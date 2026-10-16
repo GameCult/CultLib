@@ -610,7 +610,8 @@ CultCellular cultmath_cellular(float3 p)
 // mirror. They follow the includes because the bounds read CULTMATH_SNOISE_LIPSCHITZ, _HESSIAN and _THIRD.
 // A shader caller builds a SpanStage itself (SpanStage(1.0, 1.0, vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0))
 // is the identity of math.SpanStage.Identity, which has no shader form); see math.span_stage's comments for
-// the span, the transform, the bounds and the allowances.
+// the span, the transform, the bounds and the allowances. cultmath_span_rounding and cultmath_span_slack
+// are math.span_rounding and math.span_slack, the owners of S_o and of the three allowances.
 struct SpanPath
 {
     float3 midpoint;
@@ -636,6 +637,18 @@ struct SpanNoise
     float curvature;
     float fold;
 };
+
+float cultmath_span_rounding(float scale, float3 mq, SpanStage stage, float3 octaveShift, float nu, float halfLength)
+{
+    return 9.5367431640625e-7 * (abs(scale) * (cultmath_csum(abs(mq)) + cultmath_csum(abs(stage.shift))) + cultmath_csum(abs(stage.offset)) + cultmath_csum(abs(octaveShift)) + 1.7320508 * nu * halfLength);
+}
+
+float3 cultmath_span_slack(float rounding)
+{
+    return float3(CULTMATH_SNOISE_READ_VALUE + CULTMATH_SNOISE_LIPSCHITZ * rounding,
+        CULTMATH_SNOISE_READ_GRADIENT + CULTMATH_SNOISE_HESSIAN * rounding,
+        9.765625e-4 + CULTMATH_SNOISE_THIRD * rounding);
+}
 
 // The octave stage behind cultmath_span_fbm and cultmath_span_ridged, as math.span_stage is behind span_fbm
 // and span_ridged. The Frobenius norm of the Hessian is written out in C#'s order (GLSL has no _mRC member
@@ -679,10 +692,11 @@ SpanNoise cultmath_span_stage(bool ridged, SpanPath path, SpanStage stage, int o
         float weight = abs(amplitude);
         float factor = abs(scale) * norm;
         float nu = factor * path.speed;
-        float rounding = 9.5367431640625e-7 * (abs(scale) * (cultmath_csum(abs(mq)) + cultmath_csum(abs(stage.shift))) + cultmath_csum(abs(stage.offset)) + cultmath_csum(abs(octaveShift)) + 1.7320508 * nu * halfLength);
-        float valueSlack = 6.103515625e-5 + CULTMATH_SNOISE_LIPSCHITZ * rounding;
-        float gradientSlack = 2.44140625e-4 + CULTMATH_SNOISE_HESSIAN * rounding;
-        float hessianSlack = 9.765625e-4 + CULTMATH_SNOISE_THIRD * rounding;
+        float rounding = cultmath_span_rounding(scale, mq, stage, octaveShift, nu, halfLength);
+        float3 slack = cultmath_span_slack(rounding);
+        float valueSlack = slack.x;
+        float gradientSlack = slack.y;
+        float hessianSlack = slack.z;
         float3x3 hm = cultmath_snoise_hessian(x);
         float frobenius = sqrt(hm[0][0] * hm[0][0] + hm[0][1] * hm[0][1] + hm[0][2] * hm[0][2] + hm[1][0] * hm[1][0] + hm[1][1] * hm[1][1] + hm[1][2] * hm[1][2]
             + hm[2][0] * hm[2][0] + hm[2][1] * hm[2][1] + hm[2][2] * hm[2][2]);

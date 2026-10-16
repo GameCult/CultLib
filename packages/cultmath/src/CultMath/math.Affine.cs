@@ -35,6 +35,13 @@ public static partial class math
     // kernel must re-run MeasureHessian and re-pin it. SNOISE_THIRD (math.Span.cs) is the next-order pin.
     public const float SNOISE_HESSIAN = 55.642143f;
 
+    // The absolute rounding of one float32 read of the snoise kernel, apart from the coordinate's own
+    // rounding (af_snoise's comment derives both): 2^-14 on the value and 2^-12 on the gradient. The single
+    // owner of the two, read by af_snoise and by span_slack (math.Span.cs); the shader twins are
+    // CULTMATH_SNOISE_READ_VALUE and CULTMATH_SNOISE_READ_GRADIENT.
+    internal const float SNOISE_READ_VALUE = 6.103515625e-5f;
+    internal const float SNOISE_READ_GRADIENT = 2.44140625e-4f;
+
     /// <summary>The point form (x, 0, 0): the value x at every eps. Exact.</summary>
     public static float3 af_point(float value) => new(value, 0.0f, 0.0f);
 
@@ -165,7 +172,7 @@ public static partial class math
         var lipschitz = SNOISE_LIPSCHITZ * reach;
         var a = dot(gradient, axis);
         var remainder = length(gradient) * radius + 0.5f * SNOISE_HESSIAN * reach * reach;
-        var allowance = 6.103515625e-5f + 2.44140625e-4f * reach
+        var allowance = SNOISE_READ_VALUE + SNOISE_READ_GRADIENT * reach
             + SNOISE_LIPSCHITZ * 9.5367431640625e-7f * (abs(centre.x) + abs(centre.y) + abs(centre.z) + reach);
         var centred = abs(a) + remainder < lipschitz;
         var slope = centred ? a : 0.0f;

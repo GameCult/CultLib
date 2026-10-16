@@ -722,6 +722,44 @@ public sealed class NoiseBoundTests
         return total;
     }
 
+    // The gradient of snoise at v in double: 105 sum (m^4 p - 8 m^3 s x) over Corners, the derivative of
+    // ValueDouble (every corner's x moves one for one with v, dm = -2 x, ds = p).
+    internal static double[] GradDouble(double vx, double vy, double vz)
+    {
+        var (x, p, _) = Corners(vx, vy, vz);
+        var gradient = new double[3];
+        for (var c = 0; c < 4; c++)
+        {
+            var m = 0.5 - (x[c][0] * x[c][0] + x[c][1] * x[c][1] + x[c][2] * x[c][2]);
+            if (m <= 0.0)
+                continue;
+            var s = p[c][0] * x[c][0] + p[c][1] * x[c][1] + p[c][2] * x[c][2];
+            for (var i = 0; i < 3; i++)
+                gradient[i] += 105.0 * (m * m * m * m * p[c][i] - 8.0 * m * m * m * s * x[c][i]);
+        }
+
+        return gradient;
+    }
+
+    /// <summary>
+    /// GradDouble is the kernel's gradient: within float rounding of snoise_grad (L1 distance at most 2e-4)
+    /// at 300 seeded points of [-20, 20]^3, the way ExactReferenceIsTheKernel pins ValueDouble.
+    /// </summary>
+    [Fact]
+    public void GradDoubleIsTheKernelsGradient()
+    {
+        var random = new System.Random(0x6BAD);
+        double Coordinate() => random.NextDouble() * 40.0 - 20.0;
+        for (var k = 0; k < 300; k++)
+        {
+            var p = new float3((float)Coordinate(), (float)Coordinate(), (float)Coordinate());
+            var exact = GradDouble(p.x, p.y, p.z);
+            var kernel = snoise_grad(p);
+            var distance = Math.Abs(exact[0] - kernel.x) + Math.Abs(exact[1] - kernel.y) + Math.Abs(exact[2] - kernel.z);
+            Assert.True(distance <= 2.0e-4, $"GradDouble({p}) is {exact[0]:R}, {exact[1]:R}, {exact[2]:R}, snoise_grad {kernel.x:R}, {kernel.y:R}, {kernel.z:R}");
+        }
+    }
+
     private static double Delta(int a, int b) => a == b ? 1.0 : 0.0;
 
     // The symmetric third-derivative tensor of snoise at p, entry (i * 3 + j) * 3 + k, in closed form:

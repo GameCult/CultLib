@@ -748,6 +748,12 @@ vec4 cultmath_iv_frustum_ball(vec2 centreSlope, float z0, float z1, float footpr
 // math.Affine.cs (SNOISE_HESSIAN).
 const float CULTMATH_SNOISE_HESSIAN = 55.642143;
 
+// The absolute rounding of one float32 read of cultmath_snoise_grad, value and gradient; the owner is
+// math.Affine.cs (SNOISE_READ_VALUE, SNOISE_READ_GRADIENT), read here by cultmath_af_snoise and in
+// CultMath.hlsl by cultmath_span_slack.
+const float CULTMATH_SNOISE_READ_VALUE = 6.103515625e-5;
+const float CULTMATH_SNOISE_READ_GRADIENT = 2.44140625e-4;
+
 // An upper bound on the operator norm of the third-derivative tensor of cultmath_snoise(vec3), the
 // next order after CULTMATH_SNOISE_HESSIAN; provenance in math.Span.cs (SNOISE_THIRD).
 const float CULTMATH_SNOISE_THIRD = 535.8009;
@@ -823,7 +829,7 @@ vec3 cultmath_af_snoise(vec3 centre, vec3 axis, float radius)
     float lipschitz = CULTMATH_SNOISE_LIPSCHITZ * reach;
     float a = dot(gradient, axis);
     float remainder = length(gradient) * radius + 0.5 * CULTMATH_SNOISE_HESSIAN * reach * reach;
-    float allowance = 6.103515625e-5 + 2.44140625e-4 * reach
+    float allowance = CULTMATH_SNOISE_READ_VALUE + CULTMATH_SNOISE_READ_GRADIENT * reach
         + CULTMATH_SNOISE_LIPSCHITZ * 9.5367431640625e-7 * (abs(centre.x) + abs(centre.y) + abs(centre.z) + reach);
     bool centred = abs(a) + remainder < lipschitz;
     float slope = centred ? a : 0.0;
@@ -877,7 +883,8 @@ vec4 cultmath_af_frustum_ball(vec2 centreSlope, float z0, float z1, float footpr
 // mirror. They follow the includes because the bounds read CULTMATH_SNOISE_LIPSCHITZ, _HESSIAN and _THIRD.
 // A shader caller builds a SpanStage itself (SpanStage(1.0, 1.0, vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0))
 // is the identity of math.SpanStage.Identity, which has no shader form); see math.span_stage's comments for
-// the span, the transform, the bounds and the allowances.
+// the span, the transform, the bounds and the allowances. cultmath_span_rounding and cultmath_span_slack
+// are math.span_rounding and math.span_slack, the owners of S_o and of the three allowances.
 struct SpanPath
 {
     vec3 midpoint;
@@ -903,6 +910,18 @@ struct SpanNoise
     float curvature;
     float fold;
 };
+
+float cultmath_span_rounding(float scale, vec3 mq, SpanStage stage, vec3 octaveShift, float nu, float halfLength)
+{
+    return 9.5367431640625e-7 * (abs(scale) * (cultmath_csum(abs(mq)) + cultmath_csum(abs(stage.shift))) + cultmath_csum(abs(stage.offset)) + cultmath_csum(abs(octaveShift)) + 1.7320508 * nu * halfLength);
+}
+
+vec3 cultmath_span_slack(float rounding)
+{
+    return vec3(CULTMATH_SNOISE_READ_VALUE + CULTMATH_SNOISE_LIPSCHITZ * rounding,
+        CULTMATH_SNOISE_READ_GRADIENT + CULTMATH_SNOISE_HESSIAN * rounding,
+        9.765625e-4 + CULTMATH_SNOISE_THIRD * rounding);
+}
 
 // The octave stage behind cultmath_span_fbm and cultmath_span_ridged, as math.span_stage is behind span_fbm
 // and span_ridged. The Frobenius norm of the Hessian is written out in C#'s order (GLSL has no _mRC member
@@ -946,10 +965,11 @@ SpanNoise cultmath_span_stage(bool ridged, SpanPath path, SpanStage stage, int o
         float weight = abs(amplitude);
         float factor = abs(scale) * norm;
         float nu = factor * path.speed;
-        float rounding = 9.5367431640625e-7 * (abs(scale) * (cultmath_csum(abs(mq)) + cultmath_csum(abs(stage.shift))) + cultmath_csum(abs(stage.offset)) + cultmath_csum(abs(octaveShift)) + 1.7320508 * nu * halfLength);
-        float valueSlack = 6.103515625e-5 + CULTMATH_SNOISE_LIPSCHITZ * rounding;
-        float gradientSlack = 2.44140625e-4 + CULTMATH_SNOISE_HESSIAN * rounding;
-        float hessianSlack = 9.765625e-4 + CULTMATH_SNOISE_THIRD * rounding;
+        float rounding = cultmath_span_rounding(scale, mq, stage, octaveShift, nu, halfLength);
+        vec3 slack = cultmath_span_slack(rounding);
+        float valueSlack = slack.x;
+        float gradientSlack = slack.y;
+        float hessianSlack = slack.z;
         mat3 hm = cultmath_snoise_hessian(x);
         float frobenius = sqrt(hm[0][0] * hm[0][0] + hm[0][1] * hm[0][1] + hm[0][2] * hm[0][2] + hm[1][0] * hm[1][0] + hm[1][1] * hm[1][1] + hm[1][2] * hm[1][2]
             + hm[2][0] * hm[2][0] + hm[2][1] * hm[2][1] + hm[2][2] * hm[2][2]);

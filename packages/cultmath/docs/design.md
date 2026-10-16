@@ -243,6 +243,13 @@ the main families' reach is at least about 1e-3, where the second-order remainde
 allowance still passes. `GoldenFixtureMatchesCSharp` requires each of the two to hold cases that fail on C#'s own results once
 the allowance is removed.
 
+Four more appended families, the coordinate-band `snoise_grad` and `snoise_hessian` reads (256 cases each, the magnitude of the
+point log-uniform from 1e-4 to 1e2 and from 1e2 to 4e6), carry an allowance `check`: with `S = |x|_1` and the allowances
+`math.span_slack(math.span_rounding(1, x, zero stage, 0, 0, 0))` (the owners of the span stage's allowances in C#, HLSL and GLSL),
+the result must lie within the allowance of the kernel's exact value, gradient or Hessian in double, no tolerance. The two small
+families must also fail it in at least 16 cases once the absolute term is removed. `GoldenFixtureMatchesCSharp` applies the check
+to C#'s own results, and a device capture is judged by the same `Verify`.
+
 `GoldenFixtureMatchesCSharp` evaluates C# on the committed fixture's own
 arguments. Arguments are drawn only when the fixture is regenerated
 (`CULTMATH_WRITE_GLSL=1`), because the draw itself calls `MathF.Pow`, whose

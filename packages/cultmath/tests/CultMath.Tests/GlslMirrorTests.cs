@@ -336,7 +336,7 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
 
     // The float32 allowance of one octave of af_snoise: 2^-14 + 2^-12 R + L 2^-20 (|c|_1 + R).
     private static double SnoiseAllowance(double centre1, double reach) =>
-        Math.ScaleB(1.0, -14) + Math.ScaleB(reach, -12) + math.SNOISE_LIPSCHITZ * Math.ScaleB(centre1 + reach, -20);
+        math.SNOISE_READ_VALUE + math.SNOISE_READ_GRADIENT * reach + math.SNOISE_LIPSCHITZ * Math.ScaleB(centre1 + reach, -20);
 
     // The Lipschitz form's width bound for one octave of the sampled-form check.
     private static double SnoiseWidthBound(double centre1, double reach) => math.SNOISE_LIPSCHITZ * reach + SnoiseAllowance(centre1, reach);
@@ -406,6 +406,74 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
         }
 
         return $"least enclosure slack {enclosure:E3} of the radius, least slack above R0 + d {lower:E3} of R0, below its widening {upper:F3} of 2^-19 (R0 + |c0|_1 + spread)";
+    }
+
+    private const string SpanAllowanceRead =
+        "Read at the case's point x, with S = |x|_1 and (e_n, e_g, e_h) = math.span_slack(math.span_rounding(1, x, zero stage, 0, 0, 0)), " +
+        "against the kernel's exact values in double: |n - n_exact| <= e_n and |g - g_exact|_2 <= e_g for snoise_grad, " +
+        "||H - H_exact||_F <= e_h for snoise_hessian, no tolerance. " +
+        "Report the largest fraction of each allowance per decade of S and the largest absolute error at S < 1e-2.";
+
+    // SpanAllowanceRead applied to a family's results (C#'s own, or a device's): every read is within the
+    // allowance math.span_slack gives at its point, the owner's own numbers and no restated literal. A small
+    // family (bands 1e-4 to 1e2) must also fail the check once the absolute term is removed in at least 16
+    // cases, and hold at least 48 cases with S <= 1e-2: the allowance's absolute term is what decides there.
+    private static string AssertSpanAllowance(JsonArray cases, bool hessian, bool small)
+    {
+        var absolute = math.span_slack(0.0f);
+        var fractions = new SortedDictionary<int, (double Value, double Gradient)>();
+        double smallestError = 0.0;
+        int absoluteDecides = 0, nearOrigin = 0;
+        foreach (var entry in cases)
+        {
+            var sides = ((string)entry!).Split(" -> ");
+            double[] x = Floats(sides[0]), result = Floats(sides[1]);
+            var s = Math.Abs(x[0]) + Math.Abs(x[1]) + Math.Abs(x[2]);
+            var slack = math.span_slack(math.span_rounding(1.0f, new float3((float)x[0], (float)x[1], (float)x[2]), default, new float3(0.0f, 0.0f, 0.0f), 0.0f, 0.0f));
+            double valueError = 0.0, gradientError, valueFraction = 0.0, gradientFraction;
+            bool needsAbsolute;
+            if (hessian)
+            {
+                var exact = NoiseBoundTests.HessianDouble(x[0], x[1], x[2]);
+                var sum = 0.0;
+                for (var i = 0; i < 9; i++)
+                    sum += (result[i] - exact[i]) * (result[i] - exact[i]);
+                gradientError = Math.Sqrt(sum);
+                Assert.True(gradientError <= slack.z, $"snoise_hessian case {entry}: ||H - H_exact||_F is {gradientError:R}, past the allowance {slack.z:R}");
+                gradientFraction = gradientError / slack.z;
+                needsAbsolute = gradientError > slack.z - absolute.z;
+            }
+            else
+            {
+                var exact = NoiseBoundTests.GradDouble(x[0], x[1], x[2]);
+                valueError = Math.Abs(result[3] - NoiseBoundTests.ValueDouble(x[0], x[1], x[2]));
+                gradientError = Math.Sqrt((result[0] - exact[0]) * (result[0] - exact[0]) + (result[1] - exact[1]) * (result[1] - exact[1]) + (result[2] - exact[2]) * (result[2] - exact[2]));
+                Assert.True(valueError <= slack.x, $"snoise_grad case {entry}: |n - n_exact| is {valueError:R}, past the allowance {slack.x:R}");
+                Assert.True(gradientError <= slack.y, $"snoise_grad case {entry}: |g - g_exact|_2 is {gradientError:R}, past the allowance {slack.y:R}");
+                valueFraction = valueError / slack.x;
+                gradientFraction = gradientError / slack.y;
+                needsAbsolute = valueError > slack.x - absolute.x || gradientError > slack.y - absolute.y;
+            }
+
+            var decade = (int)Math.Floor(Math.Log10(s));
+            fractions.TryGetValue(decade, out var largest);
+            fractions[decade] = (Math.Max(largest.Value, valueFraction), Math.Max(largest.Gradient, gradientFraction));
+            if (needsAbsolute)
+                absoluteDecides++;
+            if (s < 1.0e-2)
+                smallestError = Math.Max(smallestError, Math.Max(valueError, gradientError));
+            if (s <= 1.0e-2)
+                nearOrigin++;
+        }
+
+        if (small)
+        {
+            Assert.True(absoluteDecides >= 16, $"only {absoluteDecides} of {cases.Count} cases fail once the absolute term is removed: the family cannot tell a device that needs it from one that does not");
+            Assert.True(nearOrigin >= 48, $"only {nearOrigin} of {cases.Count} cases have |x|_1 <= 1e-2");
+        }
+
+        var report = string.Join(", ", fractions.Select(f => hessian ? $"1e{f.Key}: {f.Value.Gradient:F3}" : $"1e{f.Key}: {f.Value.Value:F3}/{f.Value.Gradient:F3}"));
+        return $"largest fraction of {(hessian ? "e_h" : "e_n/e_g")} per decade of |x|_1: {report}; largest absolute error at |x|_1 < 1e-2 {smallestError:E3}; {absoluteDecides} of {cases.Count} cases need the absolute term";
     }
 
     // A committed case's arguments, decoded into the C# method's parameter types in Hex's field order.
@@ -575,7 +643,8 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
     // Every family the site's WebGL2 readback evaluates, in a fixed order. A new family is appended, so the
     // seeded stream and every earlier family's cases stay as they were. pcg3d and pcg4d are "exact"; the
     // float families are ulp-bounded, with the bound measured on the device by the consumer, and
-    // iv_frustum_ball also carries an enclosure check. phacelle is in CultMath.Phacelle.glsl, so its
+    // iv_frustum_ball also carries an enclosure check; the four coordinate-band snoise_grad and snoise_hessian
+    // families carry an allowance check, applied to C#'s own results here and to a device's by the device judge. phacelle is in CultMath.Phacelle.glsl, so its
     // evaluator concatenates that file after CultMath.glsl; the site, which does not vendor it, skips it.
     private static readonly Family[] Families = new Family[]
     {
@@ -720,7 +789,23 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
         // midpoint a Point3, one span in four a point.
         new Family("SpanNoise cultmath_span_fbm(SpanPath, SpanStage, int, float, float)", "ulp-bounded", SpanArguments),
         new Family("SpanNoise cultmath_span_ridged(SpanPath, SpanStage, int, float, float)", "ulp-bounded", SpanArguments),
+        // The kernel's reads over coordinate bands, the magnitude log-uniform in the band: the allowance of
+        // math.span_slack is checked against the exact kernel at every case (SpanAllowanceRead).
+        new Family("vec4 cultmath_snoise_grad(vec3)", "ulp-bounded, coordinate bands 1e-4 to 1e2", r => new object[] { BandPoint3(r, 1.0e-4, 1.0e2) }, SpanAllowanceRead, Verify: cases => AssertSpanAllowance(cases, hessian: false, small: true)),
+        new Family("vec4 cultmath_snoise_grad(vec3)", "ulp-bounded, coordinate bands 1e2 to 4e6", r => new object[] { BandPoint3(r, 1.0e2, 4.0e6) }, SpanAllowanceRead, Verify: cases => AssertSpanAllowance(cases, hessian: false, small: false)),
+        new Family("mat3 cultmath_snoise_hessian(vec3)", "ulp-bounded, coordinate bands 1e-4 to 1e2", r => new object[] { BandPoint3(r, 1.0e-4, 1.0e2) }, SpanAllowanceRead, Verify: cases => AssertSpanAllowance(cases, hessian: true, small: true)),
+        new Family("mat3 cultmath_snoise_hessian(vec3)", "ulp-bounded, coordinate bands 1e2 to 4e6", r => new object[] { BandPoint3(r, 1.0e2, 4.0e6) }, SpanAllowanceRead, Verify: cases => AssertSpanAllowance(cases, hessian: true, small: false)),
     }).ToArray();
+
+    // A point of magnitude m, m log-uniform in [lo, hi]: one component at +-m, the other two uniform in [-m, m],
+    // the axis of the large one random.
+    private static float3 BandPoint3(System.Random r, double lo, double hi)
+    {
+        var m = lo * Math.Pow(hi / lo, r.NextDouble());
+        var v = new double[] { (r.NextDouble() * 2.0 - 1.0) * m, (r.NextDouble() * 2.0 - 1.0) * m, (r.NextDouble() * 2.0 - 1.0) * m };
+        v[r.Next(3)] = r.Next(2) == 0 ? m : -m;
+        return new float3((float)v[0], (float)v[1], (float)v[2]);
+    }
 
     private static object[] SpanArguments(System.Random r)
     {

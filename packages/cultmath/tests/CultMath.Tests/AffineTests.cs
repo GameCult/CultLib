@@ -295,8 +295,34 @@ public sealed class AffineTests
 
     // af_snoise's float32 allowance, as its doc comment states it, for the width comparison below.
     private static double Allowance(float3 centre, double reach) =>
-        Math.ScaleB(1.0, -14) + Math.ScaleB(reach, -12)
+        SNOISE_READ_VALUE + SNOISE_READ_GRADIENT * reach
         + SNOISE_LIPSCHITZ * Math.ScaleB(Math.Abs(centre.x) + Math.Abs(centre.y) + Math.Abs(centre.z) + reach, -20);
+
+    /// <summary>
+    /// af_snoise reads the same absolute rounding terms of the kernel as span_slack: at the origin with no
+    /// axis, the form's error is span_slack's value allowance at zero rounding plus the Lipschitz form's
+    /// L R, and each unit of reach adds span_slack's gradient term at zero rounding plus L 2^-20 (the
+    /// coordinate's own rounding). Widening the kernel's absolute read in one reader and not the other,
+    /// the device judge's possible outcome, fails here. The expected bits are formed from span_slack, not
+    /// from a literal.
+    /// </summary>
+    [Fact]
+    public void SnoiseFormAndSpanSlackShareTheKernelsAbsoluteTerms()
+    {
+        var zero = new float3(0.0f, 0.0f, 0.0f);
+        var slack = span_slack(0.0f);
+        var value = snoise_grad(zero).w;
+        foreach (var reach in new[] { 0.0f, 1.0f, 3.0f })
+        {
+            var lipschitz = SNOISE_LIPSCHITZ * reach;
+            var allowance = slack.x + slack.y * reach + SNOISE_LIPSCHITZ * 9.5367431640625e-7f * reach;
+            var e = lipschitz + allowance;
+            var expected = e + (abs(value) + 0.0f + e) * 9.5367431640625e-7f;
+            var form = af_snoise(zero, zero, reach);
+            Assert.True(BitConverter.SingleToInt32Bits(form.z) == BitConverter.SingleToInt32Bits(expected),
+                $"af_snoise(0, 0, {reach:R}).z is {form.z:R}; the allowances span_slack reads give {expected:R}");
+        }
+    }
 
     private static float3 UnitVector(System.Random random)
     {
