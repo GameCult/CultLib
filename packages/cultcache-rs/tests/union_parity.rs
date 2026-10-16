@@ -293,6 +293,36 @@ fn a_union_that_is_not_a_key_and_slots_pair_is_refused_naming_the_enum() {
     }
 }
 
+// A plain derive struct: the door names a missing or duplicated field (a static name from the type)
+// and describes a mistyped value by kind, never quoting it.
+#[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
+struct Probe {
+    name: String,
+    flag: bool,
+}
+
+#[test]
+fn a_missing_or_duplicate_field_is_named_and_a_mistyped_value_is_not() {
+    let name = |value: &str| [&[0xa4][..], b"name", &[0xa0 | value.len() as u8][..], value.as_bytes()].concat();
+    let flag_true = [&[0xa4][..], b"flag", &[0xc3][..]].concat();
+
+    let missing = [&[0x81][..], &name("a")].concat();
+    let message = cultcache_rs::decode_payload::<Probe>(&missing).unwrap_err().to_string();
+    assert!(message.contains("missing field `flag`"), "{message}");
+
+    let duplicated = [&[0x83][..], &name("a"), &name("b"), &flag_true].concat();
+    let message = cultcache_rs::decode_payload::<Probe>(&duplicated).unwrap_err().to_string();
+    assert!(message.contains("duplicate field `name`"), "{message}");
+
+    let canary = "CANARY-3d9e";
+    let flag_text = [&[0xa4][..], b"flag", &[0xa0 | canary.len() as u8][..], canary.as_bytes()].concat();
+    let mistyped = [&[0x82][..], &name("a"), &flag_text].concat();
+    let message = cultcache_rs::decode_payload::<Probe>(&mistyped).unwrap_err().to_string();
+    assert!(!message.contains("CANARY"), "{message}");
+    assert!(message.contains("MessagePack type"), "{message}");
+}
+
 #[test]
 fn the_key_decides_the_arm() {
     // Tool and Part carry different slots under different keys in the two unions.
