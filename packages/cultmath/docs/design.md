@@ -213,6 +213,12 @@ test, bit for bit; GLSL against C# by the golden fixture, which records 256
 seeded cases per function family as float32 bit patterns, evaluated by the
 consumer on WebGL2 and read back. The families `pcg3d` and `pcg4d` are marked
 exact; the float families are ulp-bounded, the bound measured on the device.
+A conforming leg runs every fixture family through both routes on a device: `tools/device/run-lavapipe.sh`
+compiles the HLSL with dxc and the committed GLSL with glslang, dispatches each family on Mesa lavapipe, and
+`GlslMirrorTests.DeviceResultsHoldFixture` judges the results. Exact and integer families must match bit for bit,
+families with a check pass their `Verify`, the sampled-form families are checked on the device's own noise values,
+and every other family is held to the worst error recorded for that device in
+`tests/CultMath.Tests/fixtures/device-bounds-lavapipe.txt`.
 
 `iv_frustum_ball` is ulp-bounded, not exact: it calls `sqrt`, which GLSL ES
 3.00 does not require to be correctly rounded, and WebGL2 compilers may
@@ -266,10 +272,9 @@ ulps mean nothing, and Windows differs from the Linux fixture by up to
 `CultMath.Phacelle.glsl`, so the evaluator concatenates
 `CultMath.Phacelle.glsl` after `CultMath.glsl` for that family, with
 normalization 0.5. The site does not vendor the MPL file and skips the family.
-Its evaluator is the cultmath-tapes follow-up `glsl-browser-parity-run`, owned
-by the next CultMath parity cut: a repeatable CultLib WebGL2 run of every
-fixture family, `phacelle` included. Until it lands, the one GLSL evaluation of
-`phacelle` is a single probe (GTX 1070, ANGLE D3D11: within `3.1e-6 max(|v|, 1)`
+Its evaluator is the lavapipe GLSL route of the conforming run above, which covers
+every fixture family, `phacelle` included. The real-device leg (ANGLE D3D11 on the GTX 1070)
+is the later cut `angle-capture`; the one GLSL evaluation of `phacelle` on that device is a single probe (GTX 1070, ANGLE D3D11: within `3.1e-6 max(|v|, 1)`
 of C#). Asura's `gpu-snoise-parity` is a different check, an FXC and Unity
 readback of `snoise`, and evaluates no GLSL.
 
