@@ -11,8 +11,9 @@ The contract is intentionally boring:
 - `gamecult.networking.v0` maps the legacy C# union shape explicitly.
 - schema discovery uses explicit catalog request/response messages; no inbound
   auto-detect sludge.
-- put/delete/snapshot travel only as raw messages that carry the canonical
-  MessagePack payload bytes; the receiver decodes them through registered types.
+- put and snapshot travel only as raw messages that carry the canonical
+  MessagePack payload bytes; the receiver decodes them through registered
+  types. Delete carries ids.
 - hello messages advertise `supportedMutationContracts`, so callers discover
   which document types are read-only, which accept typed intents, which
   authority owns the mutation, and which receipt documents prove the outcome.

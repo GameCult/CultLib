@@ -1658,7 +1658,7 @@ fn require_legacy_optional_schema_kind_array(
             "wire_message" => Ok(CultNetSchemaKind::WireMessage),
             "document_payload" => Ok(CultNetSchemaKind::DocumentPayload),
             "shared_contract" => Ok(CultNetSchemaKind::SharedContract),
-            _ => Err(anyhow!("{field_name} has unsupported schema kind {value}")),
+            _ => Err(anyhow!("{field_name} has an unsupported schema kind")),
         })
         .collect::<Result<Vec<_>>>()
         .map(Some)

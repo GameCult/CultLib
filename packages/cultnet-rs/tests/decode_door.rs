@@ -676,6 +676,26 @@ fn a_networking_schema_descriptor_with_a_repeated_key_is_refused_and_a_bad_kind_
 }
 
 #[test]
+fn a_networking_catalog_request_with_a_bad_kind_element_is_refused_without_quoting_it() {
+    let union = rmpv::Value::Array(vec![
+        7.into(),
+        rmpv::Value::Array(vec![
+            "m".into(),
+            false.into(),
+            rmpv::Value::Nil,
+            rmpv::Value::Array(vec!["CANARY-s2x".into()]),
+        ]),
+    ]);
+    let bytes = rmp_serde::to_vec(&union).unwrap();
+    let text = on_stack(BIG, move || {
+        decode_cultnet_message_from_slice(&bytes, CultNetWireContract::GameCultNetworkingV0)
+            .map_err(|error| format!("{error:#}"))
+    })
+    .unwrap_err();
+    assert!(text.contains("Kinds") && !text.contains("CANARY"), "{text}");
+}
+
+#[test]
 fn a_schema_version_that_is_not_shaped_like_a_schema_name_is_described_by_length() {
     let long = format!("cultnet.{}.v0", "a".repeat(100));
     for version in [
