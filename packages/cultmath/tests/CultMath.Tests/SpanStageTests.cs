@@ -753,6 +753,54 @@ public sealed class SpanStageTests
     }
 
     /// <summary>
+    /// The allowance a span computes covers the float kernel's read at every point of its path: the identity
+    /// stage, the midpoint within |q|_inf 1, a velocity of random direction and speed 1 to 1e3 (log-uniform),
+    /// a halfLength 1 to 1e3, so path points lie out to about 1e6. At 16 points of the straight path
+    /// q + v t the value, the gradient's length and the Hessian's Frobenius norm of the float kernel are
+    /// within math.span_slack(math.span_rounding(...)) of the exact kernel's, the reach term of S_o included.
+    /// Teeth: the largest value error exceeds the allowance computed with nu = 0 by more than 10 times.
+    /// </summary>
+    [Fact]
+    public void SpanAllowanceCoversReadsAlongTheSpan()
+    {
+        var random = new System.Random(0x5EA4);
+        double worstValue = 0.0, worstGradient = 0.0, worstHessian = 0.0, teeth = 0.0;
+        for (var k = 0; k < 200; k++)
+        {
+            var q = Vector(random, -1.0f, 1.0f);
+            var speed = LogUniform(random, 1.0f, 1.0e3f);
+            var velocity = UnitVector(random) * speed;
+            var halfLength = LogUniform(random, 1.0f, 1.0e3f);
+            var slack = span_slack(span_rounding(1.0f, q, SpanStage.Identity, None, speed, halfLength));
+            var midpointSlack = span_slack(span_rounding(1.0f, q, SpanStage.Identity, None, 0.0f, halfLength));
+            for (var j = 0; j < 16; j++)
+            {
+                var x = q + velocity * (halfLength * (j / 7.5f - 1.0f));
+                var value = NoiseBoundTests.ValueDouble(x.x, x.y, x.z);
+                var gradient = NoiseBoundTests.GradDouble(x.x, x.y, x.z);
+                var hessian = NoiseBoundTests.HessianDouble(x.x, x.y, x.z);
+                var read = snoise_grad(x);
+                var h = snoise_hessian(x);
+                var valueError = Math.Abs(read.w - value);
+                var gradientError = Math.Sqrt(Math.Pow(read.x - gradient[0], 2) + Math.Pow(read.y - gradient[1], 2) + Math.Pow(read.z - gradient[2], 2));
+                var hessianError = Math.Sqrt(Math.Pow(h._m00 - hessian[0], 2) + Math.Pow(h._m01 - hessian[1], 2) + Math.Pow(h._m02 - hessian[2], 2)
+                    + Math.Pow(h._m10 - hessian[3], 2) + Math.Pow(h._m11 - hessian[4], 2) + Math.Pow(h._m12 - hessian[5], 2)
+                    + Math.Pow(h._m20 - hessian[6], 2) + Math.Pow(h._m21 - hessian[7], 2) + Math.Pow(h._m22 - hessian[8], 2));
+                Assert.True(valueError <= slack.x, $"midpoint {q}, speed {speed:R}, halfLength {halfLength:R}, point {x}: the value error {valueError:R} is past the allowance {slack.x:R}");
+                Assert.True(gradientError <= slack.y, $"midpoint {q}, speed {speed:R}, halfLength {halfLength:R}, point {x}: the gradient error {gradientError:R} is past the allowance {slack.y:R}");
+                Assert.True(hessianError <= slack.z, $"midpoint {q}, speed {speed:R}, halfLength {halfLength:R}, point {x}: the Hessian error {hessianError:R} is past the allowance {slack.z:R}");
+                worstValue = Math.Max(worstValue, valueError / slack.x);
+                worstGradient = Math.Max(worstGradient, gradientError / slack.y);
+                worstHessian = Math.Max(worstHessian, hessianError / slack.z);
+                teeth = Math.Max(teeth, valueError / midpointSlack.x);
+            }
+        }
+
+        output.WriteLine($"IV-REPORT span allowance: largest fraction of e_n {worstValue:F3}, e_g {worstGradient:F3}, e_h {worstHessian:F3}; largest value error over the allowance without the reach {teeth:F1}");
+        Assert.True(teeth > 10.0, $"the largest value error is only {teeth:F1} times the allowance without the reach: the check has no teeth");
+    }
+
+    /// <summary>
     /// The fold's acceleration term, alone, at the identity stage and under a transform (frequency 2.5, stretch
     /// 0.5, shift and offset): the midpoint velocity is zero and the acceleration points along the gradient
     /// (in q), against the sign of n, so n reaches zero and crosses it on the way to the span's ends by
