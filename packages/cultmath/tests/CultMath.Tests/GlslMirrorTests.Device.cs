@@ -652,4 +652,37 @@ public sealed partial class GlslMirrorTests
         Assert.Equal(DeviceRoutes.Length, failures.Count);
         Assert.All(failures, line => Assert.Contains("stated tolerance", line));
     }
+
+    [Theory]
+    [InlineData(24, true)]
+    [InlineData(40, false)]
+    public void TheStatedDeviceToleranceIsTheLimitInUlpsOfTheFixturesMagnitude(int ulps, bool holds)
+    {
+        // 2^-18 max(|v|, 1) is 32 u1. A fixture value in [1, 2) moved by k ulps is exactly k u1 away.
+        var f = Array.FindIndex(Families, fam => StatedDeviceLimit(fam.Tolerance) is not null);
+        Assert.Equal(32.0, StatedDeviceLimit(Families[f].Tolerance));
+        var fixture = FixtureFamilies()[f]!["cases"]!.AsArray();
+        var floatWord = FloatWords(Resolve(Families[f].Glsl).ReturnType).ToArray();
+        var at = -1;
+        for (var c = 0; c < fixture.Count && at < 0; c++)
+        {
+            var want = DevWords(Sides(fixture[c])[1]);
+            for (var w = 0; w < want.Length && at < 0; w++)
+                if (floatWord[w] && Math.Abs(BitConverter.UInt32BitsToSingle(want[w])) is >= 1.0f and < 2.0f)
+                    at = c * want.Length + w;
+        }
+
+        Assert.True(at >= 0, "no fixture value of the family lies in [1, 2)");
+        using var device = Simulate((_, item, words) =>
+        {
+            if (item.Index != f.ToString())
+                return words;
+            var moved = (uint[])words.Clone();
+            moved[at] += (uint)ulps; // magnitude grows by k ulps whatever the sign
+            return moved;
+        });
+        Record(device);
+        var failures = Judge(device, device).Failures;
+        Assert.Equal(holds ? 0 : DeviceRoutes.Length, failures.Count);
+    }
 }
