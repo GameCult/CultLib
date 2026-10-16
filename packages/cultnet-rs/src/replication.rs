@@ -1,4 +1,3 @@
-use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use cultcache_rs::CultCache;
@@ -18,7 +17,6 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::CultNetDocumentMutationContract;
-use crate::CultNetDocumentRecord;
 use crate::CultNetMessage;
 use crate::CultNetRawDocumentRecord;
 use crate::CultNetRawPayloadEncoding;
@@ -152,33 +150,6 @@ impl CultNetDocumentRegistry {
             .collect()
     }
 
-    pub fn create_document_put_message<T>(
-        &self,
-        message_id: impl Into<String>,
-        record_key: impl Into<String>,
-        value: &T,
-        options: CultNetDocumentPutOptions,
-    ) -> Result<CultNetMessage>
-    where
-        T: DatabaseEntry + Serialize + DeserializeOwned,
-    {
-        let binding = self.require_binding(T::TYPE)?;
-        let payload = serde_json::to_value(round_trip_typed(value)?)?;
-        Ok(CultNetMessage::DocumentPut {
-            message_id: message_id.into(),
-            document: CultNetDocumentRecord {
-                schema_id: binding.schema_id.clone(),
-                record_key: record_key.into(),
-                stored_at: options.stored_at.unwrap_or_else(now_utc_second),
-                payload,
-                source_runtime_id: options.source_runtime_id,
-                source_agent_id: options.source_agent_id,
-                source_role: options.source_role,
-                tags: options.tags,
-            },
-        })
-    }
-
     pub fn create_document_delete_message(
         &self,
         message_id: impl Into<String>,
@@ -230,38 +201,6 @@ impl CultNetDocumentRegistry {
         })
     }
 
-    pub fn create_snapshot_response(
-        &self,
-        cache: &CultCache,
-        message_id: impl Into<String>,
-        schema_ids: Option<&[String]>,
-        record_keys: Option<&[String]>,
-    ) -> Result<CultNetMessage> {
-        let requested_schema_ids = schema_ids.map(|items| items.iter().collect::<BTreeSet<_>>());
-        let requested_record_keys = record_keys.map(|items| items.iter().collect::<BTreeSet<_>>());
-        let mut documents = Vec::new();
-        for envelope in cache.snapshot() {
-            let binding = self.require_binding(&envelope.r#type)?;
-            if requested_schema_ids
-                .as_ref()
-                .is_some_and(|ids| !ids.contains(&binding.schema_id))
-            {
-                continue;
-            }
-            if requested_record_keys
-                .as_ref()
-                .is_some_and(|keys| !keys.contains(&envelope.key))
-            {
-                continue;
-            }
-            documents.push(self.document_record_from_envelope(&envelope)?);
-        }
-        Ok(CultNetMessage::SnapshotResponse {
-            message_id: message_id.into(),
-            documents,
-        })
-    }
-
     pub fn create_raw_snapshot_response(
         &self,
         cache: &CultCache,
@@ -292,36 +231,6 @@ impl CultNetDocumentRegistry {
             message_id: message_id.into(),
             documents,
         })
-    }
-
-    pub fn apply_document_put_message<T>(
-        &self,
-        cache: &mut CultCache,
-        message: &CultNetMessage,
-    ) -> Result<T>
-    where
-        T: DatabaseEntry + Serialize + DeserializeOwned,
-    {
-        let CultNetMessage::DocumentPut { document, .. } = message else {
-            return Err(anyhow!("expected cultnet.document_put.v0"));
-        };
-        let binding = self.require_binding(T::TYPE)?;
-        if document.schema_id != binding.schema_id {
-            return Err(anyhow!(
-                "schema id {:?} does not match registered Rust type {:?} schema {:?}",
-                document.schema_id,
-                T::TYPE,
-                binding.schema_id
-            ));
-        }
-        let value: T = serde_json::from_value(document.payload.clone()).with_context(|| {
-            format!(
-                "failed to decode CultNet payload schema {:?} as {}",
-                binding.schema_id,
-                T::SCHEMA_NAME
-            )
-        })?;
-        cache.put(&document.record_key, &value)
     }
 
     pub fn apply_document_delete_message<T>(
@@ -379,68 +288,6 @@ impl CultNetDocumentRegistry {
             stored_at: document.stored_at.clone(),
             schema_id: Some(binding.schema_id.clone()),
         })
-    }
-
-    pub fn apply_snapshot_response<T>(
-        &self,
-        cache: &mut CultCache,
-        response: &CultNetMessage,
-    ) -> Result<Vec<T>>
-    where
-        T: DatabaseEntry + Serialize + DeserializeOwned,
-    {
-        let CultNetMessage::SnapshotResponse { documents, .. } = response else {
-            return Err(anyhow!("expected cultnet.snapshot_response.v0"));
-        };
-        let mut applied = Vec::new();
-        let binding = self.require_binding(T::TYPE)?;
-        for document in documents {
-            if document.schema_id != binding.schema_id {
-                continue;
-            }
-            applied.push(self.apply_document_put_message::<T>(
-                cache,
-                &CultNetMessage::DocumentPut {
-                    message_id: "snapshot-apply".to_string(),
-                    document: document.clone(),
-                },
-            )?);
-        }
-        Ok(applied)
-    }
-
-    pub fn sync_document_from_snapshot_response<T>(
-        &self,
-        cache: &mut CultCache,
-        response: &CultNetMessage,
-        record_key: &str,
-    ) -> Result<T>
-    where
-        T: DatabaseEntry + Serialize + DeserializeOwned,
-    {
-        let CultNetMessage::SnapshotResponse { documents, .. } = response else {
-            return Err(anyhow!("expected cultnet.snapshot_response.v0"));
-        };
-        let binding = self.require_binding(T::TYPE)?;
-        let document = documents
-            .iter()
-            .find(|document| {
-                document.schema_id == binding.schema_id && document.record_key == record_key
-            })
-            .ok_or_else(|| {
-                anyhow!(
-                    "No CultNet snapshot document for schema {:?} and record key {:?}",
-                    binding.schema_id,
-                    record_key
-                )
-            })?;
-        self.apply_document_put_message::<T>(
-            cache,
-            &CultNetMessage::DocumentPut {
-                message_id: "snapshot-sync".to_string(),
-                document: document.clone(),
-            },
-        )
     }
 
     pub fn apply_raw_snapshot_response<T>(
@@ -515,29 +362,6 @@ impl CultNetDocumentRegistry {
         T: DatabaseEntry + Serialize + DeserializeOwned,
     {
         CultNetReactiveDocument::new(self.clone(), cache, record_key, options)
-    }
-
-    fn document_record_from_envelope(
-        &self,
-        envelope: &CultCacheEnvelope,
-    ) -> Result<CultNetDocumentRecord<Value>> {
-        let binding = self.require_binding(&envelope.r#type)?;
-        let payload: Value = cultcache_rs::decode_payload(&envelope.payload).with_context(|| {
-            format!(
-                "failed to decode CultCache envelope {:?} at {:?} as generic CultNet payload",
-                envelope.r#type, envelope.key
-            )
-        })?;
-        Ok(CultNetDocumentRecord {
-            schema_id: binding.schema_id.clone(),
-            record_key: envelope.key.clone(),
-            stored_at: envelope.stored_at.clone(),
-            payload,
-            source_runtime_id: None,
-            source_agent_id: None,
-            source_role: None,
-            tags: None,
-        })
     }
 
     pub fn raw_document_record_from_envelope(
@@ -730,18 +554,6 @@ where
 
     pub fn flush(&self) -> Result<()> {
         flush_reactive_document::<T>(&self.cache, &self.current, &self.state, &self.record_key)
-    }
-
-    pub fn apply_document_put_message(&self, message: &CultNetMessage) -> Result<T> {
-        let canonical = {
-            let mut cache = self
-                .cache
-                .lock()
-                .map_err(|_| anyhow!("CultCache mutex poisoned"))?;
-            self.registry
-                .apply_document_put_message::<T>(&mut cache, message)?
-        };
-        self.apply_canonical_value(canonical)
     }
 
     pub fn apply_raw_document_put_message(&self, message: &CultNetMessage) -> Result<T> {
@@ -1000,13 +812,6 @@ fn numeric_delta(predicted: &Value, canonical: &Value) -> Option<Value> {
     let predicted = predicted.as_f64()?;
     let canonical = canonical.as_f64()?;
     serde_json::Number::from_f64(predicted - canonical).map(Value::Number)
-}
-
-fn round_trip_typed<T>(value: &T) -> Result<T>
-where
-    T: Serialize + DeserializeOwned,
-{
-    Ok(rmp_serde::from_slice(&rmp_serde::to_vec(value)?)?)
 }
 
 fn now_utc_second() -> String {

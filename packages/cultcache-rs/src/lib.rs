@@ -732,6 +732,7 @@ fn opaque_decode_error(error: rmp_serde::decode::Error) -> anyhow::Error {
     anyhow!(describe_decode_error(&error))
 }
 
+/// The text of a decode failure. Field names in it come from the type, never from the bytes.
 fn describe_decode_error(error: &rmp_serde::decode::Error) -> String {
     use rmp_serde::decode::Error;
     match error {
@@ -744,9 +745,33 @@ fn describe_decode_error(error: &rmp_serde::decode::Error) -> String {
         Error::Syntax(message) | Error::Uncategorized(message) if message.starts_with(RECORD_REFUSAL) => {
             return message.clone();
         }
-        Error::Syntax(_) | Error::Uncategorized(_) => "a value does not fit the store format",
+        Error::Syntax(message) | Error::Uncategorized(message) => {
+            return describe_serde_message(message);
+        }
     }
     .to_string()
+}
+
+/// serde's own texts, kept only where they cannot carry a received value: a missing or duplicated
+/// field is named by the type's static field name (checked to look like one), an unknown tag and a
+/// mistyped value are described by kind. Everything else, `unknown field` included, is opaque.
+fn describe_serde_message(message: &str) -> String {
+    for lead in ["missing field `", "duplicate field `"] {
+        if let Some(name) = message.strip_prefix(lead).and_then(|rest| rest.strip_suffix('`')) {
+            let is_name = (1..=64).contains(&name.len())
+                && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+            if is_name {
+                return message.to_string();
+            }
+        }
+    }
+    if message.starts_with("unknown variant ") {
+        "a tag names no variant this type knows".to_string()
+    } else if message.starts_with("invalid type: ") {
+        "a value has a MessagePack type the store format does not allow".to_string()
+    } else {
+        "a value does not fit the store format".to_string()
+    }
 }
 
 /// The store header string, or `None` when the bytes do not open with an array whose

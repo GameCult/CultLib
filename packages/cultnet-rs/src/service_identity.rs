@@ -285,11 +285,10 @@ pub fn open_service_identity_credential_reader<P: ServiceIdentityProfile>(
 pub fn open_service_identity_credential_bytes<P: ServiceIdentityProfile>(
     bytes: &[u8],
 ) -> Result<ServiceIdentitySigner<P>> {
-    let mut decoder = rmp_serde::Deserializer::new(std::io::Cursor::new(bytes));
-    let entries = Vec::<CultCacheEnvelope>::deserialize(&mut decoder)
+    let entries = cultcache_rs::decode_payload::<Vec<CultCacheEnvelope>>(bytes)
         .context("immutable service identity credential is malformed MessagePack")?;
-    if decoder.position() != bytes.len() as u64 {
-        bail!("immutable service identity credential contains trailing data");
+    if Zeroizing::new(rmp_serde::to_vec(&entries)?).as_slice() != bytes {
+        bail!("immutable service identity credential is not its canonical encoding");
     }
     open_service_identity_envelopes::<P>(&entries)
 }
@@ -766,6 +765,37 @@ mod tests {
             .err()
             .expect("the payload is not a credential");
         assert!(at.downcast_ref::<cultcache_rs::PayloadTooDeep>().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn a_same_length_credential_spelled_with_a_str_payload_is_refused() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("idunn.ccmp");
+        enroll_service_identity_at::<IdunnServiceIdentity>(&path)?;
+        let bytes = std::fs::read(path)?;
+        open_service_identity_credential_bytes::<IdunnServiceIdentity>(&bytes)?;
+
+        // The envelope's payload spelled as a MessagePack str of the same bytes (bin8 -> str8, bin16 ->
+        // str16): same length, same decoded entries, a different encoding.
+        let envelopes: Vec<CultCacheEnvelope> = rmp_serde::from_slice(&bytes)?;
+        let payload = &envelopes[0].payload;
+        let at = bytes
+            .windows(payload.len())
+            .position(|window| window == payload.as_slice())
+            .expect("the payload is in the credential");
+        let mut forged = bytes.clone();
+        let (bin, str_marker, header) = if payload.len() <= 0xff { (0xc4, 0xd9, 2) } else { (0xc5, 0xda, 3) };
+        assert_eq!(forged[at - header], bin, "payload spelled bin");
+        forged[at - header] = str_marker;
+        assert_eq!(forged.len(), bytes.len());
+        let reread: Vec<CultCacheEnvelope> = rmp_serde::from_slice(&forged)?;
+        assert_eq!(reread, envelopes, "the forgery decodes to identical entries");
+
+        let error = open_service_identity_credential_bytes::<IdunnServiceIdentity>(&forged)
+            .err()
+            .expect("a differently spelled credential is refused");
+        assert!(format!("{error:#}").contains("canonical encoding"), "{error:#}");
         Ok(())
     }
 
