@@ -797,15 +797,23 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
         new Family("mat3 cultmath_snoise_hessian(vec3)", "ulp-bounded, coordinate bands 1e2 to 4e6", r => new object[] { BandPoint3(r, 1.0e2, 4.0e6) }, SpanAllowanceRead, Verify: cases => AssertSpanAllowance(cases, hessian: true, small: false)),
         // Segment distance in 2D and 3D (one segment in eight degenerate), then the site cells: scores, fold step
         // over states built by inserting 0-3 random scores (one in four with an exactly tied score), border, margin.
-        new Family("float cultmath_distance_to_segment(vec2, vec2, vec2)", "ulp-bounded", r =>
-        {
-            var start = Point2(r);
-            return new object[] { Point2(r), start, r.Next(8) == 0 ? start : Point2(r) };
-        }),
         new Family("float cultmath_distance_to_segment(vec3, vec3, vec3)", "ulp-bounded", r =>
         {
             var start = Point3(r);
             return new object[] { Point3(r), start, r.Next(8) == 0 ? start : Point3(r) };
+        }),
+        new Family("vec3 cultmath_segment_closest(vec3, vec3, vec3)", "ulp-bounded", r =>
+        {
+            var start = Point3(r);
+            return new object[] { Point3(r), start, r.Next(8) == 0 ? start : Point3(r) };
+        }),
+        // The border step: owner and other random (one in six coincident), a running border either empty or a
+        // random (normal, distance).
+        new Family("vec4 cultmath_power_border_step(vec3, vec4, vec4, vec4)", "ulp-bounded", r =>
+        {
+            var owner = Site(r, 0.1f, 20.0f);
+            var border = r.Next(2) == 0 ? new float4(0.0f, 0.0f, 0.0f, 1.0e30f) : new float4(Point3(r), Uniform(r, 0.0f, 50.0f));
+            return new object[] { Point3(r), owner, r.Next(6) == 0 ? owner : Site(r, 0.1f, 20.0f), border };
         }),
         new Family("vec4 cultmath_power_score(vec3, vec4)", "ulp-bounded", r => new object[] { Point3(r), Site(r, 0.1f, 20.0f) }),
         new Family("vec4 cultmath_multiplicative_score(vec3, vec4)", "ulp-bounded", r => new object[] { Point3(r), Site(r, 0.1f, 100.0f, logWeight: true) }),
@@ -837,7 +845,6 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
         return new float3((float)v[0], (float)v[1], (float)v[2]);
     }
 
-    private static float2 Point2(System.Random r) => new(Uniform(r, -50.0f, 50.0f), Uniform(r, -50.0f, 50.0f));
 
     // A site float4(position.xyz, weight): the weight uniform in [lo, hi], or log-uniform when logWeight.
     private static float4 Site(System.Random r, float lo, float hi, bool logWeight = false)

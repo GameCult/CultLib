@@ -330,7 +330,8 @@ public static partial class math
     public static float distance_to_segment(float3 point, float3 start, float3 end) =>
         distance(point, segment_closest(point, start, end));
 
-    private static float2 segment_closest(float2 point_value, float2 start, float2 end)
+    /// <summary>The point of the segment <paramref name="start"/>-<paramref name="end"/> nearest <paramref name="point_value"/>; a degenerate segment is its start.</summary>
+    public static float2 segment_closest(float2 point_value, float2 start, float2 end)
     {
         var segment = end - start;
         var segmentLengthSq = lengthsq(segment);
@@ -341,7 +342,8 @@ public static partial class math
         return start + segment * t;
     }
 
-    private static float3 segment_closest(float3 point_value, float3 start, float3 end)
+    /// <summary>The point of the segment <paramref name="start"/>-<paramref name="end"/> nearest <paramref name="point_value"/>; a degenerate segment is its start.</summary>
+    public static float3 segment_closest(float3 point_value, float3 start, float3 end)
     {
         var segment = end - start;
         var segmentLengthSq = lengthsq(segment);

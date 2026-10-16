@@ -34,7 +34,8 @@ public sealed class HlslSourceCompatibilityTests
         Assert.NotNull(ShaderFunction(shader, "cultmath_site_cells_insert", siteCells, typeof(float4), typeof(int)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_site_cells_border", siteCells));
         Assert.NotNull(ShaderFunction(shader, "cultmath_gabriel_margin", typeof(float3), typeof(float3), typeof(float3)));
-        Assert.NotNull(ShaderFunction(shader, "cultmath_distance_to_segment", typeof(float2), typeof(float2), typeof(float2)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_power_border_step", typeof(float3), typeof(float4), typeof(float4), typeof(float4)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_segment_closest", typeof(float3), typeof(float3), typeof(float3)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_distance_to_segment", typeof(float3), typeof(float3), typeof(float3)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_snoise_grad", typeof(float3)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_snoise_hessian", typeof(float3)));
@@ -187,7 +188,7 @@ public sealed class HlslSourceCompatibilityTests
         }
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
-        Assert.Equal(135, compared.Count);
+        Assert.Equal(136, compared.Count);
     }
 
     /// <summary>

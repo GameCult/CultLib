@@ -28,12 +28,12 @@ shader semantics.
   `min`, `max`, `clamp`, `saturate`, `lerp`, `step`, `smoothstep`, `dot`,
   `cross`, `length`, `distance`, `normalize`, `reflect`, `csum`, `erf`,
   `erfinv` (scalar only), exponential
-  `decay`/`damp`, intercept/segment helpers (`distance_to_segment` in 2D and 3D, with and without `out closest`), Catmull-Rom, Bezier curves, and
+  `decay`/`damp`, intercept/segment helpers (`distance_to_segment` in 2D and 3D, with and without `out closest`, and `segment_closest`), Catmull-Rom, Bezier curves, and
   deterministic value-noise primitives
 - Site cells: `power_cells` and `multiplicative_cells` return the two nearest sites of a point as `CultSiteCells`,
   `soft_gabriel_gate` gates a pair of sites by the empty-disc margin. Each is a loop over the shader steps
   `cultmath_power_score` / `cultmath_multiplicative_score`, `cultmath_site_cells_empty`, `cultmath_site_cells_insert`,
-  `cultmath_site_cells_border` and `cultmath_gabriel_margin`; a shader loops over its own buffer.
+  `cultmath_site_cells_border`, `cultmath_power_border_step` (the exact power cell border, `power_border`) and `cultmath_gabriel_margin`; a shader loops over its own buffer.
 - `shaders/CultMath.hlsl`, a canonical HLSL mirror include for shader-side
   parity. HLSL already owns `float2`, `float3`, and `float4`; the include
   exposes `cultmath_*` functions for shared semantics HLSL does not provide.

@@ -95,10 +95,11 @@ public sealed class SiteCellsTests
         Assert.Equal(1.0f, cells.secondSite);
     }
 
-    // TN2: F2 - F1 is affine for power scores, so the border distance is the distance to the bisector plane
-    // {x : |x - s1|^2 - w1^2 = |x - s2|^2 - w2^2}, computed here in double from the two winning sites.
+    // TN2: for power scores F2 - F1 is affine, so site_cells_border is the distance to the bisector plane of the
+    // two winners {x : |x - s1|^2 - w1^2 = |x - s2|^2 - w2^2}, computed here in double. That is not the distance
+    // to the nearest site's cell boundary (PowerBorderIsTheLeastRadicalPlaneDistance).
     [Fact]
-    public void PowerBorderIsTheDistanceToThePowerBisector()
+    public void SiteCellsBorderIsTheDistanceToTheWinnersBisector()
     {
         var r = new System.Random(0xB0DE);
         var compared = 0;
@@ -314,5 +315,167 @@ public sealed class SiteCellsTests
             var expected = Math.Sqrt(Math.Pow(px - t * ex, 2) + Math.Pow(py - t * ey, 2) + Math.Pow(pz - t * ez, 2));
             Assert.Equal(expected, got, 1.0e-4 * (1.0 + expected));
         }
+    }
+
+    // The cell of the owner is the intersection of the half-spaces of its radical planes. Reference in double,
+    // written here: x.d = c with d = s2 - s1, c = (|s2|^2 - |s1|^2 + w1^2 - w2^2) / 2, signed distance (c - p.d) / |d|.
+    private static (double Distance, double[] Normal) CellBoundary(float3 p, float4[] sites, int owner)
+    {
+        var best = double.PositiveInfinity;
+        var normal = new double[3];
+        var s1 = new[] { (double)sites[owner].x, sites[owner].y, sites[owner].z };
+        var q = new[] { (double)p.x, p.y, p.z };
+        for (var k = 0; k < sites.Length; k++)
+        {
+            var s2 = new[] { (double)sites[k].x, sites[k].y, sites[k].z };
+            var d = new[] { s2[0] - s1[0], s2[1] - s1[1], s2[2] - s1[2] };
+            var dd = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+            if (k == owner || dd == 0.0)
+                continue;
+            double w1 = sites[owner].w, w2 = sites[k].w;
+            var c = (s2.Sum(v => v * v) - s1.Sum(v => v * v) + w1 * w1 - w2 * w2) / 2.0;
+            var distance = (c - (q[0] * d[0] + q[1] * d[1] + q[2] * d[2])) / Math.Sqrt(dd);
+            if (distance < best)
+            {
+                best = distance;
+                normal = new[] { -d[0] / Math.Sqrt(dd), -d[1] / Math.Sqrt(dd), -d[2] / Math.Sqrt(dd) };
+            }
+        }
+
+        return (best, normal);
+    }
+
+    // Spans with duplicated sites, zero weights, collinear sites and single-site spans.
+    private static float4[] AwkwardSites(System.Random r)
+    {
+        var count = 1 + r.Next(9);
+        var collinear = r.Next(5) == 0;
+        var sites = new float4[count];
+        for (var i = 0; i < count; i++)
+        {
+            var weight = r.Next(5) == 0 ? 0.0f : 0.5f + 2.5f * r.NextSingle();
+            sites[i] = i > 0 && r.Next(4) == 0 ? sites[r.Next(i)]
+                : collinear ? new float4(Span(r, 10.0f), 0.0f, 0.0f, weight)
+                : new float4(Span(r, 10.0f), Span(r, 10.0f), Span(r, 10.0f), weight);
+        }
+
+        return sites;
+    }
+
+    [Fact]
+    public void PowerBorderIsTheLeastRadicalPlaneDistance()
+    {
+        var r = new System.Random(0xCE11);
+        var finite = 0;
+        var unbounded = 0;
+        for (var n = 0; n < 6000; n++)
+        {
+            var sites = AwkwardSites(r);
+            var p = Point(r);
+            var reference = sites.Select(s => PowerReference(p, s)).ToArray();
+            var order = Enumerable.Range(0, sites.Length).OrderBy(i => reference[i]).ThenBy(i => i).ToArray();
+            if (order.Length > 1 && reference[order[1]] - reference[order[0]] < 1.0e-2 && reference[order[1]] != reference[order[0]])
+                continue;
+            var (distance, normal) = CellBoundary(p, sites, order[0]);
+            var border = power_border(p, sites);
+            if (double.IsPositiveInfinity(distance))
+            {
+                Assert.Equal(1.0e30f, border.w);
+                unbounded++;
+                continue;
+            }
+
+            Assert.InRange(border.w, distance - 1.0e-4 * Math.Abs(distance) - 1.0e-4, distance + 1.0e-4 * Math.Abs(distance) + 1.0e-4);
+            finite++;
+            // The normal is the minimising plane's, pointing into the cell, when that plane is clear of the rest.
+            var others = Enumerable.Range(0, sites.Length).Where(k => k != order[0]).Select(k => CellBoundary(p, new[] { sites[order[0]], sites[k] }, 0).Distance).Where(v => !double.IsPositiveInfinity(v)).OrderBy(v => v).ToArray();
+            if (others.Length > 1 && others[1] - others[0] > 1.0e-2)
+            {
+                Assert.InRange(border.x, normal[0] - 1.0e-3, normal[0] + 1.0e-3);
+                Assert.InRange(border.y, normal[1] - 1.0e-3, normal[1] + 1.0e-3);
+                Assert.InRange(border.z, normal[2] - 1.0e-3, normal[2] + 1.0e-3);
+            }
+        }
+
+        Assert.True(finite > 2500 && unbounded > 50, $"{finite} bounded and {unbounded} unbounded cells were compared");
+    }
+
+    [Fact]
+    public void ADuplicateOfTheOwnerLeavesTheCellBorderToTheOtherSites()
+    {
+        var a = new float4(0.0f, 0.0f, 0.0f, 1.0f);
+        var far = new float4(10.0f, 0.0f, 0.0f, 1.0f);
+        // p is nearer the owner's duplicate than anything else: the duplicate is the second-nearest site.
+        var border = power_border(new float3(1.0f, 0.0f, 0.0f), new[] { a, a, far });
+        Assert.Equal(4.0f, border.w, 1.0e-4f);
+        Assert.Equal(-1.0f, border.x, 1.0e-5f);
+        // Only coincident sites: the cell has no bounding plane.
+        Assert.Equal(1.0e30f, power_border(new float3(1.0f, 0.0f, 0.0f), new[] { a, a }).w);
+        Assert.Equal(1.0e30f, power_border(new float3(1.0f, 0.0f, 0.0f), new[] { a }).w);
+        Assert.Equal(1.0e30f, power_border(new float3(1.0f, 0.0f, 0.0f), ReadOnlySpan<float4>.Empty).w);
+    }
+
+    // Close sites seen from a far query: the plane distance must not cancel (the old gradient-difference form
+    // had 1.5e-4 relative error at this geometry and 3.5e-3 at coordinates near 1e4).
+    [Theory]
+    [InlineData(0.0f)]
+    [InlineData(10000.0f)]
+    public void PowerBorderKeepsItsPrecisionForCloseSitesAndAFarQuery(float shift)
+    {
+        var sites = new[] { new float4(shift - 1.453f, shift + 1.986f, 0.0f, 13.085f), new float4(shift - 1.539f, shift + 2.103f, 0.0f, 5.113f) };
+        var p = new float3(shift - 154.2f, shift + 188.9f, 0.0f);
+        var expected = CellBoundary(p, sites, (int)power_cells(p, sites).nearestSite).Distance;
+        Assert.True(expected > 100.0);
+        Assert.InRange(power_border(p, sites).w, expected * (1.0 - 1.0e-5), expected * (1.0 + 1.0e-5));
+    }
+
+    [Fact]
+    public void CoincidentGabrielPairHasMarginMinusOne()
+    {
+        var a = new float3(1.0f, 2.0f, 3.0f);
+        foreach (var other in new[] { a, new float3(0.0f, 0.0f, 0.0f), new float3(9.0f, -4.0f, 2.0f) })
+            Assert.Equal(-1.0f, gabriel_margin(a, a, other));
+
+        var pair = new[] { new float4(a, 1.0f), new float4(a, 1.0f), new float4(5.0f, 5.0f, 5.0f, 1.0f) };
+        Assert.Equal(0.0f, soft_gabriel_gate(pair, 0, 1, 0.15f));
+        // smoothstep(-3, 3, -1) = 3t^2 - 2t^3 at t = 1/3.
+        Assert.Equal(7.0 / 27.0, soft_gabriel_gate(pair, 0, 1, 3.0f), 1.0e-5);
+        Assert.Equal(1.0f, soft_gabriel_gate(pair[..2], 0, 1, 0.15f));
+    }
+
+    [Fact]
+    public void CellSpansRefuseNonFinitePositionsAndQueriesAndOverlongSpans()
+    {
+        var good = new float4(0.0f, 0.0f, 0.0f, 1.0f);
+        var origin = new float3(0.0f, 0.0f, 0.0f);
+        foreach (var bad in new[] { float.NaN, float.PositiveInfinity, float.NegativeInfinity })
+        {
+            var site = new[] { new float4(bad, 0.0f, 0.0f, 1.0f), good, new float4(2.0f, 0.0f, 0.0f, 1.0f) };
+            Assert.Equal("sites", Assert.Throws<ArgumentException>(() => power_cells(origin, site)).ParamName);
+            Assert.Equal("sites", Assert.Throws<ArgumentException>(() => multiplicative_cells(origin, site)).ParamName);
+            Assert.Equal("sites", Assert.Throws<ArgumentException>(() => power_border(origin, site)).ParamName);
+            Assert.Equal("sites", Assert.Throws<ArgumentException>(() => soft_gabriel_gate(site, 1, 2, 0.1f)).ParamName);
+            var query = new float3(0.0f, bad, 0.0f);
+            Assert.Equal("p", Assert.Throws<ArgumentException>(() => power_cells(query, new[] { good })).ParamName);
+            Assert.Equal("p", Assert.Throws<ArgumentException>(() => multiplicative_cells(query, new[] { good })).ParamName);
+            Assert.Equal("p", Assert.Throws<ArgumentException>(() => power_border(query, new[] { good })).ParamName);
+        }
+
+        // Indices are floats, exact only to 2^24: a longer span is refused before any site is read.
+        var one = new[] { good };
+        Assert.Equal("sites", Assert.Throws<ArgumentException>(() => power_cells(origin, System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref one[0], (1 << 24) + 1))).ParamName);
+        Assert.Equal("sites", Assert.Throws<ArgumentException>(() => multiplicative_cells(origin, System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref one[0], (1 << 24) + 1))).ParamName);
+    }
+
+    [Fact]
+    public void SegmentClosestIsTheClampedFootOfThePerpendicular()
+    {
+        var start = new float3(0.0f, 0.0f, 0.0f);
+        var end = new float3(4.0f, 0.0f, 0.0f);
+        Assert.Equal(new float3(2.0f, 0.0f, 0.0f), segment_closest(new float3(2.0f, 3.0f, 1.0f), start, end));
+        Assert.Equal(end, segment_closest(new float3(9.0f, 3.0f, 1.0f), start, end));
+        Assert.Equal(start, segment_closest(new float3(-9.0f, 3.0f, 1.0f), start, end));
+        Assert.Equal(start, segment_closest(new float3(2.0f, 3.0f, 1.0f), start, start));
+        Assert.Equal(new float2(4.0f, 0.0f), segment_closest(new float2(9.0f, 3.0f), new float2(0.0f, 0.0f), new float2(4.0f, 0.0f)));
     }
 }
