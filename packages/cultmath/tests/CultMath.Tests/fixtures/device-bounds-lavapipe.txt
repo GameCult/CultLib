@@ -110,6 +110,16 @@ lavapipe-glsl	105	vec4 cultmath_snoise_grad(vec3)	ulp-bounded, coordinate bands 
 lavapipe-glsl	106	vec4 cultmath_snoise_grad(vec3)	ulp-bounded, coordinate bands 1e2 to 4e6	70	11866336.625	0	833484714ebcea59d86e0fbc2eaa4ae247c29541703763989e6758547dbf6db8
 lavapipe-glsl	107	mat3 cultmath_snoise_hessian(vec3)	ulp-bounded, coordinate bands 1e-4 to 1e2	120	980.7417469278579	0	3ea43dabe0091ea8e994c1dfc65c7274ed38b9343d4d1d06f7caa09c806c91df
 lavapipe-glsl	108	mat3 cultmath_snoise_hessian(vec3)	ulp-bounded, coordinate bands 1e2 to 4e6	46	164827710.09171063	0	0984abe5fff2e2df93b053a5b5dbdd4eacd816d26144d8352497614e45159c07
+lavapipe-glsl	109	float cultmath_distance_to_segment(vec2, vec2, vec2)	ulp-bounded	256	0	0	56d4972116081037d01476cb26a7981a35e9a949eb739df87e331fef9a25e424
+lavapipe-glsl	110	vec2 cultmath_segment_closest(vec2, vec2, vec2)	ulp-bounded	256	0	0	fb6b7e9038f9138584d8d0c427578088f06ae21d7510d20e899cac3c3833dbd9
+lavapipe-glsl	111	float cultmath_distance_to_segment(vec3, vec3, vec3)	ulp-bounded	226	1.60911149933558	0	ad66ebd8fb9d743d5c74491a7657f92d1cfa04b76ae65e090112e369881cf0ce
+lavapipe-glsl	112	vec3 cultmath_segment_closest(vec3, vec3, vec3)	ulp-bounded	214	32	0	4cdb6d7124e502786a4c4b082da3b94b8bde1e2082d14efa8245cbbe6b10a978
+lavapipe-glsl	113	vec4 cultmath_power_border_step(vec3, vec4, vec4, vec4)	ulp-bounded	214	43	0	fdfdff73434a146489b002af5e80663658b2dd7b86105a7e65bdab755ab54a5e
+lavapipe-glsl	114	vec4 cultmath_power_score(vec3, vec4)	ulp-bounded	207	1.4619722193127032	0	dc1aa639ae1dc44003a0f5d8c7c99b2e3d7f51b158c96b3c3bd7a9f7df6d927e
+lavapipe-glsl	115	vec4 cultmath_multiplicative_score(vec3, vec4)	ulp-bounded	234	1.5529504197086745	0	ee1af26ac82489e8d363e7a6b6b59da7dacfb397d4bc9a723dd68607a69da41a
+lavapipe-glsl	116	CultSiteCells cultmath_site_cells_insert(CultSiteCells, vec4, int)	ulp-bounded	256	0	0	bfad8b369011cfbf14644fec68ce65620694fcbf3cd3804f54953d55587313fc
+lavapipe-glsl	117	vec4 cultmath_site_cells_border(CultSiteCells)	ulp-bounded	228	1.069496760346883	0	d7b478bef7e6f80902d0b5b255cb4fca30757ff6b9d25dac2030b037a8d342ce
+lavapipe-glsl	118	float cultmath_gabriel_margin(vec3, vec3, vec3)	ulp-bounded	201	2	0	6a80fbef486de496a08b7c8e7f9f65e2cc0f5b9f93abe50c43e84ad88d1ed034
 lavapipe-hlsl	0	float cultmath_snoise(vec3)	ulp-bounded	94	122.6875	0	5d41c14241a13124f2e1b49f230f5df0c48d0d69fb1be9ef2f33dc1702bf0b0a
 lavapipe-hlsl	1	float cultmath_snoise(vec2)	ulp-bounded	204	1	0	81d9c62726afdccbbe4ffef173b5c92731eb6bf5927b3979d653e50dbd5d4064
 lavapipe-hlsl	2	vec4 cultmath_snoise_grad(vec3)	ulp-bounded	71	617.5	0	f7e9ed1707cdb015efaba0e0150193309da0d4c125349518f8b7c60a17b25790
@@ -219,3 +229,13 @@ lavapipe-hlsl	105	vec4 cultmath_snoise_grad(vec3)	ulp-bounded, coordinate bands 
 lavapipe-hlsl	106	vec4 cultmath_snoise_grad(vec3)	ulp-bounded, coordinate bands 1e2 to 4e6	73	13116827.1875	0	9ad0fd577b26aa717534c0693df97ee41bcded0768f442739b98f505e4a2a430
 lavapipe-hlsl	107	mat3 cultmath_snoise_hessian(vec3)	ulp-bounded, coordinate bands 1e-4 to 1e2	122	980.7417469278579	0	0977fa6f446e4f916a9b938ce24ea32df6aa912dc991c182014d309dc0efb1cb
 lavapipe-hlsl	108	mat3 cultmath_snoise_hessian(vec3)	ulp-bounded, coordinate bands 1e2 to 4e6	51	164827710.09171063	0	c87f8a091b11770f7ffd8f01cf421f3fa139b58b7bcfbb6afa171ad5bca10c7b
+lavapipe-hlsl	109	float cultmath_distance_to_segment(vec2, vec2, vec2)	ulp-bounded	256	0	0	56d4972116081037d01476cb26a7981a35e9a949eb739df87e331fef9a25e424
+lavapipe-hlsl	110	vec2 cultmath_segment_closest(vec2, vec2, vec2)	ulp-bounded	256	0	0	fb6b7e9038f9138584d8d0c427578088f06ae21d7510d20e899cac3c3833dbd9
+lavapipe-hlsl	111	float cultmath_distance_to_segment(vec3, vec3, vec3)	ulp-bounded	226	1.60911149933558	0	ad66ebd8fb9d743d5c74491a7657f92d1cfa04b76ae65e090112e369881cf0ce
+lavapipe-hlsl	112	vec3 cultmath_segment_closest(vec3, vec3, vec3)	ulp-bounded	214	32	0	4cdb6d7124e502786a4c4b082da3b94b8bde1e2082d14efa8245cbbe6b10a978
+lavapipe-hlsl	113	vec4 cultmath_power_border_step(vec3, vec4, vec4, vec4)	ulp-bounded	214	43	0	fdfdff73434a146489b002af5e80663658b2dd7b86105a7e65bdab755ab54a5e
+lavapipe-hlsl	114	vec4 cultmath_power_score(vec3, vec4)	ulp-bounded	207	1.4619722193127032	0	dc1aa639ae1dc44003a0f5d8c7c99b2e3d7f51b158c96b3c3bd7a9f7df6d927e
+lavapipe-hlsl	115	vec4 cultmath_multiplicative_score(vec3, vec4)	ulp-bounded	234	1.5529504197086745	0	ee1af26ac82489e8d363e7a6b6b59da7dacfb397d4bc9a723dd68607a69da41a
+lavapipe-hlsl	116	CultSiteCells cultmath_site_cells_insert(CultSiteCells, vec4, int)	ulp-bounded	256	0	0	bfad8b369011cfbf14644fec68ce65620694fcbf3cd3804f54953d55587313fc
+lavapipe-hlsl	117	vec4 cultmath_site_cells_border(CultSiteCells)	ulp-bounded	228	1.069496760346883	0	d7b478bef7e6f80902d0b5b255cb4fca30757ff6b9d25dac2030b037a8d342ce
+lavapipe-hlsl	118	float cultmath_gabriel_margin(vec3, vec3, vec3)	ulp-bounded	201	2	0	6a80fbef486de496a08b7c8e7f9f65e2cc0f5b9f93abe50c43e84ad88d1ed034
