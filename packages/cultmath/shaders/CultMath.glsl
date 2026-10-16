@@ -608,7 +608,7 @@ CultCellular cultmath_cellular(vec3 p)
 // The exact power cell border is a second loop over the buffer, skipping the owner cells.nearestSite:
 //   vec4 border = vec4(0.0, 0.0, 0.0, 1.0e30); int owner = int(cells.nearestSite);
 //   for (int k = 0; k < count; k++) if (k != owner) border = cultmath_power_border_step(p, sites[owner], sites[k], border);
-// Shader names are unique (one 3D form of segment distance; a 2D caller uses z = 0), so none joins the overload rename list.
+// The step trusts the owner: a p outside the owner's cell reports distance 0 with that plane's normal, not an error.
 // Statement for statement with math.Sites.cs (power_score, multiplicative_score, site_cells_*, gabriel_margin).
 struct CultSiteCells
 {
@@ -688,6 +688,17 @@ float cultmath_gabriel_margin(vec3 a, vec3 b, vec3 other)
     return (cultmath_distance(other, (a + b) * 0.5) - r) / r;
 }
 
+vec2 cultmath_segment_closest(vec2 point_value, vec2 start, vec2 end)
+{
+    vec2 segment = end - start;
+    float segmentLengthSq = cultmath_lengthsq(segment);
+    if (segmentLengthSq <= 0.0)
+        return start;
+
+    float t = cultmath_saturate(dot(point_value - start, segment) / segmentLengthSq);
+    return start + segment * t;
+}
+
 vec3 cultmath_segment_closest(vec3 point_value, vec3 start, vec3 end)
 {
     vec3 segment = end - start;
@@ -697,6 +708,11 @@ vec3 cultmath_segment_closest(vec3 point_value, vec3 start, vec3 end)
 
     float t = cultmath_saturate(dot(point_value - start, segment) / segmentLengthSq);
     return start + segment * t;
+}
+
+float cultmath_distance_to_segment(vec2 point_value, vec2 start, vec2 end)
+{
+    return cultmath_distance(point_value, cultmath_segment_closest(point_value, start, end));
 }
 
 float cultmath_distance_to_segment(vec3 point_value, vec3 start, vec3 end)
