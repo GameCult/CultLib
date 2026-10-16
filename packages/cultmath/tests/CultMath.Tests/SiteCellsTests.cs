@@ -478,4 +478,19 @@ public sealed class SiteCellsTests
         Assert.Equal(start, segment_closest(new float3(2.0f, 3.0f, 1.0f), start, start));
         Assert.Equal(new float2(4.0f, 0.0f), segment_closest(new float2(9.0f, 3.0f), new float2(0.0f, 0.0f), new float2(4.0f, 0.0f)));
     }
+
+    [Fact]
+    public void PowerBorderStepLeavesTheBorderAloneForASiteCoincidentWithTheOwner()
+    {
+        var owner = new float4(1.0f, 2.0f, 3.0f, 1.0f);
+        var heavier = new float4(1.0f, 2.0f, 3.0f, 2.0f);
+        var running = new float4(1.0f, 0.0f, 0.0f, 5.0f);
+        foreach (var other in new[] { owner, heavier })
+            foreach (var border in new[] { running, new float4(0.0f, 0.0f, 0.0f, 1.0e30f) })
+            {
+                var result = power_border_step(new float3(4.0f, 4.0f, 4.0f), owner, other, border);
+                Assert.Equal(border.x, result.x);
+                Assert.Equal(border.w, result.w);
+            }
+    }
 }
