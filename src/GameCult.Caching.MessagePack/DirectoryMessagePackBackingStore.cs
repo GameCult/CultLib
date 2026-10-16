@@ -363,6 +363,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             currentManifest.FormatVersion,
             holdsIds.Values.Select(holds => (bool?)holds).ToArray(),
             copiesAny: currentIndex.Values.Any(record => !written.Contains(record.Key)),
+            copiedHoldIds: false, // only C# writes a directory store, and it marks by content
             directoryStore: true,
             holdsVariants: false);
         WriteManifest(targetCatalog, catalogBytes, currentIndex.Values

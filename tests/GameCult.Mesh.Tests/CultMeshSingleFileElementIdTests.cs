@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using FluentAssertions;
@@ -170,5 +171,130 @@ public sealed class CultMeshSingleFileElementIdTests
             ReadOnly = true
         });
         cache.Get<CultMeshBodyPublicationDocument>(Key)!.Representations.Select(entry => entry.Id).Should().Equal(first);
+    }
+
+    // A list document defined in this assembly: the record another writer leaves holding ids under an unmarked header.
+    [CultDocument("mesh.test.id_list", "mesh.test.id_list.v1")]
+    [MessagePackObject]
+    public sealed class MeshIdList
+    {
+        [Key(0)] [CultName] public string Name { get; set; } = "";
+        [Key(1)] public List<MeshIdItem> Items { get; set; } = new();
+    }
+
+    [MessagePackObject]
+    public sealed class MeshIdItem
+    {
+        [Key(0)] public string N { get; set; } = "";
+        [Key(1)] [CultElementId] public string Id { get; set; } = "";
+    }
+
+    private static readonly CultRecordKey IdsKey = new("ids");
+    private const string HexB = "bbbbbbbbbbbb";
+
+    // A v1 file whose record holds 12-hex element ids: the document is written with the type (v3), then the header is put back
+    // to the v1 a writer that does not decide would have left.
+    private string UnmarkedStoreHoldingIds()
+    {
+        var path = Path_("unmarked.cc");
+        CultMesh.WriteSingleFileDocument(
+            path,
+            IdsKey,
+            new MeshIdList { Name = "ids", Items = { new MeshIdItem { Id = HexA }, new MeshIdItem { Id = HexB } } },
+            registry: Registry(typeof(MeshIdList)));
+        var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+        snapshot.FormatVersion = CultPersistedStoreSnapshot.FormatV1;
+        File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+        HeaderOf(path).Should().Be("cultcache.store.v1");
+        return path;
+    }
+
+    private string PythonStore()
+    {
+        string? vectors = null;
+        for (var dir = new DirectoryInfo(TestContext.CurrentContext.TestDirectory); dir != null && vectors == null; dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, "tests", "vectors", "numeric-leaves", "py-store", "leaf-record.cc");
+            if (File.Exists(candidate)) vectors = candidate;
+        }
+
+        vectors.Should().NotBeNull("the shared vectors sit above the test directory");
+        var path = Path_("leaf-record.cc");
+        File.Copy(vectors!, path);
+        HeaderOf(path).Should().Be("cultcache.store.v1", "cultcache-py leaves the header unmarked");
+        return path;
+    }
+
+    private static CultDocumentRegistry Registry(params Type[] types) => CultDocumentRegistry.ForTypes(types);
+
+    // A CultMesh write is a writer with a type: it decides for the copied record from the bytes the file holds, whatever any
+    // earlier read saw (a fresh store per call has read nothing).
+    [Test]
+    public void ACultMeshWriteThatCopiesARecordHoldingIdsMarksTheStore()
+    {
+        var path = UnmarkedStoreHoldingIds();
+
+        CultMesh.WriteSingleFileDocument(path, Key, Publication(), registry: Registry(typeof(MeshIdList), typeof(CultMeshBodyPublicationDocument)));
+
+        HeaderOf(path).Should().Be("cultcache.store.v3");
+        CultMesh.ReadSingleFileDocument<MeshIdList>(path, IdsKey, Registry(typeof(MeshIdList))).Items.Select(item => item.Id).Should().Equal(HexA, HexB);
+    }
+
+    // A raw payload is opaque by design: it attaches no registry and decides nothing, even beside a record it could have read.
+    [Test]
+    public void ARawCultMeshWriteBesideARecordHoldingIdsLeavesTheHeaderAlone()
+    {
+        var path = UnmarkedStoreHoldingIds();
+
+        CultMesh.WriteSingleFileDocumentPayload(path, RawKey, new CultMeshSingleFileDocumentSchema("raw:schema", "RawSchema", "1"), null, new byte[] { 0x90 });
+
+        HeaderOf(path).Should().Be("cultcache.store.v1");
+    }
+
+    // Soul s1 P8, committed: the writer's registry has only the type it writes, so the python record is foreign to it and it
+    // decides nothing for it (variants:question:non-csharp-writers-mark-ids-2).
+    [Test]
+    public void ACultMeshWriteWhoseRegistryLacksTheRecordsTypeDecidesNothingForIt()
+    {
+        var path = PythonStore();
+
+        CultMesh.WriteSingleFileDocument(path, Key, Publication(), registry: Registry(typeof(CultMeshBodyPublicationDocument)));
+
+        HeaderOf(path).Should().Be("cultcache.store.v1");
+    }
+
+    // The copy check never refuses a write: a record the registry claims by schema name but cannot resolve (the catalog entry
+    // names another type for a slot) is copied as its bytes and decides nothing. Soul s2 P5, incompatible-catalog-slot12.
+    [Test]
+    public void AnUnresolvableCopiedRecordIsCopiedAndDecidesNothing()
+    {
+        var path = UnmarkedStoreHoldingIds();
+        var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+        const string changedId = "mesh.test.id_list.v0";
+        var entry = snapshot.SchemaCatalog.Single(candidate => candidate.SchemaName == "mesh.test.id_list");
+        entry.SchemaId = changedId;
+        entry.ContentHash = "persisted-by-another-runtime";
+        entry.Members.Single(member => member.Slot == 1).TypeName = "System.Collections.Generic.List`1[[Other.Inner]]";
+        snapshot.Records.Single(record => record.Key == IdsKey.Value).SchemaId = changedId;
+        File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+        var before = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records.Single(record => record.Key == IdsKey.Value);
+
+        Assert.DoesNotThrow(() => CultMesh.WriteSingleFileDocument(path, Key, Publication(), registry: Registry(typeof(MeshIdList), typeof(CultMeshBodyPublicationDocument))));
+
+        var after = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records.Single(record => record.Key == IdsKey.Value);
+        after.SchemaId.Should().Be(changedId);
+        after.Payload.Should().Equal(before.Payload);
+        HeaderOf(path).Should().Be("cultcache.store.v1");
+    }
+
+    // Typed writes beside records that hold no id leave the store unmarked: the check marks only on an id it found.
+    [Test]
+    public void ATypedWriteBesideARecordThatHoldsNoIdKeepsTheStoreUnmarked()
+    {
+        var path = Path_("plain.cc");
+        CultMesh.WriteSingleFileDocument(path, Key, Publication(), registry: Registry(typeof(CultMeshBodyPublicationDocument)));
+        CultMesh.WriteSingleFileDocument(path, new CultRecordKey("second"), Publication(), registry: Registry(typeof(CultMeshBodyPublicationDocument)));
+
+        HeaderOf(path).Should().Be("cultcache.store.v1");
     }
 }

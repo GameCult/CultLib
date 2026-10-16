@@ -5,6 +5,7 @@ using GameCult.Caching.MessagePack;
 using GameCult.Mesh;
 using GameCult.Networking;
 using MessagePack;
+using MessagePack.Resolvers;
 using NUnit.Framework;
 using R3;
 using System;
@@ -191,6 +192,19 @@ namespace GameCult.Geometry.Tests
             domain.Root.Children[0].Name.Should().Be("stellarator-column-00");
             CultGeometryDomainDocument.CreateRecordKey(domain).Value
                 .Should().Be("geometry:domain:02c9b5810977406b0c206f3a3494327a423abb9448192be1b9a1863cd0f2ed95");
+        }
+
+        // A source-generated formatter is of no known family and passes the element-id door (ruling c2a-source-generated-formatters-defaulted).
+        [Test]
+        public void AGeneratedFormatterPassesTheElementIdDoor()
+        {
+            StandardResolver.Instance.GetFormatter<CultGeometryDomainNode>().Should()
+                .NotBeSameAs(DynamicObjectResolver.Instance.GetFormatter<CultGeometryDomainNode>(), "the fixture must stay source-generated");
+            var payload = File.ReadAllBytes(FixturePath("ragnarok-domain.msgpack"));
+            var domain = (CultGeometryDomainDocument)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(CultGeometryDomainDocument), payload);
+            var again = (CultGeometryDomainDocument)CultDocumentMessagePackSerialization.DeserializeUntyped(
+                typeof(CultGeometryDomainDocument), CultDocumentMessagePackSerialization.SerializeUntyped(domain, typeof(CultGeometryDomainDocument)));
+            CultGeometryDomainDocument.CreateRecordKey(again).Value.Should().Be(CultGeometryDomainDocument.CreateRecordKey(domain).Value);
         }
 
         [Test]

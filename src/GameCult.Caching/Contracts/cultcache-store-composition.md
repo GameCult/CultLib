@@ -294,6 +294,25 @@ exclusive open of the same lock file exclude each other is not established.
   for `X` that `Doc<X>` needs is declared in `Doc`'s assembly.
 - An assembly that declares nothing, and the store envelope, use the base
   options.
+- A resolver may not claim a type a document's element lists pass through: the list's
+  element types, the types and members on the way to them, and the collection types
+  the walk passes (`List<T>`, `T[]`, a collection class, a dictionary on the way).
+  Those are written by their `[Key]` layout so each element's id reaches disk, and the
+  codec refuses the document on first encode or decode, naming the resolver and the
+  type. The formatter `StandardResolver` or `StandardResolverAllowPrivate` hands out for a
+  type does not claim it: the extra non-public members the `AllowPrivate` formatter writes
+  are whole values the walk does not own. A type or member declaring
+  `[MessagePackFormatter]` is a whole value off the path, the supported way to give a type its
+  own formatter. A value list (`List<float2>`, a list of a non-keyed class) is not on the
+  path, so a resolver may claim it.
+- The codec also checks, for every type on that path, that `StandardResolver` does not write it
+  against the walk. A type read by key may not be written by the generic collection resolver
+  (a `[MessagePackObject]` class that is also an `ICollection<T>` or dictionary); it is
+  refused on first encode or decode, naming the type. Any other formatter, such as one
+  MessagePack's source generator emits, passes: the walk decides which types carry ids and
+  the door only verifies. It also refuses, typed, a type MessagePack cannot build a formatter
+  for (it throws, or `StandardResolver` returns none), and a resolver that throws while asked
+  about one.
 - Deserialization runs under untrusted-data security. `CultRecordRef<T>` is a
   permitted dictionary key, compared by its key string.
 

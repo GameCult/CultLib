@@ -23,10 +23,10 @@ namespace GameCult.Caching.MessagePack
         // options, resolvers included, so dictionary keys compare by the bytes the store writes; a document type
         // deserializes as a registered document, a member type as itself.
         public static CultCodec CreateCodec(CultDocumentRegistry registry) => new CultCodec(
-            (value, type, document) => global::MessagePack.MessagePackSerializer.Serialize(type, value, CultDocumentMessagePackSerialization.OptionsFor(document.Assembly)),
+            (value, type, document) => global::MessagePack.MessagePackSerializer.Serialize(type, value, CultDocumentMessagePackSerialization.OptionsForDocument(document)),
             (type, document, bytes) => type == document
                 ? CultDocumentMessagePackSerialization.DeserializeUntyped(type, bytes, registry)
-                : global::MessagePack.MessagePackSerializer.Deserialize(type, bytes, CultDocumentMessagePackSerialization.OptionsFor(document.Assembly)),
+                : global::MessagePack.MessagePackSerializer.Deserialize(type, bytes, CultDocumentMessagePackSerialization.OptionsForDocument(document)),
             CultDocumentMessagePackSerialization.OverlaySlots);
 
         // The inspection model over that codec.

@@ -336,8 +336,11 @@ an element id, variants or not). A single-file store declares `v3` when any reco
 holds carries an element id: a non-empty `[CultElementId]` value in a record's document,
 or in a variant's override values. A store that cannot read a variant's override values
 (no codec attached) counts the variant as holding one. An element id is an ordinary keyed
-string in the payload, so no reader can tell from a record's bytes whether it holds one;
-a writer knows it only for the records it encodes. A write that copies any record forward
+string in the payload, so only a reader with the record's type can tell; a C# write
+decides for the records it encodes and, while the header it found is unmarked, for every
+plain record it copies forward that its registry can read, decoding the bytes the file
+holds under the store's lock. A copied record it cannot read, and a raw CultMesh payload,
+decide nothing. A write that copies any record forward
 therefore keeps a `v3` header it found. Only a write that encodes every record the store
 will hold decides by content, and drops to `v1` (or `v2` with a variant) when none holds
 an id. A directory store's manifest says
@@ -405,11 +408,18 @@ fifth slot:
 
 ## Element Ids
 
-Every object that sits in a list, array or dictionary value of a registered document
-type, union subtypes included, carries an id: one string member with an integer `[Key]`
-and `[CultElementId]`. The id identifies the element inside its list, so an override can
-name it (a path step is `[slot, elementId]`) and a base edit that reorders or inserts
-elements retargets nothing.
+Every object that sits in a list, array or dictionary value of a shape the element-id walk
+owns carries an id: one string member with an integer `[Key]` and `[CultElementId]`. The
+owned shapes are arrays, `IEnumerable<T>` classes and interfaces, `IDictionary<,>` and
+`IReadOnlyDictionary<,>` values, and `[MessagePackObject]` or `[Union]` types with integer
+keys (a keyed struct included), read through the members MessagePack writes. Union subtypes
+are included. The id identifies the element inside its list, so an override can name it (a
+path step is `[slot, elementId]`) and a base edit that reorders or inserts elements
+retargets nothing.
+
+Any other shape is one whole value. Its elements carry no element ids: a `[CultElementId]`
+member inside it is a plain string, never minted or checked and never counted for `v3`. A
+variant replaces it whole (operator, 2026-10-16).
 
 - A random id is 12 lowercase hex characters. A derived id
   (`[CultElementId(nameof(Source))]`, for content-addressed elements) is the
@@ -423,8 +433,32 @@ elements retargets nothing.
   the record's next write, or `CultCache.MintElementIds()`.
 - A store that holds an id declares the `v3` header (above), so a reader older than ids
   refuses it instead of skipping the id slot and rewriting the elements without ids.
-  TypeScript, Python and Rust read `v3` and keep a `v3` header they found when they
-  rewrite a store; they do not decide when a document carries ids.
+  A C# write also marks the store when a record it copies forward holds an id, judged
+  from the file's bytes at the write (above). TypeScript,
+  Python and Rust read `v3` and keep a `v3` header they found when they rewrite a
+  store; they carry ids and do not decide when a document carries them.
+- An object list's elements are written by their `[Key]` layout, because the id is a
+  keyed member of the element. Value lists are replaced whole: a list of a non-keyed
+  class or struct, or of primitives. So is a list of keyed structs, since a struct is a
+  value and never an element, but an object list inside a keyed struct is walked like any
+  other. The walk follows declared member types: a member declared `object` is untyped on
+  disk, and a subclass's extra members under a non-union base-typed member are not written,
+  so neither is walked. Whole values are `ImmutableArray<T>`, `ArraySegment<T>`,
+  `Memory<T>`, `KeyValuePair`, tuples, `Lazy<T>`, a class or struct without
+  `[MessagePackObject]`, a `[DataContract]` type, a string-keyed type, a type or member
+  declaring `[MessagePackFormatter]`, and a non-public member of a type without
+  `AllowPrivate`. The members read are an integer `[Key]` with no `[IgnoreMember]`: a
+  public field or a property whose getter is public, or any visibility up the base chain
+  under the most derived `[MessagePackObject(AllowPrivate = true)]` declaration. An id member
+  needs a setter MessagePack calls (public or `init`; any under `AllowPrivate`), so the id
+  MessagePack writes is read back. Still refused: a bad id member (missing, duplicate, not
+  a string, no integer `[Key]`, `[MessagePackFormatter]` on it, one MessagePack does not
+  write or cannot assign, a key shared with another member, a bad derived source), a
+  concrete union arm that is not keyed, a keyed type that is also a collection
+  (`ICollection<T>`, `IList`, `IDictionary`: MessagePack writes it as a collection, so C#
+  refuses it at the first encode or decode when it is on the path to an object list), a
+  type MessagePack has no formatter for, and a formatter resolver that claims a type on the
+  path. A formatter MessagePack's source generator emits is not refused.
 
 ## Canonical Semantic Schema Hash
 

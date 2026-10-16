@@ -4,6 +4,7 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.Serialization;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -20,7 +21,7 @@ namespace GameCult.Caching.Tests
     {
         private const string Canary = "CANARY-9d1e47";
 
-        private static readonly CultDocumentRegistry Registry = CultDocumentRegistry.ForTypes(new[] { typeof(GuardDoc), typeof(ShapeDoc) });
+        private static readonly CultDocumentRegistry Registry = CultDocumentRegistry.ForTypes(new[] { typeof(GuardDoc), typeof(ShapeDoc), typeof(StubDoc) });
 
         private delegate void Emit(ref MessagePackWriter writer);
 
@@ -246,13 +247,541 @@ namespace GameCult.Caching.Tests
         [Test]
         public void ConsumerResolverStillEncodesArms()
         {
-            var bytes = CultDocumentMessagePackSerialization.SerializeUntyped(new GuardDoc { Id = "d1", Root = new StubArm() }, typeof(GuardDoc), Registry);
-            Assert.That(Convert.ToHexString(bytes), Is.EqualTo(Convert.ToHexString(Doc((ref MessagePackWriter w) =>
+            var bytes = CultDocumentMessagePackSerialization.SerializeUntyped(new StubDoc { Id = "d1", Root = new StubArm() }, typeof(StubDoc), Registry);
+            Assert.That(Convert.ToHexString(bytes), Is.EqualTo(Convert.ToHexString(Raw((ref MessagePackWriter w) =>
             {
+                w.WriteArrayHeader(2); w.Write("d1");
                 w.WriteArrayHeader(2); w.Write(9); w.WriteArrayHeader(1); w.Write("via-resolver");
             }))));
-            var back = (GuardDoc)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(GuardDoc), bytes, Registry);
+            var back = (StubDoc)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(StubDoc), bytes, Registry);
             Assert.That(back.Root, Is.TypeOf<StubArm>());
+        }
+
+        // A list element is written by its [Key] layout or its id never reaches disk: a consumer resolver that claims the arm of
+        // a list's union is refused on every path that encodes or decodes the document, naming the arm and the resolver, and
+        // writes nothing.
+        [Test]
+        public void ListElementsClaimedByAResolverAreRefused()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(ClaimDoc) });
+            var doc = new ClaimDoc { Id = "c1", Items = { new ClaimArm { N = 4 } } };
+            void Refused(TestDelegate attempt)
+            {
+                var thrown = Assert.Throws<InvalidOperationException>(attempt)!;
+                Assert.That(thrown.Message, Does.Contain("ClaimArm").And.Contain(nameof(ClaimArmResolver)).And.Contain(nameof(ClaimDoc)));
+            }
+
+            Refused(() => CultDocumentMessagePackSerialization.SerializeUntyped(doc, typeof(ClaimDoc), registry));
+            var held = Raw((ref MessagePackWriter w) => { w.WriteArrayHeader(2); w.Write("c1"); w.WriteArrayHeader(0); });
+            Refused(() => CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(ClaimDoc), held, registry));
+            Refused(() => CultCacheMessagePack.CreateCodec(registry).Serialize(doc.Items, typeof(List<ClaimNode>), typeof(ClaimDoc)));
+
+            var scratch = Directory.CreateTempSubdirectory().FullName;
+            try
+            {
+                var path = Path.Combine(scratch, "claim.cc");
+                using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = registry });
+                Assert.That(Assert.Catch(() => cache.Commit(batch => batch.Upsert(typeof(ClaimDoc), doc, new CultRecordKey("c1"))))!.ToString(),
+                    Does.Contain(nameof(ClaimArmResolver)));
+                Assert.That(File.Exists(path), Is.False, "nothing reached disk");
+            }
+            finally
+            {
+                Directory.Delete(scratch, true);
+            }
+        }
+
+        // A resolver's formatter for the list type of an object list drops the elements' ids as surely as one for the element,
+        // so the collection type is on the id path (Soul s1 P1). A claim on a value list, even beside an object list, is none.
+        [Test]
+        public void AResolverClaimingTheListTypeOfAnObjectListIsRefused()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(LcDoc), typeof(LcValueDoc) });
+            var doc = new LcDoc { Id = "l1", Items = { new LcArm { Id = "000000000001", N = 4 } } };
+            var held = Raw((ref MessagePackWriter w) => { w.WriteArrayHeader(2); w.Write("l1"); w.WriteArrayHeader(0); });
+            foreach (var attempt in new TestDelegate[]
+            {
+                () => CultDocumentMessagePackSerialization.SerializeUntyped(doc, typeof(LcDoc), registry),
+                () => CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(LcDoc), held, registry)
+            })
+            {
+                var thrown = Assert.Throws<InvalidOperationException>(attempt)!;
+                Assert.That(thrown.Message, Does.Contain(nameof(ListClaimResolver)).And.Contain("List`1").And.Contain(nameof(LcDoc)));
+            }
+
+            var values = new LcValueDoc
+            {
+                Id = "v1",
+                Items = { new LcOther { Id = "000000000002" } },
+                Values = { new LcValue { N = 3 }, new LcValue { N = 5 } },
+                Points = { new Pair { A = 1, B = 2 } }
+            };
+            var bytes = CultDocumentMessagePackSerialization.SerializeUntyped(values, typeof(LcValueDoc), registry);
+            var back = (LcValueDoc)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(LcValueDoc), bytes, registry);
+            Assert.That(back.Items.Single().Id, Is.EqualTo("000000000002"));
+            Assert.That(back.Values.Select(value => value.N), Is.EqualTo(new[] { 3, 5 }));
+            Assert.That(back.Points.Single(), Is.EqualTo(new Pair { A = 1, B = 2 }));
+        }
+
+        // A resolver that hands out MessagePack's own formatter for a type writes its [Key] layout: it claims nothing, however it
+        // got there, and the document encodes with the id present (Soul s1 P2).
+        [Test]
+        public void AResolverHandingBackTheStandardFormatterIsNoClaim()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(FbDoc) });
+            var doc = new FbDoc { Id = "f1", Items = { new FbArm { Id = "000000000009", N = 7 } } };
+
+            var bytes = CultDocumentMessagePackSerialization.SerializeUntyped(doc, typeof(FbDoc), registry);
+
+            Assert.That(Convert.ToHexString(bytes), Is.EqualTo(Convert.ToHexString(MessagePackSerializer.Serialize(doc, CultDocumentMessagePackSerialization.Options))));
+            var back = (FbDoc)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(FbDoc), bytes, registry);
+            Assert.That(back.Items.Single().Id, Is.EqualTo("000000000009"));
+        }
+
+        // A consumer whose resolver composite ends in StandardResolverAllowPrivate (some models keep private [Key] members) gets
+        // that resolver's formatter for every keyed type. It writes the [Key] layout plus the private members, so it is no
+        // claim: the document encodes, the id is on disk, and the private value survives.
+        [Test]
+        public void AStandardResolverAllowPrivateFormatterIsNoClaim()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(ApDoc), typeof(ApPlainDoc) });
+            var doc = new ApDoc { Id = "a1", Items = { new ApArm { Id = "00000000000a", N = 4 }.WithSecret(11) } };
+
+            var bytes = CultDocumentMessagePackSerialization.SerializeUntyped(doc, typeof(ApDoc), registry);
+
+            var back = (ApDoc)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(ApDoc), bytes, registry);
+            Assert.That(back.Items.Single().Id, Is.EqualTo("00000000000a"));
+            Assert.That(back.Items.Single().Secret, Is.EqualTo(11), "a private plain-value [Key] member is written");
+
+            var plain = new ApPlainDoc { Id = "a2", Items = { new ApPlainArm { Id = "00000000000b", N = 5 } } };
+            var plainBytes = CultDocumentMessagePackSerialization.SerializeUntyped(plain, typeof(ApPlainDoc), registry);
+            Assert.That(Convert.ToHexString(plainBytes), Is.EqualTo(Convert.ToHexString(MessagePackSerializer.Serialize(plain, CultDocumentMessagePackSerialization.Options))));
+        }
+
+        // The walk reads a [MessagePackObject] type by its keys, but MessagePack writes one that is also an ICollection<T> as a
+        // collection and drops the keys. The codec compares the two for every type on the id path and refuses the document.
+        [Test]
+        public void AKeyedTypeMessagePackWritesAsACollectionIsRefused()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(KCollDoc), typeof(KBagDoc) });
+            Assert.That(CultElementIds.Inspect(typeof(KCollDoc)).IdPath, Does.Contain(typeof(KColl)));
+
+            var coll = new KCollDoc { Id = "k1" };
+            coll.Items.Add(new FbArm { Id = "00000000000c" });
+            var thrown = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.SerializeUntyped(coll, typeof(KCollDoc), registry))!;
+            Assert.That(thrown.Message, Does.Contain($"writes {nameof(KColl)} as a collection, but the element-id walk reads it by its [Key] layout"));
+
+            // A keyed map is read by key too, so a keyed Dictionary subclass is on the path and refused the same way.
+            var map = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(KDictDoc)))!;
+            Assert.That(map.Message, Does.Contain($"writes {nameof(KDict)} as a collection"));
+
+            var bag = new KBagDoc { Id = "b1", Bag = new KBagE { Items = { new FbArm { Id = "00000000000d" } } } };
+            var bytes = CultDocumentMessagePackSerialization.SerializeUntyped(bag, typeof(KBagDoc), registry);
+            var back = (KBagDoc)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(KBagDoc), bytes, registry);
+            Assert.That(back.Bag.Items.Single().Id, Is.EqualTo("00000000000d"));
+        }
+
+        // Every collection shape the walk reads is one MessagePack writes through a collection formatter, so none is refused.
+        [Test]
+        public void EveryCollectionShapeTheWalkReadsIsWrittenByACollectionFormatter()
+        {
+            foreach (var holder in new[]
+            {
+                typeof(G<List<FbArm>>), typeof(G<FbArm[]>), typeof(G<FbArm[,]>), typeof(G<IList<FbArm>>), typeof(G<IReadOnlyList<FbArm>>),
+                typeof(G<ICollection<FbArm>>), typeof(G<IReadOnlyCollection<FbArm>>), typeof(G<IEnumerable<FbArm>>), typeof(G<HashSet<FbArm>>),
+                typeof(G<Queue<FbArm>>), typeof(G<Stack<FbArm>>), typeof(G<LinkedList<FbArm>>),
+                typeof(G<System.Collections.ObjectModel.ReadOnlyCollection<FbArm>>), typeof(G<System.Collections.ObjectModel.ObservableCollection<FbArm>>),
+                typeof(G<System.Collections.Immutable.ImmutableList<FbArm>>), typeof(G<ILookup<string, FbArm>>), typeof(G<List<List<FbArm>>>),
+                typeof(G<Dictionary<string, GHold>>), typeof(G<IDictionary<string, GHold>>), typeof(G<IReadOnlyDictionary<string, GHold>>),
+                typeof(G<SortedDictionary<string, GHold>>), typeof(G<System.Collections.Concurrent.ConcurrentDictionary<string, GHold>>),
+                typeof(G<System.Collections.ObjectModel.ReadOnlyDictionary<string, GHold>>), typeof(G<System.Collections.Immutable.ImmutableDictionary<string, GHold>>),
+                typeof(G<SortedList<string, GHold>>), typeof(G<FbArm>), typeof(G<IGu>), typeof(G<GStruct>),
+            })
+            {
+                if (holder != typeof(G<FbArm>))
+                    Assert.That(CultElementIds.Inspect(holder).IdPath, Is.Not.Empty, holder.ToString());
+                Assert.DoesNotThrow(() => CultDocumentMessagePackSerialization.OptionsForDocument(holder), holder.ToString());
+            }
+        }
+
+        // One recogniser decides what the walk owns and the door only verifies it: the same types give no registration problem and a
+        // passing door. A type formatted by attribute or written by the object resolver is one whole value, off the id path.
+        [Test]
+        public void OneRecogniserDecidesAndTheDoorAgrees()
+        {
+            foreach (var holder in new[] { typeof(G<FormattedRoles>), typeof(G<ApTrueHold>), typeof(G<DcSeq>), typeof(G<DcColl>), typeof(G<DcBad>) })
+            {
+                Assert.That(CultElementIds.Inspect(holder).Problems, Is.Empty, holder.ToString());
+                Assert.DoesNotThrow(() => CultDocumentMessagePackSerialization.OptionsForDocument(holder), holder.ToString());
+            }
+
+            foreach (var whole in new[] { typeof(G<FormattedRoles>), typeof(G<DcSeq>), typeof(G<DcColl>), typeof(G<DcBad>) })
+                Assert.That(CultElementIds.Inspect(whole).IdPath, Is.Empty, whole.ToString());
+            var ap = CultElementIds.Inspect(typeof(G<ApTrueHold>)).IdPath;
+            Assert.That(ap, Does.Contain(typeof(ApTrueHold)).And.Contain(typeof(List<FbArm>)));
+            var seq = new G<DcSeq> { Value = new DcSeq { Items = { new FbArm() } } };
+            Assert.That(CultElementIds.Plan(seq.GetType(), seq, "r", deterministic: false).Count, Is.EqualTo(0));
+        }
+
+        // MessagePack throws for a type, or StandardResolver has no formatter for it (an interface or abstract class that is only
+        // IEnumerable<T>): such a type cannot be persisted, so the door refuses it with the same typed text as a throwing build.
+        [Test]
+        public void ATypeMessagePackCannotBuildIsATypedRefusal()
+        {
+            foreach (var (holder, name) in new[] { (typeof(G<IArms>), nameof(IArms)), (typeof(G<AbsArms>), nameof(AbsArms)) })
+            {
+                var thrown = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(holder), holder.ToString())!;
+                Assert.That(thrown.Message, Does.Contain(name).And.Contain("cannot build a formatter"));
+                Assert.That(thrown.Message, Does.Contain("StandardResolver has no formatter for it"), "a null formatter says so, without a thrown message");
+            }
+        }
+
+        // A keyed type that enumerates lists is read by key and is on the id path, so the door checks it: MessagePack writes it as a
+        // collection, which loses the ids the walk would mint.
+        [Test]
+        public void AKeyedTypeThatEnumeratesListsIsCheckedByTheDoor()
+        {
+            Assert.That(CultElementIds.Inspect(typeof(G<KLL>)).IdPath, Does.Contain(typeof(KLL)));
+            var thrown = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(G<KLL>)))!;
+            Assert.That(thrown.Message, Does.Contain($"writes {nameof(KLL)} as a collection"));
+        }
+
+        // A resolver that throws while asked about an id-path type is a typed refusal, whether it is the AllowPrivate formatter
+        // the claim check asks about (the claim stands) or a resolver ahead (it fails to build).
+        [Test]
+        public void AResolverThatThrowsIsATypedRefusal()
+        {
+            var first = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(DkDoc)))!;
+            Assert.That(first.Message, Does.Contain(nameof(ListClaimResolver)).And.Contain(nameof(DkEl)));
+            var second = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(DkDoc2)))!;
+            Assert.That(second.Message, Does.Contain(nameof(ListClaimResolver)).And.Contain(nameof(DkEl2)).And.Contain("failed to build").And.Not.Contain("target of an invocation"),
+                "the resolver's own exception is named, not the reflection wrapper");
+
+            // A type MessagePack itself cannot build a formatter for (two public members on one key) is refused, naming the type.
+            var third = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(DkDoc3)))!;
+            Assert.That(third.Message, Does.Contain(nameof(DkEl3)).And.Contain("cannot build a formatter").And.Not.Contain("target of an invocation"));
+        }
+
+        [MessagePackObject]
+        public sealed class KColl : List<FbArm>
+        {
+            [Key(0)] public int N;
+        }
+
+        [CultDocument("tests.kcoll_doc", "tests.kcoll_doc.v1")]
+        [MessagePackObject]
+        public sealed class KCollDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public KColl Items = new();
+        }
+
+        [MessagePackObject]
+        public sealed class KDict : Dictionary<string, GHold>
+        {
+            [Key(0)] public int N;
+        }
+
+        [CultDocument("tests.kdict_doc", "tests.kdict_doc.v1")]
+        [MessagePackObject]
+        public sealed class KDictDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public KDict Items = new();
+        }
+
+        [MessagePackObject]
+        public sealed class KBagE : IEnumerable<FbArm>
+        {
+            [Key(0)] public List<FbArm> Items = new();
+            public IEnumerator<FbArm> GetEnumerator() { yield break; }
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+        }
+
+        [CultDocument("tests.kbag_doc", "tests.kbag_doc.v1")]
+        [MessagePackObject]
+        public sealed class KBagDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public KBagE Bag = new();
+        }
+
+        [MessagePackObject] public sealed class G<T> { [Key(0)] public T? Value; }
+        [Union(0, typeof(GuArm))] public interface IGu { }
+        [MessagePackObject] public sealed class GuArm : IGu { [Key(0)] [CultElementId] public string Id = string.Empty; [Key(1)] public List<FbArm> Items = new(); }
+        [MessagePackObject] public sealed class GHold { [Key(0)] public List<FbArm> Items = new(); }
+        [MessagePackObject] public struct GStruct { [Key(0)] public List<FbArm> Items; }
+
+#pragma warning disable CS0169, CS0414, CS0649
+        [MessagePackObject] public sealed class DkEl { [Key(0)] [CultElementId] public string Id = string.Empty; [Key(1)] public int N; [Key(1)] private int shadow; }
+        [MessagePackObject] public sealed class DkEl2 { [Key(0)] [CultElementId] public string Id = string.Empty; [Key(1)] public int N; [Key(1)] private int shadow; }
+#pragma warning restore CS0169, CS0414, CS0649
+        [MessagePackObject] public sealed class DkEl3 { [Key(0)] [CultElementId] public string Id = string.Empty; [Key(1)] public int N; [Key(1)] public int M; }
+        [CultDocument("tests.dk_doc3", "tests.dk_doc3.v1")]
+        [MessagePackObject]
+        public sealed class DkDoc3 { [Key(0)] [CultName] public string Id = string.Empty; [Key(1)] public List<DkEl3> Items = new(); }
+        [CultDocument("tests.dk_doc", "tests.dk_doc.v1")]
+        [MessagePackObject]
+        public sealed class DkDoc { [Key(0)] [CultName] public string Id = string.Empty; [Key(1)] public List<DkEl> Items = new(); }
+        [CultDocument("tests.dk_doc2", "tests.dk_doc2.v1")]
+        [MessagePackObject]
+        public sealed class DkDoc2 { [Key(0)] [CultName] public string Id = string.Empty; [Key(1)] public List<DkEl2> Items = new(); }
+
+        [MessagePackFormatter(typeof(FormattedRolesFormatter))] public sealed class FormattedRoles : List<FbArm> { }
+        public sealed class FormattedRolesFormatter : IMessagePackFormatter<FormattedRoles>
+        {
+            public void Serialize(ref MessagePackWriter writer, FormattedRoles value, MessagePackSerializerOptions options) => writer.WriteNil();
+            public FormattedRoles Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options) { reader.Skip(); return new FormattedRoles(); }
+        }
+
+        [DataContract] public sealed class DcSeq : IEnumerable<FbArm>
+        {
+            [DataMember(Order = 0)] public List<FbArm> Items = new();
+            public IEnumerator<FbArm> GetEnumerator() => Items.GetEnumerator();
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+        }
+        public interface IArms : IEnumerable<FbArm> { }
+        public abstract class AbsArms : IEnumerable<FbArm>
+        {
+            public abstract IEnumerator<FbArm> GetEnumerator();
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+        }
+        [MessagePackObject] public sealed class KLL : List<List<FbArm>> { [Key(0)] public int N; }
+#pragma warning disable CS0169, CS0414, CS0649
+        [MessagePackObject(AllowPrivate = true)] public sealed class ApTrueHold { [Key(0)] private List<FbArm> items = new(); }
+#pragma warning restore CS0169, CS0414, CS0649
+        [DataContract] public sealed class DcColl : List<FbArm> { [DataMember(Order = 0)] public int N; }
+        [DataContract] public sealed class DcBad : List<FbArm> { [DataMember(Order = 0)] public int A; [DataMember(Order = 0)] public int B; }
+
+        public sealed class DkFormatter : IMessagePackFormatter<DkEl>
+        {
+            public void Serialize(ref MessagePackWriter writer, DkEl value, MessagePackSerializerOptions options) => writer.Write(value.N);
+            public DkEl Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options) => new DkEl { N = reader.ReadInt32() };
+        }
+
+        [MessagePackObject]
+        public sealed class ApArm
+        {
+            [Key(0)] [CultElementId] public string Id = string.Empty;
+            [Key(1)] public int N;
+            [Key(2)] private int secret;
+            [IgnoreMember] public int Secret => secret;
+            public ApArm WithSecret(int value)
+            {
+                secret = value;
+                return this;
+            }
+        }
+
+        [CultDocument("tests.ap_doc", "tests.ap_doc.v1")]
+        [MessagePackObject]
+        public sealed class ApDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public List<ApArm> Items = new();
+        }
+
+        [MessagePackObject]
+        public sealed class ApPlainArm
+        {
+            [Key(0)] [CultElementId] public string Id = string.Empty;
+            [Key(1)] public int N;
+        }
+
+        [CultDocument("tests.ap_plain_doc", "tests.ap_plain_doc.v1")]
+        [MessagePackObject]
+        public sealed class ApPlainDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public List<ApPlainArm> Items = new();
+        }
+
+        [MessagePackObject]
+        public sealed class LcArm
+        {
+            [Key(0)] [CultElementId] public string Id = string.Empty;
+            [Key(1)] public int N;
+        }
+
+        [MessagePackObject]
+        public sealed class LcOther
+        {
+            [Key(0)] [CultElementId] public string Id = string.Empty;
+        }
+
+        public sealed class LcValue
+        {
+            public int N;
+        }
+
+        [CultDocument("tests.lc_doc", "tests.lc_doc.v1")]
+        [MessagePackObject]
+        public sealed class LcDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public List<LcArm> Items = new();
+        }
+
+        [CultDocument("tests.lc_value_doc", "tests.lc_value_doc.v1")]
+        [MessagePackObject]
+        public sealed class LcValueDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public List<LcOther> Items = new();
+            [Key(2)] public List<LcValue> Values = new();
+            [Key(3)] public List<Pair> Points = new();
+        }
+
+        [MessagePackObject]
+        public sealed class FbArm
+        {
+            [Key(0)] [CultElementId] public string Id = string.Empty;
+            [Key(1)] public int N;
+        }
+
+        [CultDocument("tests.fb_doc", "tests.fb_doc.v1")]
+        [MessagePackObject]
+        public sealed class FbDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public List<FbArm> Items = new();
+        }
+
+        // Claims List<LcArm> (an object list's type: refused), List<LcValue> and List<Pair> (value lists: accepted, as a math
+        // resolver claims List<float2>), and answers FbArm with MessagePack's own formatter (no claim).
+        public sealed class ListClaimResolver : IFormatterResolver
+        {
+            public static readonly IFormatterResolver Instance = new ListClaimResolver();
+
+            public IMessagePackFormatter<T>? GetFormatter<T>()
+            {
+                if (typeof(T) == typeof(List<LcArm>)) return (IMessagePackFormatter<T>)(object)new NilFormatter();
+                if (typeof(T) == typeof(List<LcValue>)) return (IMessagePackFormatter<T>)(object)new ValuesFormatter();
+                if (typeof(T) == typeof(List<Pair>)) return (IMessagePackFormatter<T>)(object)new PointsFormatter();
+                if (typeof(T) == typeof(FbArm)) return global::MessagePack.Resolvers.StandardResolver.Instance.GetFormatter<T>();
+                if (typeof(T) == typeof(DkEl)) return (IMessagePackFormatter<T>)(object)new DkFormatter();
+                if (typeof(T) == typeof(DkEl2)) return global::MessagePack.Resolvers.StandardResolverAllowPrivate.Instance.GetFormatter<T>();
+                if (typeof(T) == typeof(ApArm) || typeof(T) == typeof(ApDoc) || typeof(T) == typeof(List<ApArm>) ||
+                    typeof(T) == typeof(ApPlainArm) || typeof(T) == typeof(ApPlainDoc) || typeof(T) == typeof(List<ApPlainArm>))
+                    return global::MessagePack.Resolvers.StandardResolverAllowPrivate.Instance.GetFormatter<T>();
+                return null;
+            }
+
+            private sealed class NilFormatter : IMessagePackFormatter<List<LcArm>>
+            {
+                public void Serialize(ref MessagePackWriter writer, List<LcArm> value, MessagePackSerializerOptions options) => writer.WriteNil();
+
+                public List<LcArm> Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+                {
+                    reader.Skip();
+                    return new List<LcArm>();
+                }
+            }
+
+            private sealed class ValuesFormatter : IMessagePackFormatter<List<LcValue>>
+            {
+                public void Serialize(ref MessagePackWriter writer, List<LcValue> value, MessagePackSerializerOptions options)
+                {
+                    writer.WriteArrayHeader(value.Count);
+                    foreach (var item in value) writer.Write(item.N);
+                }
+
+                public List<LcValue> Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+                {
+                    var count = reader.ReadArrayHeader();
+                    var list = new List<LcValue>(count);
+                    for (var index = 0; index < count; index++) list.Add(new LcValue { N = reader.ReadInt32() });
+                    return list;
+                }
+            }
+
+            private sealed class PointsFormatter : IMessagePackFormatter<List<Pair>>
+            {
+                public void Serialize(ref MessagePackWriter writer, List<Pair> value, MessagePackSerializerOptions options)
+                {
+                    writer.WriteArrayHeader(value.Count);
+                    foreach (var item in value) { writer.WriteArrayHeader(2); writer.Write(item.A); writer.Write(item.B); }
+                }
+
+                public List<Pair> Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+                {
+                    var count = reader.ReadArrayHeader();
+                    var list = new List<Pair>(count);
+                    for (var index = 0; index < count; index++)
+                    {
+                        reader.ReadArrayHeader();
+                        list.Add(new Pair { A = reader.ReadSingle(), B = reader.ReadSingle() });
+                    }
+
+                    return list;
+                }
+            }
+        }
+
+        // Composed after ListClaimResolver: once that resolver has answered FbArm with the standard formatter the composite never
+        // asks this one, so its claim on the same type must not refuse the document.
+        public sealed class FbLaterClaimResolver : IFormatterResolver
+        {
+            public static readonly IFormatterResolver Instance = new FbLaterClaimResolver();
+
+            public IMessagePackFormatter<T>? GetFormatter<T>() => typeof(T) == typeof(FbArm) ? (IMessagePackFormatter<T>)(object)new LaterFormatter() : null;
+
+            private sealed class LaterFormatter : IMessagePackFormatter<FbArm>
+            {
+                public void Serialize(ref MessagePackWriter writer, FbArm value, MessagePackSerializerOptions options) => writer.WriteNil();
+
+                public FbArm Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+                {
+                    reader.Skip();
+                    return new FbArm();
+                }
+            }
+        }
+
+        [Test]
+        public void OptionsRefuseANullDocumentTypeOrAssembly()
+        {
+            Assert.Throws<ArgumentNullException>(() => CultDocumentMessagePackSerialization.OptionsFor(null!));
+            Assert.Throws<ArgumentNullException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(null!));
+        }
+
+        [Union(0, typeof(ClaimArm))]
+        public abstract class ClaimNode { }
+
+        [MessagePackObject]
+        public sealed class ClaimArm : ClaimNode
+        {
+            [Key(0)] [CultElementId] public string Id = string.Empty;
+            [Key(1)] public int N;
+        }
+
+        [CultDocument("tests.claim_doc", "tests.claim_doc.v1")]
+        [MessagePackObject]
+        public sealed class ClaimDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public List<ClaimNode> Items = new();
+        }
+
+        public sealed class ClaimArmResolver : IFormatterResolver
+        {
+            public static readonly IFormatterResolver Instance = new ClaimArmResolver();
+            public IMessagePackFormatter<T>? GetFormatter<T>() => typeof(T) == typeof(ClaimArm) ? (IMessagePackFormatter<T>)(object)new ClaimFormatter() : null;
+
+            private sealed class ClaimFormatter : IMessagePackFormatter<ClaimArm>
+            {
+                public void Serialize(ref MessagePackWriter writer, ClaimArm value, MessagePackSerializerOptions options)
+                {
+                    writer.WriteArrayHeader(1);
+                    writer.Write(value.N);
+                }
+
+                public ClaimArm Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+                {
+                    reader.ReadArrayHeader();
+                    return new ClaimArm { N = reader.ReadInt32() };
+                }
+            }
         }
 
         // The guard wraps the composite, so the composite's own order is still the contract: a consumer resolver outranks the
@@ -568,7 +1097,7 @@ namespace GameCult.Caching.Tests
         }
 
         // An arm is [key, armSlots]; the keys here start at 3, skip 0-2, 4, 6 and 7, and never reuse a retired key.
-        [Union(3, typeof(Leaf)), Union(5, typeof(Branch)), Union(8, typeof(Unit8)), Union(9, typeof(StubArm))]
+        [Union(3, typeof(Leaf)), Union(5, typeof(Branch)), Union(8, typeof(Unit8)), Union(9, typeof(Nine))]
         public abstract class GuardNode { }
 
         [MessagePackObject]
@@ -592,11 +1121,25 @@ namespace GameCult.Caching.Tests
 
         [MessagePackObject] public sealed class Unit8 : GuardNode { [Key(0)] [CultElementId] public string Id = string.Empty; }
 
+        [MessagePackObject] public sealed class Nine : GuardNode { [Key(0)] [CultElementId] public string Id = string.Empty; }
+
         // A subtype the union does not name.
         [MessagePackObject] public sealed class Rogue : GuardNode { [Key(0)] public string Note = string.Empty; }
 
-        // Written and read by a consumer resolver, not by MessagePack.
-        public sealed class StubArm : GuardNode { [Key(0)] [CultElementId] public string Id = string.Empty; }
+        // Written and read by a consumer resolver, not by MessagePack. It can only sit outside a list: a list element is written
+        // by its [Key] layout, or its id never reaches disk (ListElementsClaimedByAResolverAreRefused).
+        [Union(9, typeof(StubArm))]
+        public abstract class StubNode { }
+
+        public sealed class StubArm : StubNode { [Key(0)] [CultElementId] public string Id = string.Empty; }
+
+        [CultDocument("tests.stub_doc", "tests.stub_doc.v1")]
+        [MessagePackObject]
+        public sealed class StubDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public StubNode? Root;
+        }
 
         public sealed class StubArmResolver : IFormatterResolver
         {

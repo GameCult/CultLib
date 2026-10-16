@@ -38,11 +38,23 @@ public static class CultDocumentMessagePackSerialization
     private const int SchemaCatalogMemberFieldCount = 8;
     private const int StoreSnapshotFieldCount = 3;
 
-    public static readonly MessagePackSerializerOptions Options = Compose(Array.Empty<IFormatterResolver>());
+    private static readonly (MessagePackSerializerOptions Options, IFormatterResolver[] Ahead) Plain = Compose(Array.Empty<IFormatterResolver>());
 
-    private static readonly ConcurrentDictionary<Assembly, MessagePackSerializerOptions> AssemblyOptions = new();
+    public static readonly MessagePackSerializerOptions Options = Plain.Options;
 
-    public static MessagePackSerializerOptions OptionsFor(Assembly documentAssembly)
+    // Per assembly: the options a document type's bytes are written with, and the resolvers composed ahead of
+    // StandardResolver, the ones that can claim a type before its [Key] layout does.
+    private static readonly ConcurrentDictionary<Assembly, (MessagePackSerializerOptions Options, IFormatterResolver[] Ahead)> AssemblyOptions = new();
+
+    // Per document type: why its element ids cannot reach disk under the composed resolvers, or null. Types and resolvers
+    // are fixed for the process, so this is a cache of a pure answer.
+    private static readonly ConcurrentDictionary<Type, string?> DocumentProblems = new();
+
+    private static readonly MethodInfo GetFormatterMethod = typeof(IFormatterResolver).GetMethod(nameof(IFormatterResolver.GetFormatter))!;
+
+    public static MessagePackSerializerOptions OptionsFor(Assembly documentAssembly) => ComposedFor(documentAssembly).Options;
+
+    private static (MessagePackSerializerOptions Options, IFormatterResolver[] Ahead) ComposedFor(Assembly documentAssembly)
     {
         if (documentAssembly == null) throw new ArgumentNullException(nameof(documentAssembly));
         return AssemblyOptions.GetOrAdd(documentAssembly, static assembly =>
@@ -50,19 +62,118 @@ public static class CultDocumentMessagePackSerialization
             var resolvers = assembly.GetCustomAttributes<CultCacheFormatterResolverAttribute>()
                 .Select(attribute => CreateResolver(attribute.ResolverType))
                 .ToArray();
-            return resolvers.Length == 0 ? Options : Compose(resolvers);
+            return resolvers.Length == 0 ? Plain : Compose(resolvers);
         });
     }
 
-    private static MessagePackSerializerOptions Compose(IFormatterResolver[] consumerResolvers)
+    // The options a document's bytes are written and read with. A document's list elements carry their ids by their [Key]
+    // layout, so a resolver ahead of StandardResolver that formats a type on the way to those lists would write them
+    // without the id: refused here, once per document type, on every encode and decode path.
+    internal static MessagePackSerializerOptions OptionsForDocument(Type documentType)
+    {
+        if (documentType == null) throw new ArgumentNullException(nameof(documentType));
+        var (options, ahead) = ComposedFor(documentType.Assembly);
+        var problem = DocumentProblems.GetOrAdd(documentType, type => ResolverClaim(type, ahead));
+        return problem == null ? options : throw new InvalidOperationException(problem);
+    }
+
+    private static string? ResolverClaim(Type documentType, IFormatterResolver[] ahead)
+    {
+        foreach (var type in CultElementIds.Inspect(documentType).IdPath)
+        {
+            var generic = GetFormatterMethod.MakeGenericMethod(type);
+            // A resolver that hands back MessagePack's own formatter for the type writes its [Key] layout: that is no claim, and the
+            // composite stops there, so no later resolver is asked. StandardResolverAllowPrivate's formatter writes the same layout
+            // plus non-public [Key] members; those extra members are whole values the walk does not own, so it claims nothing
+            // either.
+            object? standard;
+            try
+            {
+                standard = generic.Invoke(StandardResolver.Instance, null);
+            }
+            catch (Exception exception)
+            {
+                return CannotBuild(documentType, type, (exception.InnerException ?? exception).Message);
+            }
+
+            if (standard == null)
+                return CannotBuild(documentType, type, "StandardResolver has no formatter for it");
+
+            if (WrittenAsCollection(type, generic, standard))
+                return $"Cult document {documentType.Name}: MessagePack writes {type.Name} as a collection, but the element-id walk reads it by its [Key] layout, so element ids would be lost or invented. A [MessagePackObject] type that is also a collection (ICollection<T>, IList, IDictionary) is written as a collection; make it one or the other. Or declare [MessagePackFormatter] on the type or member, which makes it one whole value with no element ids.";
+
+            var allowPrivateAsked = false;
+            object? allowPrivate = null;
+            foreach (var resolver in ahead)
+            {
+                object? formatter;
+                try
+                {
+                    formatter = generic.Invoke(resolver, null);
+                }
+                catch (Exception exception)
+                {
+                    return $"Cult document {documentType.Name}: formatter resolver {resolver.GetType().FullName} failed to build a formatter for {type.Name}, which is on the path to a list whose elements carry ids ({(exception.InnerException ?? exception).Message}); a resolver may not throw for such a type.";
+                }
+
+                if (formatter == null)
+                    continue;
+                if (ReferenceEquals(formatter, standard))
+                    break;
+                if (!allowPrivateAsked)
+                {
+                    allowPrivateAsked = true;
+                    try
+                    {
+                        allowPrivate = generic.Invoke(StandardResolverAllowPrivate.Instance, null);
+                    }
+                    catch (Exception)
+                    {
+                        allowPrivate = null;
+                    }
+                }
+
+                if (allowPrivate != null && ReferenceEquals(formatter, allowPrivate))
+                    break;
+                return $"Cult document {documentType.Name}: formatter resolver {resolver.GetType().FullName} formats {type.Name}, which is on the path to a list whose elements carry ids, so its element ids would never reach disk. A resolver may not claim such a type; write it by its [Key] layout, keep it out of the document's lists, or declare [MessagePackFormatter] on the type or member, which makes it one whole value with no element ids.";
+            }
+        }
+
+        return null;
+    }
+
+    private static string CannotBuild(Type documentType, Type type, string reason) =>
+        $"Cult document {documentType.Name}: MessagePack cannot build a formatter for {type.Name}, which is on the path to a list whose elements carry ids ({reason}).";
+
+    // The door verifies the walk and never decides ownership. It refuses a proven mismatch: a type the walk reads by key
+    // (an owner) whose StandardResolver formatter is the very instance the generic resolver's singleton hands out (a keyed
+    // ICollection<T> or dictionary). Union types walk as owners and the immutable and builtin resolvers claim only framework
+    // types, so neither can contradict. Any other formatter, a source-generated one among them, passes.
+    private static bool WrittenAsCollection(Type type, MethodInfo generic, object? standard) =>
+        CultElementIds.WalksAsOwner(type) && ReferenceEquals(Formatter(DynamicGenericResolver.Instance, generic), standard);
+
+    private static object? Formatter(IFormatterResolver resolver, MethodInfo generic)
+    {
+        try
+        {
+            return generic.Invoke(resolver, null);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static (MessagePackSerializerOptions Options, IFormatterResolver[] Ahead) Compose(IFormatterResolver[] consumerResolvers)
     {
         // The guard goes first and wraps whatever formatter the rest of the composite would hand out, so a consumer
         // resolver still encodes an arm while the key check runs.
-        var inner = CompositeResolver.Create(
-            consumerResolvers.Append(CultDocumentResolver.Instance).Append(CultMathResolver.Instance).Append(CultMathExprResolver.Instance).Append(StandardResolver.Instance).ToArray());
-        return MessagePackSerializerOptions.Standard
+        var ahead = consumerResolvers.Append(CultDocumentResolver.Instance).Append(CultMathResolver.Instance).Append(CultMathExprResolver.Instance).ToArray();
+        var inner = CompositeResolver.Create(ahead.Append(StandardResolver.Instance).ToArray());
+        var options = MessagePackSerializerOptions.Standard
             .WithResolver(CompositeResolver.Create(new CultUnionGuard(inner), inner))
             .WithSecurity(CultMessagePackSecurity.Instance);
+        return (options, ahead);
     }
 
     private static IFormatterResolver CreateResolver(Type resolverType)
@@ -84,7 +195,7 @@ public static class CultDocumentMessagePackSerialization
     {
         if (registry == null) throw new ArgumentNullException(nameof(registry));
         if (value != null) registry.GetRequired(type);
-        var payload = MessagePackSerializer.Serialize(type, value, OptionsFor(type.Assembly));
+        var payload = MessagePackSerializer.Serialize(type, value, OptionsForDocument(type));
         CultPayloadDepth.Check(payload, type, PayloadDirection.Write);
         return payload;
     }
@@ -99,7 +210,7 @@ public static class CultDocumentMessagePackSerialization
         if (registry == null) throw new ArgumentNullException(nameof(registry));
         registry.GetRequired(type);
         CultPayloadDepth.Check(payload, type, PayloadDirection.Read);
-        return MessagePackSerializer.Deserialize(type, payload, OptionsFor(type.Assembly))
+        return MessagePackSerializer.Deserialize(type, payload, OptionsForDocument(type))
             ?? throw new InvalidOperationException($"MessagePack returned null for Cult document type {type.FullName}.");
     }
 

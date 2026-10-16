@@ -67,6 +67,181 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        private static string HeaderOf(string path) =>
+            CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).FormatVersion;
+
+        private static async Task<(CultCache Cache, SingleFileMessagePackBackingStore Store)> PulledAsync(string path)
+        {
+            var cache = new CultCache();
+            var store = new SingleFileMessagePackBackingStore(path);
+            cache.AddBackingStore(store);
+            await cache.PullAllBackingStoresAsync();
+            return (cache, store);
+        }
+
+        // cultcache-py writes element ids under an unmarked v1 header. A C# write that carries such a record forward marks the
+        // store, because a reader from before ids would otherwise rewrite the elements without them.
+        [Test]
+        public async Task ACSharpWriteThatCopiesAPythonRecordHoldingIdsMarksTheStore()
+        {
+            var scratch = Directory.CreateTempSubdirectory().FullName;
+            try
+            {
+                var path = Store("leaf-record.cc", scratch);
+                Assert.That(HeaderOf(path), Is.EqualTo(CultPersistedStoreSnapshot.FormatV1), "cultcache-py leaves the header unmarked");
+                var (cache, store) = await PulledAsync(path);
+                await cache.AddAsync(new NumericLeafVectorTests.LeafRecord { Id = "other" });
+                store.PushAll();
+                Assert.That(HeaderOf(path), Is.EqualTo(CultPersistedStoreSnapshot.FormatV3));
+
+                var (reloaded, _) = await PulledAsync(path);
+                var py = reloaded.AllEntries.OfType<NumericLeafVectorTests.LeafRecord>().Single(record => record.Id == "py");
+                Assert.That(py.Items.Select(item => item.Id), Is.EqualTo(new[] { "000000000021", "000000000022" }));
+            }
+            finally
+            {
+                Directory.Delete(scratch, true);
+            }
+        }
+
+        // What a load saw is a fact about those bytes at that version. Another writer replaced the record since, so the copy this
+        // write makes is not the record the load saw, and the header is not judged by it.
+        [Test]
+        public async Task ACopiedRecordAnotherWriterChangedIsNotJudgedByTheOldRead()
+        {
+            var scratch = Directory.CreateTempSubdirectory().FullName;
+            try
+            {
+                var path = Store("leaf-record.cc", scratch);
+                var (reader, readerStore) = await PulledAsync(path);
+
+                // Another writer replaces the record with one that holds no id.
+                var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+                var replaced = snapshot.Records.Single(record => record.Key == "py");
+                replaced.Payload = CultDocumentMessagePackSerialization.SerializeUntyped(
+                    new NumericLeafVectorTests.LeafRecord { Id = "py" }, typeof(NumericLeafVectorTests.LeafRecord));
+                File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+                Assert.That(HeaderOf(path), Is.EqualTo(CultPersistedStoreSnapshot.FormatV1), "the replacement holds no id");
+
+                await reader.AddAsync(new NumericLeafVectorTests.LeafRecord { Id = "other" });
+                readerStore.PushAll();
+                Assert.That(HeaderOf(path), Is.EqualTo(CultPersistedStoreSnapshot.FormatV1));
+            }
+            finally
+            {
+                Directory.Delete(scratch, true);
+            }
+        }
+
+        // A v1 store holding only this record c0, opened by a cache that has pulled it; then another runtime appends the python
+        // record (and its payload rewritten by `change`) to the file raw, header still v1, the way a writer that keeps the v1 it
+        // found does. Returns the open cache and its store.
+        private static async Task<(CultCache Cache, SingleFileMessagePackBackingStore Store)> PulledThenAppended(
+            string path, string pySource, Action<CultPersistedRecord>? change = null)
+        {
+            using (var seed = new CultCache())
+            {
+                var seedStore = new SingleFileMessagePackBackingStore(path);
+                seed.AddBackingStore(seedStore);
+                await seed.AddAsync(new NumericLeafVectorTests.LeafRecord { Id = "c0" });
+                seedStore.PushAll();
+            }
+
+            Assert.That(HeaderOf(path), Is.EqualTo(CultPersistedStoreSnapshot.FormatV1));
+            var opened = await PulledAsync(path);
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var pySnapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(pySource));
+            var py = pySnapshot.Records.Single(record => record.Key == "py");
+            change?.Invoke(py);
+            snapshot.Records = snapshot.Records.Concat(new[] { py }).ToArray();
+            snapshot.SchemaCatalog = snapshot.SchemaCatalog.Concat(pySnapshot.SchemaCatalog).GroupBy(entry => entry.SchemaId).Select(group => group.First()).ToArray();
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            Assert.That(HeaderOf(path), Is.EqualTo(CultPersistedStoreSnapshot.FormatV1), "the foreign writer keeps the v1 it found");
+            return opened;
+        }
+
+        // The cache never read this record: it was appended after the pull. A per-instance memory of what the pull saw cannot
+        // know about it; the write decides from the bytes the file holds under its lock.
+        [Test]
+        public async Task ARecordAForeignWriterAddsAfterThePullMarksTheStoreWhenCopied()
+        {
+            var scratch = Directory.CreateTempSubdirectory().FullName;
+            try
+            {
+                var path = Path.Combine(scratch, "after-pull.cc");
+                var (cache, store) = await PulledThenAppended(path, NumericLeafVectorTests.VectorPath(Path.Combine("py-store", "leaf-record.cc")));
+                await cache.AddAsync(new NumericLeafVectorTests.LeafRecord { Id = "c1" });
+                store.PushAll();
+                Assert.That(HeaderOf(path), Is.EqualTo(CultPersistedStoreSnapshot.FormatV3));
+
+                var (reloaded, _) = await PulledAsync(path);
+                var py = reloaded.AllEntries.OfType<NumericLeafVectorTests.LeafRecord>().Single(record => record.Id == "py");
+                Assert.That(py.Items.Select(item => item.Id), Is.EqualTo(new[] { "000000000021", "000000000022" }));
+            }
+            finally
+            {
+                Directory.Delete(scratch, true);
+            }
+        }
+
+        // Ids a load minted in memory are not on disk: the check judges the file's bytes, never the document the cache holds.
+        [Test]
+        public async Task ARecordWhoseIdsExistOnlyInMemoryLeavesTheStoreUnmarked()
+        {
+            var scratch = Directory.CreateTempSubdirectory().FullName;
+            try
+            {
+                var path = Path.Combine(scratch, "in-memory.cc");
+                var source = Store("leaf-record.cc", scratch);
+                var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(source));
+                var idless = new NumericLeafVectorTests.LeafRecord { Id = "py" };
+                idless.Items.Add(new NumericLeafVectorTests.LeafInner { N = "one" });
+                idless.Items.Add(new NumericLeafVectorTests.LeafInner { N = "two" });
+                snapshot.Records.Single().Payload = CultDocumentMessagePackSerialization.SerializeUntyped(idless, typeof(NumericLeafVectorTests.LeafRecord));
+                File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+                var before = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records.Single().Payload;
+
+                var (cache, store) = await PulledAsync(path);
+                Assert.That(cache.AllEntries.OfType<NumericLeafVectorTests.LeafRecord>().Single().Items.Select(item => item.Id), Has.All.Length.EqualTo(12), "the load minted ids in memory");
+                await cache.AddAsync(new NumericLeafVectorTests.LeafRecord { Id = "other" });
+                store.PushAll();
+
+                Assert.That(HeaderOf(path), Is.EqualTo(CultPersistedStoreSnapshot.FormatV1));
+                var after = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records.Single(record => record.Key == "py").Payload;
+                Assert.That(after, Is.EqualTo(before), "the copied record is the bytes the file held");
+            }
+            finally
+            {
+                Directory.Delete(scratch, true);
+            }
+        }
+
+        // The write-set rule copies records without interpreting them, so the check must never refuse a write: a record this
+        // cache claims but cannot decode is copied as its bytes and decides nothing.
+        [Test]
+        public async Task ACopiedRecordThatDoesNotDecodeIsCopiedAndDecidesNothing()
+        {
+            var scratch = Directory.CreateTempSubdirectory().FullName;
+            try
+            {
+                var path = Path.Combine(scratch, "undecodable.cc");
+                var garbage = new byte[] { 0xc1, 0xc1, 0xc1 };
+                var (cache, store) = await PulledThenAppended(
+                    path, NumericLeafVectorTests.VectorPath(Path.Combine("py-store", "leaf-record.cc")), record => record.Payload = garbage);
+
+                await cache.AddAsync(new NumericLeafVectorTests.LeafRecord { Id = "c1" });
+                Assert.DoesNotThrow(() => store.PushAll());
+
+                Assert.That(HeaderOf(path), Is.EqualTo(CultPersistedStoreSnapshot.FormatV1));
+                var py = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records.Single(record => record.Key == "py");
+                Assert.That(py.Payload, Is.EqualTo(garbage));
+            }
+            finally
+            {
+                Directory.Delete(scratch, true);
+            }
+        }
+
         [TestCase(3)]
         [TestCase(5)]
         [TestCase(7)]
