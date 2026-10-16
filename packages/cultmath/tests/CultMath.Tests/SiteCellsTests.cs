@@ -489,6 +489,18 @@ public sealed class SiteCellsTests
     }
 
     [Fact]
+    public void PowerBorderStepOutsideTheOwnersCellReportsDistanceZeroWithThatPlanesNormal()
+    {
+        var left = new float4(0.0f, 0.0f, 0.0f, 1.0f);
+        var right = new float4(4.0f, 0.0f, 0.0f, 1.0f);
+        var empty = new float4(0.0f, 0.0f, 0.0f, 1.0e30f);
+        var inside = power_border_step(new float3(1.0f, 0.0f, 0.0f), left, right, empty);
+        Assert.Equal(new float4(-1.0f, 0.0f, 0.0f, 1.0f), inside);
+        var outside = power_border_step(new float3(3.5f, 0.0f, 0.0f), left, right, empty);
+        Assert.Equal(new float4(-1.0f, 0.0f, 0.0f, 0.0f), outside);
+    }
+
+    [Fact]
     public void PowerBorderStepLeavesTheBorderAloneForASiteCoincidentWithTheOwner()
     {
         var owner = new float4(1.0f, 2.0f, 3.0f, 1.0f);

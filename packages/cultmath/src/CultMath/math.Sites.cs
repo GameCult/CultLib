@@ -69,7 +69,9 @@ public static partial class math
     // difference (w1 - w2)(w1 + w2), never from a difference of two large squared distances, so it does not
     // cancel for a far query or close sites. border is the running (unit normal toward the owner, distance),
     // starting at (0, 0, 0, 1.0e30): the cell's boundary distance is the least plane distance over every other
-    // site. A site coincident with the owner has no plane and leaves border unchanged.
+    // site. A site coincident with the owner has no plane and leaves border unchanged. The step trusts the caller's
+    // owner: a p outside the owner's cell has a negative signed distance to some plane, which is clamped to 0, so the
+    // step reports distance 0 with that plane's normal, a plausible on-the-border answer, not an error.
     public static float4 power_border_step(float3 p, float4 owner, float4 other, float4 border)
     {
         var d = other.xyz - owner.xyz;
