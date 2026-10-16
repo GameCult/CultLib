@@ -1914,20 +1914,21 @@ line 5; line 1 runs now, off that path.
    `CultMath.hlsl`). Families append after the previous cut's, so these cuts
    map on the merged head, not beside the branch. Gap (3) folds into line 3,
    whose strand kernel is its only consumer.
-3. `trophic-nodes` (CultLib): gap (3), an `out`-free
-   `distance_to_segment(float2, float2, float2)` in C# with its HLSL twin (T6;
-   `point` is reserved in HLSL, so the parameter is `point_value`); gap (2), a
-   weighted diagram over a site span (F1, F2, first-order border distance;
-   multiplicative and power weights); and gap (4), the soft Gabriel gate
-   (computed per tick on the CPU from a site span; the per-point strand kernel
-   over the gated edge span has the HLSL twin), with the span convention of
-   the model page. Waits on the `cycles-converters` merge and its map pass.
+3. `trophic-nodes` (CultLib): spec `cut-trophic-nodes.r1` admitted; see
+   "trophic-nodes" below for its body facts and decisions.
 4. `lattice-weighted-cellular` (CultLib): gap (1), 2D, `pcg3d` cells, zone
-   time, smooth-min blend, a stated weight range sizing its window. Waits on
-   question `lattice-site-weight-source`.
+   time, smooth-min blend, a stated weight range sizing its window. Its
+   question is ruled (`lattice-weight-from-bodies-ruled`): it reads the body
+   span and weights each cell at its centre through line 3's power cells and
+   border, so it waits on 3 and maps on 3's merged head (both append fixture
+   families).
 5. `expr-trophic-ops` (CultLib): the span input kind and ops for 2-4 in the op
-   table; a CultMath Unity tag for fauna. Waits on 1, 3 and 4. Fauna's first cut
-   waits on this.
+   table; the strand reduction over the gated edge span (the graph has no loop,
+   so a span op is a CultMath function: a C# span overload over a step with its
+   shader twin, the convention line 3 sets); follow-up
+   `expr-create-copy-then-validate` (the first cut that touches `ExprGraph`;
+   line 3 does not); a CultMath Unity tag for fauna. Waits on 1, 3 and 4.
+   Fauna's first cut waits on this.
 6. `tape-interpreter` (CultLib): bytecode lowering, `CultMath.Tape.hlsl`, and
    the graph-parity harness (gap 5): C# evaluator against the interpreter on a
    graph corpus and on a consumer's graph, dxc compile plus a device run, held
@@ -1940,6 +1941,58 @@ line 5; line 1 runs now, off that path.
    frontiers and an HLSL emitter over the same graph.
 10. `cultmath-unity-math-parity` (follow-up): square, exp2, exp10, log2, log10.
 11. Pruning (tape step 3) and meshing (step 5): parked as the target says.
+
+### trophic-nodes
+
+Written by Imagination (agent `imagination-ag4-trophic`, session
+`self-2026-10-16-ag4`) against CultLib `origin/main` `f697e03f`, where
+`cycles-converters` (`b136ad9b`), `expr-ir` and `stage-functions`/`stage-shaders`
+(`d7d1bcf3`) are merged. One CultLib cut owns what fauna's map line
+`cultmath-trophic-nodes` and this map's line 3 both name; fauna's consumer cut
+(`fauna-trophic-habitat`) waits on line 5 and the Unity tag, not on this cut
+alone. Spec: `cultmath-tapes:cut_spec:cut-trophic-nodes.r1`.
+
+#### Body facts (trophic-nodes)
+
+| # | Question | Result |
+|---|---|---|
+| TN1 | What does the probe compute, exactly? (Aetheria `docs/research/2026-10-14-trophic-dag-probe/trophic_probe.py:49-71`, `2026-10-14-body-voronoi-probe/body_voronoi_probe.py:36-67`, master `6b6e7c7c`) | Body diagram: every body visited, scores sorted, the two winners' `(F2 - F1) / |grad(F2 - F1)|` and its unit normal (the lattice web reads both). Power score `d^2 - sigma^2`, multiplicative `d / sigma` with `sigma` the well's Gaussian width. Gate: per pair `(i, j)`, margin = min over the other sites `k` of `(|k - mid| - r) / r`, `r = |ab| / 2`, unweighted positions; gate `smoothstep(-.15, .15, margin)`; no other site gives margin 9 (gate 1). Strands: max over gated edges of `gate * exp(-(segdist / width)^2)`, `width = 28 + .03 L`. |
+| TN2 | Is the first-order power border exact? (scratch `border_probe.py`, double, 3,000 spans of 2-8 sites) | Yes: `F2 - F1` is affine in the query for power scores, so the first-order distance is the distance to the power bisector plane; worst relative error against that plane 2.2e-13. A one-pass fold (strict `<`, F1 then F2) gives the sorted order on every draw; an exact tie keeps the lower index first. Gabriel margin: a third site on the diameter circle gives 0, inside at half radius -0.5. |
+| TN3 | Can the shader side take a span? | No resource in the mirror: `HlslSourceCompatibilityTests` compiles the HLSL text as C#, and `CultMath.hlsl` has no `StructuredBuffer` (0 in every `shaders/*.hlsl`). The struct-aware twin rule (`:153-161` at stage-shaders, now `:162-181`) compares struct and `int` arguments and private twins; `compared.Count` is 127 at `:181`. `GlslMirrorTests.FromScalars` (`:488-500`) decodes `int` and structs; `GlslTypes` (`:874-879`) maps names; `Resolve` (`:882-888`) binds public `math` methods only and cannot parse an empty parameter list. |
+| TN4 | Wire coverage of a new public struct (`CultMathSerializationTests`, `CultMathJsonTests`, T5) | Every exported struct needs a `CultMathResolver` shape and a `CultMathJson` converter; JSON `Fields<S>` (`CultMathJson.cs:269`) holds one scalar type per struct, so a struct mixing `float` and `int` fields needs new JSON machinery. Pattern: `52d25740` (SpanPath, SpanStage: resolver, JSON, a `Json`, a `RoundTrip` and a `Hex` pin). |
+| TN5 | Who calls `distance_to_segment(.., out closest)`? | `MathTests.cs` and Aetheria `Assets/Scripts/ServerShared/Galaxy.cs`; it stays, unchanged in value. |
+| TN6 | Is `CultMath` free to take `ReadOnlySpan`? | Yes: `net8.0;netstandard2.1` (`CultMath.csproj:4`); `BatchMath` already takes `ReadOnlySpan<float2>`. |
+
+#### Decisions (defaults, not forks)
+
+- **A span function is a C# loop over a step that has a shader twin.** The
+  shader cannot take a span in the mirror (TN3), and a buffer-taking HLSL
+  function would be a second, untested path. So each span function is one fold:
+  `site_cells_empty()`, then `site_cells_insert(cells, score, index)` per site,
+  read by `site_cells_border(cells)`; the per-site score is `power_score` or
+  `multiplicative_score`. C#'s `power_cells(p, sites)` and
+  `multiplicative_cells(p, sites)` are that loop and nothing else. A shader
+  caller (and later the tape interpreter) writes the same loop over its own
+  buffer. One rule, one path; the per-site functions are mirrored bit for bit.
+- **Sites are `float4(position.xyz, weight)`**, the model page's span element; a
+  2D consumer uses z = 0. For an explicit span every site is visited, so no
+  window and no weight-ratio range apply (the lattice node's range is line 4's).
+- **Indices are `float` fields** (`nearestSite`, `secondSite`, -1 for none), as
+  `CultCellular.id` is: one scalar type keeps the MessagePack and JSON shapes on
+  the existing helpers (TN4), and an index is exact below 2^24, far past any
+  span a per-point O(N) search serves.
+- **The gate is pointwise per pair**: `gabriel_margin(a, b, other)` with a
+  shader twin, and C#'s `soft_gabriel_gate(sites, first, second, softness)`
+  folding it over the span (TN1's unweighted positions; a power-weighted
+  Gabriel graph is not requested by any ruling).
+- **The strand reduction is not in this cut.** Its Gaussian profile and width
+  law are fauna's composition until the graph needs it as an op; line 5 owns
+  that op, with the same step-and-twin convention.
+- **Shader part separable.** The C# functions, struct and wire shapes land
+  first; the HLSL twins, the regenerated GLSL and the fixture families land in
+  the last commits under today's `GlslLowering`. Pass `imagination-ag4-shader-runner`
+  is re-posing the lowering and shader testing (question `device-run-driver`);
+  if that lands first, only the shader commits are re-mapped.
 
 ## Pass 8: volumetric prioritized (ruling `volumetric-work-prioritized`)
 
@@ -2107,7 +2160,8 @@ nebula work picks it.
    - `span-compose`: the composition helper (`span_compose`) and `span_range` for
      the empty and saturated proofs, in all three runtimes, with a two-stage chain
      enclosure test against dense sampling.
-   `trophic-nodes` and `lattice-weighted-cellular` map after this branch merges.
+   `trophic-nodes` (spec admitted on main after this branch merged) and then
+   `lattice-weighted-cellular` (waits on it): Pass 7 lines 3-4.
 
    Body fact (probe on Yggdrasil, scratch `edb3c1c3` over `2fd9431a`; log
    `F:\Projects\eureka-handoff-aux-2026-10-14\imagination-stage-functions\probe2.log`):
