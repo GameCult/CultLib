@@ -195,6 +195,15 @@ A document type that holds a list of objects gives every object type in that lis
 `[Key]`. The id is what lets a variant override one list element instead of the
 whole list. Lists of strings, numbers and other non-object values need none.
 
+The rule covers the shapes the id walk owns: arrays, `IEnumerable<T>` classes and
+interfaces, dictionary values, and integer-keyed `[MessagePackObject]` and `[Union]`
+types. Any other holder is one whole value: `ImmutableArray<T>`, `ArraySegment<T>`,
+`Memory<T>`, `KeyValuePair`, tuples, `Lazy<T>`, a class without `[MessagePackObject]`,
+a `[DataContract]` or string-keyed type, and a type or member declaring
+`[MessagePackFormatter]`. Its elements carry no element ids: a `[CultElementId]`
+member inside it is a plain string, never minted or checked, and a variant can only
+replace the holder whole.
+
 ```csharp
 [MessagePackObject]
 public sealed class Line

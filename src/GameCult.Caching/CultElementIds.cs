@@ -617,12 +617,12 @@ namespace GameCult.Caching
 
         // A type MessagePack writes as one value the walk cannot look into: its own formatter ([MessagePackFormatter] on the type,
         // inherited), [DataContract] on a type that is not [MessagePackObject] (the object resolver writes its members), or string
-        // keys (KeyAsPropertyName, or any [Key] with a string key). Such a type is Leaf, even when it is also enumerable.
+        // keys (KeyAsPropertyName, or a [Key] with a string key on a member MessagePack writes: a private or [IgnoreMember] one is not written). Such a type is Leaf, even when it is also enumerable.
         private static bool IsWrittenWhole(Type type) =>
             type.IsDefined(typeof(MessagePackFormatterAttribute), true) ||
             (type.IsDefined(typeof(DataContractAttribute), true) && !type.IsDefined(typeof(MessagePackObjectAttribute), true)) ||
             type.GetCustomAttribute<MessagePackObjectAttribute>(true)?.KeyAsPropertyName == true ||
-            AllInstanceMembers(type).Any(member => member.GetCustomAttribute<KeyAttribute>(true)?.StringKey != null);
+            MembersOf(type).Any(member => member.GetCustomAttribute<KeyAttribute>(true)?.StringKey != null);
 
         // A type MessagePack serializes by key: [MessagePackObject] or [Union].
         private static bool IsKeyed(Type type) =>

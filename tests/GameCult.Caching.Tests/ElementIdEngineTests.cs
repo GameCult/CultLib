@@ -357,6 +357,8 @@ namespace GameCult.Caching.Tests
         {
             Assert.That(Problems(typeof(HOverFormattedId)).Single(), Does.Contain("Id").And.Contain("[MessagePackFormatter]"));
             Assert.That(Problems(typeof(OwnerOverFormatted)), Is.Empty, "the override inherits its base's formatter, so the member is a whole value");
+            Assert.That(CultElementIds.Inspect(typeof(OwnerOverFormatted)).IdPath, Is.Empty, "a walked override would put its list on the id path");
+            Assert.That(Assign(new OwnerOverFormatted { Items = { new EIded() } }, "r", deterministic: false), Is.EqualTo(0), "and mint into a list its formatter may drop ids from");
 
             Assert.That(Problems(typeof(HIdOverride)), Is.Empty, "a base [CultElementId] is the override's id");
             var root = new HIdOverride { Items = { new IdOverride() } };
@@ -544,7 +546,7 @@ namespace GameCult.Caching.Tests
             Assert.That(Problems(typeof(ApIgn)), Is.Empty, "an ignored private member is not written");
             Assert.That(Problems(typeof(PgHold)), Is.Empty, "a list behind a private getter is not written without AllowPrivate");
 
-            foreach (var type in new[] { typeof(EIded), typeof(HHiddenLeaf), typeof(PubIgn), typeof(ApIgn), typeof(PgHold), typeof(MemberMix), typeof(HOptHidden), typeof(ApDerived), typeof(NoApDerived), typeof(ApInheritor) })
+            foreach (var type in new[] { typeof(EIded), typeof(HHiddenLeaf), typeof(PubIgn), typeof(ApIgn), typeof(PgHold), typeof(MemberMix), typeof(HOptHidden), typeof(ApDerived), typeof(NoApDerived), typeof(ApInheritor), typeof(ApIgnAp), typeof(PSkH), typeof(ISkH) })
             {
                 var allowPrivate = type.GetCustomAttribute<MessagePackObjectAttribute>(true)!.AllowPrivate;
                 Assert.That(CultElementIds.WrittenKeyedMembers(type).Select(member => member.Name),
@@ -659,6 +661,33 @@ namespace GameCult.Caching.Tests
             // Elements of a string-keyed type carry no id either, and an owned list of a bare element is still refused.
             Assert.That(Problems(typeof(Whole<List<SkElem>>)), Is.Empty);
             RefusesBare(typeof(Whole<List<EBare>>));
+        }
+
+        // A string key counts only on a member MessagePack writes: a private or [IgnoreMember] one leaves the type integer-keyed and owned.
+        [Test]
+        public void AStringKeyOnAMemberMessagePackDoesNotWriteLeavesTheTypeOwned()
+        {
+            foreach (var holder in new object[] { new PSkH { Items = { new EIded(), new EIded() } }, new ISkH { Items = { new EIded(), new EIded() } } })
+            {
+                Assert.That(Problems(holder.GetType()), Is.Empty, holder.GetType().Name);
+                Assert.That(CultElementIds.Inspect(holder.GetType()).IdPath, Does.Contain(holder.GetType()), holder.GetType().Name);
+                Assert.That(Assign(holder, "r", deterministic: false), Is.EqualTo(2), holder.GetType().Name);
+                Assert.That(CultElementIds.Holds(holder.GetType(), holder), Is.True, holder.GetType().Name);
+            }
+
+            Assert.That(Problems(typeof(Whole<List<NoIdPlain>>)).Single(), Does.Contain("[CultElementId]"));
+            Assert.That(Problems(typeof(Whole<List<NoIdEl>>)).Single(), Does.Contain("[CultElementId]"), "an element whose only string key is ignored is as bare as its twin");
+        }
+
+        // The AllowPrivate edges: an [IgnoreMember] member is not written even under it, and only the element's own most derived
+        // declaration lets a private setter be read back.
+        [Test]
+        public void TheAllowPrivateEdgesFollowWhatMessagePackWrites()
+        {
+            Assert.That(CultElementIds.WrittenKeyedMembers(typeof(ApIgnAp)), Is.Empty, "an ignored member is not written under AllowPrivate");
+            Assert.That(Problems(typeof(HApIgnId)).Single(), Does.Contain("does not write").And.Contain("Id"));
+            Assert.That(Problems(typeof(HNoApPrivSet)).Single(), Does.Contain("setter is not public").And.Contain("Id"),
+                "the derived plain [MessagePackObject] decides: its private setter is not read back, whatever its base declares");
         }
 
         // MessagePack writes an AllowPrivate type with every member up its base chain, and the most derived [MessagePackObject]
@@ -993,6 +1022,16 @@ namespace GameCult.Caching.Tests
         public class ApInheritor : ApDerived { }
         [MessagePackObject] public class SkElem { [Key("x")] public string X { get; set; } = ""; }
         [System.Runtime.Serialization.DataContract] public class DcHold { [System.Runtime.Serialization.DataMember(Order = 0)] public List<EIded> Items = new(); }
+        [MessagePackObject(AllowPrivate = true)] public class ApIgnAp { [Key(0)] [IgnoreMember] private List<EIded> l = new(); }
+        [MessagePackObject] public class PSkH { [Key(0)] public List<EIded> Items = new(); [Key("x")] private int x = 1; }
+        [MessagePackObject] public class ISkH { [Key(0)] public List<EIded> Items = new(); [IgnoreMember] [Key("x")] public int X { get; set; } }
+        [MessagePackObject] public class NoIdEl { [Key(0)] public int N { get; set; } [IgnoreMember] [Key("x")] public int X { get; set; } }
+        [MessagePackObject] public class NoIdPlain { [Key(0)] public int N { get; set; } }
+        [MessagePackObject(AllowPrivate = true)] public class EApIgnId { [Key(0)] public int N { get; set; } [Key(1)] [IgnoreMember] [CultElementId] public string Id { get; set; } = ""; }
+        [MessagePackObject] public class HApIgnId { [Key(0)] public List<EApIgnId> Items { get; set; } = new(); }
+        [MessagePackObject(AllowPrivate = true)] public class ApIdBase { [Key(0)] public int N { get; set; } }
+        [MessagePackObject] public class ENoApPrivSet : ApIdBase { [Key(1)] [CultElementId] public string? Id { get; private set; } }
+        [MessagePackObject] public class HNoApPrivSet { [Key(0)] public List<ENoApPrivSet> Items { get; set; } = new(); }
         [MessagePackObject(AllowPrivate = true)] public class EApPrivSet { [Key(0)] [CultElementId] public string? Id { get; private set; } }
         [MessagePackObject] public class HApPrivSet { [Key(0)] public List<EApPrivSet> Items { get; set; } = new(); }
 
