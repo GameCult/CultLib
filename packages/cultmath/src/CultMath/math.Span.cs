@@ -151,6 +151,20 @@ public static partial class math
     public static SpanNoise span_ridged(SpanPath path, SpanStage stage, int octaves, float lacunarity, float gain) =>
         span_stage(true, path, stage, octaves, lacunarity, gain);
 
+    // 2^-20 S_o: the rounding one octave's read of the noise carries, S_o being the sum of the magnitudes the
+    // octave's coordinate is formed from and the span's reach (the allowance paragraph above). The single
+    // owner of S_o; span_slack turns it into the three allowances.
+    internal static float span_rounding(float scale, float3 mq, SpanStage stage, float3 step, float nu, float halfLength) =>
+        9.5367431640625e-7f * (abs(scale) * (csum(abs(mq)) + csum(abs(stage.shift))) + csum(abs(stage.offset)) + csum(abs(step)) + 1.7320508f * nu * halfLength);
+
+    // The allowances (e_n, e_g, e_h) of the value, the gradient's length and the Hessian's Frobenius norm at
+    // a rounding of 2^-20 S_o: the absolute term of each plus its derivative's pin times the rounding. The
+    // single owner of the three; nothing else computes an allowance.
+    internal static float3 span_slack(float rounding) => new(
+        6.103515625e-5f + SNOISE_LIPSCHITZ * rounding,
+        2.44140625e-4f + SNOISE_HESSIAN * rounding,
+        9.765625e-4f + SNOISE_THIRD * rounding);
+
     // The span is SpanPath: q(t), |t| <= halfLength, through midpoint with velocity at t = 0, |q'| <= speed
     // and |q''| <= acceleration along it (speed at least |velocity|; all three and halfLength non-negative).
     // The transform is SpanStage: octave o samples snoise_grad at x_o(q) = f_o (M q + shift) + offset +
@@ -182,16 +196,14 @@ public static partial class math
     // coordinate by about 2u of the magnitudes it is formed from, which moves a result by its derivative
     // times that, and the caller's scaling of the point and a GPU's evaluation take 2u to 16u = 2^-20.
     // S_o is the sum of those magnitudes, |f_o| (|M q|_1 + |shift|_1) + |offset|_1 + |o octaveStep|_1, plus
-    // the span's reach sqrt(3) nu halfLength (the coordinate of a path point). The allowances are the
-    // value's e_n = 2^-14 + L 2^-20 S_o, the gradient length's e_g = 2^-12 + H 2^-20 S_o (H is the
-    // gradient's own derivative's pin) and the Hessian's Frobenius norm's e_h = 2^-10 + T 2^-20 S_o (T is
-    // the Hessian's derivative's pin): af_snoise's absolute terms for the first two, and 2^-10 for the
-    // Hessian's, which the kernel's rounding at small coordinates (2.3e-5 absolute, measured against a
-    // double kernel) sits well under. Two samples of that probe (6000 points per band, |x| from 2^-2 to
-    // 2^23) observed the error's maxima, as fractions of e_n, e_g and e_h: 0.057, 0.046 and 0.075 in the
-    // cut's own sample (seed not recorded; the 0.075 is against T 2^-20 |x|_1 alone, at the smallest
-    // band), and 0.064, 0.0485 and 0.057 in an audit's (seed 0x501). They are samples, not bounds: a new
-    // seed moves them. What they say is that the allowances enclose the error with a margin of about 15.
+    // the span's reach sqrt(3) nu halfLength (the coordinate of a path point); span_rounding is its owner. The
+    // allowances are the value's e_n = 2^-14 + L 2^-20 S_o, the gradient length's e_g = 2^-12 + H 2^-20 S_o
+    // (H is the gradient's own derivative's pin) and the Hessian's Frobenius norm's e_h = 2^-10 + T 2^-20 S_o
+    // (T is the Hessian's derivative's pin): af_snoise's absolute terms for the first two, and 2^-10 for the
+    // Hessian's; span_slack is their owner. They are observed where they are decided: the coordinate-band
+    // snoise_grad and snoise_hessian families of glsl-parity.json and SpanAllowanceCoversReadsAlongTheSpan
+    // check every read against them. Those observations are samples, not bounds: a new seed moves them. What
+    // they say is that the allowances enclose the error with a margin of about 15.
     // No new pin enters.
     //
     // Domain: no coordinate range is checked, clamped or refused. The allowances grow with S_o, so
@@ -237,10 +249,11 @@ public static partial class math
             var weight = abs(amplitude);
             var factor = abs(scale) * norm;
             var nu = factor * path.speed;
-            var rounding = 9.5367431640625e-7f * (abs(scale) * (csum(abs(mq)) + csum(abs(stage.shift))) + csum(abs(stage.offset)) + csum(abs(step)) + 1.7320508f * nu * halfLength);
-            var valueSlack = 6.103515625e-5f + SNOISE_LIPSCHITZ * rounding;
-            var gradientSlack = 2.44140625e-4f + SNOISE_HESSIAN * rounding;
-            var hessianSlack = 9.765625e-4f + SNOISE_THIRD * rounding;
+            var rounding = span_rounding(scale, mq, stage, step, nu, halfLength);
+            var slack = span_slack(rounding);
+            var valueSlack = slack.x;
+            var gradientSlack = slack.y;
+            var hessianSlack = slack.z;
             var local = min(SNOISE_HESSIAN, span_frobenius(snoise_hessian(x)) + hessianSlack + SNOISE_THIRD * nu * halfLength);
             curvature += weight * factor * factor * local;
             if (ridged)
