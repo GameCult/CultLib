@@ -159,10 +159,12 @@ public static partial class math
 
     // The allowances (e_n, e_g, e_h) of the value, the gradient's length and the Hessian's Frobenius norm at
     // a rounding of 2^-20 S_o: the absolute term of each plus its derivative's pin times the rounding. The
-    // single owner of the three; nothing else computes an allowance.
+    // single owner of the three allowances of a span; af_snoise (math.Affine.cs) forms its own allowance
+    // from the same SNOISE_READ_VALUE and SNOISE_READ_GRADIENT, the owners of the first two absolute terms,
+    // so widening either moves every reader of the kernel at once.
     internal static float3 span_slack(float rounding) => new(
-        6.103515625e-5f + SNOISE_LIPSCHITZ * rounding,
-        2.44140625e-4f + SNOISE_HESSIAN * rounding,
+        SNOISE_READ_VALUE + SNOISE_LIPSCHITZ * rounding,
+        SNOISE_READ_GRADIENT + SNOISE_HESSIAN * rounding,
         9.765625e-4f + SNOISE_THIRD * rounding);
 
     // The span is SpanPath: q(t), |t| <= halfLength, through midpoint with velocity at t = 0, |q'| <= speed
@@ -199,8 +201,8 @@ public static partial class math
     // the span's reach sqrt(3) nu halfLength (the coordinate of a path point); span_rounding is its owner. The
     // allowances are the value's e_n = 2^-14 + L 2^-20 S_o, the gradient length's e_g = 2^-12 + H 2^-20 S_o
     // (H is the gradient's own derivative's pin) and the Hessian's Frobenius norm's e_h = 2^-10 + T 2^-20 S_o
-    // (T is the Hessian's derivative's pin): af_snoise's absolute terms for the first two, and 2^-10 for the
-    // Hessian's; span_slack is their owner. They are observed where they are decided: the coordinate-band
+    // (T is the Hessian's derivative's pin): SNOISE_READ_VALUE and SNOISE_READ_GRADIENT (math.Affine.cs) are the
+    // absolute terms of the first two, 2^-10 the Hessian's; span_slack is the owner of the three. They are observed where they are decided: the coordinate-band
     // snoise_grad and snoise_hessian families of glsl-parity.json and SpanAllowanceCoversReadsAlongTheSpan
     // check every read against them. Those observations are samples, not bounds: a new seed moves them. What
     // they say is that the allowances enclose the error with a margin of about 15.

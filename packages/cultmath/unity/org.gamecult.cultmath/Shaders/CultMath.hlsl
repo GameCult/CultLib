@@ -645,8 +645,8 @@ float cultmath_span_rounding(float scale, float3 mq, SpanStage stage, float3 oct
 
 float3 cultmath_span_slack(float rounding)
 {
-    return float3(6.103515625e-5 + CULTMATH_SNOISE_LIPSCHITZ * rounding,
-        2.44140625e-4 + CULTMATH_SNOISE_HESSIAN * rounding,
+    return float3(CULTMATH_SNOISE_READ_VALUE + CULTMATH_SNOISE_LIPSCHITZ * rounding,
+        CULTMATH_SNOISE_READ_GRADIENT + CULTMATH_SNOISE_HESSIAN * rounding,
         9.765625e-4 + CULTMATH_SNOISE_THIRD * rounding);
 }
 

@@ -336,7 +336,7 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
 
     // The float32 allowance of one octave of af_snoise: 2^-14 + 2^-12 R + L 2^-20 (|c|_1 + R).
     private static double SnoiseAllowance(double centre1, double reach) =>
-        Math.ScaleB(1.0, -14) + Math.ScaleB(reach, -12) + math.SNOISE_LIPSCHITZ * Math.ScaleB(centre1 + reach, -20);
+        math.SNOISE_READ_VALUE + math.SNOISE_READ_GRADIENT * reach + math.SNOISE_LIPSCHITZ * Math.ScaleB(centre1 + reach, -20);
 
     // The Lipschitz form's width bound for one octave of the sampled-form check.
     private static double SnoiseWidthBound(double centre1, double reach) => math.SNOISE_LIPSCHITZ * reach + SnoiseAllowance(centre1, reach);
