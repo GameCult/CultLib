@@ -605,6 +605,10 @@ CultCellular cultmath_cellular(vec3 p)
 //   CultSiteCells cells = cultmath_site_cells_empty();
 //   for (int i = 0; i < count; i++)
 //       cells = cultmath_site_cells_insert(cells, cultmath_power_score(p, sites[i]), i);
+// The exact power cell border is a second loop over the buffer, skipping the owner cells.nearestSite:
+//   vec4 border = vec4(0.0, 0.0, 0.0, 1.0e30); int owner = int(cells.nearestSite);
+//   for (int k = 0; k < count; k++) if (k != owner) border = cultmath_power_border_step(p, sites[owner], sites[k], border);
+// Shader names are unique (one 3D form of segment distance; a 2D caller uses z = 0), so none joins the overload rename list.
 // Statement for statement with math.Sites.cs (power_score, multiplicative_score, site_cells_*, gabriel_margin).
 struct CultSiteCells
 {
@@ -666,23 +670,22 @@ vec4 cultmath_site_cells_border(CultSiteCells cells)
     return vec4(n / len, (cells.second.w - cells.nearest.w) / len);
 }
 
+vec4 cultmath_power_border_step(vec3 p, vec4 owner, vec4 other, vec4 border)
+{
+    vec3 d = other.xyz - owner.xyz;
+    float len = length(d);
+    if (len <= 0.0)
+        return border;
+    float plane = max((dot(owner.xyz - p, d) + 0.5 * (dot(d, d) + (owner.w - other.w) * (owner.w + other.w))) / len, 0.0);
+    return plane < border.w ? vec4(-d / len, plane) : border;
+}
+
 float cultmath_gabriel_margin(vec3 a, vec3 b, vec3 other)
 {
     float r = cultmath_distance(a, b) * 0.5;
     if (r <= 0.0)
         return -1.0;
     return (cultmath_distance(other, (a + b) * 0.5) - r) / r;
-}
-
-vec2 cultmath_segment_closest(vec2 point_value, vec2 start, vec2 end)
-{
-    vec2 segment = end - start;
-    float segmentLengthSq = cultmath_lengthsq(segment);
-    if (segmentLengthSq <= 0.0)
-        return start;
-
-    float t = cultmath_saturate(dot(point_value - start, segment) / segmentLengthSq);
-    return start + segment * t;
 }
 
 vec3 cultmath_segment_closest(vec3 point_value, vec3 start, vec3 end)
@@ -694,11 +697,6 @@ vec3 cultmath_segment_closest(vec3 point_value, vec3 start, vec3 end)
 
     float t = cultmath_saturate(dot(point_value - start, segment) / segmentLengthSq);
     return start + segment * t;
-}
-
-float cultmath_distance_to_segment(vec2 point_value, vec2 start, vec2 end)
-{
-    return cultmath_distance(point_value, cultmath_segment_closest(point_value, start, end));
 }
 
 float cultmath_distance_to_segment(vec3 point_value, vec3 start, vec3 end)
