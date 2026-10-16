@@ -449,12 +449,16 @@ public sealed partial class GlslMirrorTests
     {
         // The metric divides by max(|fixture|, 1): a result of twice a fixture value of at least 2 is 2^23 away,
         // and of twice a fixture value under 1 is |fixture| 2^23 away.
-        var f = BoundFamily();
-        var cases = FixtureFamilies()[f]!["cases"]!.AsArray();
-        float Fixture(int c) => BitConverter.UInt32BitsToSingle(DevWords(Sides(cases[c])[1])[0]);
-        var large = Enumerable.Range(0, cases.Count).First(c => Math.Abs(Fixture(c)) is >= 2.0f and < 1e30f);
-        var small = Enumerable.Range(0, cases.Count).First(c => Math.Abs(Fixture(c)) is > 1e-3f and < 1.0f);
-        foreach (var (c, expected) in new[] { (large, Math.ScaleB(1.0, 23)), (small, Math.Abs((double)Fixture(small)) * Math.ScaleB(1.0, 23)) })
+        var fixture = FixtureFamilies();
+        float Fixture(int family, int c) => BitConverter.UInt32BitsToSingle(DevWords(Sides(fixture[family]!["cases"]![c])[1])[0]);
+        int Find(int family, Func<float, bool> wanted) => Enumerable.Range(0, Points).FirstOrDefault(c => wanted(Math.Abs(Fixture(family, c))), -1);
+        bool Large(float v) => v is >= 2.0f and < 1e30f;
+        bool Small(float v) => v is > 1e-3f and < 1.0f;
+        var f = Enumerable.Range(0, Families.Length).First(g => Families[g].Tolerance == "ulp-bounded" && Families[g].Verify is null
+            && FloatWords(Resolve(Families[g].Glsl).ReturnType).First() && Find(g, Large) >= 0 && Find(g, Small) >= 0);
+        var large = Find(f, Large);
+        var small = Find(f, Small);
+        foreach (var (c, expected) in new[] { (large, Math.ScaleB(1.0, 23)), (small, Math.Abs((double)Fixture(f, small)) * Math.ScaleB(1.0, 23)) })
         {
             using var device = Simulate((_, item, words) =>
             {
