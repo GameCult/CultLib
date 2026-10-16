@@ -11,7 +11,7 @@ public sealed partial class GlslMirrorTests
     // with comments removed; it does not see a qualifier spelled through a macro, an include or a generated
     // shader, and it says nothing about a driver that relaxes highp itself. It names file and line, never text.
     private static readonly Regex ReducedPrecision = new(
-        @"\b(mediump|lowp|min16float|min10float|min16int|min12int|min16uint|half([1-4](x[1-4])?)?)\b|\bprecision\s+(?!highp\b)\w+", RegexOptions.Compiled);
+        @"\b(mediump|lowp|min(10|12|16)(float|int|uint)[1-4]?(x[1-4])?|half[1-4]?(x[1-4])?)\b|\bprecision\s+(?!highp\b)\w+", RegexOptions.Compiled);
 
     private static IEnumerable<int> ReducedPrecisionLines(string source)
     {
