@@ -2198,8 +2198,42 @@ and 16:50 UTC (18:30 to 18:50 CEST). Logs are in the Imagination scratchpad
 - **Overloads collapse in dxc, not in SPIRV-Cross.** With `export` on the 173 non-texture definitions,
   the library has 127 `OpFunction`s and 127 exports: one per name. Today's source has 22 overloaded
   names, 68 definitions and 46 lost. Trophic-nodes (branch `hands/cultmath-trophic-nodes`, unmerged) adds
-  `cultmath_segment_closest` and `cultmath_distance_to_segment` in 2D and 3D. After it merges there are
-  24 names, 72 definitions and 48 to rename.
+  `cultmath_segment_closest` and `cultmath_distance_to_segment` in 2D and 3D, so 24 names and 72 definitions.
+  The loss comes from exporting overloaded names, and build-only wrappers avoid it (next bullet). The
+  source keeps its overloads (ruling `shader-overloads-stay-native`).
+- **Build-only export wrappers keep every overload (Pass 9b).** Imagination `imagination-ag4-overload-wrappers`,
+  2026-10-16, on 09940e20, ubuntu:24.04 on Yggdrasil, 17:40 to 17:55 UTC (19:40 to 19:55 CEST), log
+  `imagination-ag4-overload-wrappers/wrap-run2.log` in the session scratchpad. The probe generated one
+  wrapper per non-texture definition (173) in a build-only file. Each wrapper looks like
+  `export float3 cmw036_cultmath_lerp(float3 start, float3 end, float3 amount) { return cultmath_lerp(start, end, amount); }`.
+  The source was unchanged, with no `export` keyword anywhere, and it compiled with dxc `-T lib_6_3 -spirv`.
+  - At default optimisation dxc inlines every wrapper. The 173 wrappers hold the bodies, and no
+    overload survives as its own function.
+  - At `-Od` it keeps the call. That gives 346 functions: 173 wrappers, each with exactly one
+    `OpFunctionCall` to its own distinct callee. Each callee's `OpName` is already the plain source
+    name (`cultmath_lerp` four times), so no rename is needed.
+  - An instruction-level edit of the SPIR-V binary then makes the library. It keeps only the Shader
+    and Linkage capabilities, drops every `OpExtension`, deletes the wrapper functions with their
+    names and decorations, and moves each wrapper's `LinkageAttributes ... Export` onto its callee.
+    `spirv-val --target-env spv1.5` accepts the result. Deleting the export instead of moving it gives
+    a module SPIRV-Cross refuses ("no entry point").
+  - SPIRV-Cross `vulkan-sdk-1.4.363.0 --es --version 310` emits 173 `cultmath_` definitions, as many
+    per name as the source has. There are no `_N` suffixes and no wrapper names: its own overload
+    handling renames only on a signature collision. The emitted text is 2621 lines, against 1497 for
+    today's three files, because `-Od` leaves temporaries.
+  - Call sites resolve. glslang compiles as a `#version 300 es` fragment shader that calls
+    `cultmath_lerp(float..)`, `cultmath_lerp(vec3..)`, `cultmath_saturate(vec4)` and
+    `cultmath_saturate(float)`. A call with `ivec2`, which has no overload, is refused ("no matching
+    overloaded function").
+  - Same computation. All 105 families the probe generator covers ran on lavapipe through the
+    restored library, and every one is bit-identical to the committed GLSL route. 85 of the 105 are
+    also bit-identical to the HLSL route, the same 85 where the committed GLSL matches it.
+  - The rest of the pipeline carries over. Partitioned by origin file, the output gives 178 chunks
+    (125 core, 51 Cycles, 2 Phacelle). No origin is unknown and nothing calls across licences.
+    Every overload set lives in one file, and no signature repeats. glslang compiles all four
+    combinations as ES 3.00. The source has 13 `static const` lines, all of the form
+    `static const float CULTMATH_X = <literal>;`. None of them reaches the output, and today's GLSL
+    holds 13.
 - **Capability strip.** `spirv-opt --trim-capabilities` (spirv-tools 2025.1~rc1) leaves all 14
   capabilities and both extensions in place, and SPIRV-Cross still refuses ("RayQuery requires Vulkan
   GLSL 460"). Stripping every capability except Shader and Linkage and every OpExtension in the
@@ -2221,7 +2255,8 @@ and 16:50 UTC (18:30 to 18:50 CEST). Logs are in the Imagination scratchpad
   probe's device), glslang-tools 15.1.0, spirv-tools 2025.1~rc1, libvulkan-dev 1.3.275 and gcc 13.2.
   `apt-get update --snapshot 20261016T000000Z` (apt 2.8.3) then installs the same versions. That pins
   the package set to a date and lets the C# judge run in the same container as the device.
-- **Consumer audit for the renames.** It covers `origin` of Aetheria (master a8586d08 and all of its
+- **Consumer audit.** No public name changes under the wrapper route, so it shows only who reads the
+  committed GLSL and HLSL. It covers `origin` of Aetheria (master a8586d08 and all of its
   remote branches), Asura (60fbd19), Odin (8e1de66) and gamecult-site (af6e206), and HEAD of every
   other git repo under F:\Projects except the CultLib worktrees, the archived AetheriaEve and the
   retired CultMath history repo. The search was for `cultmath_[a-z]` outside docs. Only one shader
@@ -2243,30 +2278,42 @@ and 16:50 UTC (18:30 to 18:50 CEST). Logs are in the Imagination scratchpad
   the device's identity. lavapipe re-runs bit-identically, so the bound is a regression gate, and an
   identity change refuses until it is re-recorded. Exact and integer families must match bit for
   bit, and `check` families must pass their `Verify`.
-- **The renames come before the switch.** dxc drops overloads, so the switch cannot run on today's
-  names. The renames are their own cut under today's `GlslLowering`, and the switch then replaces the
-  owner of a GLSL text whose names already match.
+- **Unique names for dxc live only inside the build** (ruling `shader-overloads-stay-native`). The
+  build owns three things here.
+  - The wrapper list. It is generated from the source's own definitions, one wrapper per non-texture
+    `cultmath_` definition, and the build refuses a definition it cannot read, just as it refuses a
+    `static const` line of another form. The wrappers are text in the build's temp directory and are
+    never committed. The source gains no `export` keyword and no `CULTMATH_EXPORT` macro.
+  - The compile mode. The library compiles at `-Od`, because the default optimiser's inlining is
+    what erases the overloads. glslang and the drivers optimise downstream, and on lavapipe the
+    result is bit-identical to today's output.
+  - One SPIR-V edit. A single instruction-level pass over the binary, never a regex over text,
+    strips capabilities and extensions, deletes the wrappers and moves their exports onto the
+    callees. It replaces the disassembly grep that the capability-strip probe used. It refuses a
+    wrapper that is not exactly one call. SPIRV-Cross then emits the overloaded names as they are,
+    so the build has no rename step and no name map.
 
 ### Cut sequence (Pass 9; one line each, mapped when about to run)
 
 1. `shader-conforming-run`: spec admitted. The lavapipe job with the C# device judge, run against
-   today's committed HLSL and GLSL, so the next two cuts are verified against a running check.
-2. `overload-renames`: waits on question `overload-rename-scheme` and on `trophic-nodes` merging.
-   48 overloads get unique names in both HLSL copies, the C# mirror's name maps, the fixture's family
-   names and the lavapipe bounds rows. The GLSL is regenerated under today's lowering. Muninn's
-   `cultmath_saturate(float)` keeps its name under the recommended scheme. Any other option makes Muninn a named follow-up.
-3. `glsl-build-dxc`: the switch. `tools/build-glsl.sh` pins dxc v1.9.2607 (the sha above) and SPIRV-Cross
-   `vulkan-sdk-1.4.363.0`, and takes a `CULTMATH_EXPORT` macro (empty by default, `export` under the
-   build's `-D`). The build strips capabilities and extensions and runs `spirv-val`, emits ES 3.10 with
-   the guarded `#version` and no placeholder `main`, and partitions the output by origin file into the
-   three committed files with their licence lines and guards. It emits the 13 constants from their
-   source lines. `GlslLowering.cs` and its lowering contract tests are deleted. The lavapipe job also
-   checks that the committed files are the build's output, then re-records `lavapipe-glsl`.
-   `get-spirv-cross.ps1` is pinned to the same tag. Waits on 1 and 2.
-4. `angle-capture` (stage-shaders-device part 2): the Starfire native-ANGLE tool on the shared work
+   today's committed HLSL and GLSL, so the next cut is verified against a running check.
+2. `glsl-build-dxc`: the switch. `tools/build-glsl.sh` pins dxc v1.9.2607 (the sha above) and SPIRV-Cross
+   `vulkan-sdk-1.4.363.0`. Its first step generates the export wrappers, one per non-texture definition,
+   into the build's temp directory; they are never committed (Pass 9b). It compiles source plus
+   wrappers with `-T lib_6_3 -spirv -Od`. One SPIR-V edit then strips capabilities and extensions,
+   deletes the wrappers and moves their exports onto the callees, and `spirv-val` runs on the result.
+   The build emits ES 3.10 with the guarded `#version` and no placeholder `main`, and partitions the
+   output by origin file into the three committed files with their licence lines and guards. It emits
+   the 13 constants from their source lines. The HLSL source is not edited, and every overload keeps
+   its name in the HLSL and the GLSL. `GlslLowering.cs` and its lowering contract tests are deleted.
+   The lavapipe job checks that the committed files are the build's output, and that every family's
+   `lavapipe-glsl` result is bit-identical to the old lowering's. A miss is a defect in the cut, not
+   something to re-record. `get-spirv-cross.ps1` is pinned to the same tag. Waits on 1. If
+   `trophic-nodes` merges first, the build covers its four new overloads with nothing extra.
+3. `angle-capture` (stage-shaders-device part 2): the Starfire native-ANGLE tool on the shared work
    list (ES 3.00 fragment flavour, RGBA32UI readback), loading a pinned ANGLE build rather than Docker
    Desktop's copy. Captures carry the renderer, ANGLE version and revision, the shader sha and per-family
    argument hashes and bits, and the ordinary test run judges them. A shader-sha change marks them stale.
    It settles `span-allowance-gpu-margin`'s six CPU survivors, `iv-exp-gpu-widening`'s measurement and
    `device-p2-pin-notes`, and closes `glsl-browser-parity-run` and `affine-device-runner-seed`. It waits
-   on 3, because a capture of the old lowering goes stale at the switch.
+   on 2, because a capture of the old lowering goes stale at the switch.
