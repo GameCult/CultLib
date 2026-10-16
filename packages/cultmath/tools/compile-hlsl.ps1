@@ -29,11 +29,14 @@ New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 $index = 0
 foreach ($shader in $ShaderPath) {
     $index++
+    if (-not (Test-Path -LiteralPath $shader -PathType Leaf)) {
+        throw "shader not found (parameter ShaderPath, entry $index)."
+    }
     $shaderFile = Get-Item -LiteralPath $shader
     $output = Join-Path $outputDirectory "$index-$($shaderFile.BaseName).dxil"
-    & $DxcPath -T lib_6_3 -HV 2021 -I $shaderFile.DirectoryName $shaderFile.FullName -Fo $output
+    & $DxcPath -T lib_6_3 -HV 2021 -WX -I $shaderFile.DirectoryName $shaderFile.FullName -Fo $output
     if ($LASTEXITCODE -ne 0) {
         throw "dxc failed with exit code $LASTEXITCODE (parameter ShaderPath, entry $index)."
     }
-    Write-Host "compiled shader $index of $(@($ShaderPath).Count) (lib_6_3, -HV 2021)"
+    Write-Host "compiled shader $index of $(@($ShaderPath).Count) (lib_6_3, -HV 2021, -WX)"
 }

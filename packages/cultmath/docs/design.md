@@ -113,8 +113,9 @@ modifying a temporary).
 
 The HLSL side is checked too: `tools/get-dxc.ps1` fetches Microsoft's
 DirectXShaderCompiler (x64), and `tools/compile-hlsl.ps1` compiles both copies of
-`CultMath.hlsl` with it (`dxc -T lib_6_3 -HV 2021`); the script throws when dxc cannot
-launch or exits non-zero, so a stale exit code never reads as a pass.
+`CultMath.hlsl` with it (`dxc -T lib_6_3 -HV 2021 -WX`, so a warning fails like an error and the
+text must compile cleanly); the script throws when a shader file is missing, when dxc cannot
+launch or when it exits non-zero, so a stale exit code never reads as a pass.
 
 The mirror test compares bit patterns (any NaN equals any NaN; -0 differs from
 0). It proves the text of `CultMath.hlsl` computes the same float32 results as
@@ -124,13 +125,20 @@ compiled under `using static CultMath.math;`, so its intrinsics are C# `math`
 itself: the test proves the composition in the text, not the intrinsic rules,
 which only `HlslSemanticsTests` pins.
 
+Every mirror function is compared, internals included: its counterpart is the `math`
+function of the same name, public or private (`snoise_mod289` and `snoise_permute` are
+private), and a function with no counterpart fails by name. A struct parameter maps to the
+CultMath type of the same name, and only if both have the same instance fields by name, type
+and order (`SpanPath`, `SpanStage`); the argument is built from the case's scalars field by
+field and copied to its C# twin by field name.
+
 The comparison also allows exactly one struct return shape: a mirror function
 whose HLSL return type is a plain struct of `float`/`floatN`/`int`/`intN`
 fields is compared to its C# counterpart field by field, recursing into each
 field's own components, down to bit-for-bit scalars, matching each leaf's
 declaration path (field names, not just position) and declared type as well
-as its value. `CultCellular` (`math.cs`, `cellular`) and `CultPhasor`
-(`math.Phacelle.cs`, `phacelle`) are its consumers. A struct return with a mismatched, reordered-by-name, or
+as its value. `CultCellular` (`math.cs`, `cellular`), `CultPhasor`
+(`math.Phacelle.cs`, `phacelle`) and `SpanNoise` (`math.Span.cs`, `span_fbm`) are its consumers. A struct return with a mismatched, reordered-by-name, or
 retyped field does not get a second comparison path or a shape of its own;
 it fails the same walk that already handles a bare vector return.
 
@@ -809,7 +817,8 @@ configuration bound. A change to the kernels must re-run the measurements.
 
 ### Span stages
 
-`span_fbm` and `span_ridged` (`math.Span.cs`, C# only so far) are the octave stages
+`span_fbm` and `span_ridged` (`math.Span.cs`; `cultmath_span_fbm` and `cultmath_span_ridged` in HLSL over
+the same struct types, `cultmath_span_stage` behind both, and GLSL derived) are the octave stages
 of a warp chain, `span_fbm(path, stage, octaves, lacunarity, gain)`, each returning
 one `SpanNoise { float4 field; float curvature; float fold; }`. The inputs are two
 structs with named public fields and no positional constructor, so the three floats
@@ -830,6 +839,12 @@ scalars. `field` is the octave sum and its gradient in `q` (`f_o M grad n_o`).
 Lab's stage is `1 - 2|n|` per octave: with `G` the sum of `gain^o` over the
 octaves (signed, so the alternating sum for a negative gain), its value is `2 value
 - G`, and its gradient, curvature and fold are twice `span_ridged`'s.
+
+The shaders have no `SpanStage.Identity`: a shader caller builds every stage field itself (in GLSL,
+`SpanStage(1.0, 1.0, vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0))` is the identity). A constant would
+need a second transformation rule (C# has no const structs, GLSL wants a constructor) and a mirror
+exemption, for one value; the mirror test proves instead that the shader text at a C#-built identity
+returns `cultmath_fbm_grad` and `cultmath_ridged_grad`'s field bit for bit.
 
 Bounds come from the three pins only. With `|M| = |frequency| max(1, 1/stretch)` and
 `nu = f_o |M| speed` the noise-space speed, the Hessian of the noise on the span has

@@ -29,12 +29,21 @@ if ($Phacelle) {
 if ($Cycles) {
     $library += Get-Content -LiteralPath (Join-Path $repoRoot "shaders\CultMath.Cycles.glsl") -Raw
 }
+# A parameter of a struct type the library declares is passed as that struct's constructor with each
+# field's zero, read from its declaration (a field may be a struct itself); every other type is its zero.
+$structs = @{}
+foreach ($declaration in [regex]::Matches($library, '(?s)struct (\w+)\s*\{(.*?)\};')) {
+    $structs[$declaration.Groups[1].Value] = @([regex]::Matches($declaration.Groups[2].Value, '(?m)^\s*(\w+)\s+\w+\s*;') | ForEach-Object { $_.Groups[1].Value })
+}
+function Get-Zero([string]$type) {
+    if ($structs.ContainsKey($type)) { return "$type($((@($structs[$type] | ForEach-Object { Get-Zero $_ })) -join ', '))" }
+    if ($type -eq 'int' -or $type -like 'ivec*') { return "$type(0)" }
+    if ($type -eq 'uint' -or $type -like 'uvec*') { return "$type(0u)" }
+    return "$type(0.0)"
+}
 $calls = foreach ($match in [regex]::Matches($library, '(?m)^\w+\s+(cultmath_\w+)\s*\(([^)]*)\)')) {
     $arguments = foreach ($parameter in ($match.Groups[2].Value -split ',')) {
-        $type = ($parameter.Trim() -split '\s+')[0]
-        if ($type -eq 'int' -or $type -like 'ivec*') { "$type(0)" }
-        elseif ($type -eq 'uint' -or $type -like 'uvec*') { "$type(0u)" }
-        else { "$type(0.0)" }
+        Get-Zero (($parameter.Trim() -split '\s+')[0])
     }
     "    $($match.Groups[1].Value)($($arguments -join ', '));"
 }
