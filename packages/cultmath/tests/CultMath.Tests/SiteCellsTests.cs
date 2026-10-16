@@ -461,10 +461,19 @@ public sealed class SiteCellsTests
             Assert.Equal("p", Assert.Throws<ArgumentException>(() => power_border(query, new[] { good })).ParamName);
         }
 
-        // Indices are floats, exact only to 2^24: a longer span is refused before any site is read.
-        var one = new[] { good };
-        Assert.Equal("sites", Assert.Throws<ArgumentException>(() => power_cells(origin, System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref one[0], (1 << 24) + 1))).ParamName);
-        Assert.Equal("sites", Assert.Throws<ArgumentException>(() => multiplicative_cells(origin, System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref one[0], (1 << 24) + 1))).ParamName);
+        // Indices are floats, exact only to 2^24: a span of 2^24 + 1 real sites is refused for its length.
+        var overlong = new float4[(1 << 24) + 1];
+        foreach (var call in new Func<ArgumentException>[]
+        {
+            () => Assert.Throws<ArgumentException>(() => power_cells(origin, overlong)),
+            () => Assert.Throws<ArgumentException>(() => multiplicative_cells(origin, overlong)),
+            () => Assert.Throws<ArgumentException>(() => power_border(origin, overlong)),
+        })
+        {
+            var e = call();
+            Assert.Equal("sites", e.ParamName);
+            Assert.Contains("2^24", e.Message);
+        }
     }
 
     [Fact]
