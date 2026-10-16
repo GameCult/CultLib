@@ -49,6 +49,7 @@ RENDERER=$(sort -u "$W/device.txt")
 export CULTMATH_DEVICE_NAME=${RENDERER#device=}
 export CULTMATH_DEVICE_IDENTITY="$(dpkg-query -W -f='${Package} ${Version}; ' mesa-vulkan-drivers glslang-tools)dxc $("$DXC" --version | head -1); apt snapshot $SNAPSHOT"
 export CULTMATH_DEVICE_RESULTS=$W/results
+echo "outputs sha256: $(cd "$W/results" && find . -type f | sort | xargs sha256sum | sha256sum | cut -c1-64)"
 echo "device: $CULTMATH_DEVICE_NAME"
 echo "identity: $CULTMATH_DEVICE_IDENTITY"
 
