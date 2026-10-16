@@ -10,7 +10,7 @@
 static void *slurp(const char *p, size_t *n) {
   FILE *f = fopen(p, "rb"); if (!f) { perror(p); exit(2); }
   fseek(f, 0, SEEK_END); *n = ftell(f); fseek(f, 0, SEEK_SET);
-  void *b = malloc(*n ? *n : 4); fread(b, 1, *n, f); fclose(f); return b;
+  void *b = malloc(*n ? *n : 4); if (fread(b, 1, *n, f) != *n) exit(2); fclose(f); return b;
 }
 
 int main(int argc, char **argv) {

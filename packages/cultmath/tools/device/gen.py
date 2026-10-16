@@ -67,6 +67,13 @@ def write(kind, glsl, value):
     return {'f': 'asuint(%s)', 'i': 'asuint(%s)', 'u': '%s'}[kind] % value
 
 
+def hlsl_type(t):
+    m = GLSL_VEC.match(t)
+    if m:
+        return {'': 'float', 'i': 'int', 'u': 'uint'}[m.group(1)] + m.group(2)
+    return 'float3x3' if t == 'mat3' else t
+
+
 def body(sig, n, win, wout, defs, glsl):
     m = re.fullmatch(r'(\w+)\s+(\w+)\((.*)\)', sig)
     ret, name, params = m.group(1), m.group(2), [p.strip() for p in m.group(3).split(',') if p.strip()]
