@@ -511,8 +511,8 @@ public static class CultMathJson
                 a => new CultPhasor(new float4(a[0], a[1], a[2], a[3]), new float4(a[4], a[5], a[6], a[7])),
                 (v, a) =>
                 {
-                    a[0] = v.cos.x; a[1] = v.cos.y; a[2] = v.cos.z; a[3] = v.cos.w;
-                    a[4] = v.sin.x; a[5] = v.sin.y; a[6] = v.sin.z; a[7] = v.sin.w;
+                    a[0] = v.cosine.x; a[1] = v.cosine.y; a[2] = v.cosine.z; a[3] = v.cosine.w;
+                    a[4] = v.sine.x; a[5] = v.sine.y; a[6] = v.sine.z; a[7] = v.sine.w;
                 }),
             Add<SpanNoise, float>(f, new Fields<float>(("field", Xyzw<float>()), ("curvature", Val<float>()), ("fold", Val<float>())),
                 a => new SpanNoise(new float4(a[0], a[1], a[2], a[3]), a[4], a[5]),
