@@ -772,7 +772,7 @@ float4 cultmath_weighted_lattice_cells(float2 p, float time, float4 bodies[CULTM
     int reach = 0;
     for (int k = 0; k <= 37; k++)
     {
-        if (k > 1 && 0.5 * (k - 1) >= max(f2, f1 + 2.0 * smoothing))
+        if (k > 1 && 0.5 * (float)(k - 1) >= max(f2, f1 + 2.0 * smoothing))
             break;
         for (int dz = -k; dz <= k; dz++)
         {
