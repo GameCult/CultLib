@@ -782,9 +782,11 @@ public sealed class HlslSourceCompatibilityTests
         return "using CultMath;\nusing static CultMath.math;\nnamespace CultMathHlsl;\npublic class HlslShader\n{\n" + members + source + "\n}\n";
     }
 
-    internal static (Assembly? Assembly, IReadOnlyList<string> Errors) CompileShaderMirror(string members = "", IReadOnlyDictionary<string, int>? defines = null)
+    internal static (Assembly? Assembly, IReadOnlyList<string> Errors) CompileShaderMirror(string members = "", IReadOnlyDictionary<string, int>? defines = null, Func<string, string>? mutate = null)
     {
         var hlsl = ReadShaderSource(FindCultMathRoot());
+        if (mutate is not null)
+            hlsl = mutate(hlsl);
         var tree = CSharpSyntaxTree.ParseText(TransformHlslToCSharp(hlsl, members, defines));
         var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!)
             .Split(Path.PathSeparator)
