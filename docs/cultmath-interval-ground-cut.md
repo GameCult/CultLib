@@ -825,7 +825,7 @@ above. Everything else recovered carries over.
 
 **The site scene** (`site-ground` r3; the brush parameters in this paragraph,
 `Rc = 640`, `e = 4`, are superseded by pass 4's one shipped void, `Rh = 198`,
-`S = 50`, `Rc = 248`, `e = 0.40`, pending Q9): the original's units. Outer volume: an
+`S = 50`, `Rc = 248`, `e = 0.40`, as Q9 ruled): the original's units. Outer volume: an
 unbounded uniform fill (chosen over a shell: every ray then ends in a wall
 and the march terminates by opacity, never by a far plane; `Z1 = 2 Rc` bounds
 the pre-pass range only). The carve: `d = |p − c_v|`, `g(d) = (1 −
@@ -1105,7 +1105,7 @@ assumption failed: the pre-band's 0-snoise steps, or a body start later than
   one more probe; the main pass reads it and never decides it. The Beer-Lambert
   step is the consumer's integration, not a CultMath function.
 - `(Rc, e)` are no longer authored; they are derived from `(Rh, S)`. The site
-  section's `Rc = 640, e = 4` is no longer an owner of the look (Q9 pending).
+  section's `Rc = 640, e = 4` is no longer an owner of the look (Q9 ruled (a), `operator-shipped-void`).
 - (c)'s contract is derived from its own run (0.90 of the ceiling); no absolute
   target is written for (c).
 - Deletion line: the false strictness sentence, the Tint camera citation, the
@@ -1124,6 +1124,10 @@ and `Z1 = |camera − c_v| + Rc + 6/K` (614 at the shipped point, 62 cells of
 mind's copies need re-admission by Self.
 
 ## Questions
+
+Q4-Q9 are all ruled; the options below are kept as the record of what was
+asked. Q9: (a), ruling `operator-shipped-void` (`rh198-s50`). Q4: (a), ruling
+`operator-palette-tokens`. Q5: (a), ruling `operator-wash-carry`.
 
 **Q9. The one shipped void** (pass 4; finding `shipped-void-two-scenes`).
 Authored as `(Rh, S)` with `(Rc, e)` derived; `CARVE = 1.5`, `A = 20`,
@@ -1878,10 +1882,14 @@ Aetheria twin.
 
 ### Questions (admitted in the mind)
 
-- `tape-register-model`: the HLSL interpreter's register model. Gates the
-  interpreter cut only.
+- `tape-register-model`: the HLSL interpreter's register model. Ruled
+  `tape-register-model-ruled` (groupshared registers).
 - `lattice-site-weight-source`: how a weighted lattice node gets a per-site
-  weight (T7c). Gates fauna gap (1) only.
+  weight (T7c). Re-asked as `lattice-weight-from-bodies` and ruled
+  `lattice-weight-from-bodies-ruled` (node-reads-bodies).
+- `lattice-window-sound-or-measured` (open, from section
+  "lattice-weighted-cellular"): a proven ring search or a fixed measured 7x7
+  window. Gates line 4a's search loop.
 
 Prior art in hand: `F:\Projects\aetheria-material-path-prior-art.md` section 4
 (GPU interpreters: Fidget's crates, Dolphin ubershaders, Laine et al. on
@@ -1899,9 +1907,11 @@ putting them.
 Fauna's first cut, `fauna-trophic-habitat`, evaluates the habitat graph in C# at
 candidates. It needs `expr-ir` r2, gaps (2) and (4) with (3) under the strands,
 gap (1), and their ops registered (line 5). It does not need the interpreter or
-gap (5); its presenter does. The critical path is `cycles-converters` merge,
-then line 3 beside the ruling on `lattice-site-weight-source` and line 4, then
-line 5; line 1 runs now, off that path.
+gap (5); its presenter does. Lines 1 and 3 and `cycles-converters` are on
+main (`911fc755`). The critical path is line 4a, after the ruling on
+`lattice-window-sound-or-measured`, then line 5. Line 4b, the shader twins,
+is not on the path to fauna's first cut; it is on the path to fauna's presenter,
+with line 6.
 
 1. `expr-ir` r2 (spec admitted): the graph, builder with substitution, decode
    validation, wire shape, C# evaluator. Touches no file `cycles-converters`
@@ -1916,12 +1926,14 @@ line 5; line 1 runs now, off that path.
    whose strand kernel is its only consumer.
 3. `trophic-nodes` (CultLib): spec `cut-trophic-nodes.r1` admitted; see
    "trophic-nodes" below for its body facts and decisions.
-4. `lattice-weighted-cellular` (CultLib): gap (1), 2D, `pcg3d` cells, zone
-   time, smooth-min blend, a stated weight range sizing its window. Its
-   question is ruled (`lattice-weight-from-bodies-ruled`): it reads the body
-   span and weights each cell at its centre through line 3's power cells and
-   border, so it waits on 3 and maps on 3's merged head (both append fixture
-   families).
+4. Gap (1), mapped in section "lattice-weighted-cellular" on 3's merged head
+   (`911fc755`), in two cuts. 4a, `lattice-weighted-cellular`
+   (`cut-lattice-weighted-cellular.r1`), is C#: the node reads the body span
+   and weights each cell at its centre through line 3's exact `power_border`.
+   It waits on question `lattice-window-sound-or-measured`. 4b,
+   `lattice-weighted-shaders` (`cut-lattice-weighted-shaders.r1`), adds the
+   twins of its four steps, the GLSL, the families and the lavapipe bounds.
+   It waits on 4a.
 5. `expr-trophic-ops` (CultLib): the span input kind and ops for 2-4 in the op
    table; the strand reduction over the gated edge span (the graph has no loop,
    so a span op is a CultMath function: a C# span overload over a step with its
@@ -1994,6 +2006,58 @@ alone. Spec: `cultmath-tapes:cut_spec:cut-trophic-nodes.r1`.
   is re-posing the lowering and shader testing (question `device-run-driver`);
   if that lands first, only the shader commits are re-mapped.
 
+### lattice-weighted-cellular
+
+Written by Imagination (agent `imagination-ag4-lattice-weighted`, session
+`self-2026-10-16-ag4`) against CultLib `origin/main` `911fc755`, where
+`trophic-nodes` is merged (`7e6881af`). Ruling `lattice-weight-from-bodies-ruled`
+(node-reads-bodies). Line 4 splits into two cuts because of Hands' budget:
+`cut-lattice-weighted-cellular.r1` (C#) and then `cut-lattice-weighted-shaders.r1`
+(twins, GLSL, families, lavapipe bounds). One question,
+`lattice-window-sound-or-measured`, gates the first cut's search loop.
+
+#### Body facts (lattice-weighted-cellular)
+
+The probes are numpy float64 scripts in
+`docs/research/lattice-site-weight/weighted-node/` (`probe.py` is the node, and
+each other script is one measure). They use 6 bodies orbiting with period equal to
+distance and a sigma ratio of 5:1, `cellSize 260`, `falloff 120` (the body probe's
+`3 * EW_U`), `KW .35` and boost 1.6, the ruled look.
+
+| # | Question | Result |
+|---|---|---|
+| LW1 | What weight does the ruled look use? (Aetheria `body_voronoi_probe.py` `lattice_web_edges`, master `4e620671`) | `base(.5..1) * (1 + 1.6 * exp(-(border(cell centre) / 120)^2))`. The border is the body diagram's first-order distance under the ruled power metric (`body-diagram-metric-ruled`). Distance is stretched by `1 + near` (up to 2x) across the body border's normal at the query point. Output `max(soft^2, exp(-((F2 - F1)/.1)^2))`, with soft from her smooth-min fold. |
+| LW2 | Window sufficiency (`a.py`, 67,600 points against a 19x19 box) | 7x7 has no F1/F2 misses at ratio 5.2, 10 and 20 with stretch 1 or 2. 5x5 misses .1-.3% of points with stretch 2 (output error up to .92) and .04% at 20:1. A worst-case proof covers 7x7 only for ratio x stretch up to about 1.5. |
+| LW3 | Are the weights continuous in time? (`c.py`, 576 cell centres, 300 s at 1/60 s) | First-order border: max step .68, and 113 steps over .01, where the second-nearest body changes. Exact `power_border`: max .0032, none over .01. |
+| LW4 | Does her fold (from 8, row-major) depend on the window? (`d3.py`, 40,000 straddles of lattice cell boundaries) | Yes. With F1 and F2 exact, soft jumps .114 at 5x5 and .056 at 7x7 with stretch 2. It vanishes at 13x13 on this corpus, but nothing proves that. |
+| LW5 | Which fold start is window-independent and continuous? (`d3.py`, `g.py`) | Start at F1 (F1 cell skipped): no window jump, but at F1 identity swaps m jumps .011 and soft .25, because the polynomial smooth min is not associative. Start at F1 + k and fold every cell: swaps jump 4e-15 and window jumps are 0 once the box holds every `d < F1 + 2k`. Its overshoot above m is at most .017k per step (computed), hence the clamp to F1 + k. |
+| LW6 | Look of start F1 + k against hers (`h.py`, 40,000 points, 13x13) | Mean output difference 0.0000, max .032 (stretch 1) and .030 (stretch 2). |
+| LW7 | Ring-exit cost (`e.py`) | Cells visited: at the ruled look median 25, max 49 (stretch 1) and 81 (stretch 2); at boost 4 with stretch 2, max 121; at boost 9, max 81. The worst-case sound fixed box is 19x19 to 67x67. |
+
+#### Decisions (defaults, not forks)
+
+- **The weight reads the exact power border** (`power_border`, trophic-nodes),
+  not the first-order one the ruled look's probe used: LW3, under
+  `aetheria-fauna:ruling:habitat-no-pop-ruled`. The look moves where the
+  first-order distance was wrong (LW3's jumps are the same places).
+- **Her fold starts at F1 + k and is clamped to F1 + k**, in absolute row-major
+  order (LW4-LW6). The look is unchanged to within .03, and the node is
+  window-independent by construction, which the search's exactness needs.
+- **The alignment stretch is in the node.** It is a query-point anisotropy, and
+  it does change winners (B41). Only the node sees the candidate sites, so a
+  caller cannot apply it. Stretch 1 is isotropic.
+- **float4(F1, F2, smooth, id), no gradients, no struct.** fauna's composition
+  reads values only, and a struct would owe a wire shape (TN4). Gradients can be
+  added later as their own function, if a consumer asks.
+- **The range is public constants**, so line 5's graph validator reads the range
+  from CultMath rather than restating it: boost up to 4 (10:1), stretch up to 2,
+  smoothing up to 1.
+- **The base weight takes its own hash lane** (`pcg3d(cell).z`), not the jitter
+  phase the probe reused.
+- **Steps for shaders, the span function in C# only**, by trophic-nodes'
+  convention: `lattice_site`, `lattice_weight`, `lattice_distance`,
+  `lattice_smooth_step`.
+
 ## Pass 8: volumetric prioritized (ruling `volumetric-work-prioritized`)
 
 Written by Imagination (agent `imagination-volumetric-frontier`, session
@@ -2043,10 +2107,11 @@ authoring framework" she will build on. The kernel cascade (the probe and the Ke
 Lab) is the earlier exploration, and it stays a line below.
 
 **Correction to the brief's expectation.** The next cut is not site-ground. The
-site ground's field is open: the Span Lab framework, the kernel cascade, or r3's
-marched void. The r3 machinery (the interval pre-pass, the centred warp, the
-debug-versus-dense readback) is shaped for a marched field. Question
-`site-ground-field` asks this.
+site ground's field was then open between the Span Lab framework, the kernel
+cascade and r3's marched void. The r3 machinery (the interval pre-pass, the
+centred warp, the debug-versus-dense readback) is shaped for a marched field.
+Question `site-ground-field` asked this. It is ruled `site-ground-field-ruled`:
+the Span Lab framework with the void as its brush.
 
 ### `SNOISE_LIPSCHITZ`: 10.099 in the lab, 7.964 in CultMath
 
@@ -2128,8 +2193,8 @@ is traversal, which is unmeasured. Optical depth through it is a sum of per-kern
 segment integrals, so it is order-independent. Additive blending of each kernel's
 screen footprint would give exact transmittance in WebGL2, with no compute and no
 sorting. Emission is not order-independent. This is a hypothesis with no probe
-behind it. The cascade becomes a cut only if `site-ground-field` or the operator's
-nebula work picks it.
+behind it. `site-ground-field-ruled` picked the Span Lab framework, so the cascade
+becomes a cut only if the operator's nebula work picks it.
 
 ### Cut sequence (volumetric line)
 
@@ -2170,9 +2235,9 @@ nebula work picks it.
    (`CULTMATH_PI` through `CULTMATH_SNOISE_THIRD` and `CULTMATH_CYCLES_*`). So one
    reflection test can pin every shader constant to its C# twin.
 3. The curl primitive, once the operator rules on curl (the Aetheria flow test).
-4. Question `site-ground-field`, then `cut-site-ground.r1` on the field it picks.
-   The marched option carries all three site follow-ups; the other options
-   withdraw the two marched-only ones.
+4. `cut-site-ground.r1` on the Span Lab framework (`site-ground-field-ruled`).
+   Under that option the two marched-only site follow-ups are withdrawn, and
+   only the third carries.
 5. The kernel cascade, if picked.
 
 ## Pass 9: the shader pipeline (rulings `glsl-es-via-dxc-spirv-cross`, `conforming-run-lavapipe`, `real-device-native-angle`)
