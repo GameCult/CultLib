@@ -298,6 +298,18 @@ public sealed class LatticeCellsTests
         Assert.Equal((3, 7, 8), (rings[rings.Count / 2], rings[rings.Count * 99 / 100], rings[^1]));
     }
 
+
+    [Fact]
+    public void StretchNormalIsNormalised()
+    {
+        var bodies = Bodies(3.0f);
+        var r = new System.Random(8);
+        for (var i = 0; i < 50; i++)
+        {
+            var p = RandomPoint(r);
+            Assert.Equal(Call(p, 3.0f, bodies, Looks[1]), Call(p, 3.0f, bodies, Looks[1], Normal * 7.0f));
+        }
+    }
     [Fact]
     public void MatchesTheProbeFormula()
     {
