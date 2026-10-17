@@ -93,12 +93,12 @@ public sealed class PhacelleTests
             var actual = math.phacelle(p, side, offset, normalization);
             var expected = Evaluate(p, side, offset, normalization);
 
-            maxError = Math.Max(maxError, Math.Max(Math.Abs(actual.cos.w - expected.Cos), Math.Abs(actual.sin.w - expected.Sin)));
+            maxError = Math.Max(maxError, Math.Max(Math.Abs(actual.cosine.w - expected.Cos), Math.Abs(actual.sine.w - expected.Sin)));
             if (expected.RawLength >= 1.0 - normalization + ThresholdBand)
             {
                 // The output magnitude is 1 wherever the raw magnitude reaches 1 - normalization.
                 above++;
-                var magnitude = Math.Sqrt((double)actual.cos.w * actual.cos.w + (double)actual.sin.w * actual.sin.w);
+                var magnitude = Math.Sqrt((double)actual.cosine.w * actual.cosine.w + (double)actual.sine.w * actual.sine.w);
                 Assert.True(Math.Abs(magnitude - 1.0) < ValueTolerance, $"magnitude {magnitude} above the threshold at {p}");
             }
             else if (expected.RawLength <= 1.0 - normalization - ThresholdBand)
@@ -130,10 +130,10 @@ public sealed class PhacelleTests
             var quarter = math.phacelle(p, side, offset + 0.25f, 0.5f);
             var whole = math.phacelle(p, side, offset + 1.0f, 0.5f);
 
-            Assert.True(MathF.Abs(quarter.cos.w + basePhasor.sin.w) < 2.0e-5f);
-            Assert.True(MathF.Abs(quarter.sin.w - basePhasor.cos.w) < 2.0e-5f);
-            Assert.True(MathF.Abs(whole.cos.w - basePhasor.cos.w) < 2.0e-5f);
-            Assert.True(MathF.Abs(whole.sin.w - basePhasor.sin.w) < 2.0e-5f);
+            Assert.True(MathF.Abs(quarter.cosine.w + basePhasor.sine.w) < 2.0e-5f);
+            Assert.True(MathF.Abs(quarter.sine.w - basePhasor.cosine.w) < 2.0e-5f);
+            Assert.True(MathF.Abs(whole.cosine.w - basePhasor.cosine.w) < 2.0e-5f);
+            Assert.True(MathF.Abs(whole.sine.w - basePhasor.sine.w) < 2.0e-5f);
         }
     }
 
@@ -166,9 +166,9 @@ public sealed class PhacelleTests
             if (distance > 0.0) above++; else below++;
 
             var analytic = math.phacelle(p, side, offset, normalization);
-            var numericCos = CentralDifference(q => math.phacelle(q, side, offset, normalization).cos.w, p, GradientEps);
-            var numericSin = CentralDifference(q => math.phacelle(q, side, offset, normalization).sin.w, p, GradientEps);
-            maxError = MathF.Max(maxError, MathF.Max(MaxComponentError(numericCos, analytic.cos), MaxComponentError(numericSin, analytic.sin)));
+            var numericCos = CentralDifference(q => math.phacelle(q, side, offset, normalization).cosine.w, p, GradientEps);
+            var numericSin = CentralDifference(q => math.phacelle(q, side, offset, normalization).sine.w, p, GradientEps);
+            maxError = MathF.Max(maxError, MathF.Max(MaxComponentError(numericCos, analytic.cosine), MaxComponentError(numericSin, analytic.sine)));
         }
 
         Assert.True(above >= 150 && below >= 150, $"{above} points above and {below} below the threshold");
@@ -199,7 +199,7 @@ public sealed class PhacelleTests
             var flow = math.normalize(tangent);
             var sideDirection = math.cross(hat, flow);
             var phasor = math.phacelle(hat * radiusInCells, sideDirection * math.TAU, 0.25f, 0.5f);
-            var gradient = new float3(phasor.cos.x, phasor.cos.y, phasor.cos.z);
+            var gradient = new float3(phasor.cosine.x, phasor.cosine.y, phasor.cosine.z);
             alongFlow += Math.Abs(math.dot(gradient, flow));
             acrossFlow += Math.Abs(math.dot(gradient, sideDirection));
             used++;
@@ -232,7 +232,7 @@ public sealed class PhacelleTests
             {
                 var low = math.phacelle(SetAxis(p, axis, GetAxis(p, axis) - steps[k] * 0.5f), side, offset, 0.5f);
                 var high = math.phacelle(SetAxis(p, axis, GetAxis(p, axis) + steps[k] * 0.5f), side, offset, 0.5f);
-                maxDifference[k] = MathF.Max(maxDifference[k], MathF.Max(MathF.Abs(low.cos.w - high.cos.w), MathF.Abs(low.sin.w - high.sin.w)));
+                maxDifference[k] = MathF.Max(maxDifference[k], MathF.Max(MathF.Abs(low.cosine.w - high.cosine.w), MathF.Abs(low.sine.w - high.sine.w)));
             }
         }
 
@@ -260,8 +260,8 @@ public sealed class PhacelleTests
             var pruned = math.phacelle(p, side, offset, normalization);
             var unpruned = math.phacelle(p, side, offset, normalization, false);
 
-            AssertBitEqual(unpruned.cos, pruned.cos);
-            AssertBitEqual(unpruned.sin, pruned.sin);
+            AssertBitEqual(unpruned.cosine, pruned.cosine);
+            AssertBitEqual(unpruned.sine, pruned.sine);
         }
     }
 
@@ -325,8 +325,8 @@ public sealed class PhacelleTests
             var pruned = math.phacelle(p, PruneCutSide, PruneCutOffset, PruneCutNormalization);
             var unpruned = math.phacelle(p, PruneCutSide, PruneCutOffset, PruneCutNormalization, false);
 
-            AssertBitEqual(unpruned.cos, pruned.cos);
-            AssertBitEqual(unpruned.sin, pruned.sin);
+            AssertBitEqual(unpruned.cosine, pruned.cosine);
+            AssertBitEqual(unpruned.sine, pruned.sine);
         }
     }
 

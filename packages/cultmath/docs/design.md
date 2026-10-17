@@ -95,7 +95,8 @@ and HLSL's one-based `_11`..`_33` element names.
 Roslyn against CultMath. These transformations are the complete list; if a body
 needs anything else, the test fails:
 
-1. Include guards (`#ifndef`/`#define`/`#endif`) are dropped.
+1. Include guards (`#ifndef`/`#define`/`#endif`) are dropped, except the capacity macro (`#ifndef CULTMATH_MAX_SITES`,
+   `#define CULTMATH_MAX_SITES 128`, `#endif`), which becomes `const int CULTMATH_MAX_SITES = 128;`.
 2. Functions taking `Texture2D`/`SamplerState` are dropped; GPU resources have
    no CultMath analog.
 3. File-scope `static const` becomes `const`.
@@ -103,7 +104,8 @@ needs anything else, the test fails:
 5. Struct fields gain `public`. HLSL struct members have no access-modifier
    concept; a C# struct's fields default to `private`, which would hide them
    from the mirror test's reflection-based field comparison.
-6. The file body is wrapped in a class, since C# has no free functions; HLSL
+6. An array parameter `T name[CULTMATH_MAX_SITES]` becomes `T[] name`.
+7. The file body is wrapped in a class, since C# has no free functions; HLSL
    functions become private instance methods.
 
 HLSL constructs that stay outside the target and must not appear in the mirror:
@@ -155,6 +157,10 @@ hand. Regenerate them, and the golden fixture
 ```powershell
 $env:CULTMATH_WRITE_GLSL = "1"; dotnet test packages/cultmath/tests/CultMath.Tests --filter GlslMirrorTests
 ```
+
+Run it on Yggdrasil's `mcr.microsoft.com/dotnet/sdk:10.0` image (Ubuntu 24.04) only: that image owns the fixture's platform
+families and `device-bounds-lavapipe.txt`, and `CULTMATH_WRITE_GLSL=1` fails on any other OS. Re-record the bounds there in
+the same revision (`WRITE_BOUNDS=1`, `tools/device/run-lavapipe.sh`).
 
 `GlslMirrorTests.CommittedGlslEqualsLowering` fails on any difference between
 either committed file and the lowering of the committed HLSL. These
@@ -423,7 +429,7 @@ together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
 - `phacelle(float3 p, float3 side, float offset, float normalization)` is Rune
   Skovbo Johansen's Phacelle noise ("phase + cell": a stripe pattern built by
   blending one cosine/sine wave per jittered cell), generalised to 3D cells. It
-  returns `CultPhasor { cos, sin }`, each `(∇, value)`. `side` is the stripe
+  returns `CultPhasor { cosine, sine }`, each `(∇, value)`. `side` is the stripe
   wave vector, whose length is 2π times the stripe frequency; in 3D the
   perpendicular to the flow is not unique, so the caller chooses it (on a unit
   sphere, `cross(p̂, flow)`). `offset` is the phase in cycles. It visits 4×4×4
@@ -519,11 +525,12 @@ running `float4(unit normal toward the owner, distance)` and the radical plane o
 the distance built from the offset `owner - p` and the weight difference `(w1 - w2)(w1 + w2)` so it does not
 cancel for close sites seen from far; the cell boundary distance is the least over every site except the owner
 (the fold's nearest), and a site coincident with the owner has no plane. The step trusts the caller's owner: a
-query outside the owner's cell reports distance 0 with that plane's normal, not an error. `power_border(p, sites)` is that loop.
+query outside the owner's cell reports distance 0 with that plane's normal, not an error. `power_border(p, sites)` is that loop;
+the shader's `cultmath_power_border(p, sites, count)` is the same loop over a by-value array (see "Sites in a shader" below).
 Cell spans refuse a non-finite query, site position or weight, and more than 2^24 sites (indices are floats).
 `power_cells` and
 `multiplicative_cells` are that loop over a `ReadOnlySpan<float4>` and nothing else; a shader caller writes the
-same loop over its own buffer. Every site of an explicit span is visited, so no window and no weight-ratio range
+same loop over its own array. Every site of an explicit span is visited, so no window and no weight-ratio range
 apply. `CultSiteCells` holds the two score fields and the two site indices (floats, -1 for none).
 
 `gabriel_margin(a, b, other)` is `(|other - (a + b) / 2| - r) / r` with `r = |a - b| / 2`: zero on the diameter
@@ -557,8 +564,21 @@ The accepted range is boost 0 to `LatticeMaxBoost` (4, a weight ratio of 10:1), 
 and smoothing up to `LatticeMaxSmoothing` (1); outside it the function throws `ArgumentException`. `LatticeMaxRing`
 (37) is the proven greatest ring at the range edge. Measured over 24,000 points on orbiting bodies (six bodies,
 sigma ratio 6:1, the ruled look and the range edge), the greatest ring visited has median 3, 99th percentile 7 and
-maximum 8 (49, 225 and 289 cells); `RingsStayWellInsideTheCap` asserts these. The function is C# only; the shader
-twins are the next cut.
+maximum 8 (49, 225 and 289 cells); `RingsStayWellInsideTheCap` asserts these.
+
+### Sites in a shader
+
+A shader function cannot take a span, so `cultmath_power_border(p, sites, count)`, `cultmath_lattice_cell_distance(...)`
+and `cultmath_weighted_lattice_cells(p, time, bodies, count, ...)` take `float4 sites[CULTMATH_MAX_SITES]` by value and the
+count in use, with `count` in `[0, CULTMATH_MAX_SITES]`. `CULTMATH_MAX_SITES` is 128 unless the consumer defines it before
+including the library (`#ifndef`): 128 covers every Aetheria zone within GLSL ES 3.00's 224 guaranteed fragment uniform
+vectors, and loops run to `count`, so the capacity costs uniform space, not iterations. A caller whose sites live in a
+buffer copies them into a local array first; the library takes no resource, accessor macro or uniform of its own. The preconditions the C#
+functions throw for are the caller's in a shader (finite arguments, `cellSize > 0`, the stated ranges, `p` within 2^23
+cells). The ring pass is bounded `k <= 37` and exits as C# does; the box pass recomputes each distance instead of caching
+75 x 75 of them, which gives the same values. The C# mirror compiles the array as `T[]`, and
+`HlslSourceCompatibilityTests.SiteArrayMirrorsMatchCSharp` compares the three functions through the span twins in
+`SiteArrays` (reflection cannot pass a `ReadOnlySpan`); `CULTMATH_MAX_SITES` is a shader-only capacity with no C# twin.
 
 ## Intervals
 

@@ -38,8 +38,9 @@ shader semantics.
   drifting lattice whose cell weights come from the exact power border of the body span at each cell centre, with a stretched
   metric and an exact ring search over the stated range (`LatticeMaxBoost`, `LatticeMaxStretch`, `LatticeMaxSmoothing`). It composes the
   public steps `lattice_site`, `lattice_weight`, `lattice_distance` and `lattice_smooth_step`. The shaders carry the four steps as
-  `cultmath_lattice_site`, `cultmath_lattice_weight`, `cultmath_lattice_distance` and `cultmath_lattice_smooth_step`; the ring and box loops
-  are the shader caller's, written as the comment above them in `CultMath.hlsl` gives them, and the argument checks become its preconditions.
+  `cultmath_lattice_site`, `cultmath_lattice_weight`, `cultmath_lattice_distance` and `cultmath_lattice_smooth_step`, and the whole function as `cultmath_weighted_lattice_cells(p, time, bodies,
+  count, ...)` over a `float4 bodies[CULTMATH_MAX_SITES]` array (128 by default; define the macro before including to change it);
+  `cultmath_power_border(p, sites, count)` is the matching border. The argument checks become the shader caller's preconditions.
 - `shaders/CultMath.hlsl`, a canonical HLSL mirror include for shader-side
   parity. HLSL already owns `float2`, `float3`, and `float4`; the include
   exposes `cultmath_*` functions for shared semantics HLSL does not provide.

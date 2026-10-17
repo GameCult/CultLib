@@ -6,6 +6,11 @@ All notable changes to this package are documented in this file.
 
 ### Breaking
 
+- `CultMathJson` writes `CultPhasor` as `{"cosine":..,"sine":..}` and still reads
+  the old `cos`/`sin` keys. A reader from before this change does not know the
+  new keys: with default options it skips them and decodes zeros, and with
+  `UnmappedMemberHandling.Disallow` it throws. Upgrade readers before writers.
+  MessagePack bytes are unchanged.
 - CultCache refuses an unknown union arm on read and an unnamed union subtype on
   write. A payload whose arm key the union does not declare used to decode to
   `null` (and the next save wrote the loss back); a value whose type the union

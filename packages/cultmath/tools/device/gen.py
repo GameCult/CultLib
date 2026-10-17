@@ -16,6 +16,7 @@ import sys
 HLSL_VEC = re.compile(r'(float|int|uint)([234])$')
 GLSL_VEC = re.compile(r'(i|u|)vec([234])$')
 KIND = {'float': 'f', 'int': 'i', 'uint': 'u'}
+ARRAY = re.compile(r'(\w+)\[(\d+)\]$')  # an array leaf, vec4[128]: N elements of one leaf type, N x its words
 
 
 def structs(root):
@@ -79,6 +80,19 @@ def body(sig, n, win, wout, defs, glsl):
     ret, name, params = m.group(1), m.group(2), [p.strip() for p in m.group(3).split(',') if p.strip()]
     lines, offset, args = [], 0, []
     for j, p in enumerate(params):
+        array = ARRAY.match(p)
+        if array:
+            elem, size = array.group(1), int(array.group(2))
+            words = leaves(elem, defs)
+            lines.append('    %s a%d[%d];' % (elem if glsl else hlsl_type(elem), j, size))
+            lines.append('    for (uint e = 0u; e < %du; e++) {' % size)
+            for k, leaf in enumerate(words):
+                word = ('In.a[b + %du + e * %du]' if glsl else 'In[b + %du + e * %du]') % (offset + k, len(words))
+                lines.append('        a%d[e]%s = %s;' % (j, access(leaf, glsl), read(leaf[1], glsl, word)))
+            lines.append('    }')
+            offset += size * len(words)
+            args.append('a%d' % j)
+            continue
         ptype = p if glsl else hlsl_type(p)
         lines.append('    %s a%d;' % (ptype, j))
         for leaf in leaves(p, defs):

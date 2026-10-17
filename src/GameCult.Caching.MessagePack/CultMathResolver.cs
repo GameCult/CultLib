@@ -180,7 +180,7 @@ public sealed class CultMathResolver : IFormatterResolver
                     return value;
                 }),
 
-            // Compositions: matrices are rows, rect is [min, max], CultCellular is [nearest, edge, id], CultPhasor is [cos, sin], SpanNoise is [field, curvature, fold], SpanPath is [midpoint, velocity, speed, acceleration, halfLength], SpanStage is [frequency, stretch, axis, shift, offset, octaveStep], CultSiteCells is [nearest, second, nearestSite, secondSite].
+            // Compositions: matrices are rows, rect is [min, max], CultCellular is [nearest, edge, id], CultPhasor is [cosine, sine], SpanNoise is [field, curvature, fold], SpanPath is [midpoint, velocity, speed, acceleration, halfLength], SpanStage is [frequency, stretch, axis, shift, offset, octaveStep], CultSiteCells is [nearest, second, nearestSite, secondSite].
             Shape<float2x2>((ref MessagePackWriter w, float2x2 v) => { w.WriteArrayHeader(2); PutFloat2(ref w, v[0]); PutFloat2(ref w, v[1]); },
                 (ref MessagePackReader r) =>
                 {
@@ -221,7 +221,7 @@ public sealed class CultMathResolver : IFormatterResolver
                     }
                     return value;
                 }),
-            Shape<CultPhasor>((ref MessagePackWriter w, CultPhasor v) => { w.WriteArrayHeader(2); PutFloat4(ref w, v.cos); PutFloat4(ref w, v.sin); },
+            Shape<CultPhasor>((ref MessagePackWriter w, CultPhasor v) => { w.WriteArrayHeader(2); PutFloat4(ref w, v.cosine); PutFloat4(ref w, v.sine); },
                 (ref MessagePackReader r) =>
                 {
                     var value = default(CultPhasor);
@@ -229,8 +229,8 @@ public sealed class CultMathResolver : IFormatterResolver
                     {
                         switch (i)
                         {
-                            case 0: value.cos = GetFloat4(ref r); break;
-                            case 1: value.sin = GetFloat4(ref r); break;
+                            case 0: value.cosine = GetFloat4(ref r); break;
+                            case 1: value.sine = GetFloat4(ref r); break;
                             default: r.Skip(); break;
                         }
                     }

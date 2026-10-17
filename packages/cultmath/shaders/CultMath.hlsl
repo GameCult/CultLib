@@ -600,14 +600,12 @@ CultCellular cultmath_cellular(float3 p)
     return result;
 }
 
-// Sites: a site is float4(position.xyz, weight). A span is a loop over a per-site step, because a shader
-// function cannot take a span in the mirror (design.md, "Sites"). The consumer's loop, over its own buffer:
+// Sites: a site is float4(position.xyz, weight). A shader function cannot take a span (design.md, "Sites"), so a span is a
+// fixed-capacity array and a count (cultmath_power_border, below), or a loop over a per-site step:
 //   CultSiteCells cells = cultmath_site_cells_empty();
 //   for (int i = 0; i < count; i++)
 //       cells = cultmath_site_cells_insert(cells, cultmath_power_score(p, sites[i]), i);
-// The exact power cell border is a second loop over the buffer, skipping the owner cells.nearestSite:
-//   float4 border = float4(0.0, 0.0, 0.0, 1.0e30); int owner = (int)cells.nearestSite;
-//   for (int k = 0; k < count; k++) if (k != owner) border = cultmath_power_border_step(p, sites[owner], sites[k], border);
+// The exact power cell border is cultmath_power_border, the second loop over the sites that skips the owner cells.nearestSite.
 // The step trusts the owner: a p outside the owner's cell reports distance 0 with that plane's normal, not an error.
 // Statement for statement with math.Sites.cs (power_score, multiplicative_score, site_cells_*, gabriel_margin).
 struct CultSiteCells
@@ -688,21 +686,8 @@ float cultmath_gabriel_margin(float3 a, float3 b, float3 other)
     return (cultmath_distance(other, (a + b) * 0.5) - r) / r;
 }
 
-// Weighted lattice cells: the four per-cell steps of math.Lattice.cs, statement for statement. A shader function cannot take a
-// span (design.md, "Sites"), so weighted_lattice_cells is the consumer's loop over its own body buffer, in two passes:
-//   float2 q = p / cellSize; int2 c0 = (int2)floor(q); float f1 = 1.0e30, f2 = 1.0e30; int reach = 0;
-//   for (int k = 0; ; k++) {   // ring pass: Chebyshev rings 0, 1, 2, ... around c0, exact exit
-//       if (k > 1 && 0.5 * (k - 1) >= max(f2, f1 + 2.0 * smoothing)) break;   // k never reaches 38 in the accepted range
-//       for each cell on ring k: d = cultmath_lattice_distance(q, cultmath_lattice_site(cell, time, drift).xy, w, normal, stretch),
-//           w = cultmath_lattice_weight(site.z, border, boost, falloff), border = the .w of cultmath_power_border_step
-//           folded over the bodies (owner = the nearest body of the cell centre (cell + 0.5) * cellSize, z = 0);
-//           if (d < f1) { f2 = f1; f1 = d; } else if (d < f2) f2 = d;   store d for the box pass
-//       reach = k; }
-//   float m = f1 + smoothing;   // box pass: every stored cell, rows dz = -reach..reach, then dx = -reach..reach
-//   for each (dz, dx): m = cultmath_lattice_smooth_step(m, d, f1, smoothing);   // strict < for the winning id (earlier cell wins ties)
-// The preconditions the C# function throws for are the caller's in a shader: finite arguments, cellSize > 0, boost in [0, 4],
-// falloff > 0, smoothing in (0, 1], stretch in [1, 2], p within 2^23 cells. The normal is normalised as C# does: divide by its
-// largest component, then by its length (a zero normal means (1, 0) and needs stretch == 1). The ring bound is 37.
+// Weighted lattice cells: the four per-cell steps of math.Lattice.cs, statement for statement; cultmath_weighted_lattice_cells,
+// after them, is the whole function.
 float3 cultmath_lattice_site(float2 cell, float time, float drift)
 {
     int3 h = cultmath_pcg3d(int3((int)cell.x, (int)cell.y, 0));
@@ -732,6 +717,90 @@ float cultmath_lattice_smooth_step(float m, float d, float f1, float smoothing)
     float h = cultmath_smoothstep(0.0, 1.0, 0.5 + 0.5 * (m - d) / smoothing);
     float next = m + (d - m) * h - h * (1.0 - h) * smoothing / (1.0 + 3.0 * smoothing);
     return min(next, f1 + smoothing);
+}
+
+// Sites by value: a shader function cannot take a span, so these take float4 sites[CULTMATH_MAX_SITES] and the count in use, with
+// count in [0, CULTMATH_MAX_SITES]. A consumer defines CULTMATH_MAX_SITES before including this file to change the capacity; loops
+// run to count, so the capacity costs uniform space, not iterations. A caller whose sites live in a buffer copies them into a local array first.
+// The preconditions the C# functions throw for are the caller's in a shader: finite arguments, cellSize > 0, boost in [0, 4],
+// falloff > 0, smoothing in (0, 1], stretch in [1, 2], p within 2^23 cells. A zero stretchNormal means (1, 0) and needs stretch == 1.
+// cultmath_weighted_lattice_cells is math.weighted_lattice_cells: the ring pass is bounded by k <= 37 and exits as C# does, and the
+// box pass recomputes each distance instead of caching it (a 75 x 75 private array is not a shader option), with the same values.
+#ifndef CULTMATH_MAX_SITES
+#define CULTMATH_MAX_SITES 128
+#endif
+
+float4 cultmath_power_border(float3 p, float4 sites[CULTMATH_MAX_SITES], int count)
+{
+    CultSiteCells cells = cultmath_site_cells_empty();
+    for (int i = 0; i < count; i++)
+        cells = cultmath_site_cells_insert(cells, cultmath_power_score(p, sites[i]), i);
+    float4 border = float4(0.0, 0.0, 0.0, 1.0e30);
+    int owner = (int)cells.nearestSite;
+    if (owner < 0)
+        return border;
+    for (int k = 0; k < count; k++)
+        if (k != owner)
+            border = cultmath_power_border_step(p, sites[owner], sites[k], border);
+    return border;
+}
+
+float cultmath_lattice_cell_distance(float2 q, float2 cell, float time, float drift, float4 bodies[CULTMATH_MAX_SITES], int count,
+    float cellSize, float boost, float falloff, float2 normal, float stretch)
+{
+    float3 site = cultmath_lattice_site(cell, time, drift);
+    float border = cultmath_power_border(float3((cell + 0.5) * cellSize, 0.0), bodies, count).w;
+    return cultmath_lattice_distance(q, site.xy, cultmath_lattice_weight(site.z, border, boost, falloff), normal, stretch);
+}
+
+float4 cultmath_weighted_lattice_cells(float2 p, float time, float4 bodies[CULTMATH_MAX_SITES], int count, float cellSize, float drift,
+    float boost, float falloff, float smoothing, float2 stretchNormal, float stretch)
+{
+    float scale = max(abs(stretchNormal.x), abs(stretchNormal.y));
+    float2 normal = float2(1.0, 0.0);
+    if (scale > 0.0)
+    {
+        normal = stretchNormal / scale;
+        normal = normal / length(normal);
+    }
+    float2 q = p / cellSize;
+    float2 origin = floor(q);
+    int cx0 = (int)origin.x;
+    int cz0 = (int)origin.y;
+    float f1 = 1.0e30;
+    float f2 = 1.0e30;
+    int reach = 0;
+    for (int k = 0; k <= 37; k++)
+    {
+        if (k > 1 && 0.5 * (float)(k - 1) >= max(f2, f1 + 2.0 * smoothing))
+            break;
+        for (int dz = -k; dz <= k; dz++)
+        {
+            int step = dz == -k || dz == k || k == 0 ? 1 : 2 * k;
+            for (int dx = -k; dx <= k; dx += step)
+            {
+                float d = cultmath_lattice_cell_distance(q, float2(cx0 + dx, cz0 + dz), time, drift, bodies, count, cellSize, boost, falloff, normal, stretch);
+                if (d < f1) { f2 = f1; f1 = d; }
+                else if (d < f2) f2 = d;
+            }
+        }
+        reach = k;
+    }
+    float m = f1 + smoothing;
+    float best = 1.0e30;
+    float second = 1.0e30;
+    int winDx = 0;
+    int winDz = 0;
+    for (int dz = -reach; dz <= reach; dz++)
+        for (int dx = -reach; dx <= reach; dx++)
+        {
+            float d = cultmath_lattice_cell_distance(q, float2(cx0 + dx, cz0 + dz), time, drift, bodies, count, cellSize, boost, falloff, normal, stretch);
+            if (d < best) { second = best; best = d; winDx = dx; winDz = dz; }
+            else if (d < second) second = d;
+            m = cultmath_lattice_smooth_step(m, d, f1, smoothing);
+        }
+    int4 id = cultmath_pcg4d(int4(cx0 + winDx, cz0 + winDz, 0, 0));
+    return float4(best, second, m, (float)((uint)id.w >> 8) * (1.0 / 16777216.0));
 }
 
 float2 cultmath_segment_closest(float2 point_value, float2 start, float2 end)

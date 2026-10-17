@@ -44,7 +44,7 @@ namespace GameCult.Caching.Tests
             Json(new CultCellular(new float4(1f, 2f, 3f, 4f), new float4(5f, 6f, 7f, 8f), 0.25f)).Should().Be(
                 """{"nearest":{"x":1,"y":2,"z":3,"w":4},"edge":{"x":5,"y":6,"z":7,"w":8},"id":0.25}""");
             Json(new CultPhasor(new float4(1f, 2f, 3f, 4f), new float4(5f, 6f, 7f, 8f))).Should().Be(
-                """{"cos":{"x":1,"y":2,"z":3,"w":4},"sin":{"x":5,"y":6,"z":7,"w":8}}""");
+                """{"cosine":{"x":1,"y":2,"z":3,"w":4},"sine":{"x":5,"y":6,"z":7,"w":8}}""");
             Json(new SpanNoise(new float4(1f, 2f, 3f, 4f), 0.25f, 0.5f)).Should().Be(
                 """{"field":{"x":1,"y":2,"z":3,"w":4},"curvature":0.25,"fold":0.5}""");
             Json(new SpanPath { midpoint = new float3(1f, 2f, 3f), velocity = new float3(4f, 5f, 6f), speed = 7f, acceleration = 8f, halfLength = 9f }).Should().Be(
@@ -91,6 +91,87 @@ namespace GameCult.Caching.Tests
             Parse<Color32>("""{"r":1,"g":2,"b":3}""").Should().Be(new Color32(1, 2, 3, 255));
             Parse<float2?>("null").Should().BeNull();
         }
+
+        [Test]
+        public void Reading_AcceptsTheLegacyPhasorNames()
+        {
+            // The fixture is what the 0.4.1-era encoder wrote: keys cos/sin.
+            var path = System.IO.Path.Combine(TestContext.CurrentContext.TestDirectory, "Fixtures", "cultphasor-json-legacy.json");
+            var legacy = Parse<CultPhasor[]>(System.IO.File.ReadAllText(path));
+            var current = new[]
+            {
+                new CultPhasor(new float4(1f, 2f, 3f, 4f), new float4(5f, 6f, 7f, 8f)),
+                math.phacelle(new float3(0.3f, 1.7f, -2.2f), new float3(6.2831853f, 0f, 0f), 0.25f, 0.5f),
+            };
+            legacy.Should().HaveCount(2);
+            for (var i = 0; i < 2; i++)
+            {
+                BitsOf(legacy[i]).Should().Equal(BitsOf(current[i]));
+                BitsOf(Parse<CultPhasor>(Json(current[i]))).Should().Equal(BitsOf(current[i]));
+            }
+
+            var caseInsensitive = new JsonSerializerOptions { PropertyNameCaseInsensitive = true }.AddCultMathConverters();
+            BitsOf(JsonSerializer.Deserialize<CultPhasor>("""{"COS":{"x":1,"y":2,"z":3,"w":4},"Sin":{"x":5,"y":6,"z":7,"w":8}}""", caseInsensitive))
+                .Should().Equal(BitsOf(current[0]));
+        }
+
+        [Test]
+        public void Reading_RefusesALegacyAndCurrentNameTogether()
+        {
+            var property = typeof(JsonSerializerOptions).GetProperty("AllowDuplicateProperties");
+            Assert.That(property, Is.Not.Null, "the test runtime's System.Text.Json has AllowDuplicateProperties");
+            var strict = new JsonSerializerOptions().AddCultMathConverters();
+            property!.SetValue(strict, false);
+            Action both = () => JsonSerializer.Deserialize<CultPhasor>("""{"cos":{"x":1},"cosine":{"x":2}}""", strict);
+            both.Should().Throw<JsonException>().WithMessage("*appears more than once*");
+            Action reversed = () => JsonSerializer.Deserialize<CultPhasor>("""{"sine":{"x":1},"sin":{"x":2}}""", strict);
+            reversed.Should().Throw<JsonException>().WithMessage("*appears more than once*");
+
+            // With duplicates allowed the later property replaces the earlier one, as for any repeated name.
+            Parse<CultPhasor>("""{"cos":{"x":1,"y":9},"cosine":{"x":2}}""").cosine.Should().Be(new float4(2f, 0f, 0f, 0f));
+        }
+
+        [Test]
+        public void Reading_AcceptsTheLegacyPhasorNamesUnderDisallow()
+        {
+            var options = new JsonSerializerOptions { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow }.AddCultMathConverters();
+            var phasor = JsonSerializer.Deserialize<CultPhasor>("""{"cos":{"x":1,"y":2,"z":3,"w":4},"sin":{"x":5,"y":6,"z":7,"w":8}}""", options);
+            BitsOf(phasor).Should().Equal(BitsOf(new CultPhasor(new float4(1f, 2f, 3f, 4f), new float4(5f, 6f, 7f, 8f))));
+            Action unknown = () => JsonSerializer.Deserialize<CultPhasor>("""{"cos":{"x":1},"coss":{"x":2}}""", options);
+            unknown.Should().Throw<JsonException>().WithMessage("*not a component*");
+        }
+
+        [Test]
+        public void Reading_TreatsAThirdOccurrenceOfAPhasorNameAsADuplicate()
+        {
+            var property = typeof(JsonSerializerOptions).GetProperty("AllowDuplicateProperties");
+            Assert.That(property, Is.Not.Null, "the test runtime's System.Text.Json has AllowDuplicateProperties");
+            var strict = new JsonSerializerOptions().AddCultMathConverters();
+            property!.SetValue(strict, false);
+            Action thrice = () => JsonSerializer.Deserialize<CultPhasor>("""{"cos":{"x":1},"cosine":{"x":2},"cos":{"x":3}}""", strict);
+            thrice.Should().Throw<JsonException>().WithMessage("*appears more than once*");
+
+            // Allowed, the last occurrence replaces the whole value, including after a third.
+            Parse<CultPhasor>("""{"cos":{"x":1,"y":9},"cosine":{"x":2},"cos":{"z":3}}""").cosine.Should().Be(new float4(0f, 0f, 3f, 0f));
+        }
+
+        [Test]
+        public void Reading_SkipsUnknownNamesWhenCaseInsensitive()
+        {
+            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true }.AddCultMathConverters();
+            JsonSerializer.Deserialize<CultPhasor>("""{"extra":[1,2],"COSINE":{"x":3},"coss":{"x":4}}""", options).cosine.x.Should().Be(3f);
+            JsonSerializer.Deserialize<float2>("""{"X":1,"q":2,"Y":3}""", options).Should().Be(new float2(1f, 3f));
+        }
+
+        [Test]
+        public void Writing_NeverEmitsLegacyNames()
+        {
+            using var document = JsonDocument.Parse(Json(new CultPhasor(new float4(1f, 1f, 1f, 1f), new float4(2f, 2f, 2f, 2f))));
+            document.RootElement.EnumerateObject().Select(p => p.Name).Should().Equal("cosine", "sine");
+        }
+
+        private static int[] BitsOf(CultPhasor v) => new[] { v.cosine.x, v.cosine.y, v.cosine.z, v.cosine.w, v.sine.x, v.sine.y, v.sine.z, v.sine.w }
+            .Select(BitConverter.SingleToInt32Bits).ToArray();
 
         [Test]
         public void Reading_RefusesShapesThatAreNotTheType()

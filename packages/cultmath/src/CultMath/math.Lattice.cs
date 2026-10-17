@@ -200,7 +200,7 @@ public static partial class math
         return new float4(best, second, m, cellular_unit(id.w));
     }
 
-    private static float lattice_cell_distance(
+    internal static float lattice_cell_distance(
         float2 q, float2 cell, float time, float drift, ReadOnlySpan<float4> bodies, float cellSize, float boost, float falloff,
         float2 normal, float stretch)
     {
