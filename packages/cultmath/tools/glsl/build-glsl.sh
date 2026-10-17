@@ -131,6 +131,8 @@ SENTINEL=$(cut -f2 "$W/shw/capacity.tsv")
 expect_refused macro-in-expression 'int cultmath_zz_probe(int n) { return n + CULTMATH_MAX_SITES; }' 'outside its guard'
 # the sentinel spelled in hex: wrappers.py's scan reads decimal tokens, so only the length check can see it
 expect_refused length-in-expression "uint cultmath_zz_probe(uint n) { return n + $(printf '0x%xu' "$SENTINEL"); }" 'also used by opcode'
+# the sentinel as another element type's array length: not a capacity parameter type
+expect_refused other-element-same-length "float3 cultmath_zz_probe(float3 x[$(printf '0x%x' "$SENTINEL")], int n) { return x[n]; }" 'not a capacity parameter type'
 variant array-128 'float4 cultmath_zz_probe(float4 x[128], int n) { return x[n]; }' || { echo "array-128 failed: a library array of length 128 broke the build"; tail -5 "$VD/log"; exit 1; }
 grep -Eq 'cultmath_zz_probe\(.*\[128\]' "$VD/out/core.glsl" || { echo "array-128 failed: the 128 array is not literal in core.glsl"; exit 1; }
 PROBE='vec4 x[128]; c = cultmath_zz_probe(x, 1);'

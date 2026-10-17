@@ -179,7 +179,7 @@ def by_value(h, ins):
     return out, len(newtype), len(newid)
 
 
-def capacity_edit(h, ins, rows, callee_of, default, sentinel):
+def capacity_edit(h, ins, rows, callee_of, default):
     """Each capacity parameter (wrappers.tsv column 5) of each callee has an OpTypeArray type. Exactly one length id may
     serve all of them, and nothing but OpTypeArray, OpName and decorations may use it. That OpConstant becomes an
     OpSpecConstant with SpecId SPEC_ID named cultmath_max_sites, defaulting to the HLSL guard value. The constant is the
@@ -204,9 +204,6 @@ def capacity_edit(h, ins, rows, callee_of, default, sentinel):
     if len(lengths) != 1:
         sys.exit('refuse: %d array length ids serve the capacity parameters, expected exactly one' % len(lengths))
     cap = lengths.pop()
-    value = next(x[3] for x in ins if op(x) == OP_CONSTANT and x[2] == cap)
-    if value != sentinel:
-        sys.exit('refuse: the capacity length constant is %d, expected the sentinel %d' % (value, sentinel))
     site_types = {params[fid][int(c)] for row, fid in zip(rows, callee_of) for c in row[4].split(',') if c}
     if {t for t, a in arrays.items() if a[3] == cap} != site_types:
         sys.exit('refuse: an array type of the capacity length is not a capacity parameter type')
@@ -233,8 +230,8 @@ def main(src, dst, tsv, capacity):
     rows = [l.split('\t') for l in open(tsv).read().splitlines() if l]
     ins, callee_of = export_edit(h, ins, rows)
     ins, changed, params = by_value(h, ins)
-    default, sentinel = [int(v) for v in open(capacity).read().split()]
-    ins, spec = capacity_edit(h, ins, rows, callee_of, default, sentinel)
+    default = int(open(capacity).read().split()[0])
+    ins, spec = capacity_edit(h, ins, rows, callee_of, default)
     words = h + [v for x in ins for v in x]
     open(dst, 'wb').write(struct.pack('<%dI' % len(words), *words))
     print('spvedit: %d wrappers dropped; by-value: %d functions changed, %d parameters; capacity spec constant id %d' % (len(rows), changed, params, spec))
