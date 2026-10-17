@@ -9,7 +9,7 @@ the Self opened the `cultmath-tapes` campaign from pass 2; pass 3 revises the
 two CultLib cuts after their first Hands reports and the operator's challenge
 to the march, and changes the site field to envelope-then-noise; pass 4
 (section "Pass 4") revises `interval-ops` to r3 after its second Hands report
-and Soul's verdict, and names the one shipped void (Q9). Pass 5 (section "Pass 5") maps
+and Soul's verdict, and names the one shipped void (Q9, ruled `operator-shipped-void`). Pass 5 (section "Pass 5") maps
 affine forms against CultLib `main` at `a7966142`. Where a later pass and
 an earlier section disagree, the later pass wins. Where this map and the Body
 disagree, the Body wins and this map is stale.
@@ -126,9 +126,10 @@ nebula input tokens and the seed values of the ground tokens.
 **Not consumers.** Asura (its field is noise-dominated and needs no tape).
 AetheriaEve and AetheriaThing (archived). The material graph line until it returns
 after the demo (`aetheria-release:ruling:demo-material-scope`). The brush-grammar
-station, until pruning and meshing unpark. Whether Aetheria's nebula moves onto the
-span framework is not decided; until it is, the nebula consumes CultMath noise at
-its pin bump and nothing else from this line.
+station, until pruning and meshing unpark. Aetheria's nebula on the
+span framework is an option to try (ruling `aetheria-nebula-spans-as-option`), not
+yet a consumer; until a cut makes it one, the nebula consumes CultMath noise at its
+pin bump and nothing else from this line.
 
 **Invariants.**
 
@@ -750,7 +751,7 @@ and `S` from the exponent (`e = 4` gives `S ≈ 1.3 Rh`, `e = 0.25` gives
 `S ≈ 0.12 Rh`), so `(Rh, S)` are the knobs and `(Rc, e)` derived. Shipped:
 `Rh = 198`, `S = 50`, so `Rc = Rh + S = 248` and `e = −ln CARVE / ln(1 −
 (Rh/Rc)²) = 0.40`, `K = 1/30` (pass 4 corrects this line's `e ≈ 0.6, Rc ≈
-220`, which did not satisfy the formula; Q9 holds the look question).
+220`, which did not satisfy the formula; Q9 asked the look question and is ruled `operator-shipped-void`).
 
 Imagination's model (scratchpad `cavity_model.py`; the test confirms or
 refutes), 1080p, `N = 8`, per pixel for a converged frame; "ref" is the
@@ -964,7 +965,7 @@ answers the first; the second is content and stays.
 | --- | --- | --- |
 | `frustum-ball-float-crossing` | Medium | the radius is widened by a derived float32 bound (below); seven extreme families join the enclosure test; the strictness sentence leaves the C#, the HLSL and `design.md` |
 | `aetheria-far-plane-miscited` | Low | `far = 2048`, the Main Camera's (`ARPG.unity:31777`, `:31830`); the Tint camera's 1000 was the wrong camera |
-| `shipped-void-two-scenes` | Medium | one shipped void, `(Rh, S) = (198, 50)`, `(Rc, e) = (248, 0.40)` derived; the map, the site-ground spec and the test agree; the look question is Q9 |
+| `shipped-void-two-scenes` | Medium | one shipped void, `(Rh, S) = (198, 50)`, `(Rc, e) = (248, 0.40)` derived; the map, the site-ground spec and the test agree; the look question was Q9, ruled `operator-shipped-void` |
 | `lod-weights-never-exercised` | Low | configuration "LOD far" (`Rh = 4000`, `S = 50`, low camera, `f = 467`) reaches weights in `(0, 1)` and at 0; the `[w(z1), 1]` bound is recorded as a deviation with its soundness argument |
 | `stryker-timeout-survivor` | Low | 2525 named equivalent; ball radii to `1e3` so `L/r` dies to an enclosure test; every timeout hand-run; the report claims only demonstrated kills |
 
@@ -1011,7 +1012,7 @@ analytic body the second gains nothing: across a 442-wide ramp the optical
 depth exceeds 4 before the density is provably constant, so rays end inside the
 ramp and the body is never proven. The map's own rule says `(Rh, S)` are the
 knobs, so the honest choice is the first; it changes the look relative to the
-site section, hence Q9 (below). For `CARVE = 1.5` the ramp width is tied to the
+site section, hence Q9 (below; ruled (a), `operator-shipped-void`). For `CARVE = 1.5` the ramp width is tied to the
 exponent (`S/Rh = 1/√(1 − 1.5^(−1/e)) − 1`: `e = 0.4 → 0.25`, `e = 0.7 →
 0.5`, `e = 1 → 0.73`, `e = 4 → 2.2`), so "pseudo-Gaussian" and "narrow" cannot
 both be had without a third knob, and a narrow wall at `e = 4` needs
@@ -1887,9 +1888,9 @@ Aetheria twin.
 - `lattice-site-weight-source`: how a weighted lattice node gets a per-site
   weight (T7c). Re-asked as `lattice-weight-from-bodies` and ruled
   `lattice-weight-from-bodies-ruled` (node-reads-bodies).
-- `lattice-window-sound-or-measured` (open, from section
-  "lattice-weighted-cellular"): a proven ring search or a fixed measured 7x7
-  window. Gates line 4a's search loop.
+- `lattice-window-sound-or-measured` (from section "lattice-weighted-cellular"):
+  a proven ring search or a fixed measured 7x7 window. Ruled
+  `lattice-ring-exit-sound` (ring by ring until no farther cell can win).
 
 Prior art in hand: `F:\Projects\aetheria-material-path-prior-art.md` section 4
 (GPU interpreters: Fidget's crates, Dolphin ubershaders, Laine et al. on
@@ -1899,8 +1900,7 @@ found) and section 6 (IR placement); Aetheria
 filaments). Neither covers a GPU tape interpreter's register storage (dynamic
 indexing of local arrays and scratch spill, groupshared memory, Fidget-wgpu's
 `tape_interpreter.wgsl`, Keeter's MPR 2020) or per-site weight fields in
-lattice Voronoi. Both questions lack that prior art; Self runs Eyes before
-putting them.
+lattice Voronoi. Both questions have since been ruled.
 
 ### Cut sequence (Pass 7; one line each, mapped when about to run)
 
@@ -2369,6 +2369,36 @@ and 16:50 UTC (18:30 to 18:50 CEST). Logs are in the Imagination scratchpad
     form: HLSL entry built with `-Gis`, and a harness pass that adds `NoContraction` to every float op of
     both modules (about 12 lines of `spirv-dis` and `spirv-as`; `tools/device/nc.py` in the probe). That is
     127 of 127. The shipped GLSL and the C# bounds judge are unchanged. See question `glsl-gate-strict-form`.
+- **The build at main, with the rename and the strict form (Pass 9d).** Imagination `imagination-ag5-glsl`,
+  2026-10-17, scratch worktree `C:\cl-wt\imag-ag5-probe` (not pushed): `23ac4e89` merged with origin/main
+  `86cd84a3` as `69987d91` (no conflict; README.md and tools/device/gen.py auto-merged), probe commits
+  `575badb6` to `d14bfbbe` (`probe/p1.sh`, `p2.sh`, `spec.py`). Yggdrasil, `mcr.microsoft.com/dotnet/sdk:10.0` and
+  `ubuntu:24.04`; logs in the session scratchpad `imagination-ag5-glsl/p2.log` to `p4.log`.
+  - **Site arrays break the wrappers.** `wrappers.py` passes `sites[CULTMATH_MAX_SITES]` as the argument (its
+    last-token rule), and dxc refuses the three wrappers of `cultmath_power_border`,
+    `cultmath_lattice_cell_distance` and `cultmath_weighted_lattice_cells` ('no known conversion from float4 to
+    float4 [128]'). Stripping the `[..]` suffix from the argument fixes it; then the build is green: core 139
+    functions over 91 names (1554 lines, 54775 bytes), cycles 51/51 (867, 21250), phacelle 1/1 (82, 3199); zero
+    suffixed ids and zero inout.
+  - **The renamed fields survive SPIRV-Cross.** With `float4 cosine; float4 sine;` in the HLSL (HLSL only, in
+    the job), the built phacelle.glsl declares `vec4 cosine; vec4 sine;`.
+  - **The strict-form gate holds at main.** With `-Gis` on the HLSL entry and NoContraction on both modules
+    (the text `nc.py` of Pass 9c, probe only): lavapipe-glsl equals lavapipe-hlsl on 129 of 129 work items.
+    The work list is 125 fixture families (123 at `774bebb0`; the lattice loop added two) plus one
+    reference item for each of the 4 sampled affine families, so h1's 127 was 123 + 4.
+  - **The built GLSL loses the capacity override.** dxc preprocesses `CULTMATH_MAX_SITES`, so built core.glsl
+    has no mention of it and four literal `[128]` arrays. A consumer with `#define CULTMATH_MAX_SITES 4`
+    passing `vec4 s[4]` fails glslang ('no matching overloaded function'); the same consumer compiles
+    against the committed (lowered) GLSL and through dxc against the HLSL.
+  - **dxc has no spec-constant array size.** `[[vk::constant_id(7)]] const int CAP = 128;` as an array
+    parameter's length is refused ('variable length arrays are not supported in HLSL').
+  - **A SPIR-V spec constant carries it.** In the built SPIR-V exactly one constant is an array length
+    equal to 128 (id 1297), used by nothing but OpTypeArray. Made an OpSpecConstant with SpecId 0, it passes
+    spirv-val, and SPIRV-Cross ES emits `#ifndef SPIRV_CROSS_CONSTANT_ID_0` / `#define ... 128u` /
+    `const uint _1297 = SPIRV_CROSS_CONSTANT_ID_0;` with `vec4 sites[_1297]` in every site-array
+    signature. The probe's consumer defined the macro as a plain int and was refused for the uint
+    initializer, so the `uint(CULTMATH_MAX_SITES)` mapping that `cut-glsl-build-dxc.r2` writes is
+    the route, but has not been compiled yet.
 - **Capability strip.** `spirv-opt --trim-capabilities` (spirv-tools 2025.1~rc1) leaves all 14
   capabilities and both extensions in place, and SPIRV-Cross still refuses ("RayQuery requires Vulkan
   GLSL 460"). Stripping every capability except Shader and Linkage and every OpExtension in the
@@ -2436,11 +2466,23 @@ and 16:50 UTC (18:30 to 18:50 CEST). Logs are in the Imagination scratchpad
     lavapipe-hlsl result bit for bit in every family (117 of 117 measured), and the C# judge's
     bounds are re-recorded only where a family moved and equals its HLSL result.
 
+- **CultPhasor's JSON keys (model page row).** Named by `CultMathJson`; written as `cosine`/`sine` from
+  `phasor-field-rename` on, and read as either those or the legacy `cos`/`sin`, forever unless a later
+  Breaking change removes the legacy names. Decided by ruling `phasor-fields-renamed-at-source`. The
+  MessagePack wire is positional and never named the fields, so `.cc` documents are untouched both ways.
+  A reader from before the rename skips the new keys and decodes zeros (its unknown-property rule), which
+  is why the change is Breaking in both changelogs: upgrade readers before writers.
+- **The capacity through the build.** dxc cannot keep a macro and refuses spec-constant array sizes, so
+  the build turns the one array-length constant into a SPIR-V spec constant and `partition.py` maps
+  `CULTMATH_MAX_SITES` onto SPIRV-Cross's `SPIRV_CROSS_CONSTANT_ID_0` with source-copied header lines.
+  Rejected: building the GLSL per capacity (a consumer would run the build to change one number), and
+  rewriting `[128]` in the emitted text (the forbidden text post-pass). Pass 9d.
+
 ### Cut sequence (Pass 9; one line each, mapped when about to run)
 
 1. `shader-conforming-run`: spec admitted. The lavapipe job with the C# device judge, run against
    today's committed HLSL and GLSL, so the next cut is verified against a running check.
-2. `glsl-build-dxc` (spec admitted): the build, not yet the switch. `packages/cultmath/tools/glsl/`
+2. `glsl-build-dxc` (spec `cut-glsl-build-dxc.r2` admitted; r1's h1 left the gate red, Pass 9d): the build, not yet the switch. r2 merges main, carries site arrays and their capacity (a spec constant mapped to `CULTMATH_MAX_SITES`), the strict-form gate and the renamed phasor fields, and waits on `phasor-field-rename` (spec admitted: `cosine`/`sine` in C#, HLSL, GLSL and CultMathJson, legacy keys read; CultMath's next release is 0.5.0, a release cut of its own). `packages/cultmath/tools/glsl/`
    holds `build-glsl.sh`, which pins dxc v1.9.2607 (the sha above), SPIRV-Cross and SPIRV-Tools
    `vulkan-sdk-1.4.363.0`, plus one SPIR-V tool in Python. The build generates the export wrappers into
    its temp directory (never committed), compiles source plus wrappers with `-T lib_6_3 -spirv -Od`,

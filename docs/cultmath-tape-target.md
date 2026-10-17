@@ -108,15 +108,18 @@ source.
 - Asura does not need this campaign. Its field is noise-dominated, and its
   `A_max` shell and band-limiting already give the cheap culling.
 
-## Open before unparking
+## Decided since the unpark, and what stays open
 
-- Run the (a) spike first, or go straight to (c)?
-- Pick the interval representation (plain intervals or affine arithmetic) and
-  the noise bound strategy.
-  Affine forms for noise and warp were unparked on 2026-10-03 (ruling
-  `cultmath-tapes:ruling:affine-forms-unparked`): one shared symbol, mapped in
-  `docs/cultmath-interval-ground-cut.md`, "Pass 5".
-- Choose the bytecode register model for the HLSL interpreter, given GPU
-  register pressure.
-- Decide whether the brush-grammar station project lives in Aetheria or in
-  its own repo.
+- The spike-or-(c) choice was settled by the operator's unpark: the tape
+  unparked for Aetheria's trophic species graphs (ruling
+  `cultmath-tapes:ruling:tape-unparked-for-trophic-graphs`).
+- Interval representation: affine forms for noise and warp, unparked on
+  2026-10-03 (ruling `cultmath-tapes:ruling:affine-forms-unparked`): one
+  shared symbol, mapped in `docs/cultmath-interval-ground-cut.md`, "Pass 5".
+- Register model: the HLSL interpreter keeps its registers in groupshared
+  memory, a slice per thread, linear-scan allocated at lowering (ruling
+  `cultmath-tapes:ruling:tape-register-model-ruled`; research in
+  `docs/research/tape-register-model.md`).
+- Open: whether the brush-grammar station project lives in Aetheria or in
+  its own repo (follow-up `cultmath-tapes:follow_up:brush-grammar-station-repo`,
+  raised as an operator question when a station cut reaches the frontier).
