@@ -339,6 +339,7 @@ public sealed class LatticeCellsTests
         Refuses("cellSize", () => W(cell: 1.0e37f));
         Refuses("p", () => W(pp: new float2(3.0e38f, 0)));
         Refuses("p", () => W(pp: new float2(0, 1.0e10f)));
+        Refuses("p", () => W(pp: new float2(3.3e38f, 0), cell: 1.0e36f));
         Refuses("time", () => W(time: float.PositiveInfinity));
         Refuses("drift", () => W(drift: float.NaN));
         Refuses("drift", () => W(time: 3.0e38f, drift: 2.0f));
