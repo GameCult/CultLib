@@ -12,7 +12,8 @@ usage: spvedit.py <in.spv> <out.spv> <wrappers.tsv>
 The header bound is last id + 1."""
 import struct, sys
 
-OP_NAME, OP_MEMBER_NAME, OP_CAPABILITY, OP_EXTENSION, OP_DECORATE = 5, 6, 17, 10, 71
+OP_NAME, OP_MEMBER_NAME, OP_CAPABILITY, OP_EXTENSION, OP_DECORATE, OP_MEMBER_DECORATE = 5, 6, 17, 10, 71, 72
+OP_TYPE_ARRAY, OP_CONSTANT, OP_SPEC_CONSTANT, DECORATION_SPEC_ID = 28, 43, 50, 1
 OP_TYPE_POINTER, OP_TYPE_FUNCTION, OP_FUNCTION, OP_PARAMETER, OP_FUNCTION_END = 32, 33, 54, 55, 56
 OP_CALL, OP_LABEL, OP_VARIABLE, OP_LOAD, OP_STORE = 57, 248, 59, 61, 62
 CAP_SHADER, CAP_LINKAGE, DECORATION_LINKAGE, LINKAGE_EXPORT, FUNCTION_STORAGE = 1, 5, 41, 41, 7
@@ -72,7 +73,8 @@ def export_edit(h, ins, rows):
     fs = functions(ins)
     by_name = {v: k for k, v in names.items() if k in fs}
     drop_k, drop_ids, set_name, retarget = set(), set(), {}, {}
-    for wn, name, _, _ in rows:
+    callee_of = []
+    for wn, name, _, _, _ in rows:
         fid = by_name.get(wn)
         callees = fs[fid][2] if fid else None
         if not callees or len(callees) != 1:
@@ -82,6 +84,7 @@ def export_edit(h, ins, rows):
         drop_ids |= ids | {fid}
         set_name[callees[0]] = name
         retarget[fid] = callees[0]
+        callee_of.append(callees[0])
     out, named = [], set()
     for k, x in enumerate(ins):
         if k in drop_k:
@@ -105,7 +108,7 @@ def export_edit(h, ins, rows):
     for fid, name in set_name.items():
         if fid not in named:
             out.insert(next(i for i, x in enumerate(out) if op(x) == OP_NAME), mk(OP_NAME, fid, *encode(name)))
-    return out, len(rows)
+    return out, callee_of
 
 
 def by_value(h, ins):
@@ -175,14 +178,56 @@ def by_value(h, ins):
     return out, len(newtype), len(newid)
 
 
+def capacity_edit(h, ins, rows, callee_of):
+    """Each capacity parameter (wrappers.tsv column 5) of each callee has an OpTypeArray type. Exactly one length id may
+    serve all of them, and nothing but OpTypeArray, OpName and decorations may use it. That OpConstant becomes an
+    OpSpecConstant with SpecId 0 named cultmath_max_sites. Returns the instructions and the spec constant id."""
+    ftype = {x[1]: x for x in ins if op(x) == OP_TYPE_FUNCTION}
+    arrays = {x[1]: x for x in ins if op(x) == OP_TYPE_ARRAY}
+    params, cur = {}, None
+    for x in ins:
+        if op(x) == OP_FUNCTION:
+            cur = x[2]
+            params[cur] = []
+        elif op(x) == OP_PARAMETER:
+            params[cur].append(x[1])
+    lengths = set()
+    for row, fid in zip(rows, callee_of):
+        for i in [int(c) for c in row[4].split(',') if c]:
+            t = params[fid][i]
+            if t not in arrays:
+                sys.exit('refuse: capacity parameter %d of %s is not an array type' % (i, row[1]))
+            lengths.add(arrays[t][3])
+    if len(lengths) != 1:
+        sys.exit('refuse: %d array length ids serve the capacity parameters, expected exactly one' % len(lengths))
+    cap = lengths.pop()
+    for x in ins:
+        o = op(x)
+        defines = o in (OP_CONSTANT, OP_SPEC_CONSTANT) and x[2] == cap
+        allowed = o in (OP_TYPE_ARRAY, OP_NAME, OP_DECORATE, OP_MEMBER_DECORATE) or defines
+        if cap in x[1:] and not allowed:
+            sys.exit('refuse: the capacity length id %d is also used by opcode %d' % (cap, o))
+    out = []
+    for x in ins:
+        if op(x) == OP_CONSTANT and x[2] == cap:
+            x = [(x[0] & 0xffff0000) | OP_SPEC_CONSTANT] + x[1:]
+        out.append(x)
+    first = next((k for k, x in enumerate(out) if op(x) in (OP_DECORATE, OP_MEMBER_DECORATE)), None)
+    if first is None:
+        sys.exit('refuse: no annotation section to decorate the capacity constant in')
+    out[first:first] = [mk(OP_NAME, cap, *encode('cultmath_max_sites')), mk(OP_DECORATE, cap, DECORATION_SPEC_ID, 0)]
+    return out, cap
+
+
 def main(src, dst, tsv):
     h, ins = load(src)
     rows = [l.split('\t') for l in open(tsv).read().splitlines() if l]
-    ins, wrappers = export_edit(h, ins, rows)
+    ins, callee_of = export_edit(h, ins, rows)
     ins, changed, params = by_value(h, ins)
+    ins, spec = capacity_edit(h, ins, rows, callee_of)
     words = h + [v for x in ins for v in x]
     open(dst, 'wb').write(struct.pack('<%dI' % len(words), *words))
-    print('spvedit: %d wrappers dropped; by-value: %d functions changed, %d parameters' % (wrappers, changed, params))
+    print('spvedit: %d wrappers dropped; by-value: %d functions changed, %d parameters; capacity spec constant id %d' % (len(rows), changed, params, spec))
 
 
 if __name__ == '__main__':
