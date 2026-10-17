@@ -41,7 +41,7 @@ public sealed class LatticeCellsTests
     }
 
     // Folds F1, F2, id and smooth over the box of the given radius in absolute row-major order.
-    private static float4 BoxFold(float2 p, float time, float4[] bodies, Look look, int radius,
+    internal static float4 BoxFold(float2 p, float time, float4[] bodies, Look look, int radius,
         Dictionary<(int, int), float> weights, float2? unitNormal = null)
     {
         var q = p / Cell;
@@ -71,7 +71,7 @@ public sealed class LatticeCellsTests
         return new float4(f1, f2, m, cellular_unit(id.w));
     }
 
-    private static float4 Call(float2 p, float time, float4[] bodies, Look look, float2? normal = null) =>
+    internal static float4 Call(float2 p, float time, float4[] bodies, Look look, float2? normal = null) =>
         weighted_lattice_cells(p, time, bodies, Cell, Drift, look.Boost, look.Falloff, look.Smoothing, normal ?? Normal, look.Stretch);
 
     internal static float2 RandomPoint(System.Random r) =>

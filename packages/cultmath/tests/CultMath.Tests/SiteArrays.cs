@@ -108,12 +108,43 @@ internal static class SiteArrays
         return found;
     }
 
+    /// <summary>
+    /// Points where an exit one ring early (the rule "bound 0.5*k") returns another result than the exact search, found once by
+    /// running both on the six orbiting bodies under each look: the cases that pin the ring exit to the bit.
+    /// </summary>
+    internal static readonly IReadOnlyList<(float2 P, float Time, LatticeCellsTests.Look Look)> ExitBoundPoints = FindExitBoundPoints();
+
+    private static List<(float2, float, LatticeCellsTests.Look)> FindExitBoundPoints()
+    {
+        var found = new List<(float2, float, LatticeCellsTests.Look)>();
+        var looks = LatticeCellsTests.Looks.Append(WidestLook).ToArray();
+        var r = new System.Random(0xE517);
+        while (found.Count < 24)
+        {
+            var p = LatticeCellsTests.RandomPoint(r);
+            var time = 13.0f * r.Next(20);
+            var look = looks[r.Next(looks.Length)];
+            var bodies = LatticeCellsTests.Bodies(time);
+            var early = LatticeCellsTests.Radius(p, time, bodies, look, LatticeCellsTests.Rules[2].stop, new Dictionary<(int, int), float>());
+            if (early >= LatticeCellsTests.Radius(p, time, bodies, look, LatticeCellsTests.Rules[0].stop, new Dictionary<(int, int), float>()))
+                continue;
+            if (!LatticeCellsTests.BoxFold(p, time, bodies, look, Math.Max(0, early), new Dictionary<(int, int), float>()).Equals(LatticeCellsTests.Call(p, time, bodies, look)))
+                found.Add((p, time, look));
+        }
+
+        return found;
+    }
+
     internal static object[] LatticeArguments(System.Random r)
     {
-        if (r.Next(3) == 0)
+        switch (r.Next(4))
         {
-            var far = FarPoints[r.Next(FarPoints.Count)];
-            return Lattice(far.P, far.Time, Padded(LatticeCellsTests.Bodies(far.Time)), 6, WidestLook, LatticeCellsTests.Normal);
+            case 0:
+                var far = FarPoints[r.Next(FarPoints.Count)];
+                return Lattice(far.P, far.Time, Padded(LatticeCellsTests.Bodies(far.Time)), 6, WidestLook, LatticeCellsTests.Normal);
+            case 1:
+                var tight = ExitBoundPoints[r.Next(ExitBoundPoints.Count)];
+                return Lattice(tight.P, tight.Time, Padded(LatticeCellsTests.Bodies(tight.Time)), 6, tight.Look, LatticeCellsTests.Normal);
         }
 
         var time = 13.0f * r.Next(20);
