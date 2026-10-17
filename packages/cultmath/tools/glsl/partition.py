@@ -58,8 +58,7 @@ def main(shaders, glsl, outdir):
     odd = [l for l in prologue if not PROLOGUE.match(l)]
     if odd:
         sys.exit('refuse: %d unexpected prologue lines, first at %r' % (len(odd), odd[0][:60]))
-    seen = collections.Counter(b.split('
-')[0] for _, b in parts)     # overloads share a name, never a signature
+    seen = collections.Counter(b.split(chr(10))[0] for _, b in parts)     # overloads share a name, never a signature
     dup = sorted(n for n, c in seen.items() if c > 1)
     if dup:
         sys.exit('refuse: duplicate chunks %s' % dup[:6])
