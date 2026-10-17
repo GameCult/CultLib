@@ -2299,6 +2299,47 @@ and 16:50 UTC (18:30 to 18:50 CEST). Logs are in the Imagination scratchpad
     combinations as ES 3.00. The source has 13 `static const` lines, all of the form
     `static const float CULTMATH_X = <literal>;`. None of them reaches the output, and today's GLSL
     holds 13.
+- **What `-Od` leaves, and what cleans it (Pass 9c).** Imagination `imagination-ag4-od-temps`,
+  2026-10-17, on e626bf26 (188 wrappers, 140 names, 117 families), ubuntu:24.04 on Yggdrasil, 10:05 to
+  10:35 UTC (12:05 to 12:35 CEST), dxc v1.9.2607, SPIRV-Cross and SPIRV-Tools both built from
+  `vulkan-sdk-1.4.363.0` (spirv-opt v2026.4), log `od-temps/imag-od7.log` in the session scratchpad,
+  probe in `docs/research/native-shader-probes/od-temporaries/`. Pass 9b's route as ruled, with no
+  further step, emits:
+  - 2824 lines, 86129 bytes, 188 `cultmath_` definitions, 140 names, no suffixed names. The
+    committed files are 1663 lines of one-line bodies, so line counts do not compare; SPIRV-Cross
+    prints every body in Allman style.
+  - Named locals survive, so most functions read like the source. Two things do not. First, 472
+    `param_var_*` copies: dxc passes every parameter as a pointer and the caller copies in. Second,
+    11 functions assign to a parameter in their body (`smootherstep`, `integral_clamp_linear`,
+    `fbm_grad`, `ridged_grad`, both Bezier pairs, `span_stage`, `iv_fbm_ball`, `af_fbm`) and come out
+    `inout`. The HLSL has no `out` or `inout` anywhere.
+  - That `inout` is a defect in the route, not a blemish. glslang refuses a consumer call with a
+    value, `cultmath_smootherstep(x + 1.0)` ("l-value required"), and a call with a variable
+    rewrites the caller's variable. Pass 9b's bit-identical result held because the families call
+    through their own copies. Overloads that look native must also take values like native ones.
+  - NaN-safe `min` and `max` expansions (`mix(mix(max(a, b), b, isnan(a)), a, isnan(b))`) from
+    `NMin` and `NMax`.
+  - Six `spirv-opt` pass lists on the edited module alone (`--convert-local-access-chains`,
+    `--ssa-rewrite`, `--eliminate-local-single-block`, `--eliminate-local-single-store`,
+    `--eliminate-local-multi-store`, `--simplify-instructions`, `--eliminate-dead-branches`,
+    `--merge-blocks`, `--vector-dce`, `--redundancy-elimination`, `--scalar-replacement`,
+    `--copy-propagate-arrays`, each with `--eliminate-dead-code-aggressive`) are valid and keep 188
+    functions, but make the text bigger (2870 to 2930 lines) and swap named locals for `_N` ids (218
+    tokens become 2155 to 2517). `param_var_` and `inout` stay. They are not a cleanup.
+  - A by-value lowering of the SPIR-V (`od-temporaries/byvalue.py`, 50 lines) makes each Function
+    pointer parameter a value parameter, with the old id kept as an entry-block local stored from
+    it, and each call loads what it passed. It changed 187 functions and 456 parameters, validates,
+    and leaves `inout` at 0. On lavapipe all 117 families stay bit-identical to the committed GLSL.
+  - Then `spirv-opt --eliminate-local-single-store --eliminate-dead-code-aggressive` removes every
+    `param_var_` copy (472 to 0): 2604 lines, 79782 bytes, 188 functions, 316 distinct `_N` ids, valid.
+    Adding SPIRV-Cross `--relax-nan-checks` drops the `isnan` expansions: 2556 lines, 74263 bytes,
+    268 `_N` ids. glslang accepts both as ES 3.00, `cultmath_smootherstep(p.x + 1.0)` included.
+  - That cleaned module is bit-identical to the lavapipe HLSL result on 117 of 117 families, where
+    the committed GLSL is on 97. It differs from the committed GLSL in 20 families. Against the C#
+    fixture the exact, at most 4 ulp, at most 64 ulp and over 64 buckets are 80, 11, 9, 17, where
+    the committed GLSL is 80, 9, 10, 18. `--relax-nan-checks` changes no lavapipe bit. So the
+    cleaned route is closer to the HLSL than today's GLSL is, and "bit-identical to today's
+    lowering" cannot be its gate. With apt's spirv-tools 2025.1~rc1 the figures for this route are the same.
 - **Capability strip.** `spirv-opt --trim-capabilities` (spirv-tools 2025.1~rc1) leaves all 14
   capabilities and both extensions in place, and SPIRV-Cross still refuses ("RayQuery requires Vulkan
   GLSL 460"). Stripping every capability except Shader and Linkage and every OpExtension in the
@@ -2350,35 +2391,44 @@ and 16:50 UTC (18:30 to 18:50 CEST). Logs are in the Imagination scratchpad
     `static const` line of another form. The wrappers are text in the build's temp directory and are
     never committed. The source gains no `export` keyword and no `CULTMATH_EXPORT` macro.
   - The compile mode. The library compiles at `-Od`, because the default optimiser's inlining is
-    what erases the overloads. glslang and the drivers optimise downstream, and on lavapipe the
-    result is bit-identical to today's output.
+    what erases the overloads. The text it leaves is cleaned by the next two items (Pass 9c), not
+    shipped as is: `-Od` alone emits `inout` parameters, which native overloads must not have.
   - One SPIR-V edit. A single instruction-level pass over the binary, never a regex over text,
     strips capabilities and extensions, deletes the wrappers and moves their exports onto the
     callees. It replaces the disassembly grep that the capability-strip probe used. It refuses a
     wrapper that is not exactly one call. SPIRV-Cross then emits the overloaded names as they are,
     so the build has no rename step and no name map.
+  - By-value parameters. The same pass makes every Function-pointer parameter a value parameter
+    (`byvalue.py` in the probe), so no emitted function can be `inout`. The build then runs exactly
+    `spirv-opt --eliminate-local-single-store --eliminate-dead-code-aggressive`, never an inliner
+    and never `--simplify-instructions` or `--ssa-rewrite`, which turn named locals into `_N` ids,
+    and SPIRV-Cross runs with `--relax-nan-checks`, so `min` and `max` are the plain intrinsics.
+  - The gate is the HLSL, not the old text. A cleaned route's lavapipe-glsl result must equal the
+    lavapipe-hlsl result bit for bit in every family (117 of 117 measured), and the C# judge's
+    bounds are re-recorded only where a family moved and equals its HLSL result.
 
 ### Cut sequence (Pass 9; one line each, mapped when about to run)
 
 1. `shader-conforming-run`: spec admitted. The lavapipe job with the C# device judge, run against
    today's committed HLSL and GLSL, so the next cut is verified against a running check.
-2. `glsl-build-dxc`: the switch. `tools/build-glsl.sh` pins dxc v1.9.2607 (the sha above) and SPIRV-Cross
-   `vulkan-sdk-1.4.363.0`. Its first step generates the export wrappers, one per non-texture definition,
-   into the build's temp directory; they are never committed (Pass 9b). It compiles source plus
-   wrappers with `-T lib_6_3 -spirv -Od`. One SPIR-V edit then strips capabilities and extensions,
-   deletes the wrappers and moves their exports onto the callees, and `spirv-val` runs on the result.
-   The build emits ES 3.10 with the guarded `#version` and no placeholder `main`, and partitions the
-   output by origin file into the three committed files with their licence lines and guards. It emits
-   the 13 constants from their source lines. The HLSL source is not edited, and every overload keeps
-   its name in the HLSL and the GLSL. `GlslLowering.cs` and its lowering contract tests are deleted.
-   The lavapipe job checks that the committed files are the build's output, and that every family's
-   `lavapipe-glsl` result is bit-identical to the old lowering's. A miss is a defect in the cut, not
-   something to re-record. `get-spirv-cross.ps1` is pinned to the same tag. Waits on 1. If
-   `trophic-nodes` merges first, the build covers its four new overloads with nothing extra.
+2. `glsl-build-dxc` (spec admitted): the build, not yet the switch. `packages/cultmath/tools/glsl/`
+   holds `build-glsl.sh`, which pins dxc v1.9.2607 (the sha above), SPIRV-Cross and SPIRV-Tools
+   `vulkan-sdk-1.4.363.0`, plus one SPIR-V tool in Python. The build generates the export wrappers into
+   its temp directory (never committed), compiles source plus wrappers with `-T lib_6_3 -spirv -Od`,
+   and runs the one SPIR-V edit (strip, wrapper delete, export move, by-value parameters; Pass 9c).
+   It runs the pinned `spirv-opt` pair, `spirv-val`, and SPIRV-Cross ES 3.10 with `--relax-nan-checks`,
+   then partitions by origin file and emits the 13 constants. Output goes to a directory the caller
+   names. The committed GLSL, `GlslLowering.cs` and its tests are untouched, and the lavapipe job gains
+   one switch to run a built directory in place of `shaders/*.glsl`. Waits on 1, which is merged.
+   2b. `glsl-switch` (mapped when 2 is verified): commits the build's output with the licence lines and
+   guards, deletes `GlslLowering.cs` and the lowering contract tests, makes the lavapipe job check
+   the committed files against the build, re-records the lavapipe bounds for moved families
+   (Pass 9c's gate), and pins `get-spirv-cross.ps1`. If `trophic-nodes` merges first, the build
+   covers its four new overloads with nothing extra.
 3. `angle-capture` (stage-shaders-device part 2): the Starfire native-ANGLE tool on the shared work
    list (ES 3.00 fragment flavour, RGBA32UI readback), loading a pinned ANGLE build rather than Docker
    Desktop's copy. Captures carry the renderer, ANGLE version and revision, the shader sha and per-family
    argument hashes and bits, and the ordinary test run judges them. A shader-sha change marks them stale.
    It settles `span-allowance-gpu-margin`'s six CPU survivors, `iv-exp-gpu-widening`'s measurement and
    `device-p2-pin-notes`, and closes `glsl-browser-parity-run` and `affine-device-runner-seed`. It waits
-   on 2, because a capture of the old lowering goes stale at the switch.
+   on 2b, because a capture of the old lowering goes stale at the switch.
