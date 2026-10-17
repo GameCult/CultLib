@@ -572,8 +572,8 @@ A shader function cannot take a span, so `cultmath_power_border(p, sites, count)
 and `cultmath_weighted_lattice_cells(p, time, bodies, count, ...)` take `float4 sites[CULTMATH_MAX_SITES]` by value and the
 count in use, with `count` in `[0, CULTMATH_MAX_SITES]`. `CULTMATH_MAX_SITES` is 128 unless the consumer defines it before
 including the library (`#ifndef`): 128 covers every Aetheria zone within GLSL ES 3.00's 224 guaranteed fragment uniform
-vectors, and loops run to `count`, so the capacity costs uniform space, not iterations. A `StructuredBuffer` caller copies
-into a local array first; the library takes no resource, accessor macro or uniform of its own. The preconditions the C#
+vectors, and loops run to `count`, so the capacity costs uniform space, not iterations. A caller whose sites live in a
+buffer copies them into a local array first; the library takes no resource, accessor macro or uniform of its own. The preconditions the C#
 functions throw for are the caller's in a shader (finite arguments, `cellSize > 0`, the stated ranges, `p` within 2^23
 cells). The ring pass is bounded `k <= 37` and exits as C# does; the box pass recomputes each distance instead of caching
 75 x 75 of them, which gives the same values. The C# mirror compiles the array as `T[]`, and
