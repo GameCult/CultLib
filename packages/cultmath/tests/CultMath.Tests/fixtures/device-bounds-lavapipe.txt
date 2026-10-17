@@ -20,14 +20,14 @@ lavapipe-glsl	15	vec2 cultmath_iv_min(vec2, vec2)	ulp-bounded	256	0	0	a324b35cb4
 lavapipe-glsl	16	vec2 cultmath_iv_max(vec2, vec2)	ulp-bounded	256	0	0	d68412262ca234c1da130fc5217ba6856da3e92e435c28c1fbdbf3692a89e1fa
 lavapipe-glsl	17	vec2 cultmath_iv_sqr(vec2)	ulp-bounded	256	0	0	dbbb0e0df015456393452377d689732428a9a8e24d8e2b407ee9620593b4c46b
 lavapipe-glsl	18	vec2 cultmath_iv_sqrt(vec2)	ulp-bounded	256	0	0	95bd15d1b283713fc632ced350f5da1b89f8f73e6618329773db1b52acd29991
-lavapipe-glsl	19	vec2 cultmath_iv_clamp(vec2, float, float)	ulp-bounded	256	0	0	268d61fd6d122e2b85e211c96daf410fb7e2d8ff83ec2082709f640504c852a7
+lavapipe-glsl	19	vec2 cultmath_iv_clamp(vec2, float, float)	ulp-bounded	256	0	0	abe9daf24930a5e3a49ec994c4cae3a0c27b9d019d6d93ec1963ec3daad664a0
 lavapipe-glsl	20	vec2 cultmath_iv_saturate(vec2)	ulp-bounded	256	0	0	0f844ef8c4d9a9f748c80677bbbfc36b5f6e682eb87c2d46e7e20635d5f55c26
 lavapipe-glsl	21	vec2 cultmath_iv_smoothstep(float, float, vec2)	ulp-bounded	256	0	0	3d5944a4c43feb91d6786924e0f5439c05285d28ff1f500b5582893758dd4ce5
 lavapipe-glsl	22	vec2 cultmath_iv_lerp(vec2, vec2, float)	ulp-bounded	256	0	0	96b09e90a3fbbfe81379a29a23b676e490bc7dc6bb731450197707e6cf4c573f
 lavapipe-glsl	23	vec2 cultmath_iv_snoise_ball(vec3, float)	ulp-bounded	242	54	0	570eb031260c8f4aab42edc57a5fa1d0da70e8a4e6f0b4bf68208c15506f7cb5
 lavapipe-glsl	24	vec2 cultmath_iv_fbm_ball(vec3, float, int, float, float)	ulp-bounded	250	56	0	9e7017426314537f84c58dcdd1f85188cbe8f4dd9ababed887f60776cf861ebf
 lavapipe-glsl	25	vec4 cultmath_iv_frustum_ball(vec2, float, float, float, float)	ulp-bounded	198	1.6457063576593662	0	327c306aa4d06aecbb2681d8808c6dbf0567e87b54a6067c68001e36b3e52169
-lavapipe-glsl	26	vec2 cultmath_iv_exp(vec2)	ulp-bounded, platform exp	7	7.526057804152758	0	1a46b0fa116f55e5abd70ec9f2a66de0befe8b3577fe472f9eaa98932aae8040
+lavapipe-glsl	26	vec2 cultmath_iv_exp(vec2)	ulp-bounded, platform exp	7	7.526057804152758	0	b4af8232dc3dd782cc6d790e928ede0f6ba6dfdffd6c71dd9494fb58973e485c
 lavapipe-glsl	27	CultPhasor cultmath_phacelle(vec3, vec3, float, float)	ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20 max(|v|, 1); on a device |diff| <= 2^-18 max(|v|, 1)	0	18.5	0	705b4c18027a0838218645e9368c3749ae4b5bf75e0485985725e8e72b73ab88
 lavapipe-glsl	28	float cultmath_snoise(vec3)	ulp-bounded, on the simplex tie set	127	112	0	6929326e4f27726d7bbdbac3a7823209e2ecfcd301018ef164527c4c1a9f7ae8
 lavapipe-glsl	29	vec4 cultmath_snoise_grad(vec3)	ulp-bounded, on the simplex tie set	102	546.5	0	6173a812fd4059fa19bce84d34858c6035cdda98aa21a2b210e611cbd58c29d6
@@ -36,7 +36,7 @@ lavapipe-glsl	31	vec3 cultmath_af_symbol(float, float)	ulp-bounded	256	0	0	04147
 lavapipe-glsl	32	vec3 cultmath_af_from_iv(vec2)	ulp-bounded	256	0	0	306fe58a3268199fc8fd845a32d956f349a790422fa5c87d5a0824636cb55424
 lavapipe-glsl	33	vec2 cultmath_af_range(vec3)	ulp-bounded	256	0	0	6245eeba19473d69d0d8155e20e2e6089a6843140723d23ed5d501064023a44a
 lavapipe-glsl	34	vec3 cultmath_af_add(vec3, vec3)	ulp-bounded	256	0	0	cb1cb3fc69224837342de767525d332687b9d3e17b3de255c28e2f0f65f32640
-lavapipe-glsl	35	vec3 cultmath_af_sub(vec3, vec3)	ulp-bounded	256	0	0	df44c501a8be20dc46a54faac9583da13f4367adc501a33fe14624f10e54b558
+lavapipe-glsl	35	vec3 cultmath_af_sub(vec3, vec3)	ulp-bounded	256	0	0	a8fad8ea86cf61841430293fdd9840a54008160250114040380c9634c63bb17e
 lavapipe-glsl	36	vec3 cultmath_af_neg(vec3)	ulp-bounded	256	0	0	e485acf8ee21c6d880621cc6216b3b2a78318f56f5864b33c5509be27e22a694
 lavapipe-glsl	37	vec3 cultmath_af_scale(vec3, float)	ulp-bounded	256	0	0	8b0c8a540fea82fe058efc42ffa38dbd69850e579cefe5fdbc4c164b715ec15d
 lavapipe-glsl	38	vec3 cultmath_af_add_iv(vec3, vec2)	ulp-bounded	256	0	0	620f747e6ba53014c9714a8dbfaa3ff93f281c80938bd035ef64657e3bdc1a16
@@ -50,7 +50,7 @@ lavapipe-glsl	45	vec3 cultmath_af_snoise(vec3, vec3, float)	ulp-bounded, reach 1
 lavapipe-glsl	46	vec3 cultmath_af_fbm(vec3, vec3, float, int, float, float)	ulp-bounded, reach 1e-6 to 1e-3	27	102.5	0	42246db4e19a1da20433517cdc7016dda375ea70dc90d1a777679bfd76fb59e8
 lavapipe-glsl	47	float cultmath_cycles_divide(float, float)	ulp-bounded	256	0	0	87f143c57806ad52c3295cde67e97f31e39c8572b8c0a4b8c577e6fcd8ecbebf
 lavapipe-glsl	48	float cultmath_cycles_power(float, float)	ulp-bounded, platform pow	136	4.918926113980705	0	0e62db5ea32fdb9fdd3a9b135a914ddadd3231bdee0ff15c709102b26bb89186
-lavapipe-glsl	49	float cultmath_cycles_logarithm(float, float)	ulp-bounded, platform log	147	4.94622778071426	0	5b2bf1411512c7e5a3f4b335a16fc3ba00ba0784bb87acb14b7d1b9dd551b2f3
+lavapipe-glsl	49	float cultmath_cycles_logarithm(float, float)	ulp-bounded, platform log	146	4.94622778071426	0	5b2bf1411512c7e5a3f4b335a16fc3ba00ba0784bb87acb14b7d1b9dd551b2f3
 lavapipe-glsl	50	float cultmath_cycles_sqrt(float)	ulp-bounded	256	0	0	6d4beb34e93ae304b3d9d30f203fb6c2ba222affc0efc35bb5441528e9062a9a
 lavapipe-glsl	51	float cultmath_cycles_inverse_sqrt(float)	ulp-bounded	256	0	0	71aadd5bd384b9ca2eb89827de53af810a1350b02177de1987e9405e4a6e9ad8
 lavapipe-glsl	52	float cultmath_cycles_modulo(float, float)	ulp-bounded	256	0	0	cf055cafcb5b2d4789a0a2d5cfbc8bc79f52df646b60f5e47db3f994680949e9
@@ -96,16 +96,16 @@ lavapipe-glsl	91	vec3 cultmath_cycles_mix_val(float, vec3, vec3)	ulp-bounded	256
 lavapipe-glsl	92	vec3 cultmath_cycles_mix_color(float, vec3, vec3)	ulp-bounded	256	0	0	00067b1567bcd6c07a81fa5002f145dfca22437a3f3df5389b2665334d14909b
 lavapipe-glsl	93	vec3 cultmath_cycles_mix_soft(float, vec3, vec3)	ulp-bounded	157	1.9750388068880254	0	ed7c5508ca0543cc20a5f0c5624e75e3ca2a2d6044d481816eeda2edc50c0592
 lavapipe-glsl	94	vec3 cultmath_cycles_mix_linear(float, vec3, vec3)	ulp-bounded	256	0	0	672435cc30bcbbb253cce7316ee0712b1a18f06924bc89cea2d3388dd164a15d
-lavapipe-glsl	95	float cultmath_cycles_arcsine(float)	ulp-bounded, platform asin	155	2734.286809678319	0	f28f3ed0a53ffeebdfa84865d2d3d41590e6b46fc1578d40e1215e2a9e1af585
+lavapipe-glsl	95	float cultmath_cycles_arcsine(float)	ulp-bounded, platform asin	154	2734.286809678319	0	f28f3ed0a53ffeebdfa84865d2d3d41590e6b46fc1578d40e1215e2a9e1af585
 lavapipe-glsl	96	float cultmath_cycles_arccosine(float)	ulp-bounded, platform acos	79	1046.8674409774287	0	22a2c38ab5a232cdbb33cf0c133362581a398f64a4d0d5d6dd89dc5af06bd890
-lavapipe-glsl	97	float cultmath_cycles_arctan2(float, float)	ulp-bounded, platform atan	7	25.5	0	2c60447d80186f6dc9726f19c09fa96ec3f66d8f5688968da533d9195ea463c4
+lavapipe-glsl	97	float cultmath_cycles_arctan2(float, float)	ulp-bounded, platform atan	6	25.5	0	2c60447d80186f6dc9726f19c09fa96ec3f66d8f5688968da533d9195ea463c4
 lavapipe-glsl	98	mat3 cultmath_snoise_hessian(vec3)	ulp-bounded	30	1358.4375	0	62bbafb8420ed5aaa0ce11d1470ca98945e690b186c33a1e7cf4d71478396465
 lavapipe-glsl	99	mat3 cultmath_snoise_hessian(vec3)	ulp-bounded, on the simplex tie set	110	1317.4754224467295	0	0efd9b3a637b46033ed0351f64de274db4d9ce05bb83dd1ce57afb3ceaea26bc
 lavapipe-glsl	100	float cultmath_integral_clamp_linear(float, float, float, float, float, float)	ulp-bounded	256	0	0	84bf9c9a2126b3114a692507cc54f58d313afc33de8a1cac83969cc508433cbe
 lavapipe-glsl	101	float cultmath_integral_clamp_linear(float, float, float, float, float, float)	ulp-bounded, lo above hi and infinite bounds	256	0	0	ff999094d7794aa525e0f9f9a067aa21408a59559aa546cace3b1bb4a8c7f96d
 lavapipe-glsl	102	float cultmath_integral_clamp_linear(float, float, float, float, float, float)	ulp-bounded, zero-length spans and flat infinite clamps	256	0	0	c3cc48f4edcac6801b9223f12d289934916431bdfaea8f68af33a1b833ab9860
 lavapipe-glsl	103	SpanNoise cultmath_span_fbm(SpanPath, SpanStage, int, float, float)	ulp-bounded	7	1012477.3459086476	0	97c531c3a690e056d95e949e243ae74111d4a93a39fd22c0358a103b3bb14bc1
-lavapipe-glsl	104	SpanNoise cultmath_span_ridged(SpanPath, SpanStage, int, float, float)	ulp-bounded	8	948534.9108393334	0	c5d55a1d05403f6a1a7b7946c3a4c9556277f217fc660d338b3894efbb333e43
+lavapipe-glsl	104	SpanNoise cultmath_span_ridged(SpanPath, SpanStage, int, float, float)	ulp-bounded	8	948534.9108393334	0	54fd229d69439ff3318690b7802143f8410dc7ece30ad0d56ccc4b68bf39bec2
 lavapipe-glsl	105	vec4 cultmath_snoise_grad(vec3)	ulp-bounded, coordinate bands 1e-4 to 1e2	116	249.5	0	fff9658a8ec055766c9327ee9b680cf7fb83736c472ae90a11e50d6d2a053fdc
 lavapipe-glsl	106	vec4 cultmath_snoise_grad(vec3)	ulp-bounded, coordinate bands 1e2 to 4e6	70	11866336.625	0	833484714ebcea59d86e0fbc2eaa4ae247c29541703763989e6758547dbf6db8
 lavapipe-glsl	107	mat3 cultmath_snoise_hessian(vec3)	ulp-bounded, coordinate bands 1e-4 to 1e2	120	980.7417469278579	0	3ea43dabe0091ea8e994c1dfc65c7274ed38b9343d4d1d06f7caa09c806c91df
@@ -117,13 +117,15 @@ lavapipe-glsl	112	vec3 cultmath_segment_closest(vec3, vec3, vec3)	ulp-bounded	21
 lavapipe-glsl	113	vec4 cultmath_power_border_step(vec3, vec4, vec4, vec4)	ulp-bounded	214	43	0	fdfdff73434a146489b002af5e80663658b2dd7b86105a7e65bdab755ab54a5e
 lavapipe-glsl	114	vec4 cultmath_power_score(vec3, vec4)	ulp-bounded	207	1.4619722193127032	0	dc1aa639ae1dc44003a0f5d8c7c99b2e3d7f51b158c96b3c3bd7a9f7df6d927e
 lavapipe-glsl	115	vec4 cultmath_multiplicative_score(vec3, vec4)	ulp-bounded	234	1.5529504197086745	0	ee1af26ac82489e8d363e7a6b6b59da7dacfb397d4bc9a723dd68607a69da41a
-lavapipe-glsl	116	CultSiteCells cultmath_site_cells_insert(CultSiteCells, vec4, int)	ulp-bounded	256	0	0	b8687b139aaa865e9f28fbc84fe37dd4a1d4873d5ff8e2074922c07f56551576
+lavapipe-glsl	116	CultSiteCells cultmath_site_cells_insert(CultSiteCells, vec4, int)	ulp-bounded	256	0	0	bfad8b369011cfbf14644fec68ce65620694fcbf3cd3804f54953d55587313fc
 lavapipe-glsl	117	vec4 cultmath_site_cells_border(CultSiteCells)	ulp-bounded	228	1.069496760346883	0	d7b478bef7e6f80902d0b5b255cb4fca30757ff6b9d25dac2030b037a8d342ce
 lavapipe-glsl	118	float cultmath_gabriel_margin(vec3, vec3, vec3)	ulp-bounded	201	2	0	6a80fbef486de496a08b7c8e7f9f65e2cc0f5b9f93abe50c43e84ad88d1ed034
 lavapipe-glsl	119	vec3 cultmath_lattice_site(vec2, float, float)	ulp-bounded	256	0	0	84df739c336796638dcf0a99c328a4b8c150c25d80e02248d4b6d023dc13161f
 lavapipe-glsl	120	float cultmath_lattice_weight(float, float, float, float)	ulp-bounded	231	2.0671110200639147	0	434cdf5603abc2942aa624b9d2e98d5f1231706c86180a80439bc8b72bdd066e
-lavapipe-glsl	121	float cultmath_lattice_distance(vec2, vec2, float, vec2, float)	ulp-bounded	256	0	0	622d0e1ea0fcf0e2700558dbdaea92b8ce02e44048dbf35944c23b5088c3e40c
-lavapipe-glsl	122	float cultmath_lattice_smooth_step(float, float, float, float)	ulp-bounded	256	0	0	e6c9aeb52c5e63ebf3c8525dd39b5b88d5f890fd4f23f4894a92232807a3d94e
+lavapipe-glsl	121	float cultmath_lattice_distance(vec2, vec2, float, vec2, float)	ulp-bounded	256	0	0	ba3fa3bdb4f5f5b2478a4ddfb2e08f2f425e997778a716884e43b13d6ed050b5
+lavapipe-glsl	122	float cultmath_lattice_smooth_step(float, float, float, float)	ulp-bounded	256	0	0	6cbeddde536b12e83873f2e5ac60d16bef22049d2a7dea61af0ff1e0d5b84740
+lavapipe-glsl	123	vec4 cultmath_power_border(vec3, vec4[128], int)	ulp-bounded	188	65.72121683891783	0	8427c2b99109a4f59ff745fdb87f261deb1cbae34ce99bc1ae05ebb7f9963b4d
+lavapipe-glsl	124	vec4 cultmath_weighted_lattice_cells(vec2, float, vec4[128], int, float, float, float, float, float, vec2, float)	ulp-bounded	179	3	0	fd3b58c4e2ba8a7bf801a1e6cdff82468abcb368442bc98b2583fda9d2e6f823
 lavapipe-hlsl	0	float cultmath_snoise(vec3)	ulp-bounded	94	122.6875	0	5d41c14241a13124f2e1b49f230f5df0c48d0d69fb1be9ef2f33dc1702bf0b0a
 lavapipe-hlsl	1	float cultmath_snoise(vec2)	ulp-bounded	204	1	0	81d9c62726afdccbbe4ffef173b5c92731eb6bf5927b3979d653e50dbd5d4064
 lavapipe-hlsl	2	vec4 cultmath_snoise_grad(vec3)	ulp-bounded	71	617.5	0	f7e9ed1707cdb015efaba0e0150193309da0d4c125349518f8b7c60a17b25790
@@ -143,14 +145,14 @@ lavapipe-hlsl	15	vec2 cultmath_iv_min(vec2, vec2)	ulp-bounded	256	0	0	a324b35cb4
 lavapipe-hlsl	16	vec2 cultmath_iv_max(vec2, vec2)	ulp-bounded	256	0	0	d68412262ca234c1da130fc5217ba6856da3e92e435c28c1fbdbf3692a89e1fa
 lavapipe-hlsl	17	vec2 cultmath_iv_sqr(vec2)	ulp-bounded	256	0	0	dbbb0e0df015456393452377d689732428a9a8e24d8e2b407ee9620593b4c46b
 lavapipe-hlsl	18	vec2 cultmath_iv_sqrt(vec2)	ulp-bounded	256	0	0	95bd15d1b283713fc632ced350f5da1b89f8f73e6618329773db1b52acd29991
-lavapipe-hlsl	19	vec2 cultmath_iv_clamp(vec2, float, float)	ulp-bounded	256	0	0	268d61fd6d122e2b85e211c96daf410fb7e2d8ff83ec2082709f640504c852a7
+lavapipe-hlsl	19	vec2 cultmath_iv_clamp(vec2, float, float)	ulp-bounded	256	0	0	abe9daf24930a5e3a49ec994c4cae3a0c27b9d019d6d93ec1963ec3daad664a0
 lavapipe-hlsl	20	vec2 cultmath_iv_saturate(vec2)	ulp-bounded	256	0	0	0f844ef8c4d9a9f748c80677bbbfc36b5f6e682eb87c2d46e7e20635d5f55c26
 lavapipe-hlsl	21	vec2 cultmath_iv_smoothstep(float, float, vec2)	ulp-bounded	256	0	0	3d5944a4c43feb91d6786924e0f5439c05285d28ff1f500b5582893758dd4ce5
 lavapipe-hlsl	22	vec2 cultmath_iv_lerp(vec2, vec2, float)	ulp-bounded	256	0	0	96b09e90a3fbbfe81379a29a23b676e490bc7dc6bb731450197707e6cf4c573f
 lavapipe-hlsl	23	vec2 cultmath_iv_snoise_ball(vec3, float)	ulp-bounded	244	54	0	f36530a4cd8c9fdc1c73e7ddb6782cd11cbf8493e2ee7b0656e818812504267e
 lavapipe-hlsl	24	vec2 cultmath_iv_fbm_ball(vec3, float, int, float, float)	ulp-bounded	252	75	0	a1677ea42ce91a5d2b6f83fa7c44879b7a184ed4631108d7a1c6e710bf26ff02
 lavapipe-hlsl	25	vec4 cultmath_iv_frustum_ball(vec2, float, float, float, float)	ulp-bounded	198	1.6457063576593662	0	327c306aa4d06aecbb2681d8808c6dbf0567e87b54a6067c68001e36b3e52169
-lavapipe-hlsl	26	vec2 cultmath_iv_exp(vec2)	ulp-bounded, platform exp	7	7.526057804152758	0	1a46b0fa116f55e5abd70ec9f2a66de0befe8b3577fe472f9eaa98932aae8040
+lavapipe-hlsl	26	vec2 cultmath_iv_exp(vec2)	ulp-bounded, platform exp	7	7.526057804152758	0	b4af8232dc3dd782cc6d790e928ede0f6ba6dfdffd6c71dd9494fb58973e485c
 lavapipe-hlsl	27	CultPhasor cultmath_phacelle(vec3, vec3, float, float)	ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20 max(|v|, 1); on a device |diff| <= 2^-18 max(|v|, 1)	0	18.5	0	705b4c18027a0838218645e9368c3749ae4b5bf75e0485985725e8e72b73ab88
 lavapipe-hlsl	28	float cultmath_snoise(vec3)	ulp-bounded, on the simplex tie set	144	99	0	be76512b18eb678194dad0c4726c0aef9ba34012b60b79d24c2df27989707145
 lavapipe-hlsl	29	vec4 cultmath_snoise_grad(vec3)	ulp-bounded, on the simplex tie set	111	546.5	0	124d4be07cbb66edab644e649c081cb7c8be5d99b6c1d84fec5d7ef65c76ed0f
@@ -159,7 +161,7 @@ lavapipe-hlsl	31	vec3 cultmath_af_symbol(float, float)	ulp-bounded	256	0	0	04147
 lavapipe-hlsl	32	vec3 cultmath_af_from_iv(vec2)	ulp-bounded	256	0	0	306fe58a3268199fc8fd845a32d956f349a790422fa5c87d5a0824636cb55424
 lavapipe-hlsl	33	vec2 cultmath_af_range(vec3)	ulp-bounded	256	0	0	6245eeba19473d69d0d8155e20e2e6089a6843140723d23ed5d501064023a44a
 lavapipe-hlsl	34	vec3 cultmath_af_add(vec3, vec3)	ulp-bounded	256	0	0	cb1cb3fc69224837342de767525d332687b9d3e17b3de255c28e2f0f65f32640
-lavapipe-hlsl	35	vec3 cultmath_af_sub(vec3, vec3)	ulp-bounded	256	0	0	df44c501a8be20dc46a54faac9583da13f4367adc501a33fe14624f10e54b558
+lavapipe-hlsl	35	vec3 cultmath_af_sub(vec3, vec3)	ulp-bounded	256	0	0	a8fad8ea86cf61841430293fdd9840a54008160250114040380c9634c63bb17e
 lavapipe-hlsl	36	vec3 cultmath_af_neg(vec3)	ulp-bounded	256	0	0	e485acf8ee21c6d880621cc6216b3b2a78318f56f5864b33c5509be27e22a694
 lavapipe-hlsl	37	vec3 cultmath_af_scale(vec3, float)	ulp-bounded	256	0	0	8b0c8a540fea82fe058efc42ffa38dbd69850e579cefe5fdbc4c164b715ec15d
 lavapipe-hlsl	38	vec3 cultmath_af_add_iv(vec3, vec2)	ulp-bounded	256	0	0	620f747e6ba53014c9714a8dbfaa3ff93f281c80938bd035ef64657e3bdc1a16
@@ -173,7 +175,7 @@ lavapipe-hlsl	45	vec3 cultmath_af_snoise(vec3, vec3, float)	ulp-bounded, reach 1
 lavapipe-hlsl	46	vec3 cultmath_af_fbm(vec3, vec3, float, int, float, float)	ulp-bounded, reach 1e-6 to 1e-3	24	122.75	0	7f941b1f0c76d9f2121027a555ae7f2a741cc164402f0df75237198ac97f850b
 lavapipe-hlsl	47	float cultmath_cycles_divide(float, float)	ulp-bounded	256	0	0	87f143c57806ad52c3295cde67e97f31e39c8572b8c0a4b8c577e6fcd8ecbebf
 lavapipe-hlsl	48	float cultmath_cycles_power(float, float)	ulp-bounded, platform pow	136	4.918926113980705	0	0e62db5ea32fdb9fdd3a9b135a914ddadd3231bdee0ff15c709102b26bb89186
-lavapipe-hlsl	49	float cultmath_cycles_logarithm(float, float)	ulp-bounded, platform log	147	4.94622778071426	0	5b2bf1411512c7e5a3f4b335a16fc3ba00ba0784bb87acb14b7d1b9dd551b2f3
+lavapipe-hlsl	49	float cultmath_cycles_logarithm(float, float)	ulp-bounded, platform log	146	4.94622778071426	0	5b2bf1411512c7e5a3f4b335a16fc3ba00ba0784bb87acb14b7d1b9dd551b2f3
 lavapipe-hlsl	50	float cultmath_cycles_sqrt(float)	ulp-bounded	256	0	0	6d4beb34e93ae304b3d9d30f203fb6c2ba222affc0efc35bb5441528e9062a9a
 lavapipe-hlsl	51	float cultmath_cycles_inverse_sqrt(float)	ulp-bounded	256	0	0	71aadd5bd384b9ca2eb89827de53af810a1350b02177de1987e9405e4a6e9ad8
 lavapipe-hlsl	52	float cultmath_cycles_modulo(float, float)	ulp-bounded	256	0	0	cf055cafcb5b2d4789a0a2d5cfbc8bc79f52df646b60f5e47db3f994680949e9
@@ -219,16 +221,16 @@ lavapipe-hlsl	91	vec3 cultmath_cycles_mix_val(float, vec3, vec3)	ulp-bounded	256
 lavapipe-hlsl	92	vec3 cultmath_cycles_mix_color(float, vec3, vec3)	ulp-bounded	256	0	0	00067b1567bcd6c07a81fa5002f145dfca22437a3f3df5389b2665334d14909b
 lavapipe-hlsl	93	vec3 cultmath_cycles_mix_soft(float, vec3, vec3)	ulp-bounded	157	1.9750388068880254	0	ed7c5508ca0543cc20a5f0c5624e75e3ca2a2d6044d481816eeda2edc50c0592
 lavapipe-hlsl	94	vec3 cultmath_cycles_mix_linear(float, vec3, vec3)	ulp-bounded	256	0	0	672435cc30bcbbb253cce7316ee0712b1a18f06924bc89cea2d3388dd164a15d
-lavapipe-hlsl	95	float cultmath_cycles_arcsine(float)	ulp-bounded, platform asin	155	2734.286809678319	0	f28f3ed0a53ffeebdfa84865d2d3d41590e6b46fc1578d40e1215e2a9e1af585
+lavapipe-hlsl	95	float cultmath_cycles_arcsine(float)	ulp-bounded, platform asin	154	2734.286809678319	0	f28f3ed0a53ffeebdfa84865d2d3d41590e6b46fc1578d40e1215e2a9e1af585
 lavapipe-hlsl	96	float cultmath_cycles_arccosine(float)	ulp-bounded, platform acos	79	1046.8674409774287	0	22a2c38ab5a232cdbb33cf0c133362581a398f64a4d0d5d6dd89dc5af06bd890
-lavapipe-hlsl	97	float cultmath_cycles_arctan2(float, float)	ulp-bounded, platform atan	7	25.5	0	2c60447d80186f6dc9726f19c09fa96ec3f66d8f5688968da533d9195ea463c4
+lavapipe-hlsl	97	float cultmath_cycles_arctan2(float, float)	ulp-bounded, platform atan	6	25.5	0	2c60447d80186f6dc9726f19c09fa96ec3f66d8f5688968da533d9195ea463c4
 lavapipe-hlsl	98	mat3 cultmath_snoise_hessian(vec3)	ulp-bounded	33	2377.8799856935966	0	a64853839f394cc7c367ba5e107caa8bb396f07cf202263aa917095dd1c939f7
 lavapipe-hlsl	99	mat3 cultmath_snoise_hessian(vec3)	ulp-bounded, on the simplex tie set	132	1317.4754224467295	0	9066a49e50731881583ffca16c949171bb61578a1dfd497c54dafe773ab49488
 lavapipe-hlsl	100	float cultmath_integral_clamp_linear(float, float, float, float, float, float)	ulp-bounded	256	0	0	84bf9c9a2126b3114a692507cc54f58d313afc33de8a1cac83969cc508433cbe
 lavapipe-hlsl	101	float cultmath_integral_clamp_linear(float, float, float, float, float, float)	ulp-bounded, lo above hi and infinite bounds	256	0	0	ff999094d7794aa525e0f9f9a067aa21408a59559aa546cace3b1bb4a8c7f96d
 lavapipe-hlsl	102	float cultmath_integral_clamp_linear(float, float, float, float, float, float)	ulp-bounded, zero-length spans and flat infinite clamps	256	0	0	c3cc48f4edcac6801b9223f12d289934916431bdfaea8f68af33a1b833ab9860
 lavapipe-hlsl	103	SpanNoise cultmath_span_fbm(SpanPath, SpanStage, int, float, float)	ulp-bounded	3	1024946.5723514018	0	f6395b9f2609d914894c35b442719be3cc3e11d07c5f0bae5a8719651e60cd4e
-lavapipe-hlsl	104	SpanNoise cultmath_span_ridged(SpanPath, SpanStage, int, float, float)	ulp-bounded	7	948534.9108393334	0	bfda3536007373bdbef75a5c7bb63a7192f1c90b082984588f23e5b4eb767867
+lavapipe-hlsl	104	SpanNoise cultmath_span_ridged(SpanPath, SpanStage, int, float, float)	ulp-bounded	7	948534.9108393334	0	2adfdc4e6c81ee0bc7bb7869c55207f5033b4176104bc36dce1528ae0a5fe39b
 lavapipe-hlsl	105	vec4 cultmath_snoise_grad(vec3)	ulp-bounded, coordinate bands 1e-4 to 1e2	119	423.1430718408491	0	a94c38d1baa651a6faa510920cbe9d1f9528c0adb863ba6e35d835588ad00a58
 lavapipe-hlsl	106	vec4 cultmath_snoise_grad(vec3)	ulp-bounded, coordinate bands 1e2 to 4e6	73	13116827.1875	0	9ad0fd577b26aa717534c0693df97ee41bcded0768f442739b98f505e4a2a430
 lavapipe-hlsl	107	mat3 cultmath_snoise_hessian(vec3)	ulp-bounded, coordinate bands 1e-4 to 1e2	122	980.7417469278579	0	0977fa6f446e4f916a9b938ce24ea32df6aa912dc991c182014d309dc0efb1cb
@@ -240,10 +242,12 @@ lavapipe-hlsl	112	vec3 cultmath_segment_closest(vec3, vec3, vec3)	ulp-bounded	21
 lavapipe-hlsl	113	vec4 cultmath_power_border_step(vec3, vec4, vec4, vec4)	ulp-bounded	214	43	0	fdfdff73434a146489b002af5e80663658b2dd7b86105a7e65bdab755ab54a5e
 lavapipe-hlsl	114	vec4 cultmath_power_score(vec3, vec4)	ulp-bounded	207	1.4619722193127032	0	dc1aa639ae1dc44003a0f5d8c7c99b2e3d7f51b158c96b3c3bd7a9f7df6d927e
 lavapipe-hlsl	115	vec4 cultmath_multiplicative_score(vec3, vec4)	ulp-bounded	234	1.5529504197086745	0	ee1af26ac82489e8d363e7a6b6b59da7dacfb397d4bc9a723dd68607a69da41a
-lavapipe-hlsl	116	CultSiteCells cultmath_site_cells_insert(CultSiteCells, vec4, int)	ulp-bounded	256	0	0	b8687b139aaa865e9f28fbc84fe37dd4a1d4873d5ff8e2074922c07f56551576
+lavapipe-hlsl	116	CultSiteCells cultmath_site_cells_insert(CultSiteCells, vec4, int)	ulp-bounded	256	0	0	bfad8b369011cfbf14644fec68ce65620694fcbf3cd3804f54953d55587313fc
 lavapipe-hlsl	117	vec4 cultmath_site_cells_border(CultSiteCells)	ulp-bounded	228	1.069496760346883	0	d7b478bef7e6f80902d0b5b255cb4fca30757ff6b9d25dac2030b037a8d342ce
 lavapipe-hlsl	118	float cultmath_gabriel_margin(vec3, vec3, vec3)	ulp-bounded	201	2	0	6a80fbef486de496a08b7c8e7f9f65e2cc0f5b9f93abe50c43e84ad88d1ed034
 lavapipe-hlsl	119	vec3 cultmath_lattice_site(vec2, float, float)	ulp-bounded	256	0	0	84df739c336796638dcf0a99c328a4b8c150c25d80e02248d4b6d023dc13161f
 lavapipe-hlsl	120	float cultmath_lattice_weight(float, float, float, float)	ulp-bounded	231	2.0671110200639147	0	434cdf5603abc2942aa624b9d2e98d5f1231706c86180a80439bc8b72bdd066e
-lavapipe-hlsl	121	float cultmath_lattice_distance(vec2, vec2, float, vec2, float)	ulp-bounded	256	0	0	622d0e1ea0fcf0e2700558dbdaea92b8ce02e44048dbf35944c23b5088c3e40c
-lavapipe-hlsl	122	float cultmath_lattice_smooth_step(float, float, float, float)	ulp-bounded	256	0	0	e6c9aeb52c5e63ebf3c8525dd39b5b88d5f890fd4f23f4894a92232807a3d94e
+lavapipe-hlsl	121	float cultmath_lattice_distance(vec2, vec2, float, vec2, float)	ulp-bounded	256	0	0	ba3fa3bdb4f5f5b2478a4ddfb2e08f2f425e997778a716884e43b13d6ed050b5
+lavapipe-hlsl	122	float cultmath_lattice_smooth_step(float, float, float, float)	ulp-bounded	256	0	0	6cbeddde536b12e83873f2e5ac60d16bef22049d2a7dea61af0ff1e0d5b84740
+lavapipe-hlsl	123	vec4 cultmath_power_border(vec3, vec4[128], int)	ulp-bounded	188	65.72121683891783	0	8427c2b99109a4f59ff745fdb87f261deb1cbae34ce99bc1ae05ebb7f9963b4d
+lavapipe-hlsl	124	vec4 cultmath_weighted_lattice_cells(vec2, float, vec4[128], int, float, float, float, float, float, vec2, float)	ulp-bounded	179	3	0	fd3b58c4e2ba8a7bf801a1e6cdff82468abcb368442bc98b2583fda9d2e6f823
