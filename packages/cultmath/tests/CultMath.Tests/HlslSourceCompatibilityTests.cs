@@ -205,7 +205,7 @@ public sealed class HlslSourceCompatibilityTests
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
         // The three site-array functions are compared by SiteArrayMirrorsMatchCSharp, which draws their counts and arrays.
-        Assert.Equal(137, compared.Count);
+        Assert.Equal(140, compared.Count);
     }
 
     /// <summary>
