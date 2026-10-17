@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The one instruction-level SPIR-V edit of the GLSL build. Binary, never text.
 
-usage: spvedit.py <in.spv> <out.spv> <wrappers.tsv>
+usage: spvedit.py <in.spv> <out.spv> <wrappers.tsv> <capacity.tsv>
 1. Keeps only the capabilities Shader and Linkage and drops every OpExtension.
 2. Deletes each wrapper function with its OpName and decorations, moves its LinkageAttributes Export to its callee, and
    sets the callee's OpName to the source name. Refuses a wrapper that is not exactly one OpFunctionCall.
@@ -14,6 +14,7 @@ import struct, sys
 
 OP_NAME, OP_MEMBER_NAME, OP_CAPABILITY, OP_EXTENSION, OP_DECORATE, OP_MEMBER_DECORATE = 5, 6, 17, 10, 71, 72
 OP_TYPE_ARRAY, OP_CONSTANT, OP_SPEC_CONSTANT, DECORATION_SPEC_ID = 28, 43, 50, 1
+SPEC_ID = 0
 OP_TYPE_POINTER, OP_TYPE_FUNCTION, OP_FUNCTION, OP_PARAMETER, OP_FUNCTION_END = 32, 33, 54, 55, 56
 OP_CALL, OP_LABEL, OP_VARIABLE, OP_LOAD, OP_STORE = 57, 248, 59, 61, 62
 CAP_SHADER, CAP_LINKAGE, DECORATION_LINKAGE, LINKAGE_EXPORT, FUNCTION_STORAGE = 1, 5, 41, 41, 7
@@ -178,10 +179,12 @@ def by_value(h, ins):
     return out, len(newtype), len(newid)
 
 
-def capacity_edit(h, ins, rows, callee_of):
+def capacity_edit(h, ins, rows, callee_of, default, sentinel):
     """Each capacity parameter (wrappers.tsv column 5) of each callee has an OpTypeArray type. Exactly one length id may
     serve all of them, and nothing but OpTypeArray, OpName and decorations may use it. That OpConstant becomes an
-    OpSpecConstant with SpecId 0 named cultmath_max_sites. Returns the instructions and the spec constant id."""
+    OpSpecConstant with SpecId SPEC_ID named cultmath_max_sites, defaulting to the HLSL guard value. The constant is the
+    sentinel wrappers.py compiled the library with, so no array outside the capacity parameters shares its length id.
+    Returns the instructions and the spec constant id."""
     ftype = {x[1]: x for x in ins if op(x) == OP_TYPE_FUNCTION}
     arrays = {x[1]: x for x in ins if op(x) == OP_TYPE_ARRAY}
     params, cur = {}, None
@@ -201,6 +204,12 @@ def capacity_edit(h, ins, rows, callee_of):
     if len(lengths) != 1:
         sys.exit('refuse: %d array length ids serve the capacity parameters, expected exactly one' % len(lengths))
     cap = lengths.pop()
+    value = next(x[3] for x in ins if op(x) == OP_CONSTANT and x[2] == cap)
+    if value != sentinel:
+        sys.exit('refuse: the capacity length constant is %d, expected the sentinel %d' % (value, sentinel))
+    site_types = {params[fid][int(c)] for row, fid in zip(rows, callee_of) for c in row[4].split(',') if c}
+    if {t for t, a in arrays.items() if a[3] == cap} != site_types:
+        sys.exit('refuse: an array type of the capacity length is not a capacity parameter type')
     for x in ins:
         o = op(x)
         defines = o in (OP_CONSTANT, OP_SPEC_CONSTANT) and x[2] == cap
@@ -210,25 +219,26 @@ def capacity_edit(h, ins, rows, callee_of):
     out = []
     for x in ins:
         if op(x) == OP_CONSTANT and x[2] == cap:
-            x = [(x[0] & 0xffff0000) | OP_SPEC_CONSTANT] + x[1:]
+            x = [(x[0] & 0xffff0000) | OP_SPEC_CONSTANT, x[1], x[2], default]
         out.append(x)
     first = next((k for k, x in enumerate(out) if op(x) in (OP_DECORATE, OP_MEMBER_DECORATE)), None)
     if first is None:
         sys.exit('refuse: no annotation section to decorate the capacity constant in')
-    out[first:first] = [mk(OP_NAME, cap, *encode('cultmath_max_sites')), mk(OP_DECORATE, cap, DECORATION_SPEC_ID, 0)]
+    out[first:first] = [mk(OP_NAME, cap, *encode('cultmath_max_sites')), mk(OP_DECORATE, cap, DECORATION_SPEC_ID, SPEC_ID)]
     return out, cap
 
 
-def main(src, dst, tsv):
+def main(src, dst, tsv, capacity):
     h, ins = load(src)
     rows = [l.split('\t') for l in open(tsv).read().splitlines() if l]
     ins, callee_of = export_edit(h, ins, rows)
     ins, changed, params = by_value(h, ins)
-    ins, spec = capacity_edit(h, ins, rows, callee_of)
+    default, sentinel = [int(v) for v in open(capacity).read().split()]
+    ins, spec = capacity_edit(h, ins, rows, callee_of, default, sentinel)
     words = h + [v for x in ins for v in x]
     open(dst, 'wb').write(struct.pack('<%dI' % len(words), *words))
     print('spvedit: %d wrappers dropped; by-value: %d functions changed, %d parameters; capacity spec constant id %d' % (len(rows), changed, params, spec))
 
 
 if __name__ == '__main__':
-    main(*sys.argv[1:4])
+    main(*sys.argv[1:5])

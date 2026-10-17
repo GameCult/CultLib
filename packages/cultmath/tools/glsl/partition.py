@@ -6,18 +6,20 @@ Each top-level struct and function chunk goes to the file whose HLSL defines it 
 Cycles; Phacelle). The library-header prologue and any main are dropped. Writes core.glsl, cycles.glsl and
 phacelle.glsl bodies, with the 13 `static const float` constants of the HLSL as `const float NAME = <literal>;` at the
 head of the file that defines them. core.glsl opens with the HLSL's own CULTMATH_MAX_SITES guard lines, one line mapping
-SPIRV_CROSS_CONSTANT_ID_0 to uint(CULTMATH_MAX_SITES), and SPIRV-Cross's one spec-constant block. Licence lines, include guards and the #version contract belong to the caller.
+SPIRV_CROSS_CONSTANT_ID_<SPEC_ID of spvedit.py> (CultMath's own, 'CMS1') to uint(CULTMATH_MAX_SITES), and SPIRV-Cross's one spec-constant block. Licence lines, include guards and the #version contract belong to the caller.
 Refuses: a static const line that is not `static const float CULTMATH_X = <literal>;`, an unknown-origin chunk, a
 duplicate chunk, an unexpected prologue line, a missing or other SPIRV_CROSS_CONSTANT_ID block, and a call from a non-core chunk into a different non-core origin."""
 import collections, os, re, sys
+from spvedit import SPEC_ID
 
 OWNER = {'CultMath.hlsl': 'core', 'CultMath.Interval.hlsl': 'core', 'CultMath.Affine.hlsl': 'core',
          'CultMath.Cycles.hlsl': 'cycles', 'CultMath.Phacelle.hlsl': 'phacelle'}
 CONST = re.compile(r'^static const float (CULTMATH_\w+) = (-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?);$')
 PROLOGUE = re.compile(r'^(#version |#extension |precision |#ifdef SPIRV_CROSS|#define SPIRV_CROSS|#endif)')
 GUARD = re.compile(r'#ifndef CULTMATH_MAX_SITES\n#define CULTMATH_MAX_SITES (\d+)\n#endif\n')
-SPEC = re.compile(r'#ifndef SPIRV_CROSS_CONSTANT_ID_0\n#define SPIRV_CROSS_CONSTANT_ID_0 (\d+)u\n#endif\n'
-                  r'const uint cultmath_max_sites = SPIRV_CROSS_CONSTANT_ID_0;\n?')
+ID = 'SPIRV_CROSS_CONSTANT_ID_%d' % SPEC_ID
+SPEC = re.compile(r'#ifndef %s\n#define %s (\d+)u\n#endif\n'
+                  r'const uint cultmath_max_sites = %s;\n?' % (ID, ID, ID))
 STRUCT, FUNC = re.compile(r'^struct (\w+)$'), re.compile(r'^\w+ (\w+)\(.*\)$')
 
 
@@ -87,7 +89,7 @@ def main(shaders, glsl, outdir):
         files[o].append(body)
     os.makedirs(outdir, exist_ok=True)
     for o in OWNER.values():
-        head = [guard.group(0).rstrip('\n'), '#define SPIRV_CROSS_CONSTANT_ID_0 uint(CULTMATH_MAX_SITES)', spec.group(0).rstrip('\n')] if o == 'core' else []
+        head = [guard.group(0).rstrip('\n'), '#define %s uint(CULTMATH_MAX_SITES)' % ID, spec.group(0).rstrip('\n')] if o == 'core' else []
         text = '\n'.join(head + consts[o] + files[o]) + '\n'
         open(os.path.join(outdir, o + '.glsl'), 'w').write(text)
     print('partition:', {o: len(files[o]) for o in sorted(files)}, 'constants', sum(len(v) for v in consts.values()))

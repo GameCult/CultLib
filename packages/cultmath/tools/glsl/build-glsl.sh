@@ -44,14 +44,19 @@ fi
 export PATH=$TOOLS/bin:$PATH
 echo "dxc: $("$DXC" --version | head -1)"; echo "spirv-opt: $(spirv-opt --version | head -1)"
 
-python3 "$G/wrappers.py" "$CM/shaders" "$W/shw"
-"$DXC" -T lib_6_3 -HV 2021 -spirv -fspv-target-env=universal1.5 -Od -I "$W/shw" "$W/shw/cm_wrappers.hlsl" -Fo "$W/lib.spv" >"$W/dxc.log" 2>&1 || { head -20 "$W/dxc.log"; exit 1; }
-python3 "$G/spvedit.py" "$W/lib.spv" "$W/edited.spv" "$W/shw/wrappers.tsv"
-spirv-val --target-env spv1.5 "$W/edited.spv"
-spirv-opt --target-env=spv1.5 --eliminate-local-single-store --eliminate-dead-code-aggressive "$W/edited.spv" -o "$W/opt.spv"
-spirv-val --target-env spv1.5 "$W/opt.spv"
-spirv-cross "$W/opt.spv" --es --version 310 --relax-nan-checks --output "$W/cross.glsl"
-python3 "$G/partition.py" "$CM/shaders" "$W/cross.glsl" "$OUT"
+pipeline() {   # shaders dir, work dir, out dir: HLSL to partitioned GLSL; returns 1 at the first refusal
+  local sh=$1 w=$2 out=$3
+  mkdir -p "$w" "$out"
+  python3 "$G/wrappers.py" "$sh" "$w/shw" || return 1
+  "$DXC" -T lib_6_3 -HV 2021 -spirv -fspv-target-env=universal1.5 -Od -I "$w/shw" "$w/shw/cm_wrappers.hlsl" -Fo "$w/lib.spv" >"$w/dxc.log" 2>&1 || { head -20 "$w/dxc.log"; return 1; }
+  python3 "$G/spvedit.py" "$w/lib.spv" "$w/edited.spv" "$w/shw/wrappers.tsv" "$w/shw/capacity.tsv" || return 1
+  spirv-val --target-env spv1.5 "$w/edited.spv" || return 1
+  spirv-opt --target-env=spv1.5 --eliminate-local-single-store --eliminate-dead-code-aggressive "$w/edited.spv" -o "$w/opt.spv" || return 1
+  spirv-val --target-env spv1.5 "$w/opt.spv" || return 1
+  spirv-cross "$w/opt.spv" --es --version 310 --relax-nan-checks --output "$w/cross.glsl" || return 1
+  python3 "$G/partition.py" "$sh" "$w/cross.glsl" "$out" || return 1
+}
+pipeline "$CM/shaders" "$W" "$OUT" || exit 1
 
 # Consumer checks: glslang ES 3.00 fragment compiles of every include combination, and a consumer calling overloads
 # with an r-value argument.
@@ -70,13 +75,22 @@ done
 printf '#define CULTMATH_MAX_SITES 4\n#include "CultMath.hlsl"\nfloat4 cap4(float3 p, float4 s[4]) { return cultmath_power_border(p, s, 4); }\n' >"$W/shw/cap4.hlsl"
 "$DXC" -T lib_6_3 -HV 2021 -Od -I "$W/shw" "$W/shw/cap4.hlsl" -Fo "$W/cap4.dxil" >"$W/cap4.log" 2>&1 || { echo "capacity (a) failed: dxc with CULTMATH_MAX_SITES 4"; head -8 "$W/cap4.log"; exit 1; }
 echo "capacity (a) ok: dxc lib_6_3 with a prior define 4 takes float4 s[4]"
-cap_check() {   # label, expected (ok|fail), define lines, GLSL library file, array length
+consume() {   # label, expected (ok|fail), define lines, GLSL library file, main body
   local f=$W/cap.frag
-  printf '#version 300 es\nprecision highp float;\nprecision highp int;\n%s\n' "$3" >"$f"; cat "$4" >>"$f"
-  printf 'out highp vec4 c;\nvoid main() { vec4 s[%s]; for (int i = 0; i < %s; i++) s[i] = vec4(float(i)); c = cultmath_power_border(gl_FragCoord.xyz, s, 4); }\n' "$5" "$5" >>"$f"
+  printf '#version 300 es
+precision highp float;
+precision highp int;
+%s
+' "$3" >"$f"; cat "$4" >>"$f"
+  printf 'out highp vec4 c;
+void main() { %s }
+' "$5" >>"$f"
   local got=fail; glslangValidator "$f" >"$W/cap.log" 2>&1 && got=ok
   [ "$got" = "$2" ] || { echo "capacity $1 failed: expected $2, got $got"; head -6 "$W/cap.log"; exit 1; }
   echo "capacity $1 ok: $2"
+}
+cap_check() {   # label, expected, define lines, GLSL library file, site array length
+  consume "$1" "$2" "$3" "$4" "vec4 s[$5]; for (int i = 0; i < $5; i++) s[i] = vec4(float(i)); c = cultmath_power_border(gl_FragCoord.xyz, s, 4);"
 }
 D4='#define CULTMATH_MAX_SITES 4'
 cap_check "(b) built, define 4, vec4 s[4]" ok "$D4" "$OUT/core.glsl" 4
@@ -98,3 +112,26 @@ if cat "$OUT"/*.glsl | grep -Eq "$SHAPE"; then
   echo "build shape failed:"; cat "$OUT"/*.glsl | grep -Eo "$SHAPE" | sort | uniq -c; exit 1
 fi
 echo "build shape ok"
+
+# Tool refusals, and the capacity's reach: each variant appends one probe function to a scratch copy of CultMath.hlsl and
+# runs the whole pipeline on it.
+variant() {   # label, probe HLSL; leaves the variant directory in VD
+  VD=$W/v/$1; rm -rf "$VD"; mkdir -p "$VD"; cp -r "$CM/shaders" "$VD/sh"
+  printf '
+%s
+' "$2" >>"$VD/sh/CultMath.hlsl"
+  pipeline "$VD/sh" "$VD/w" "$VD/out" >"$VD/log" 2>&1
+}
+expect_refused() {   # label, probe HLSL, pattern the refusal prints
+  if variant "$1" "$2"; then echo "refusal $1 failed: the build passed"; exit 1; fi
+  grep -q "$3" "$VD/log" || { echo "refusal $1 failed: no '$3' in the log"; tail -5 "$VD/log"; exit 1; }
+  echo "refusal $1 ok"
+}
+SENTINEL=$(cut -f2 "$W/shw/capacity.tsv")
+expect_refused macro-in-expression 'int cultmath_zz_probe(int n) { return n + CULTMATH_MAX_SITES; }' 'outside its guard'
+expect_refused length-in-expression "uint cultmath_zz_probe(uint n) { return n + (100u + $((SENTINEL - 100))u); }" 'also used by opcode'
+variant array-128 'float4 cultmath_zz_probe(float4 x[128], int n) { return x[n]; }' || { echo "array-128 failed: a library array of length 128 broke the build"; tail -5 "$VD/log"; exit 1; }
+grep -Eq 'cultmath_zz_probe\(.*\[128\]' "$VD/out/core.glsl" || { echo "array-128 failed: the 128 array is not literal in core.glsl"; exit 1; }
+PROBE='vec4 x[128]; c = cultmath_zz_probe(x, 1);'
+consume "(f) non-site array, define 4, vec4 x[128]" ok "$D4" "$VD/out/core.glsl" "$PROBE"
+consume "(f) non-site array, define 4, vec4 x[4]" fail "$D4" "$VD/out/core.glsl" 'vec4 x[4]; c = cultmath_zz_probe(x, 1);'
