@@ -2461,3 +2461,23 @@ and 16:50 UTC (18:30 to 18:50 CEST). Logs are in the Imagination scratchpad
    It settles `span-allowance-gpu-margin`'s six CPU survivors, `iv-exp-gpu-widening`'s measurement and
    `device-p2-pin-notes`, and closes `glsl-browser-parity-run` and `affine-device-runner-seed`. It waits
    on 2b, because a capture of the old lowering goes stale at the switch.
+
+### shader-lattice-loop (follow-ups `shader-weighted-lattice-loop`, `lattice-shader-pins`)
+
+Written by Imagination (agent `imagination-ag4-shader-loop`, session `self-2026-10-16-ag4`) against `origin/main`
+`e2051c5a` and the build branch at `23ac4e89`. Research and probes: `docs/research/shader-variable-inputs.md`.
+Spec: `cultmath-tapes:cut_spec:cut-shader-lattice-loop.r1`. Question: `shader-site-capacity` (gates the spec).
+
+- **Bodies reach the shader as `float4 sites[CULTMATH_MAX_SITES]` plus `int count`, by value.** A caller accessor
+  macro cannot survive the library build (the built GLSL has no consumer macros), and library-owned uniforms would
+  take a binding the consumer owns. dxc, the SPIR-V edit, SPIRV-Cross and a WebGL2-style uniform-array consumer all
+  accept the array form (probes P1-P3).
+- **The shader owns the whole search.** `cultmath_weighted_lattice_cells` and `cultmath_power_border` replace the two
+  comment recipes; the four steps stay public. The box pass recomputes distances (no shader cache), the ring loop is
+  bounded by 37 with C#'s exit.
+- **The lavapipe run kills the exit and the normaliser** (probe table, research section 3): M1-M6 fail the C# device
+  judge; M7, a late exit, is equivalent by the window-independence proof. M1 needs several far-ring points.
+- **Smooth-step cap point** joins its family (m = f1 + smoothing, d past it, smoothing >= 0.5).
+- **Yggdrasil's sdk:10.0 Ubuntu image owns `glsl-parity.json`'s platform values** with the lavapipe bounds; a write
+  on another OS is refused.
+- Left: `shader-span-functions-array-form` (power_cells, multiplicative_cells, soft_gabriel_gate array forms).
