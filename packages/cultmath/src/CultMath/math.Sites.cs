@@ -122,6 +122,11 @@ public static partial class math
     public static CultSiteCells power_cells(float3 p, ReadOnlySpan<float4> sites)
     {
         require_cell_span(p, sites, positiveWeights: false);
+        return power_cells_unchecked(p, sites);
+    }
+
+    private static CultSiteCells power_cells_unchecked(float3 p, ReadOnlySpan<float4> sites)
+    {
         var cells = site_cells_empty();
         for (var i = 0; i < sites.Length; i++)
             cells = site_cells_insert(cells, power_score(p, sites[i]), i);
@@ -138,8 +143,15 @@ public static partial class math
     /// <exception cref="ArgumentException">As <see cref="power_cells"/>.</exception>
     public static float4 power_border(float3 p, ReadOnlySpan<float4> sites)
     {
+        require_cell_span(p, sites, positiveWeights: false);
+        return power_border_unchecked(p, sites);
+    }
+
+    // The border over an already validated span, which the lattice calls once per cell.
+    private static float4 power_border_unchecked(float3 p, ReadOnlySpan<float4> sites)
+    {
         var border = new float4(0.0f, 0.0f, 0.0f, 1.0e30f);
-        var owner = (int)power_cells(p, sites).nearestSite;
+        var owner = (int)power_cells_unchecked(p, sites).nearestSite;
         if (owner < 0)
             return border;
         for (var k = 0; k < sites.Length; k++)
