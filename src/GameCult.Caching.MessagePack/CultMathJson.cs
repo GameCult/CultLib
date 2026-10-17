@@ -14,7 +14,7 @@ namespace GameCult.Caching.MessagePack;
 /// The canonical System.Text.Json shape of every public CultMath value type, the JSON twin of
 /// <see cref="CultMathResolver"/>. Vectors, quaternions and colors are objects keyed by their
 /// field names (<c>{"x":1,"y":2}</c>), matrices are arrays of row objects, <c>rect</c> is
-/// <c>{"min":..,"max":..}</c>, <c>CultCellular</c> is <c>{"nearest":..,"edge":..,"id":..}</c>, <c>CultPhasor</c> is <c>{"cos":..,"sin":..}</c>, <c>SpanNoise</c> is <c>{"field":..,"curvature":..,"fold":..}</c>, <c>SpanPath</c> is <c>{"midpoint":..,"velocity":..,"speed":..,"acceleration":..,"halfLength":..}</c>, <c>SpanStage</c> is <c>{"frequency":..,"stretch":..,"axis":..,"shift":..,"offset":..,"octaveStep":..}</c>, and <c>CultSiteCells</c> is <c>{"nearest":..,"second":..,"nearestSite":..,"secondSite":..}</c>.
+/// <c>{"min":..,"max":..}</c>, <c>CultCellular</c> is <c>{"nearest":..,"edge":..,"id":..}</c>, <c>CultPhasor</c> is <c>{"cosine":..,"sine":..}</c> (reading also accepts the legacy <c>cos</c>/<c>sin</c> names), <c>SpanNoise</c> is <c>{"field":..,"curvature":..,"fold":..}</c>, <c>SpanPath</c> is <c>{"midpoint":..,"velocity":..,"speed":..,"acceleration":..,"halfLength":..}</c>, <c>SpanStage</c> is <c>{"frequency":..,"stretch":..,"axis":..,"shift":..,"offset":..,"octaveStep":..}</c>, and <c>CultSiteCells</c> is <c>{"nearest":..,"second":..,"nearestSite":..,"secondSite":..}</c>.
 /// Property names are fixed: <c>PropertyNamingPolicy</c> does not rename them, and
 /// <c>PropertyNameCaseInsensitive</c> makes reading case-insensitive.
 /// <para>
@@ -270,14 +270,24 @@ public static class CultMathJson
     {
         private readonly string[] names;
         private readonly byte[][] utf8Names;
+        private readonly string?[] legacyNames;
+        private readonly byte[]?[] legacyUtf8Names;
         private readonly JsonEncodedText[] encoded;
         private readonly Node<S>[] children;
         private readonly int[] offsets;
 
         public Fields(params (string Name, Node<S> Child)[] fields)
+            : this(Array.ConvertAll(fields, f => (f.Name, f.Child, (string?)null)))
+        {
+        }
+
+        // A legacy name is matched on read only and maps to the same field as its current name.
+        public Fields(params (string Name, Node<S> Child, string? Legacy)[] fields)
         {
             names = new string[fields.Length];
             utf8Names = new byte[fields.Length][];
+            legacyNames = new string?[fields.Length];
+            legacyUtf8Names = new byte[]?[fields.Length];
             encoded = new JsonEncodedText[fields.Length];
             children = new Node<S>[fields.Length];
             offsets = new int[fields.Length];
@@ -285,6 +295,8 @@ public static class CultMathJson
             {
                 names[i] = fields[i].Name;
                 utf8Names[i] = Encoding.UTF8.GetBytes(fields[i].Name);
+                legacyNames[i] = fields[i].Legacy;
+                legacyUtf8Names[i] = fields[i].Legacy is { } legacy ? Encoding.UTF8.GetBytes(legacy) : null;
                 encoded[i] = JsonEncodedText.Encode(fields[i].Name);
                 children[i] = fields[i].Child;
                 offsets[i] = Count;
@@ -339,13 +351,14 @@ public static class CultMathJson
             if (!ignoreCase)
             {
                 for (var i = 0; i < utf8Names.Length; i++)
-                    if (r.ValueTextEquals(utf8Names[i])) return i;
+                    if (r.ValueTextEquals(utf8Names[i]) || (legacyUtf8Names[i] is { } legacy && r.ValueTextEquals(legacy))) return i;
                 return -1;
             }
 
             var name = r.GetString()!;
             for (var i = 0; i < names.Length; i++)
-                if (string.Equals(names[i], name, StringComparison.OrdinalIgnoreCase)) return i;
+                if (string.Equals(names[i], name, StringComparison.OrdinalIgnoreCase)
+                    || (legacyNames[i] is { } legacy && string.Equals(legacy, name, StringComparison.OrdinalIgnoreCase))) return i;
             return -1;
         }
     }
@@ -481,7 +494,7 @@ public static class CultMathJson
             Add<Random, uint>(UIntScalar.Instance, new Fields<uint>(("state", Val<uint>())),
                 a => new Random { state = a[0] }, (v, a) => a[0] = v.state),
 
-            // Compositions: matrices are arrays of row objects, rect is {min, max}, CultCellular is {nearest, edge, id}, CultPhasor is {cos, sin}, SpanNoise is {field, curvature, fold}, SpanPath is {midpoint, velocity, speed, acceleration, halfLength}, SpanStage is {frequency, stretch, axis, shift, offset, octaveStep}, CultSiteCells is {nearest, second, nearestSite, secondSite}.
+            // Compositions: matrices are arrays of row objects, rect is {min, max}, CultCellular is {nearest, edge, id}, CultPhasor is {cosine, sine}, SpanNoise is {field, curvature, fold}, SpanPath is {midpoint, velocity, speed, acceleration, halfLength}, SpanStage is {frequency, stretch, axis, shift, offset, octaveStep}, CultSiteCells is {nearest, second, nearestSite, secondSite}.
             Add<float2x2, float>(f, new Rows<float>(2, Xy<float>()),
                 a => new float2x2(a[0], a[1], a[2], a[3]),
                 (v, a) => { a[0] = v[0].x; a[1] = v[0].y; a[2] = v[1].x; a[3] = v[1].y; }),
@@ -507,12 +520,12 @@ public static class CultMathJson
                     a[4] = v.edge.x; a[5] = v.edge.y; a[6] = v.edge.z; a[7] = v.edge.w;
                     a[8] = v.id;
                 }),
-            Add<CultPhasor, float>(f, new Fields<float>(("cos", Xyzw<float>()), ("sin", Xyzw<float>())),
+            Add<CultPhasor, float>(f, new Fields<float>(("cosine", Xyzw<float>(), "cos"), ("sine", Xyzw<float>(), "sin")),
                 a => new CultPhasor(new float4(a[0], a[1], a[2], a[3]), new float4(a[4], a[5], a[6], a[7])),
                 (v, a) =>
                 {
-                    a[0] = v.cos.x; a[1] = v.cos.y; a[2] = v.cos.z; a[3] = v.cos.w;
-                    a[4] = v.sin.x; a[5] = v.sin.y; a[6] = v.sin.z; a[7] = v.sin.w;
+                    a[0] = v.cosine.x; a[1] = v.cosine.y; a[2] = v.cosine.z; a[3] = v.cosine.w;
+                    a[4] = v.sine.x; a[5] = v.sine.y; a[6] = v.sine.z; a[7] = v.sine.w;
                 }),
             Add<SpanNoise, float>(f, new Fields<float>(("field", Xyzw<float>()), ("curvature", Val<float>()), ("fold", Val<float>())),
                 a => new SpanNoise(new float4(a[0], a[1], a[2], a[3]), a[4], a[5]),

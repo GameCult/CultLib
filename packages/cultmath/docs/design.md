@@ -429,7 +429,7 @@ together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
 - `phacelle(float3 p, float3 side, float offset, float normalization)` is Rune
   Skovbo Johansen's Phacelle noise ("phase + cell": a stripe pattern built by
   blending one cosine/sine wave per jittered cell), generalised to 3D cells. It
-  returns `CultPhasor { cos, sin }`, each `(∇, value)`. `side` is the stripe
+  returns `CultPhasor { cosine, sine }`, each `(∇, value)`. `side` is the stripe
   wave vector, whose length is 2π times the stripe frequency; in 3D the
   perpendicular to the flow is not unique, so the caller chooses it (on a unit
   sphere, `cross(p̂, flow)`). `offset` is the phase in cycles. It visits 4×4×4
