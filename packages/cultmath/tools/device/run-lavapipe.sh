@@ -7,7 +7,9 @@
 #   SUMMARY=<log> tools/stopgap/ygg-verify.sh <repo> <rev> mcr.microsoft.com/dotnet/sdk:10.0 'bash packages/cultmath/tools/device/run-lavapipe.sh'
 # GLSL_DIR=<dir holding core.glsl, cycles.glsl, phacelle.glsl> (the output of tools/glsl/build-glsl.sh) runs the built
 # route instead of the committed one and skips the bounds judge: every lavapipe-glsl/<tag>.out must equal its
-# lavapipe-hlsl/<tag>.out byte for byte, and a difference exits 1. It records no bounds.
+# lavapipe-hlsl/<tag>.out byte for byte, and a difference exits 1. It records no bounds. That compare is in strict form:
+# dxc gets -Gis and nocontract.py decorates every float result of both modules NoContraction, so the two routes cannot
+# differ by a fused multiply-add.
 # WRITE_BOUNDS=1 re-records packages/cultmath/tests/CultMath.Tests/fixtures/device-bounds-lavapipe.txt and prints it
 # between BOUNDS-BEGIN and BOUNDS-END, because the job's clone is discarded.
 set -euo pipefail
@@ -38,12 +40,19 @@ export CULTMATH_DEVICE_WORK=$W/work
 dotnet test "$TESTS" --no-build --filter "FullyQualifiedName~GlslMirrorTests.WriteDeviceWork"
 python3 "$DEV/gen.py" "$W/work" "$CM"
 
+STRICT=(); [ -z "${GLSL_DIR:-}" ] || STRICT=(-Gis)
 while IFS=$'\t' read -r tag _ _ n _ wout; do
   in=$W/work/$tag.in
-  "$DXC" -T cs_6_0 -E main -HV 2021 -spirv -fspv-target-env=vulkan1.2 -I "$CM/shaders" "$W/work/$tag.hlsl" -Fo "$W/work/$tag.h.spv" >"$W/work/$tag.h.log" 2>&1 \
+  "$DXC" -T cs_6_0 -E main -HV 2021 "${STRICT[@]}" -spirv -fspv-target-env=vulkan1.2 -I "$CM/shaders" "$W/work/$tag.hlsl" -Fo "$W/work/$tag.h.spv" >"$W/work/$tag.h.log" 2>&1 \
     || { echo "dxc failed for $tag"; head -5 "$W/work/$tag.h.log"; exit 1; }
   glslangValidator -V --target-env vulkan1.2 -o "$W/work/$tag.g.spv" "$W/work/$tag.comp" >"$W/work/$tag.g.log" 2>&1 \
     || { echo "glslang failed for $tag"; head -5 "$W/work/$tag.g.log"; exit 1; }
+  if [ -n "${GLSL_DIR:-}" ]; then
+    for m in h g; do
+      python3 "$DEV/nocontract.py" "$W/work/$tag.$m.spv" "$W/work/$tag.$m.nc.spv" >>"$W/nocontract.txt"
+      mv "$W/work/$tag.$m.nc.spv" "$W/work/$tag.$m.spv"
+    done
+  fi
   "$W/vkrun" "$W/work/$tag.h.spv" "$in" "$W/results/lavapipe-hlsl/$tag.out" "$n" "$wout" >>"$W/device.txt"
   "$W/vkrun" "$W/work/$tag.g.spv" "$in" "$W/results/lavapipe-glsl/$tag.out" "$n" "$wout" >>"$W/device.txt"
 done <"$W/work/manifest.txt"
@@ -54,6 +63,7 @@ if [ -n "${GLSL_DIR:-}" ]; then
     tag=$(basename "$h" .out); total=$((total + 1))
     if cmp -s "$h" "$W/results/lavapipe-glsl/$tag.out"; then equal=$((equal + 1)); else echo "differs: $tag"; fi
   done
+  echo "strict form: $(wc -l <"$W/nocontract.txt") modules rewritten, $(awk '{n += $2} END {print n}' "$W/nocontract.txt") results decorated NoContraction"
   echo "lavapipe-glsl equals lavapipe-hlsl: $equal/$total"
   [ "$equal" = "$total" ] && [ "$total" -gt 0 ]
   exit
