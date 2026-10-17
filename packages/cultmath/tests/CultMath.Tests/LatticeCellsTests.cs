@@ -14,7 +14,7 @@ public sealed class LatticeCellsTests
     private const float Drift = 0.7f;
     private static readonly float2 Normal = new(0.6f, 0.8f);
 
-    private sealed record Look(float Boost, float Stretch, float Smoothing);
+    private sealed record Look(float Boost, float Stretch, float Smoothing, float Falloff = LatticeCellsTests.Falloff);
 
     private static readonly Look[] Looks =
     {
@@ -37,12 +37,12 @@ public sealed class LatticeCellsTests
     {
         var site = lattice_site(cell, time, Drift);
         var border = power_border(new float3((cell + 0.5f) * Cell, 0.0f), bodies).w;
-        return lattice_weight(site.z, border, look.Boost, Falloff);
+        return lattice_weight(site.z, border, look.Boost, look.Falloff);
     }
 
     // Folds F1, F2, id and smooth over the box of the given radius in absolute row-major order.
     private static float4 BoxFold(float2 p, float time, float4[] bodies, Look look, int radius,
-        Dictionary<(int, int), float> weights)
+        Dictionary<(int, int), float> weights, float2? unitNormal = null)
     {
         var q = p / Cell;
         var c0 = floor(q);
@@ -55,7 +55,7 @@ public sealed class LatticeCellsTests
                 if (!weights.TryGetValue(key, out var w))
                     weights[key] = w = CellWeight(cell, time, bodies, look);
                 var site = lattice_site(cell, time, Drift);
-                cells.Add((cell, lattice_distance(q, site.xy, w, Normal, look.Stretch)));
+                cells.Add((cell, lattice_distance(q, site.xy, w, unitNormal ?? Normal, look.Stretch)));
             }
         float f1 = 1.0e30f, f2 = 1.0e30f;
         var win = default(float2);
@@ -72,7 +72,7 @@ public sealed class LatticeCellsTests
     }
 
     private static float4 Call(float2 p, float time, float4[] bodies, Look look, float2? normal = null) =>
-        weighted_lattice_cells(p, time, bodies, Cell, Drift, look.Boost, Falloff, look.Smoothing, normal ?? Normal, look.Stretch);
+        weighted_lattice_cells(p, time, bodies, Cell, Drift, look.Boost, look.Falloff, look.Smoothing, normal ?? Normal, look.Stretch);
 
     private static float2 RandomPoint(System.Random r) =>
         new((r.NextSingle() * 2.0f - 1.0f) * 1500.0f, (r.NextSingle() * 2.0f - 1.0f) * 1500.0f);
@@ -115,7 +115,7 @@ public sealed class LatticeCellsTests
         var q = p / Cell;
         var c0 = floor(q);
         float f1 = 1.0e30f, f2 = 1.0e30f;
-        for (var k = 0; k <= 12; k++)
+        for (var k = 0; k <= LatticeMaxRing; k++)
         {
             if (stop(k, f1, f2, look))
                 return k - 1;
@@ -133,7 +133,7 @@ public sealed class LatticeCellsTests
                     else if (d < f2) f2 = d;
                 }
         }
-        return 12;
+        return LatticeMaxRing;
     }
 
     [Fact]
@@ -220,6 +220,8 @@ public sealed class LatticeCellsTests
             var edge = new float2(MathF.Round(p.x / Cell) * Cell, p.y);
             var lo = Call(edge - new float2(1e-3f * Cell, 0.0f), 11.0f, bodies, look);
             var hi = Call(edge + new float2(1e-3f * Cell, 0.0f), 11.0f, bodies, look);
+            Assert.True(abs(lo.x - hi.x) < 1e-3f * 24.0f);
+            Assert.True(abs(lo.y - hi.y) < 1e-3f * 24.0f);
             Assert.True(abs(lo.z - hi.z) < 1e-3f * 24.0f);
             Assert.True(abs((lo.x - lo.z) - (hi.x - hi.z)) < 1e-3f * 24.0f);
         }
@@ -260,12 +262,17 @@ public sealed class LatticeCellsTests
             weighted_lattice_cells(pp ?? p, time, bodies ?? b, cell, drift, boost, falloff, smoothing, normal ?? n, stretch);
 
         W(boost: 0.0f); W(boost: LatticeMaxBoost); W(stretch: 1.0f); W(stretch: LatticeMaxStretch);
-        W(smoothing: LatticeMaxSmoothing); W(normal: float2.zero, stretch: 1.0f); W(bodies: Array.Empty<float4>());
+        W(smoothing: LatticeMaxSmoothing); W(normal: float2.zero, stretch: 1.0f); W(normal: new float2(1.0e-45f, 0.0f)); W(bodies: Array.Empty<float4>());
         Refuses("p", () => W(pp: new float2(float.NaN, 0)));
-        Refuses("p", () => W(cell: 0.0f));
-        Refuses("p", () => W(cell: float.PositiveInfinity));
+        Refuses("cellSize", () => W(cell: 0.0f));
+        Refuses("cellSize", () => W(cell: float.PositiveInfinity));
+        Refuses("cellSize", () => W(cell: 1.0e37f));
+        Refuses("p", () => W(pp: new float2(3.0e38f, 0)));
+        Refuses("p", () => W(pp: new float2(0, 1.0e10f)));
         Refuses("time", () => W(time: float.PositiveInfinity));
         Refuses("drift", () => W(drift: float.NaN));
+        Refuses("drift", () => W(time: 3.0e38f, drift: 2.0f));
+        W(time: 1.0e30f, drift: 1.0e-30f);
         Refuses("boost", () => W(boost: -0.01f));
         Refuses("boost", () => W(boost: LatticeMaxBoost + 0.01f));
         Refuses("falloff", () => W(falloff: 0.0f));
@@ -276,7 +283,8 @@ public sealed class LatticeCellsTests
         Refuses("stretch", () => W(stretch: LatticeMaxStretch + 0.01f));
         Refuses("stretchNormal", () => W(normal: float2.zero));
         Refuses("stretchNormal", () => W(normal: new float2(float.NaN, 1)));
-        Assert.Throws<ArgumentException>(() => W(bodies: new[] { new float4(float.NaN, 0, 0, 1) }));
+        Refuses("bodies", () => W(bodies: new[] { new float4(float.NaN, 0, 0, 1) }));
+        Refuses("bodies", () => W(bodies: new[] { new float4(0, 0, 0, float.PositiveInfinity) }));
     }
 
     [Fact]
@@ -310,6 +318,33 @@ public sealed class LatticeCellsTests
             Assert.Equal(Call(p, 3.0f, bodies, Looks[1]), Call(p, 3.0f, bodies, Looks[1], Normal * 7.0f));
         }
     }
+
+    [Fact]
+    public void ANormalOfAnyMagnitudeActsAsItsDirection()
+    {
+        // A tiny normal once normalised to length 0.944 and a huge one to zero; both then missed a winning cell.
+        var none = Array.Empty<float4>();
+        var look = new Look(0.0f, 1.0f, 0.01f);
+        var invSqrt2 = new float2(0.70710677f, 0.70710677f);
+        var cases = new (float2 given, float2 unit)[]
+        {
+            (new float2(3.0e-23f, 4.0e-23f), Normal), (new float2(6.0e29f, 8.0e29f), Normal),
+            (new float2(1.0e30f, 1.0e30f), invSqrt2), (new float2(1.0e-44f, 1.0e-44f), invSqrt2), (new float2(3.0e38f, 3.0e38f), invSqrt2),
+        };
+        var weights = new Dictionary<(int, int), float>();
+        foreach (var (given, unit) in cases)
+        {
+            var miss = new float2(-1040.0f, -1481.7773f);
+            Assert.Equal(BoxFold(miss, 54.725235f, none, look, 12, weights, unit), Call(miss, 54.725235f, none, look, given));
+            var r = new System.Random(3);
+            for (var i = 0; i < 300; i++)
+            {
+                var p = RandomPoint(r);
+                Assert.Equal(BoxFold(p, 7.0f, none, Looks[1], 12, weights, unit), Call(p, 7.0f, none, Looks[1], given));
+            }
+        }
+    }
+
     [Fact]
     public void MatchesTheProbeFormula()
     {

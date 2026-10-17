@@ -99,18 +99,18 @@ public static partial class math
 
     // The one validation of a cell span: finite query, finite positions and weights, weights above zero when
     // positiveWeights, at most 2^24 sites. Messages name the parameter, never a value.
-    private static void require_cell_span(float3 p, ReadOnlySpan<float4> sites, bool positiveWeights)
+    private static void require_cell_span(float3 p, ReadOnlySpan<float4> sites, bool positiveWeights, string spanName = "sites")
     {
         if (!all_finite(p))
             throw new ArgumentException("The query point must be finite.", nameof(p));
         if (sites.Length > MaxSiteSpan)
-            throw new ArgumentException("A site span holds at most 2^24 sites.", nameof(sites));
+            throw new ArgumentException("A site span holds at most 2^24 sites.", spanName);
         for (var i = 0; i < sites.Length; i++)
         {
             if (!all_finite(sites[i].xyz))
-                throw new ArgumentException("Site positions must be finite.", nameof(sites));
+                throw new ArgumentException("Site positions must be finite.", spanName);
             if (!float.IsFinite(sites[i].w) || (positiveWeights && !(sites[i].w > 0.0f)))
-                throw new ArgumentException(positiveWeights ? "Site weights must be finite and greater than zero." : "Site weights must be finite.", nameof(sites));
+                throw new ArgumentException(positiveWeights ? "Site weights must be finite and greater than zero." : "Site weights must be finite.", spanName);
         }
     }
 

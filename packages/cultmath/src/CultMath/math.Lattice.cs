@@ -116,13 +116,19 @@ public static partial class math
         float2 p, float time, ReadOnlySpan<float4> bodies, float cellSize, float drift, float boost, float falloff,
         float smoothing, float2 stretchNormal, float stretch)
     {
-        if (!float.IsFinite(p.x) || !float.IsFinite(p.y) || !float.IsFinite(cellSize) || !(cellSize > 0.0f)
-            || !(abs(p.x / cellSize) < LatticeMaxCoordinate) || !(abs(p.y / cellSize) < LatticeMaxCoordinate))
-            throw new ArgumentException("p must be finite and within 2^23 cells of the origin, and cellSize finite and greater than zero.", nameof(p));
+        // Cell centres stay finite: the farthest one the search can reach is a ring past the query's cell.
+        var reachSpan = cellSize * (LatticeMaxRing + 2);
+        if (!float.IsFinite(cellSize) || !(cellSize > 0.0f) || !float.IsFinite(reachSpan))
+            throw new ArgumentException("cellSize must be finite and greater than zero, and small enough for its cell centres to be finite.", nameof(cellSize));
+        if (!float.IsFinite(p.x) || !float.IsFinite(p.y) || !(abs(p.x / cellSize) < LatticeMaxCoordinate) || !(abs(p.y / cellSize) < LatticeMaxCoordinate)
+            || !float.IsFinite(abs(p.x) + reachSpan) || !float.IsFinite(abs(p.y) + reachSpan))
+            throw new ArgumentException("p must be finite and within 2^23 cells of the origin.", nameof(p));
         if (!float.IsFinite(time))
             throw new ArgumentException("time must be finite.", nameof(time));
         if (!float.IsFinite(drift))
             throw new ArgumentException("drift must be finite.", nameof(drift));
+        if (!float.IsFinite(drift * time))
+            throw new ArgumentException("drift times time must be finite.", nameof(drift));
         if (!float.IsFinite(boost) || boost < 0.0f || boost > LatticeMaxBoost)
             throw new ArgumentException("boost must be within [0, LatticeMaxBoost].", nameof(boost));
         if (!float.IsFinite(falloff) || !(falloff > 0.0f))
@@ -133,14 +139,18 @@ public static partial class math
             throw new ArgumentException("stretch must be within [1, LatticeMaxStretch].", nameof(stretch));
         if (!float.IsFinite(stretchNormal.x) || !float.IsFinite(stretchNormal.y))
             throw new ArgumentException("stretchNormal must be finite.", nameof(stretchNormal));
-        var normalLength = length(stretchNormal);
-        if (normalLength > 0.0f)
-            stretchNormal /= normalLength;
+        // Scaled by its largest component first, so a tiny or huge normal normalises to unit length.
+        var scale = max(abs(stretchNormal.x), abs(stretchNormal.y));
+        if (scale > 0.0f)
+        {
+            stretchNormal /= scale;
+            stretchNormal /= length(stretchNormal);
+        }
         else if (stretch > 1.0f)
             throw new ArgumentException("stretchNormal must not be zero while stretch exceeds 1.", nameof(stretchNormal));
         else
             stretchNormal = new float2(1.0f, 0.0f);
-        require_cell_span(new float3(p, 0.0f), bodies, positiveWeights: false);
+        require_cell_span(new float3(p, 0.0f), bodies, positiveWeights: false, nameof(bodies));
 
         const int Width = 2 * LatticeMaxRing + 1;
         Span<float> cache = stackalloc float[Width * Width];
