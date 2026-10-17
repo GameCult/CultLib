@@ -53,6 +53,7 @@ public sealed partial class GlslMirrorTests
                     killed++;
             }
 
+            output.WriteLine($"{name}: separated on {killed} of {Points} cases of {Families[f].Glsl}");
             Assert.True(killed >= kills, $"{name}: the {Families[f].Glsl} fixture cases separate it on {killed} of {Points}, fewer than {kills}");
         }
     }

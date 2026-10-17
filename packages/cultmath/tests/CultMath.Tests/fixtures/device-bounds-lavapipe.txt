@@ -125,7 +125,7 @@ lavapipe-glsl	120	float cultmath_lattice_weight(float, float, float, float)	ulp-
 lavapipe-glsl	121	float cultmath_lattice_distance(vec2, vec2, float, vec2, float)	ulp-bounded	256	0	0	ba3fa3bdb4f5f5b2478a4ddfb2e08f2f425e997778a716884e43b13d6ed050b5
 lavapipe-glsl	122	float cultmath_lattice_smooth_step(float, float, float, float)	ulp-bounded	256	0	0	6cbeddde536b12e83873f2e5ac60d16bef22049d2a7dea61af0ff1e0d5b84740
 lavapipe-glsl	123	vec4 cultmath_power_border(vec3, vec4[128], int)	ulp-bounded	188	65.72121683891783	0	8427c2b99109a4f59ff745fdb87f261deb1cbae34ce99bc1ae05ebb7f9963b4d
-lavapipe-glsl	124	vec4 cultmath_weighted_lattice_cells(vec2, float, vec4[128], int, float, float, float, float, float, vec2, float)	ulp-bounded	192	2.5	0	a33083016b0018fe7f953058a401b1498e5b11d71f6e90336c529e0603857ef9
+lavapipe-glsl	124	vec4 cultmath_weighted_lattice_cells(vec2, float, vec4[128], int, float, float, float, float, float, vec2, float)	ulp-bounded	179	3	0	fd3b58c4e2ba8a7bf801a1e6cdff82468abcb368442bc98b2583fda9d2e6f823
 lavapipe-hlsl	0	float cultmath_snoise(vec3)	ulp-bounded	94	122.6875	0	5d41c14241a13124f2e1b49f230f5df0c48d0d69fb1be9ef2f33dc1702bf0b0a
 lavapipe-hlsl	1	float cultmath_snoise(vec2)	ulp-bounded	204	1	0	81d9c62726afdccbbe4ffef173b5c92731eb6bf5927b3979d653e50dbd5d4064
 lavapipe-hlsl	2	vec4 cultmath_snoise_grad(vec3)	ulp-bounded	71	617.5	0	f7e9ed1707cdb015efaba0e0150193309da0d4c125349518f8b7c60a17b25790
@@ -250,4 +250,4 @@ lavapipe-hlsl	120	float cultmath_lattice_weight(float, float, float, float)	ulp-
 lavapipe-hlsl	121	float cultmath_lattice_distance(vec2, vec2, float, vec2, float)	ulp-bounded	256	0	0	ba3fa3bdb4f5f5b2478a4ddfb2e08f2f425e997778a716884e43b13d6ed050b5
 lavapipe-hlsl	122	float cultmath_lattice_smooth_step(float, float, float, float)	ulp-bounded	256	0	0	6cbeddde536b12e83873f2e5ac60d16bef22049d2a7dea61af0ff1e0d5b84740
 lavapipe-hlsl	123	vec4 cultmath_power_border(vec3, vec4[128], int)	ulp-bounded	188	65.72121683891783	0	8427c2b99109a4f59ff745fdb87f261deb1cbae34ce99bc1ae05ebb7f9963b4d
-lavapipe-hlsl	124	vec4 cultmath_weighted_lattice_cells(vec2, float, vec4[128], int, float, float, float, float, float, vec2, float)	ulp-bounded	192	2.5	0	a33083016b0018fe7f953058a401b1498e5b11d71f6e90336c529e0603857ef9
+lavapipe-hlsl	124	vec4 cultmath_weighted_lattice_cells(vec2, float, vec4[128], int, float, float, float, float, float, vec2, float)	ulp-bounded	179	3	0	fd3b58c4e2ba8a7bf801a1e6cdff82468abcb368442bc98b2583fda9d2e6f823
