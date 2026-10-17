@@ -81,14 +81,14 @@ internal static class SiteArrays
     // The unit-less normals the function normalises itself: ordinary, 3-4-5, tiny, huge, and zero (stretch 1 only).
     private static readonly float2[] Normals = { LatticeCellsTests.Normal, new(3.0f, 4.0f), new(3.0e-30f, -4.0e-30f), new(1.0e30f, 2.0e30f), new(0.0f, 0.0f) };
 
+    internal static readonly LatticeCellsTests.Look WidestLook = new(LatticeMaxBoost, LatticeMaxStretch, LatticeMaxSmoothing, 1.0e6f);
+
     /// <summary>
     /// Points whose ring search runs to ring 8 or past it under the widest look (boost, stretch and smoothing at their
     /// maxima, falloff so wide that every cell is boosted), found once by the radius the exit rule visits, and the
     /// ring-17 point of LatticeCellsTests.TheCapIsReachedAndMatchesTheFullBox first. Each is (p, time).
     /// </summary>
     internal static readonly IReadOnlyList<(float2 P, float Time, int Ring)> FarPoints = FindFarPoints();
-
-    internal static readonly LatticeCellsTests.Look WidestLook = new(LatticeMaxBoost, LatticeMaxStretch, LatticeMaxSmoothing, 1.0e6f);
 
     private static List<(float2, float, int)> FindFarPoints()
     {
