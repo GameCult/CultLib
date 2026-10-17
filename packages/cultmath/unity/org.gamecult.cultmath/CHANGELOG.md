@@ -5,6 +5,15 @@ All notable changes to this package are documented in this file.
 Earlier releases (0.2.0-0.2.3) predate this package's changelog and are not
 backfilled here; see `docs/semver-policy.md` for why.
 
+## [Unreleased]
+
+### Breaking
+
+- `CultPhasor.cos` and `.sin` are now `.cosine` and `.sine` in C#, HLSL and GLSL,
+  constructor parameters included, because SPIRV-Cross renames members that match
+  GLSL builtins. This is a minor bump on 0.y.z, so the next cultmath-unity release
+  is 0.5.0.
+
 ## [0.4.1]
 
 ### Fixed
