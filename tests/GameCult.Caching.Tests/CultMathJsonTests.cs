@@ -132,6 +132,30 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public void Reading_AcceptsTheLegacyPhasorNamesUnderDisallow()
+        {
+            var options = new JsonSerializerOptions { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow }.AddCultMathConverters();
+            var phasor = JsonSerializer.Deserialize<CultPhasor>("""{"cos":{"x":1,"y":2,"z":3,"w":4},"sin":{"x":5,"y":6,"z":7,"w":8}}""", options);
+            BitsOf(phasor).Should().Equal(BitsOf(new CultPhasor(new float4(1f, 2f, 3f, 4f), new float4(5f, 6f, 7f, 8f))));
+            Action unknown = () => JsonSerializer.Deserialize<CultPhasor>("""{"cos":{"x":1},"coss":{"x":2}}""", options);
+            unknown.Should().Throw<JsonException>().WithMessage("*not a component*");
+        }
+
+        [Test]
+        public void Reading_TreatsAThirdOccurrenceOfAPhasorNameAsADuplicate()
+        {
+            var property = typeof(JsonSerializerOptions).GetProperty("AllowDuplicateProperties");
+            Assert.That(property, Is.Not.Null, "the test runtime's System.Text.Json has AllowDuplicateProperties");
+            var strict = new JsonSerializerOptions().AddCultMathConverters();
+            property!.SetValue(strict, false);
+            Action thrice = () => JsonSerializer.Deserialize<CultPhasor>("""{"cos":{"x":1},"cosine":{"x":2},"cos":{"x":3}}""", strict);
+            thrice.Should().Throw<JsonException>().WithMessage("*appears more than once*");
+
+            // Allowed, the last occurrence replaces the whole value, including after a third.
+            Parse<CultPhasor>("""{"cos":{"x":1,"y":9},"cosine":{"x":2},"cos":{"z":3}}""").cosine.Should().Be(new float4(0f, 0f, 3f, 0f));
+        }
+
+        [Test]
         public void Reading_SkipsUnknownNamesWhenCaseInsensitive()
         {
             var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true }.AddCultMathConverters();
