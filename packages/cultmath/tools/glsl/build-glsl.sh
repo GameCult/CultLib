@@ -136,3 +136,4 @@ grep -Eq 'cultmath_zz_probe\(.*\[128\]' "$VD/out/core.glsl" || { echo "array-128
 PROBE='vec4 x[128]; c = cultmath_zz_probe(x, 1);'
 consume "(f) non-site array, define 4, vec4 x[128]" ok "$D4" "$VD/out/core.glsl" "$PROBE"
 consume "(f) non-site array, define 4, vec4 x[4]" fail "$D4" "$VD/out/core.glsl" 'vec4 x[4]; c = cultmath_zz_probe(x, 1);'
+consume "(g) consumer's own SPIRV_CROSS_CONSTANT_ID_0" ok '#define SPIRV_CROSS_CONSTANT_ID_0 7u' "$OUT/core.glsl" 'c = vec4(float(cultmath_max_sites));'
