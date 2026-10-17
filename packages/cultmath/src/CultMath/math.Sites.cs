@@ -99,18 +99,18 @@ public static partial class math
 
     // The one validation of a cell span: finite query, finite positions and weights, weights above zero when
     // positiveWeights, at most 2^24 sites. Messages name the parameter, never a value.
-    private static void require_cell_span(float3 p, ReadOnlySpan<float4> sites, bool positiveWeights)
+    private static void require_cell_span(float3 p, ReadOnlySpan<float4> sites, bool positiveWeights, string spanName = "sites")
     {
         if (!all_finite(p))
             throw new ArgumentException("The query point must be finite.", nameof(p));
         if (sites.Length > MaxSiteSpan)
-            throw new ArgumentException("A site span holds at most 2^24 sites.", nameof(sites));
+            throw new ArgumentException("A site span holds at most 2^24 sites.", spanName);
         for (var i = 0; i < sites.Length; i++)
         {
             if (!all_finite(sites[i].xyz))
-                throw new ArgumentException("Site positions must be finite.", nameof(sites));
+                throw new ArgumentException("Site positions must be finite.", spanName);
             if (!float.IsFinite(sites[i].w) || (positiveWeights && !(sites[i].w > 0.0f)))
-                throw new ArgumentException(positiveWeights ? "Site weights must be finite and greater than zero." : "Site weights must be finite.", nameof(sites));
+                throw new ArgumentException(positiveWeights ? "Site weights must be finite and greater than zero." : "Site weights must be finite.", spanName);
         }
     }
 
@@ -122,6 +122,11 @@ public static partial class math
     public static CultSiteCells power_cells(float3 p, ReadOnlySpan<float4> sites)
     {
         require_cell_span(p, sites, positiveWeights: false);
+        return power_cells_unchecked(p, sites);
+    }
+
+    private static CultSiteCells power_cells_unchecked(float3 p, ReadOnlySpan<float4> sites)
+    {
         var cells = site_cells_empty();
         for (var i = 0; i < sites.Length; i++)
             cells = site_cells_insert(cells, power_score(p, sites[i]), i);
@@ -138,8 +143,15 @@ public static partial class math
     /// <exception cref="ArgumentException">As <see cref="power_cells"/>.</exception>
     public static float4 power_border(float3 p, ReadOnlySpan<float4> sites)
     {
+        require_cell_span(p, sites, positiveWeights: false);
+        return power_border_unchecked(p, sites);
+    }
+
+    // The border over an already validated span, which the lattice calls once per cell.
+    private static float4 power_border_unchecked(float3 p, ReadOnlySpan<float4> sites)
+    {
         var border = new float4(0.0f, 0.0f, 0.0f, 1.0e30f);
-        var owner = (int)power_cells(p, sites).nearestSite;
+        var owner = (int)power_cells_unchecked(p, sites).nearestSite;
         if (owner < 0)
             return border;
         for (var k = 0; k < sites.Length; k++)

@@ -532,6 +532,34 @@ is `smoothstep(-softness, softness, least margin over every other site)` on posi
 exists; it is C# only. `distance_to_segment(point, start, end)` has out-free 2D and 3D forms beside the `out`
 form, all over one public `segment_closest` per dimension, each with its 2D and 3D shader overload.
 
+## Weighted lattice cells
+
+`weighted_lattice_cells(p, time, bodies, cellSize, drift, boost, falloff, smoothing, stretchNormal, stretch)` in
+`math.Lattice.cs` returns `float4(F1, F2, smooth, id)` over a jittered, drifting lattice, in cell units times weight.
+Four public steps compose it, and a shader or a tape composes the same four:
+
+- `lattice_site(cell, time, drift)`: the site `cell + 0.5 + 0.5 sin(drift time + 2 pi u)` per axis (so it stays within
+  one cell of the corner) and the base weight `0.5 + 0.5 u`, in [0.5, 1), from its own hash lane.
+- `lattice_weight(base, border, boost, falloff)`: `base (1 + boost exp(-(border / falloff)^2))`. `border` is
+  `power_border` at the cell centre over the body span (exact, so the weight is continuous as bodies move; the first
+  order `site_cells_border` jumps where the second-nearest body changes and is not used).
+- `lattice_distance(q, site, weight, normal, stretch)`: `weight |(stretch a, c)|`, `a` and `c` the offset along and
+  across the unit normal; isotropic at stretch 1.
+- `lattice_smooth_step(m, d, f1, smoothing)`: the smooth minimum fold, started at `F1 + smoothing` and clamped to it,
+  so a cell with `d >= F1 + 2 smoothing` changes nothing and the result does not depend on the box visited.
+
+The search visits Chebyshev rings around the query's cell and stops before ring `k` once `0.5 (k - 1) >= max(F2,
+F1 + 2 smoothing)`: every cell on ring `k` has `d >= 0.5 (k - 1)` (site within one cell of its corner, weight at
+least 0.5, stretch at least 1). A second pass folds the visited box in absolute row-major order, so ties and the
+smooth minimum do not depend on how far the search went. The proof is the comment above `weighted_lattice_cells`.
+
+The accepted range is boost 0 to `LatticeMaxBoost` (4, a weight ratio of 10:1), stretch 1 to `LatticeMaxStretch` (2)
+and smoothing up to `LatticeMaxSmoothing` (1); outside it the function throws `ArgumentException`. `LatticeMaxRing`
+(37) is the proven greatest ring at the range edge. Measured over 24,000 points on orbiting bodies (six bodies,
+sigma ratio 6:1, the ruled look and the range edge), the greatest ring visited has median 3, 99th percentile 7 and
+maximum 8 (49, 225 and 289 cells); `RingsStayWellInsideTheCap` asserts these. The function is C# only; the shader
+twins are the next cut.
+
 ## Intervals
 
 `math.Interval.cs` and `shaders/CultMath.Interval.hlsl` (included from
