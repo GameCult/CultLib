@@ -189,6 +189,8 @@ CultMath keeps portable DXC outside git under `packages/cultmath/.tools/`:
   -OutputPath E:\Projects\Odin\crates\muninn-move-tracker\artifacts\shader\MoveSphereCandidate.comp.metal
 ```
 
+`tools/glsl/build-glsl.sh <outdir>` (Linux, repository root) builds the library GLSL from the HLSL with dxc, SPIRV-Cross and SPIRV-Tools and writes `core.glsl`, `cycles.glsl` and `phacelle.glsl` bodies into `<outdir>`. It does not yet own the committed GLSL; `GlslLowering` still does. `GLSL_DIR=<outdir> tools/device/run-lavapipe.sh` runs that output on lavapipe and compares it with the HLSL results bit for bit instead of judging the committed files.
+
 `compile-hlsl.ps1` compiles both `CultMath.hlsl` copies as a `lib_6_3` library with the x64 DXC; a warning fails it too (`-WX`).
 
 DXC emits Vulkan SPIR-V with `-spirv`. `-TargetEnv vulkan1.2` is exposed by the
