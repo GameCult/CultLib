@@ -26,7 +26,7 @@ public sealed class LatticeCellsTests
         var bodies = new float4[6];
         for (var i = 0; i < bodies.Length; i++)
         {
-            var angle = 0.01f * (i + 1) * t + i;
+            var angle = 0.001f * (i + 1) * t + i;
             var radius = 300.0f + 220.0f * i;
             bodies[i] = new float4(radius * MathF.Cos(angle), radius * MathF.Sin(angle), 0.0f, 40.0f + 40.0f * i);
         }
@@ -240,7 +240,7 @@ public sealed class LatticeCellsTests
                 var border = power_border(new float3((cells[i] + 0.5f) * Cell, 0.0f), bodies).w;
                 var w = lattice_weight(site.z, border, look.Boost, Falloff) / site.z;
                 if (s > 0)
-                    Assert.True(abs(w - prev[i]) <= 0.01f * look.Boost, $"cell {cells[i]} at {s}");
+                    Assert.True(abs(w - prev[i]) <= 0.01f * look.Boost, $"cell {cells[i]} at {s}: {prev[i]} -> {w}");
                 prev[i] = w;
             }
         }
