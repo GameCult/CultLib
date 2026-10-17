@@ -106,11 +106,15 @@ for part in core cycles phacelle; do
   echo "$part: functions $fn, distinct names $names, lines $(wc -l <"$g"), bytes $(wc -c <"$g"), sha256 $(sha256sum "$g" | cut -c1-64)"
 done
 echo "suffixed ids: $(cat "$OUT"/*.glsl | grep -oE '\bcultmath_\w+_[0-9]+\(' | sort -u | wc -l); inout: $(cat "$OUT"/*.glsl | grep -c inout || true)"
-# Build shape: the lowering leaves none of these, and the NaN-check option leaves no mix(mix( expansions.
-SHAPE='inout|param_var_|cmw[0-9]{3}_|export |mix\(mix\(|\[128\]|\b_cos\b|\b_sin\b'
-if cat "$OUT"/*.glsl | grep -Eq "$SHAPE"; then
-  echo "build shape failed:"; cat "$OUT"/*.glsl | grep -Eo "$SHAPE" | sort | uniq -c; exit 1
-fi
+# Build shape: the lowering leaves none of these, and the NaN-check option leaves no mix(mix( expansions. A literal
+# [128] is not among them: the capacity is selected by name, so a library array of length 128 is legitimate output.
+SHAPE='inout|param_var_|cmw[0-9]{3}_|export |mix\(mix\(|\b_cos\b|\b_sin\b'
+shape_check() {   # output directory; returns 1 when the shape fails
+  if cat "$1"/*.glsl | grep -Eq "$SHAPE"; then
+    echo "build shape failed:"; cat "$1"/*.glsl | grep -Eo "$SHAPE" | sort | uniq -c; return 1
+  fi
+}
+shape_check "$OUT" || exit 1
 echo "build shape ok"
 
 # Tool refusals, and the capacity's reach: each variant appends one probe function to a scratch copy of CultMath.hlsl and
@@ -135,6 +139,7 @@ expect_refused length-in-expression "uint cultmath_zz_probe(uint n) { return n +
 expect_refused other-element-same-length "float3 cultmath_zz_probe(float3 x[$(printf '0x%x' "$SENTINEL")], int n) { return x[n]; }" 'not a capacity parameter type'
 variant array-128 'float4 cultmath_zz_probe(float4 x[128], int n) { return x[n]; }' || { echo "array-128 failed: a library array of length 128 broke the build"; tail -5 "$VD/log"; exit 1; }
 grep -Eq 'cultmath_zz_probe\(.*\[128\]' "$VD/out/core.glsl" || { echo "array-128 failed: the 128 array is not literal in core.glsl"; exit 1; }
+shape_check "$VD/out" || { echo "array-128 failed: the shape check refused a library array of length 128"; exit 1; }
 PROBE='vec4 x[128]; c = cultmath_zz_probe(x, 1);'
 consume "(f) non-site array, define 4, vec4 x[128]" ok "$D4" "$VD/out/core.glsl" "$PROBE"
 consume "(f) non-site array, define 4, vec4 x[4]" fail "$D4" "$VD/out/core.glsl" 'vec4 x[4]; c = cultmath_zz_probe(x, 1);'
