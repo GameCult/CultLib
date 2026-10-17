@@ -65,6 +65,26 @@ for combo in "core" "core cycles" "core phacelle" "core cycles phacelle"; do
   echo "ES 3.00 ok: $combo"
 done
 
+# Capacity checks: a consumer's prior #define CULTMATH_MAX_SITES changes the array type through dxc, the committed GLSL
+# and the built GLSL, and 128 still works with no define.
+printf '#define CULTMATH_MAX_SITES 4\n#include "CultMath.hlsl"\nfloat4 cap4(float3 p, float4 s[4]) { return cultmath_power_border(p, s, 4); }\n' >"$W/shw/cap4.hlsl"
+"$DXC" -T lib_6_3 -HV 2021 -Od -I "$W/shw" "$W/shw/cap4.hlsl" -Fo "$W/cap4.dxil" >"$W/cap4.log" 2>&1 || { echo "capacity (a) failed: dxc with CULTMATH_MAX_SITES 4"; head -8 "$W/cap4.log"; exit 1; }
+echo "capacity (a) ok: dxc lib_6_3 with a prior define 4 takes float4 s[4]"
+cap_check() {   # label, expected (ok|fail), define lines, GLSL library file, array length
+  local f=$W/cap.frag
+  printf '#version 300 es\nprecision highp float;\nprecision highp int;\n%s\n' "$3" >"$f"; cat "$4" >>"$f"
+  printf 'out highp vec4 c;\nvoid main() { vec4 s[%s]; for (int i = 0; i < %s; i++) s[i] = vec4(float(i)); c = cultmath_power_border(gl_FragCoord.xyz, s, 4); }\n' "$5" "$5" >>"$f"
+  local got=fail; glslangValidator "$f" >"$W/cap.log" 2>&1 && got=ok
+  [ "$got" = "$2" ] || { echo "capacity $1 failed: expected $2, got $got"; head -6 "$W/cap.log"; exit 1; }
+  echo "capacity $1 ok: $2"
+}
+D4='#define CULTMATH_MAX_SITES 4'
+cap_check "(b) built, define 4, vec4 s[4]" ok "$D4" "$OUT/core.glsl" 4
+cap_check "(c) built, define 4, vec4 s[128]" fail "$D4" "$OUT/core.glsl" 128
+cap_check "(d) built, no define, vec4 s[128]" ok "" "$OUT/core.glsl" 128
+cap_check "(e) committed, define 4, vec4 s[4]" ok "$D4" "$CM/shaders/CultMath.glsl" 4
+cap_check "(e) committed, define 4, vec4 s[128]" fail "$D4" "$CM/shaders/CultMath.glsl" 128
+
 for part in core cycles phacelle; do
   g=$OUT/$part.glsl
   fn=$(grep -cE '^[A-Za-z_]\w* [A-Za-z_]\w*\(.*\)$' "$g" || true)
@@ -73,7 +93,8 @@ for part in core cycles phacelle; do
 done
 echo "suffixed ids: $(cat "$OUT"/*.glsl | grep -oE '\bcultmath_\w+_[0-9]+\(' | sort -u | wc -l); inout: $(cat "$OUT"/*.glsl | grep -c inout || true)"
 # Build shape: the lowering leaves none of these, and the NaN-check option leaves no mix(mix( expansions.
-if cat "$OUT"/*.glsl | grep -Eq 'inout|param_var_|cmw[0-9]{3}_|export |mix\(mix\('; then
-  echo "build shape failed:"; cat "$OUT"/*.glsl | grep -Eo 'inout|param_var_|cmw[0-9]{3}_|export |mix\(mix\(' | sort | uniq -c; exit 1
+SHAPE='inout|param_var_|cmw[0-9]{3}_|export |mix\(mix\(|\[128\]|\b_cos\b|\b_sin\b'
+if cat "$OUT"/*.glsl | grep -Eq "$SHAPE"; then
+  echo "build shape failed:"; cat "$OUT"/*.glsl | grep -Eo "$SHAPE" | sort | uniq -c; exit 1
 fi
 echo "build shape ok"
