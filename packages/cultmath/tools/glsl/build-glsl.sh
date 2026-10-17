@@ -72,3 +72,8 @@ for part in core cycles phacelle; do
   echo "$part: functions $fn, distinct names $names, lines $(wc -l <"$g"), bytes $(wc -c <"$g"), sha256 $(sha256sum "$g" | cut -c1-64)"
 done
 echo "suffixed ids: $(cat "$OUT"/*.glsl | grep -oE '\bcultmath_\w+_[0-9]+\(' | sort -u | wc -l); inout: $(cat "$OUT"/*.glsl | grep -c inout || true)"
+# Build shape: the lowering leaves none of these, and the NaN-check option leaves no mix(mix( expansions.
+if cat "$OUT"/*.glsl | grep -Eq 'inout|param_var_|cmw[0-9]{3}_|export |mix\(mix\('; then
+  echo "build shape failed:"; cat "$OUT"/*.glsl | grep -Eo 'inout|param_var_|cmw[0-9]{3}_|export |mix\(mix\(' | sort | uniq -c; exit 1
+fi
+echo "build shape ok"
