@@ -721,7 +721,7 @@ float cultmath_lattice_smooth_step(float m, float d, float f1, float smoothing)
 
 // Sites by value: a shader function cannot take a span, so these take vec4 sites[CULTMATH_MAX_SITES] and the count in use, with
 // count in [0, CULTMATH_MAX_SITES]. A consumer defines CULTMATH_MAX_SITES before including this file to change the capacity; loops
-// run to count, so the capacity costs uniform space, not iterations. A StructuredBuffer caller copies into a local array first.
+// run to count, so the capacity costs uniform space, not iterations. A caller whose sites live in a buffer copies them into a local array first.
 // The preconditions the C# functions throw for are the caller's in a shader: finite arguments, cellSize > 0, boost in [0, 4],
 // falloff > 0, smoothing in (0, 1], stretch in [1, 2], p within 2^23 cells. A zero stretchNormal means (1, 0) and needs stretch == 1.
 // cultmath_weighted_lattice_cells is math.weighted_lattice_cells: the ring pass is bounded by k <= 37 and exits as C# does, and the
