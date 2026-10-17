@@ -70,7 +70,7 @@ public sealed class HlslSourceCompatibilityTests
         shader.GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic, null, parameters, null);
 
     // Shader constants with no C# twin of the same name (empty when every constant has one).
-    private static readonly string[] ConstantsWithoutTwin = Array.Empty<string>();
+    private static readonly string[] ConstantsWithoutTwin = { "CULTMATH_MAX_SITES" };
 
     /// <summary>
     /// Every static const of the compiled HLSL mirror (a static literal CULTMATH_* field, whatever its access) is the
@@ -85,7 +85,7 @@ public sealed class HlslSourceCompatibilityTests
         Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
         var shader = assembly!.GetType("CultMathHlsl.HlslShader")!;
         var constants = shader.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
-            .Where(f => f.IsLiteral && f.Name.StartsWith("CULTMATH_", StringComparison.Ordinal))
+            .Where(f => f.IsLiteral && f.FieldType == typeof(float) && f.Name.StartsWith("CULTMATH_", StringComparison.Ordinal))
             .ToArray();
         Assert.True(constants.Length >= 10, $"only {constants.Length} shader constants were found by reflection");
         foreach (var constant in constants)
@@ -183,7 +183,7 @@ public sealed class HlslSourceCompatibilityTests
 
         var mismatches = new List<string>();
         var compared = new HashSet<string>();
-        foreach (var mirror in shaderType.GetMethods(BindingFlags.Instance | BindingFlags.NonPublic).Where(m => m.Name.StartsWith("cultmath_")))
+        foreach (var mirror in shaderType.GetMethods(BindingFlags.Instance | BindingFlags.NonPublic).Where(m => m.Name.StartsWith("cultmath_") && !m.GetParameters().Any(p => p.ParameterType.IsArray)))
         {
             var types = mirror.GetParameters().Select(p => p.ParameterType).ToArray();
             var counterpart = Twin(shaderType, mirror.Name["cultmath_".Length..], types);
@@ -204,7 +204,65 @@ public sealed class HlslSourceCompatibilityTests
         }
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
-        Assert.Equal(140, compared.Count);
+        // The three site-array functions are compared by SiteArrayMirrorsMatchCSharp, which draws their counts and arrays.
+        Assert.Equal(137, compared.Count);
+    }
+
+    /// <summary>
+    /// The shader functions that take a site array and a count are bit-equal to C#'s span functions on the same
+    /// arguments: at least 64 compared cases each, counts 0 to the capacity with filler after the count (a loop bound that
+    /// ignores the count reads it), the lattice at rings up to 17. A case C# refuses is skipped and counted.
+    /// </summary>
+    [Fact]
+    public void SiteArrayMirrorsMatchCSharp()
+    {
+        var (assembly, errors) = CompileShaderMirror();
+        Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
+        var shaderType = assembly!.GetType("CultMathHlsl.HlslShader")!;
+        var shader = Activator.CreateInstance(shaderType);
+        Assert.Equal(17, SiteArrays.FarPoints[0].Ring);
+        Assert.All(SiteArrays.FarPoints, far => Assert.InRange(far.Ring, 8, LatticeMaxRing));
+
+        var draws = new (string Name, Func<System.Random, object[]> Draw)[]
+        {
+            ("power_border", SiteArrays.PowerBorderArguments),
+            ("lattice_cell_distance", SiteArrays.LatticeCellDistanceArguments),
+            ("weighted_lattice_cells", SiteArrays.LatticeArguments),
+        };
+        foreach (var (name, draw) in draws)
+        {
+            var mirror = shaderType.GetMethod("cultmath_" + name, BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var twin = typeof(SiteArrays).GetMethod(name, BindingFlags.Static | BindingFlags.NonPublic)!;
+            Assert.Equal(twin.GetParameters().Select(p => p.ParameterType), mirror.GetParameters().Select(p => p.ParameterType));
+            var random = new System.Random(0x517E);
+            int compared = 0, refused = 0;
+            for (var i = 0; i < 160; i++)
+            {
+                var args = draw(random);
+                object expected;
+                try { expected = twin.Invoke(null, args)!; }
+                catch (TargetInvocationException e) when (e.InnerException is ArgumentException) { refused++; continue; }
+                var actual = Values(mirror.Invoke(shader, args)!);
+                Assert.True(BitwiseEqual(Values(expected), actual),
+                    $"{name} case {i}: C# {string.Join(" ", Values(expected).Select(v => v.Value))}, mirror {string.Join(" ", actual.Select(v => v.Value))}");
+                compared++;
+            }
+
+            Assert.True(compared >= 64, $"{name} compared only {compared} cases ({refused} refused)");
+        }
+    }
+
+    /// <summary>A consumer defines CULTMATH_MAX_SITES before including the library; the mirror compiles with the capacity changed.</summary>
+    [Fact]
+    public void TheSiteCapacityIsOverridable()
+    {
+        var (assembly, errors) = CompileShaderMirror(defines: new Dictionary<string, int> { ["CULTMATH_MAX_SITES"] = 4 });
+        Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
+        var shaderType = assembly!.GetType("CultMathHlsl.HlslShader")!;
+        Assert.Equal(4, (int)shaderType.GetField("CULTMATH_MAX_SITES", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)!.GetRawConstantValue()!);
+        var sites = new[] { new float4(0, 0, 0, 1), new float4(10, 0, 0, 1), new float4(0, 10, 0, 2), new float4(-10, 0, 0, 1) };
+        var border = (float4)shaderType.GetMethod("cultmath_power_border", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(Activator.CreateInstance(shaderType), new object[] { new float3(1, 1, 0), sites, 4 })!;
+        Assert.Equal(power_border(new float3(1, 1, 0), sites), border);
     }
 
     /// <summary>
@@ -683,13 +741,22 @@ public sealed class HlslSourceCompatibilityTests
     }
 
     /// <summary>
+    /// The text without its include-guard lines. A capacity macro (<c>#ifndef X</c>, <c>#define X n</c>, <c>#endif</c>, a
+    /// consumer-overridable default) is not a guard: <paramref name="capacity"/> gives the text it becomes, from its name and value.
+    /// </summary>
+    internal static string DropGuards(string source, Func<string, string, string> capacity) =>
+        Regex.Replace(source, @"(?m)^#ifndef (CULTMATH_MAX_\w+)\r?\n#define \1 (\d+)\r?\n#endif[ \t]*$|^[ \t]*#(ifndef|define|endif)\b.*$",
+            match => match.Groups[1].Success ? capacity(match.Groups[1].Value, match.Groups[2].Value) : string.Empty);
+
+    /// <summary>
     /// The documented HLSL-to-C# transformations, and nothing else. <paramref name="members"/> is C# source a
     /// test supplies, placed first in the class body: it is not a transformation of the HLSL.
     /// </summary>
-    internal static string TransformHlslToCSharp(string hlsl, string members = "")
+    internal static string TransformHlslToCSharp(string hlsl, string members = "", IReadOnlyDictionary<string, int>? defines = null)
     {
-        // 1. Include guards (#ifndef/#define/#endif) are dropped; C# has no textual include.
-        var source = Regex.Replace(hlsl, @"(?m)^\s*#(ifndef|define|endif)\b.*$", string.Empty);
+        // 1. Include guards (#ifndef/#define/#endif) are dropped; C# has no textual include. A capacity macro
+        //    (#ifndef X, #define X n, #endif) becomes `const int X = n;`, or the value a test defines for X.
+        var source = DropGuards(hlsl, (name, value) => $"const int {name} = {(defines is not null && defines.TryGetValue(name, out var defined) ? defined : value)};");
 
         // 2. Functions taking Texture2D/SamplerState resources are dropped; GPU resources have
         //    no CultMath analog.
@@ -708,14 +775,17 @@ public sealed class HlslSourceCompatibilityTests
         source = Regex.Replace(source, @"(?ms)(struct\s+\w+\s*\{)(.*?)(\};)", m =>
             m.Groups[1].Value + Regex.Replace(m.Groups[2].Value, @"(?m)^(\s*)(\w+\s+\w+;)", "$1public $2") + m.Groups[3].Value);
 
-        // 6. The file body is wrapped in a class; C# has no free functions.
+        // 6. An array parameter `T name[N]` becomes `T[] name`; the mirror takes the array whole and the count beside it.
+        source = Regex.Replace(source, @"\b(\w+) (\w+)\[CULTMATH_MAX_\w+\]", "$1[] $2");
+
+        // 7. The file body is wrapped in a class; C# has no free functions.
         return "using CultMath;\nusing static CultMath.math;\nnamespace CultMathHlsl;\npublic class HlslShader\n{\n" + members + source + "\n}\n";
     }
 
-    internal static (Assembly? Assembly, IReadOnlyList<string> Errors) CompileShaderMirror(string members = "")
+    internal static (Assembly? Assembly, IReadOnlyList<string> Errors) CompileShaderMirror(string members = "", IReadOnlyDictionary<string, int>? defines = null)
     {
         var hlsl = ReadShaderSource(FindCultMathRoot());
-        var tree = CSharpSyntaxTree.ParseText(TransformHlslToCSharp(hlsl, members));
+        var tree = CSharpSyntaxTree.ParseText(TransformHlslToCSharp(hlsl, members, defines));
         var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!)
             .Split(Path.PathSeparator)
             .Append(typeof(math).Assembly.Location)

@@ -9,19 +9,19 @@ namespace CultMath.Tests;
 /// </summary>
 public sealed class LatticeCellsTests
 {
-    private const float Cell = 260.0f;
-    private const float Falloff = 120.0f;
-    private const float Drift = 0.7f;
-    private static readonly float2 Normal = new(0.6f, 0.8f);
+    internal const float Cell = 260.0f;
+    internal const float Falloff = 120.0f;
+    internal const float Drift = 0.7f;
+    internal static readonly float2 Normal = new(0.6f, 0.8f);
 
-    private sealed record Look(float Boost, float Stretch, float Smoothing, float Falloff = LatticeCellsTests.Falloff);
+    internal sealed record Look(float Boost, float Stretch, float Smoothing, float Falloff = LatticeCellsTests.Falloff);
 
-    private static readonly Look[] Looks =
+    internal static readonly Look[] Looks =
     {
         new(1.6f, 1.0f, 0.35f), new(1.6f, 2.0f, 0.35f), new(LatticeMaxBoost, LatticeMaxStretch, LatticeMaxSmoothing), new(0.0f, 1.0f, 0.05f),
     };
 
-    private static float4[] Bodies(float t)
+    internal static float4[] Bodies(float t)
     {
         var bodies = new float4[6];
         for (var i = 0; i < bodies.Length; i++)
@@ -74,7 +74,7 @@ public sealed class LatticeCellsTests
     private static float4 Call(float2 p, float time, float4[] bodies, Look look, float2? normal = null) =>
         weighted_lattice_cells(p, time, bodies, Cell, Drift, look.Boost, look.Falloff, look.Smoothing, normal ?? Normal, look.Stretch);
 
-    private static float2 RandomPoint(System.Random r) =>
+    internal static float2 RandomPoint(System.Random r) =>
         new((r.NextSingle() * 2.0f - 1.0f) * 1500.0f, (r.NextSingle() * 2.0f - 1.0f) * 1500.0f);
 
     [Fact]
@@ -97,9 +97,9 @@ public sealed class LatticeCellsTests
             }
     }
 
-    private delegate bool Stop(int k, float f1, float f2, Look look);
+    internal delegate bool Stop(int k, float f1, float f2, Look look);
 
-    private static readonly (string name, Stop stop)[] Rules =
+    internal static readonly (string name, Stop stop)[] Rules =
     {
         ("correct", (k, f1, f2, l) => k > 1 && 0.5f * (k - 1) >= max(f2, f1 + 2.0f * l.Smoothing)),
         ("cutoff F1 + k", (k, f1, f2, l) => k > 1 && 0.5f * (k - 1) >= max(f2, f1 + l.Smoothing)),
@@ -109,7 +109,7 @@ public sealed class LatticeCellsTests
     };
 
     // The radius of the box a search with the given exit rule visits (rings 0 to k - 1 when it stops before ring k).
-    private static int Radius(float2 p, float time, float4[] bodies, Look look, Stop stop,
+    internal static int Radius(float2 p, float time, float4[] bodies, Look look, Stop stop,
         Dictionary<(int, int), float> weights)
     {
         var q = p / Cell;

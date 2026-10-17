@@ -22,7 +22,11 @@ public sealed partial class GlslMirrorTests
 
     public GlslMirrorTests(ITestOutputHelper output) => this.output = output;
 
-    private static bool Write => Environment.GetEnvironmentVariable("CULTMATH_WRITE_GLSL") == "1";
+    // The fixture is written by Yggdrasil's mcr.microsoft.com/dotnet/sdk:10.0 image (Ubuntu 24.04) only: its platform families record
+    // that platform's libm, so a write from another OS would move them.
+    private static bool Write => Environment.GetEnvironmentVariable("CULTMATH_WRITE_GLSL") == "1"
+        ? OperatingSystem.IsLinux() ? true : throw new InvalidOperationException("CULTMATH_WRITE_GLSL=1 writes glsl-parity.json, whose platform families belong to Yggdrasil's Ubuntu image (mcr.microsoft.com/dotnet/sdk:10.0): regenerate it there.")
+        : false;
 
     private static string Root => HlslSourceCompatibilityTests.FindCultMathRoot();
 
@@ -497,6 +501,14 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
             return (int)scalars.Dequeue();
         if (type == typeof(uint))
             return scalars.Dequeue();
+        if (type.IsArray)
+        {
+            var array = Array.CreateInstance(type.GetElementType()!, SiteArrays.Capacity);
+            for (var i = 0; i < array.Length; i++)
+                array.SetValue(FromScalars(type.GetElementType()!, scalars), i);
+            return array;
+        }
+
         var value = Activator.CreateInstance(type)!;
         foreach (var field in type.GetFields().Where(f => !f.IsStatic))
             field.SetValue(value, FromScalars(field.FieldType, scalars));
@@ -872,14 +884,26 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
         }),
         // The smooth step: d exactly at f1 + 2 smoothing one in four (the equal branch), near it one in four, the
         // smoothing near 0 and at 1, m anywhere up to f1 + smoothing.
+        // One draw in four is the cap point: m = f1 + smoothing exactly and d = f1 + smoothing (1 + U(0.3, 0.9)) with smoothing in
+        // [0.5, 1], where next exceeds f1 + smoothing and the min clamps; a step that returns next reads another function there.
         new Family("float cultmath_lattice_smooth_step(float, float, float, float)", "ulp-bounded", r =>
         {
+            if (r.Next(4) == 0)
+            {
+                var cappedSmoothing = Uniform(r, 0.5f, 1.0f);
+                var cappedF1 = Uniform(r, 0.0f, 10.0f);
+                return new object[] { cappedF1 + cappedSmoothing, cappedF1 + cappedSmoothing * (1.0f + Uniform(r, 0.3f, 0.9f)), cappedF1, cappedSmoothing };
+            }
+
             var smoothing = r.Next(5) switch { 0 => 1.0f, 1 => Uniform(r, 1.0e-3f, 1.0e-2f), _ => Uniform(r, 0.01f, 1.0f) };
             var f1 = Uniform(r, 0.0f, 10.0f);
             var edge = f1 + 2.0f * smoothing;
             var d = r.Next(4) switch { 0 => edge, 1 => edge * Uniform(r, 0.99f, 1.01f), _ => Uniform(r, f1, edge + 1.0f) };
             return new object[] { Uniform(r, f1, f1 + smoothing), d, f1, smoothing };
         }),
+        // The site-array functions: a fixed-capacity array and a count, killed on the device (the lattice at rings up to 17).
+        new Family($"vec4 cultmath_power_border(vec3, vec4[{SiteArrays.Capacity}], int)", "ulp-bounded", SiteArrays.PowerBorderArguments),
+        new Family($"vec4 cultmath_weighted_lattice_cells(vec2, float, vec4[{SiteArrays.Capacity}], int, float, float, float, float, float, vec2, float)", "ulp-bounded", SiteArrays.LatticeArguments),
     }).ToArray();
 
     // A point of magnitude m, m log-uniform in [lo, hi]: one component at +-m, the other two uniform in [-m, m],
@@ -988,6 +1012,7 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
         ["vec4"] = typeof(float4), ["ivec3"] = typeof(int3), ["ivec4"] = typeof(int4),
         ["SpanPath"] = typeof(SpanPath), ["SpanStage"] = typeof(SpanStage),
         ["CultSiteCells"] = typeof(CultSiteCells),
+        [$"vec4[{SiteArrays.Capacity}]"] = typeof(float4[]),
     };
 
     // The C# math method a GLSL signature names: cultmath_ dropped, parameter types mapped.
@@ -996,6 +1021,7 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
         var match = Regex.Match(glsl, @"^\w+ cultmath_(\w+)\(([^)]*)\)$");
         var types = match.Groups[2].Value.Split(", ").Select(t => GlslTypes[t]).ToArray();
         return typeof(math).GetMethod(match.Groups[1].Value, BindingFlags.Public | BindingFlags.Static, null, types, null)
+            ?? typeof(SiteArrays).GetMethod(match.Groups[1].Value, BindingFlags.NonPublic | BindingFlags.Static, null, types, null)
             ?? throw new InvalidOperationException("no C# math counterpart for " + glsl);
     }
 
@@ -1011,6 +1037,8 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
     // the same read as GLSL's columns.
     private static IEnumerable<object> Scalars(object value) => value is float or int or uint
         ? new[] { value }
+        : value is Array array
+        ? array.Cast<object>().SelectMany(Scalars)
         : value is float3x3 matrix
         ? new object[] { matrix._m00, matrix._m01, matrix._m02, matrix._m10, matrix._m11, matrix._m12, matrix._m20, matrix._m21, matrix._m22 }
         : value.GetType().GetFields().Where(f => !f.IsStatic).SelectMany(f => Scalars(f.GetValue(value)!));
