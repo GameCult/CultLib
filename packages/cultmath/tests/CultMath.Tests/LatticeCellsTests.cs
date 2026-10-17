@@ -248,6 +248,76 @@ public sealed class LatticeCellsTests
         }
     }
 
+    [Fact]
+    public void F1F2AndSmoothAreContinuousThroughWinnerSwaps()
+    {
+        var r = new System.Random(19);
+        var bodies = Bodies(11.0f);
+        var swaps = 0;
+        foreach (var look in new[] { Looks[1], Looks[2] })
+            for (var line = 0; line < 6; line++)
+            {
+                var a = RandomPoint(r);
+                var b = RandomPoint(r);
+                float2 At(float t) => a + (b - a) * t;
+                const int Steps = 4000;
+                for (var s = 1; s <= Steps; s++)
+                {
+                    float lo = (s - 1) / (float)Steps, hi = s / (float)Steps;
+                    if (Call(At(lo), 11.0f, bodies, look).w == Call(At(hi), 11.0f, bodies, look).w)
+                        continue;
+                    swaps++;
+                    for (var i = 0; i < 40; i++)
+                    {
+                        var mid = 0.5f * (lo + hi);
+                        if (Call(At(mid), 11.0f, bodies, look).w == Call(At(lo), 11.0f, bodies, look).w) lo = mid; else hi = mid;
+                    }
+                    var before = Call(At(lo), 11.0f, bodies, look);
+                    var after = Call(At(hi), 11.0f, bodies, look);
+                    var bound = 12.0f * length(At(hi) - At(lo)) / Cell + 1e-5f * 12.0f;
+                    Assert.True(abs(before.x - after.x) < bound, $"F1 {before.x} -> {after.x}");
+                    Assert.True(abs(before.y - after.y) < bound, $"F2 {before.y} -> {after.y}");
+                    Assert.True(abs(before.z - after.z) < bound, $"smooth {before.z} -> {after.z}");
+                }
+            }
+        Assert.True(swaps >= 20, $"only {swaps} winner swaps crossed");
+    }
+
+    [Fact]
+    public void TheCapIsReachedAndMatchesTheFullBox()
+    {
+        // A cell whose every neighbour is boosted far and stretched needs ring 17, past the cap a smaller bound would set.
+        var look = new Look(LatticeMaxBoost, LatticeMaxStretch, LatticeMaxSmoothing, 1.0e6f);
+        var p = new float2(1446.7345f, -680.7637f);
+        const float Time = 97.69269f;
+        var bodies = Bodies(Time);
+        var weights = new Dictionary<(int, int), float>();
+        var ring = Radius(p, Time, bodies, look, Rules[0].stop, weights);
+        Assert.InRange(ring, 13, LatticeMaxRing);
+        Assert.Equal(BoxFold(p, Time, bodies, look, LatticeMaxRing, weights), Call(p, Time, bodies, look));
+        // The cap is the greatest ring the range's worst case can need: the exit holds once 0.5 (k - 1) reaches the
+        // larger of the F2 and F1 + 2 smoothing bounds, which are (1 + boost) stretch sqrt(3.25) and (1 + boost) stretch sqrt(2) + 2 smoothing.
+        var f2Bound = (1.0f + LatticeMaxBoost) * LatticeMaxStretch * MathF.Sqrt(3.25f);
+        var bandBound = (1.0f + LatticeMaxBoost) * LatticeMaxStretch * MathF.Sqrt(2.0f) + 2.0f * LatticeMaxSmoothing;
+        Assert.Equal((int)MathF.Ceiling(2.0f * max(f2Bound, bandBound)), LatticeMaxRing);
+    }
+
+    [Fact]
+    public void AnExactTieChangesOnlyTheIdToTheEarlierRowMajorCell()
+    {
+        // Cells sharing a base weight and, at these coordinates, a rounded site: a query on that site is at distance 0 from both.
+        foreach (var (earlier, time) in new[] { (new float2(6003486, 3996 + 6000000), 0.0f), (new float2(6007572, 2713 + 6000000), 4.07f) })
+        {
+            var later = earlier + new float2(0, 1);
+            var siteA = lattice_site(earlier, time, 1.0f);
+            Assert.Equal(siteA, lattice_site(later, time, 1.0f));
+            var got = weighted_lattice_cells(siteA.xy, time, Array.Empty<float4>(), 1.0f, 1.0f, 0.0f, 1.0f, 0.01f, Normal, 1.0f);
+            var idOf = (float2 c) => cellular_unit(pcg4d(new int4((int)c.x, (int)c.y, 0, 0)).w);
+            Assert.NotEqual(idOf(earlier), idOf(later));
+            Assert.Equal(new float4(0.0f, 0.0f, got.z, idOf(earlier)), got);
+        }
+    }
+
     private static void Refuses(string parameter, Action call) =>
         Assert.Equal(parameter, Assert.Throws<ArgumentException>(call).ParamName);
 
