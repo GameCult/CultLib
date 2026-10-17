@@ -2340,6 +2340,35 @@ and 16:50 UTC (18:30 to 18:50 CEST). Logs are in the Imagination scratchpad
     the committed GLSL is 80, 9, 10, 18. `--relax-nan-checks` changes no lavapipe bit. So the
     cleaned route is closer to the HLSL than today's GLSL is, and "bit-identical to today's
     lowering" cannot be its gate. With apt's spirv-tools 2025.1~rc1 the figures for this route are the same.
+- **Why `span_fbm` and `span_ridged` differ by 1 ulp (Pass 9c).** Imagination `imagination-ag4-span-ulp`,
+  2026-10-17, on 23ac4e89, same image and tools as `cut-glsl-build-dxc.h1`, probes in the session
+  scratchpad `logs/ag4-ulp/` (`probe1.sh` to `probe4.sh`). Only the curvature word (word 4 of 6) differs, in
+  41 and 42 of 1536 words. Two causes, both measured:
+  - **dxc's entry-point optimiser reassociates.** `cultmath_snoise_hessian` ends every entry in
+    `105.0 * (...)`. In the `-O3` entry module the 105 is hoisted out: nine squares are summed bare and
+    the sum is multiplied once (`OpFMul %11025 %sum`, then `Sqrt`), where the source squares `105 * a`
+    nine times. That is real arithmetic, not float arithmetic. Neither `NoContraction` nor
+    `--relax-nan-checks` touches it. `dxc -Gis` (IEEE strictness) stops it.
+  - **The driver contracts mul+add by use count.** lavapipe (NIR) fuses an `OpFMul` into the `OpFAdd`
+    that consumes it only when the product has one use. dxc's CSE shares the symmetric Hessian's
+    off-diagonal squares (two uses each), so the entry module fuses some of the nine pairs; the `-Od`
+    library module has nine single-use products and fuses all nine. The `OpFAdd` order is the same in
+    both (left fold, as the C# `span_frobenius`).
+  - Decorating every `OpFMul`, `OpFAdd`, `OpFSub`, `OpVectorTimesScalar` and `OpDot` `NoContraction` in
+    both final modules, f103 and f104: `-Od` HLSL equals the built GLSL (0 words differ); `-O3`
+    HLSL still differs in 31 and 44 (the hoist). `-Gis` (with `-O3`) plus `NoContraction` equals the built GLSL on
+    127 of 127 families, and so does `-Od` plus `NoContraction`. Plain `-Od` HLSL differs from the built GLSL in 664 words
+    (contraction depends on use structure), so `-Od` alone is worse than `-O3`: your suspicion of `-Od`
+    on the HLSL route is not a fix.
+  - **Which is right.** Against the C# fixture, exact cases of 256 for f103 are 3 (HLSL) and 4 (GLSL) plain,
+    and 151 for both under `NoContraction`; for f104, 7 and 10 plain, 141 under it. Of the first 60 families whose
+    count moved, the strict form is nearer the C# in all but one, which moved by 1. Strict IEEE, no contraction, no
+    reassociation is what C# computes, so it is "right"; the plain routes are each one driver's
+    fusion pattern. The built GLSL is source-faithful (nothing in the `-Od` route reassociates).
+  - **What makes them agree.** The equality gate (`GLSL_DIR` mode) compares both routes in the strict
+    form: HLSL entry built with `-Gis`, and a harness pass that adds `NoContraction` to every float op of
+    both modules (about 12 lines of `spirv-dis` and `spirv-as`; `tools/device/nc.py` in the probe). That is
+    127 of 127. The shipped GLSL and the C# bounds judge are unchanged. See question `glsl-gate-strict-form`.
 - **Capability strip.** `spirv-opt --trim-capabilities` (spirv-tools 2025.1~rc1) leaves all 14
   capabilities and both extensions in place, and SPIRV-Cross still refuses ("RayQuery requires Vulkan
   GLSL 460"). Stripping every capability except Shader and Linkage and every OpExtension in the
