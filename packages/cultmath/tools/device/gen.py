@@ -115,7 +115,9 @@ def body(sig, n, win, wout, defs, glsl):
 def main(work, root):
     defs = structs(root)
     shaders = os.path.join(root, 'shaders')
-    library = ''.join(open(os.path.join(shaders, f)).read() for f in ('CultMath.glsl', 'CultMath.Cycles.glsl', 'CultMath.Phacelle.glsl'))
+    built = os.environ.get('GLSL_DIR')
+    parts = [os.path.join(built, f) for f in ('core.glsl', 'cycles.glsl', 'phacelle.glsl')] if built else         [os.path.join(shaders, f) for f in ('CultMath.glsl', 'CultMath.Cycles.glsl', 'CultMath.Phacelle.glsl')]
+    library = ''.join(open(p).read() for p in parts)
     count = 0
     for line in open(os.path.join(work, 'manifest.txt')):
         tag, _, sig, n, win, wout = line.rstrip('\n').split('\t')
