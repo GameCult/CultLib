@@ -18,7 +18,7 @@ public sealed class LatticeCellsTests
 
     private static readonly Look[] Looks =
     {
-        new(1.6f, 1.0f, 0.35f), new(1.6f, 2.0f, 0.35f), new(LatticeMaxBoost, LatticeMaxStretch, LatticeMaxSmoothing),
+        new(1.6f, 1.0f, 0.35f), new(1.6f, 2.0f, 0.35f), new(LatticeMaxBoost, LatticeMaxStretch, LatticeMaxSmoothing), new(0.0f, 1.0f, 0.05f),
     };
 
     private static float4[] Bodies(float t)
@@ -26,7 +26,7 @@ public sealed class LatticeCellsTests
         var bodies = new float4[6];
         for (var i = 0; i < bodies.Length; i++)
         {
-            var angle = 0.05f * (i + 1) * t + i;
+            var angle = 0.01f * (i + 1) * t + i;
             var radius = 300.0f + 220.0f * i;
             bodies[i] = new float4(radius * MathF.Cos(angle), radius * MathF.Sin(angle), 0.0f, 40.0f + 40.0f * i);
         }
@@ -139,9 +139,9 @@ public sealed class LatticeCellsTests
     [Fact]
     public void ConstructedPointsRealizeTheExitBound()
     {
-        var look = Looks[2];
         var failed = new Dictionary<string, int>();
         var r = new System.Random(7);
+        foreach (var look in new[] { Looks[2], Looks[3] })
         for (var batch = 0; batch < 20; batch++)
         {
             var time = 29.0f * batch;
