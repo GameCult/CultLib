@@ -852,6 +852,34 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
             var a = Point3(r);
             return new object[] { a, r.Next(8) == 0 ? a : Point3(r), Point3(r) };
         }),
+        // The lattice steps. The cell is an integer-valued vec2 (negative and large included), time and drift span
+        // zero and the accepted range; the weight's border covers 0, near the falloff, and the 1.0e30 of no body.
+        new Family("vec3 cultmath_lattice_site(vec2, float, float)", "ulp-bounded", r =>
+            new object[] { new float2(r.Next(-4000, 4000), r.Next(-4000, 4000)), r.Next(6) == 0 ? 0.0f : Uniform(r, -200.0f, 200.0f), r.Next(6) == 0 ? 0.0f : Uniform(r, -3.0f, 3.0f) }),
+        new Family("float cultmath_lattice_weight(float, float, float, float)", "ulp-bounded", r =>
+        {
+            var falloff = Uniform(r, 0.05f, 40.0f);
+            var border = r.Next(5) switch { 0 => 0.0f, 1 => 1.0e30f, 2 => falloff * Uniform(r, 0.9f, 1.1f), _ => Uniform(r, 0.0f, 3.0f * falloff) };
+            var boost = r.Next(5) switch { 0 => 0.0f, 1 => 4.0f, _ => Uniform(r, 0.0f, 4.0f) };
+            return new object[] { Uniform(r, 0.5f, 1.0f), border, boost, falloff };
+        }),
+        new Family("float cultmath_lattice_distance(vec2, vec2, float, vec2, float)", "ulp-bounded", r =>
+        {
+            var angle = Uniform(r, 0.0f, 6.2831855f);
+            var normal = r.Next(6) == 0 ? new float2(1.0f, 0.0f) : new float2(MathF.Cos(angle), MathF.Sin(angle));
+            var stretch = r.Next(5) switch { 0 => 1.0f, 1 => 2.0f, _ => Uniform(r, 1.0f, 2.0f) };
+            return new object[] { Point2(r), Point2(r), Uniform(r, 0.5f, 5.0f), normal, stretch };
+        }),
+        // The smooth step: d exactly at f1 + 2 smoothing one in four (the equal branch), near it one in four, the
+        // smoothing near 0 and at 1, m anywhere up to f1 + smoothing.
+        new Family("float cultmath_lattice_smooth_step(float, float, float, float)", "ulp-bounded", r =>
+        {
+            var smoothing = r.Next(5) switch { 0 => 1.0f, 1 => Uniform(r, 1.0e-3f, 1.0e-2f), _ => Uniform(r, 0.01f, 1.0f) };
+            var f1 = Uniform(r, 0.0f, 10.0f);
+            var edge = f1 + 2.0f * smoothing;
+            var d = r.Next(4) switch { 0 => edge, 1 => edge * Uniform(r, 0.99f, 1.01f), _ => Uniform(r, f1, edge + 1.0f) };
+            return new object[] { Uniform(r, f1, f1 + smoothing), d, f1, smoothing };
+        }),
     }).ToArray();
 
     // A point of magnitude m, m log-uniform in [lo, hi]: one component at +-m, the other two uniform in [-m, m],

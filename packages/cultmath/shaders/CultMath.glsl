@@ -688,6 +688,52 @@ float cultmath_gabriel_margin(vec3 a, vec3 b, vec3 other)
     return (cultmath_distance(other, (a + b) * 0.5) - r) / r;
 }
 
+// Weighted lattice cells: the four per-cell steps of math.Lattice.cs, statement for statement. A shader function cannot take a
+// span (design.md, "Sites"), so weighted_lattice_cells is the consumer's loop over its own body buffer, in two passes:
+//   vec2 q = p / cellSize; ivec2 c0 = (ivec2)floor(q); float f1 = 1.0e30, f2 = 1.0e30; int reach = 0;
+//   for (int k = 0; ; k++) {   // ring pass: Chebyshev rings 0, 1, 2, ... around c0, exact exit
+//       if (k > 1 && 0.5 * (k - 1) >= max(f2, f1 + 2.0 * smoothing)) break;   // k never reaches 38 in the accepted range
+//       for each cell on ring k: d = cultmath_lattice_distance(q, cultmath_lattice_site(cell, time, drift).xy, w, normal, stretch),
+//           w = cultmath_lattice_weight(site.z, border, boost, falloff), border = the .w of cultmath_power_border_step
+//           folded over the bodies (owner = the nearest body of the cell centre (cell + 0.5) * cellSize, z = 0);
+//           if (d < f1) { f2 = f1; f1 = d; } else if (d < f2) f2 = d;   store d for the box pass
+//       reach = k; }
+//   float m = f1 + smoothing;   // box pass: every stored cell, rows dz = -reach..reach, then dx = -reach..reach
+//   for each (dz, dx): m = cultmath_lattice_smooth_step(m, d, f1, smoothing);   // strict < for the winning id (earlier cell wins ties)
+// The preconditions the C# function throws for are the caller's in a shader: finite arguments, cellSize > 0, boost in [0, 4],
+// falloff > 0, smoothing in (0, 1], stretch in [1, 2], p within 2^23 cells. The normal is normalised as C# does: divide by its
+// largest component, then by its length (a zero normal means (1, 0) and needs stretch == 1). The ring bound is 37.
+vec3 cultmath_lattice_site(vec2 cell, float time, float drift)
+{
+    ivec3 h = cultmath_pcg3d(ivec3(int(cell.x), int(cell.y), 0));
+    vec2 phase = vec2(float(uint(h.x) >> 8) * (1.0 / 16777216.0), float(uint(h.y) >> 8) * (1.0 / 16777216.0));
+    vec2 site = cell + 0.5 + 0.5 * vec2(sin(drift * time + CULTMATH_TAU * phase.x), sin(drift * time + CULTMATH_TAU * phase.y));
+    return vec3(site, 0.5 + 0.5 * (float(uint(h.z) >> 8) * (1.0 / 16777216.0)));
+}
+
+float cultmath_lattice_weight(float base_weight, float border, float boost, float falloff)
+{
+    float t = border / falloff;
+    return base_weight * (1.0 + boost * exp(-(t * t)));
+}
+
+float cultmath_lattice_distance(vec2 q, vec2 site, float weight, vec2 normal, float stretch)
+{
+    vec2 v = site - q;
+    float a = dot(v, normal);
+    float c = v.x * normal.y - v.y * normal.x;
+    return weight * length(vec2(stretch * a, c));
+}
+
+float cultmath_lattice_smooth_step(float m, float d, float f1, float smoothing)
+{
+    if (d >= f1 + 2.0 * smoothing)
+        return m;
+    float h = cultmath_smoothstep(0.0, 1.0, 0.5 + 0.5 * (m - d) / smoothing);
+    float next = m + (d - m) * h - h * (1.0 - h) * smoothing / (1.0 + 3.0 * smoothing);
+    return min(next, f1 + smoothing);
+}
+
 vec2 cultmath_segment_closest(vec2 point_value, vec2 start, vec2 end)
 {
     vec2 segment = end - start;
