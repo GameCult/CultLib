@@ -132,6 +132,14 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public void Reading_SkipsUnknownNamesWhenCaseInsensitive()
+        {
+            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true }.AddCultMathConverters();
+            JsonSerializer.Deserialize<CultPhasor>("""{"extra":[1,2],"COSINE":{"x":3},"coss":{"x":4}}""", options).cosine.x.Should().Be(3f);
+            JsonSerializer.Deserialize<float2>("""{"X":1,"q":2,"Y":3}""", options).Should().Be(new float2(1f, 3f));
+        }
+
+        [Test]
         public void Writing_NeverEmitsLegacyNames()
         {
             using var document = JsonDocument.Parse(Json(new CultPhasor(new float4(1f, 1f, 1f, 1f), new float4(2f, 2f, 2f, 2f))));
