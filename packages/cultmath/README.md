@@ -34,6 +34,10 @@ shader semantics.
   `soft_gabriel_gate` gates a pair of sites by the empty-disc margin. Each is a loop over the shader steps
   `cultmath_power_score` / `cultmath_multiplicative_score`, `cultmath_site_cells_empty`, `cultmath_site_cells_insert`,
   `cultmath_site_cells_border`, `cultmath_power_border_step` (the exact power cell border, `power_border`) and `cultmath_gabriel_margin`; a shader loops over its own buffer.
+- Weighted lattice cells (C# only until the shader cut): `weighted_lattice_cells` returns `float4(F1, F2, smooth, id)` over a jittered,
+  drifting lattice whose cell weights come from the exact power border of the body span at each cell centre, with a stretched
+  metric and an exact ring search over the stated range (`LatticeMaxBoost`, `LatticeMaxStretch`, `LatticeMaxSmoothing`). It composes the
+  public steps `lattice_site`, `lattice_weight`, `lattice_distance` and `lattice_smooth_step`.
 - `shaders/CultMath.hlsl`, a canonical HLSL mirror include for shader-side
   parity. HLSL already owns `float2`, `float3`, and `float4`; the include
   exposes `cultmath_*` functions for shared semantics HLSL does not provide.

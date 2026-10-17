@@ -295,7 +295,7 @@ public sealed class LatticeCellsTests
             }
         Assert.True(rings.Max() <= LatticeMaxRing - 2, $"greatest ring {rings.Max()}");
         rings.Sort();
-        Console.WriteLine($"lattice rings p50 {rings[rings.Count / 2]} p99 {rings[rings.Count * 99 / 100]} max {rings[^1]}");
+        Assert.Equal((3, 7, 8), (rings[rings.Count / 2], rings[rings.Count * 99 / 100], rings[^1]));
     }
 
     [Fact]
