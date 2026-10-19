@@ -9,6 +9,7 @@ import test, { mock } from "node:test";
 import { execFileSync } from "node:child_process";
 
 import { EMPTY_SHA256, chunkRecordKey, packContent, sha256Hex } from "cultnet-ts/content";
+import { closeSync, constants as fsConstants, openSync, symlinkSync } from "node:fs";
 
 import {
   ContentChunkTooLargeError,
@@ -267,11 +268,12 @@ test("a recordKey is compared exactly: padded and re-cased forms of the right ke
   const store = spyStore({ [chunk.chunkHash]: chunk.payload });
   const key = chunkRecordKey(chunk.chunkHash);
   const q = (value: string) => `/c?chunkHash=${chunk.chunkHash}&recordKey=${encodeURIComponent(value)}`;
-  for (const forged of [` ${key}`, `${key} `, `\t${key}`, key.toUpperCase(), key.replace("mesh", "Mesh")]) {
+  for (const forged of [` ${key}`, `${key} `, `\t${key}`, key.toUpperCase(), key.replace("mesh", "Mesh"), "\uFEFF", `\uFEFF${key}`]) {
     assert.equal((await ask(store, q(forged))).status, 400, JSON.stringify(forged));
   }
   assert.deepEqual(store.calls, []);
-  for (const blank of ["\t", "\n", "\r\n", " \t "]) assert.equal((await ask(store, q(blank))).status, 200, JSON.stringify(blank));
+  // U+0085 is white space to C# and not to JS trim(); U+FEFF is the reverse: the blank rule is C#'s, not the platform's.
+  for (const blank of ["\t", "\n", "\r\n", " \t ", "\u0085", "\u00A0", " \u0085 "]) assert.equal((await ask(store, q(blank))).status, 200, JSON.stringify(blank));
   assert.equal((await ask(store, q(key))).status, 200);
 });
 
@@ -317,6 +319,27 @@ test("a store that reuses its buffer cannot change the bytes after the hash: the
   assert.notEqual(answer.body?.buffer, shared.buffer);
 });
 
+test("a store that overwrites its buffer on any microtask hop never gets other bytes served under the chunk's name", async () => {
+  const chunk = await packed("hello chunk");
+  const outcomes = new Set<number>();
+  for (let overwriteAt = 0; overwriteAt <= 10; overwriteAt += 1) {
+    const shared = Buffer.from(chunk.payload);
+    const store: ContentChunkStore = {
+      readChunk: async () => {
+        let hops = 0;
+        const hop = (): void => { if (hops++ < overwriteAt) queueMicrotask(hop); else shared.fill(0x58); };
+        queueMicrotask(hop);
+        return shared;
+      },
+    };
+    const answer = await ask(store, `/c?chunkHash=${chunk.chunkHash}`);
+    outcomes.add(answer.status);
+    const served = answer.status === 200 && Buffer.from(answer.body ?? new Uint8Array()).equals(Buffer.from(chunk.payload));
+    assert.ok(served || answer.status === 500, `overwrite after ${overwriteAt} hops answered ${answer.status} with ${decode(answer)}`);
+  }
+  assert.deepEqual([...outcomes].sort(), [200, 500], "the sweep covers an overwrite before the copy and one after the hash");
+});
+
 test("a FIFO named by a hash is refused as not a regular file at once and holds no thread: other chunks are still served", { skip: process.platform === "win32" }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cm-content-"));
   try {
@@ -335,5 +358,26 @@ test("a FIFO named by a hash is refused as not a regular file at once and holds 
     assert.deepEqual(await Promise.all(refusals), Array(8).fill("Chunk is not a regular file."));
     assert.deepEqual(await within(store.readChunk(chunk.chunkHash, 1 << 20)), chunk.payload);
     assert.equal((await within(createContentChunkHandler(store)({ method: "GET", url: `/?chunkHash=${fifoHash}` }))).status, 500);
+  } finally {
+    // A reverted non-blocking open leaves pool threads waiting for a writer, which would keep the process alive past the failure.
+    // Opening the FIFO read-write (synchronously: the pool is full) releases them, so the revert fails the test in seconds.
+    try { closeSync(openSync(join(root, await sha256Hex(new Uint8Array([9]))), fsConstants.O_RDWR | fsConstants.O_NONBLOCK)); } catch { /* already gone */ }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a character device named by a hash is refused as not a regular file, whatever the user id", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cm-content-"));
+  try {
+    const store = createDirectoryChunkStore(root);
+    for (const [index, device] of ["/dev/null", "/dev/zero"].entries()) {
+      const hash = await sha256Hex(new Uint8Array([index]));
+      symlinkSync(device, join(root, hash));
+      await assert.rejects(store.readChunk(hash, 1 << 20), { message: "Chunk is not a regular file." }, device);
+      const seen: string[] = [];
+      const answer = await createContentChunkHandler(store, { onServerFault: fault => seen.push(fault.kind) })({ method: "GET", url: `/?chunkHash=${hash}` });
+      assert.equal(answer.status, 500, device);
+      assert.deepEqual(seen, ["store-error"], device);
+    }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
