@@ -32,6 +32,7 @@ import {
   type CultMeshAuthorityTrustPolicy,
   type CultMeshP256PublicKey,
 } from "cultnet-ts/authority";
+export * from "./content.js";
 
 export type CultMeshBrowserIdentity = CultMeshAuthorityIdentity;
 export type CultMeshBrowserRoute = CultMeshAuthorityRouteView;
