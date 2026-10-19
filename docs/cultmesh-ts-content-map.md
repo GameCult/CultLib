@@ -12,7 +12,9 @@ typed mind, not here.
 ## 1. Body facts
 
 F1-F18 were probed by running code or read from source at `8990bd46`. F19-F27
-were probed or read at `b8b825e1` (C1's head) and `2de07065`. Scratch probes
+were probed or read at `b8b825e1` (C1's head) and `2de07065`. F28-F33 were
+probed on 2026-10-19 over the C2+C3 merge tree (`7adbf3cb` merged with C3's
+head, extracted by `git archive`), on Windows and in a Linux container. Scratch probes
 ran under the session scratchpad (`imagination/`), not in the repo.
 
 | # | Fact | Evidence |
@@ -44,6 +46,12 @@ ran under the session scratchpad (`imagination/`), not in the repo.
 | F25 | The existing TLS fixture `packages/cultmesh-ts/test/fixtures/quic-test.p12` is a self-signed P-256 certificate with subject `CN=cultmesh-quic-native-tests` and no subjectAltName (fixtures README). Node's TLS hostname check therefore refuses it for `127.0.0.1` even when it is trusted through `NODE_EXTRA_CA_CERTS`. A C# handler that pins by certificate hash does not care about the name. | source: fixtures README |
 | F26 | `CultMeshCdn.ValidateChunkPayload`, `HashBytes`, `ValidateManifest` and `NormalizeHash` are `internal`, and `GameCult.Mesh` declares no `InternalsVisibleTo`. A test in `tests/GameCult.Mesh.Tests` can therefore verify chunk bytes only with `SHA256.HashData`, or through a public consumer of the connector. The public surface is `CreateRecordKey`, `PackArtifact`, `PublishAsync` and `ReadArtifact(Async)`. | grep of `CultMeshCdn.cs`, `src/GameCult.Mesh` |
 | F27 | No CultLib workflow runs `cultmesh-ts` interop tests. `cultnet-interop.yml` (windows-latest, main only) runs `cultnet-ts`'s `test/interop`, and its QUIC native case spawns `dotnet test --filter NativeConnectorReceivesFromExternalProvider` through `runDotnetTestFilter` (`cultnet-interop.test.ts:550,2826`). `cultmesh-ts` has a `test/interop/` folder (a QUIC peer script) but no `test:interop` script. | grep of `.github/workflows`, source |
+| F28 | **The real provider meets the real reader across processes, on Windows and Linux.** C2's handler, store and `toNodeListener` served on `node:https` with a self-signed P-256 certificate (subjectAltName `IP:127.0.0.1, DNS:localhost`, `CA:FALSE`, `serverAuth`, 100-year validity). They served a 4-chunk artifact (3.5 x 64 KiB) and an empty one. C3's `fetchVerifiedContent` ran in a child `node` with `NODE_EXTRA_CA_CERTS` set to that certificate, through the real global `fetch`, and returned both bodies with the right hashes. Without the variable it rejected `network` (cause `DEPTH_ZERO_SELF_SIGNED_CERT`). Behind a test wrapper that flips byte 0 of every non-empty 200 body, it rejected `chunk-hash-mismatch`. Platforms: Windows (Node 24.15) and a `node:24-trixie` container (Node 24.21). | probe: `imagination/probe/{serve,read,drive}.mjs` over the C2+C3 merge tree `8d1482c8` |
+| F29 | **The C# consumer that verifies is `CultMeshContentTransferService`, and it runs against an HTTPS route without Odin.** The probed path: `CultMeshDiscoveryService` over a test `RouteSource(<https endpoint>)`, then `CultMeshSessionManager` with `LocalDevelopment` trust and the unmodified `CultMeshHttpsContentTransportConnector`, then `CultMeshSessionContentProvider`, then `FetchAsync(manifest)`. This is the shape of `CultMeshContentSessionTests.TcpContentSessionStreamsLargeBodyAndReusesCommittedBody` with the TCP connector swapped for the HTTPS one. It fetched both artifacts from the TS provider, decoding the **TS-encoded** manifest bytes with `CultDocumentMessagePackSerialization.DeserializeUntyped`. Trust was a `SocketsHttpHandler` whose `SslOptions.CertificateChainPolicy` is `CustomRootTrust` with only the fixture certificate in `CustomTrustStore` (`RevocationMode.NoCheck`). That is real chain and name validation, with no callback and no system roots. The default handler failed with `UntrustedRoot`. Against the tampering wrapper, `FetchAsync` threw `AggregateException` over `InvalidDataException` ("CDN artifact chunk hash does not match its manifest."), leaving only `.<hash>.partial`, never `<hash>.body`. The connector itself does not verify (F6). The C# verifier is the transfer service's `BoundedHashingWriteStream` per chunk and its whole-file hash. The results on the Linux container (self-contained linux-x64 publish) were identical. | probe: `imagination/csprobe/Program.cs` and `probe/drive-cs.mjs`; source `CultMeshContentTransfer.cs:115-330`, `CultMeshContentTransports.cs:138-160` |
+| F30 | The two consumers request the same URLs. C# sent five requests: four chunks, plus the empty chunk `e3b0…`, which the provider answers intrinsically. Each was `/api/content?chunkHash=<hex>&recordKey=mesh%3Acdn%3Achunk%3A<hex>`. The reader sent the same four chunk URLs, and nothing for the empty chunk, which it verifies locally. | same probes, the provider's request log |
+| F31 | **Build order decides where the cross-process test lives.** `scripts/run-typescript-workspaces.mjs` builds `cultcache-ts, cultnet-ts, cultmesh-ts, cultmesh-browser`, and each package's `test` compiles `test/**/*.ts`, `test/interop` included. A `cultmesh-ts` test that imports `cultmesh-browser` therefore fails to compile on a clean checkout, while a `cultmesh-browser` test that imports `cultmesh-ts/content` follows the order. Named ESM imports of the CommonJS `cultmesh-ts/content` work from an ESM file: all four provider names import as functions. At `7adbf3cb`, `cultmesh-portability.yml` runs the browser step (lines 119-120) **before** the `cultmesh-ts` step (129-130), which is the opposite of the script's order. The wiring check requires `test/interop/*.test.ts` to be run by a `test:interop` script. | probe (node, ESM import); source |
+| F32 | Node's `execFile("dotnet")` resolves `dotnet.exe` on Windows without an extension. The C3 merge into `7adbf3cb` is clean at C3 head `67ff3f64` (`git merge-tree` gives `666162a3`). It touches the workflow only at comment lines 105-107, and the reader's exports keep their names. The probe's body pattern `(i*31+7)&255` repeats every 256 bytes, so all of its 64 KiB chunks shared one hash. A parity fixture needs non-periodic bytes, or chunk order is invisible. | probe (node); `git merge-tree` |
+| F33 | `cultmesh-portability.yml` triggers on `push` only for `main` and `codex/**`. A `hands/**` branch runs it through `pull_request` or `workflow_dispatch`, and both triggers exist. The job `reactive-and-resource-lifetime` has .NET 10 and Node 24 on `windows-latest` and `ubuntu-latest`, and it already builds `tests/GameCult.Mesh.Tests` in earlier steps. | source at `7adbf3cb` |
 
 ## 2. Model page
 
@@ -98,7 +106,7 @@ and corrected this page's first draft (R §8). In short:
 | **Provider memory** | At most `maxChunkBytes` buffered per in-flight request. | Per request. | Provider. Buffering is forced, because the status line cannot be sent before the hash is known (the bazel-remote scar above). `maxChunkBytes` defaults to `DEFAULT_CHUNK_SIZE_BYTES` (4 MiB) and must lie in 1..2147483647. The host bounds concurrency (server `maxConnections` or a reverse proxy), and the README says so. |
 | **Reader result / error** | A `Uint8Array` of the whole body, or one `CultMeshContentError` with `code` ∈ {`manifest-invalid`, `too-large`, `insecure-endpoint`, `webcrypto-unavailable`, `network`, `http-status`, `length-mismatch`, `chunk-hash-mismatch`, `content-hash-mismatch`}, plus `chunkHash` and `status` where they apply. A caller abort rejects with the signal's own `reason`, unwrapped. Bad options reject with `RangeError`. | Transient, held in memory only. No byte of a failed chunk or body is returned, in whole or in part (`verify-before-use`). | `fetchVerifiedContent` (and `fetchVerifiedChunk`) in `cultmesh-browser`. Concurrency defaults to 4 and is bounded 1..32 (the C# `CultMeshContentTransferOptions` bounds). `maxBytes` defaults to 256 MiB and is checked before any request. The scheme must be `https:`, or `http:` where `isLoopbackEndpoint` (F22) holds. Only status 200 is accepted. **`Content-Length` is not consulted** (F20). The body is read through a stream into the chunk's slot, a body that runs past the chunk's size is cancelled at the first excess byte, and one that ends short is refused. |
 | **Endpoint** | A URL the caller resolved through CultMesh. | Per call; never persisted in content. | The caller. **Forbidden:** any manifest, chunk-ref or record field carrying it (`no-urls-in-content`). Error messages never echo it, because an endpoint query may carry a tenant or a token. |
-| **Vector files** | `content-vectors.cs-written.json` (C#), `.rs-written.json` (Rust), `content-vectors.ts-written.json` (TS, manifests only, own inputs) and `cdn-record-key-vectors.json` (C#, record-key traps), all landed by C1. | Each is rewritten only by its writer under `CULTNET_WRITE_VECTORS=1`. CI never sets the variable: the committed files are the contract. | Each writer owns its file. C2 and C3 add no vector file. HTTP behaviour is pinned by tests and, in C4, by the C# connector itself. |
+| **Vector files** | `content-vectors.cs-written.json` (C#), `.rs-written.json` (Rust), `content-vectors.ts-written.json` (TS, manifests only, own inputs) and `cdn-record-key-vectors.json` (C#, record-key traps), all landed by C1. | Each is rewritten only by its writer under `CULTNET_WRITE_VECTORS=1`. CI never sets the variable: the committed files are the contract. | Each writer owns its file. C2 and C3 add no vector file. HTTP behaviour is pinned by tests and, in C4, by the C# transfer service driving the unmodified connector (F29). |
 
 Two cells rest on reasoning rather than a probe: that the host, not the
 provider, bounds concurrency, and the cost of hashing on HEAD. Both are
@@ -201,6 +209,29 @@ and wrong bytes. The real provider meets the real reader in C4. This keeps
 the two cuts parallel, and it lets C3 test misbehaviours the real provider can
 never produce.
 
+**C4: the proof lives in `cultmesh-browser/test/interop`, with the C# half
+in `GameCult.Mesh.Tests`.** The orchestrator is Node, following the QUIC
+precedent (F13): it starts the provider, runs both consumers and judges what
+the provider saw. It lives in `cultmesh-browser` and not `cultmesh-ts`,
+because the workspace build order compiles `cultmesh-ts` first (F31). The
+browser package can import `cultmesh-ts/content` with types. The reverse
+would need either an untyped script or a build-order exception. The provider
+runs in its own process rather than the orchestrator's, so each of the three
+parties is a separate OS process, and the orchestrator never shares an event
+loop with the server it judges. The C# half drives the connector through
+`CultMeshContentTransferService` (F29), because the connector alone does not
+verify (F6). A parity test that stopped at the connector would show that C#
+receives bytes, not that C# refuses bad ones. TLS trust is a committed
+fixture certificate, as the QUIC fixture is (F25). The C# side anchors it
+through `CustomRootTrust`, which keeps chain and name validation and adds no
+code path that can accept a different certificate. A hash-pinning
+`ServerCertificateCustomValidationCallback` would skip name validation and
+add a callback that has to be read to be trusted. Corruption comes in two
+kinds. On disk, the real provider refuses it with 500 (C2's
+verify-before-serve). In flight, a test wrapper flips bytes after the
+provider has verified them. The in-flight leg is what proves that both
+consumers verify.
+
 **"Released"** is ruled: `release-shape-gitlink` (Defaulted by Self).
 
 ## 4. Cut sequence
@@ -212,59 +243,19 @@ merge. Both are based on `b8b825e1`, and they touch disjoint files except
 `cultmesh-portability.yml`, where their hunks lie 15 lines apart. What
 remains:
 
-4. **C4 `c4-cross-process`**, waiting on C2 and C3. Line-level plan for the
-   pass that specifies it:
-   - New fixture `packages/cultmesh-ts/test/fixtures/content-https-test.p12`
-     plus `content-https-test-cert.pem`, a self-signed P-256 certificate with
-     subjectAltName `IP:127.0.0.1, DNS:localhost` (F25 rules out reusing the
-     QUIC pair). The recipe goes in the fixtures README beside the QUIC one.
-   - New `packages/cultmesh-ts/test/interop/content-https.test.ts`, and a
-     `test:interop` script in `cultmesh-ts/package.json` that runs
-     `dist-test/test/interop/*.test.js`, as `cultnet-ts`'s does. The test is
-     skipped when `dotnet` is absent. It packs a 3.5-chunk artifact (chunk
-     size 64 KiB), an empty artifact and a single-chunk artifact with C1's
-     `packContent`, and writes the chunks into a temporary directory store.
-     It serves them through `createContentChunkHandler` and `toNodeListener`
-     on `node:https` with the new fixture on `127.0.0.1:0`. It writes the
-     manifests' bytes (`encodeManifest`) to a temporary file.
-   - C# leg: it spawns `dotnet test tests/GameCult.Mesh.Tests --filter
-     HttpsConnectorFetchesFromExternalTypeScriptProvider` with
-     `CULTMESH_HTTPS_CONTENT_ENDPOINT`, `CULTMESH_HTTPS_CONTENT_MANIFESTS`
-     (the file path) and `CULTMESH_HTTPS_CONTENT_CERT_SHA256`. Reuse or lift
-     the `runDotnetTestFilter` shape from `cultnet-interop.test.ts:2826`
-     (F27), and assert on "Test Run Successful." and "Passed: 1", not on a
-     skip.
-   - New C# test in `tests/GameCult.Mesh.Tests/CultMeshHttpsContentInteropTests.cs`:
-     `Assert.Ignore` without the variable, as F13 does. It builds the
-     **unmodified** `CultMeshHttpsContentTransportConnector` with a
-     `HttpClientHandler` whose `ServerCertificateCustomValidationCallback`
-     accepts exactly the pinned SHA-256, then `ConnectAsync` with a
-     `CultMeshTransportCandidate { Endpoint }` and a session target, then
-     `CopyChunkToAsync` for every chunk ref of every manifest (deserialized
-     by the public MessagePack path the vector tests use). It checks each
-     chunk with `SHA256.HashData` and the whole body against `ContentHash`
-     (F26: the validators are internal). It also asserts that an unknown
-     hash raises `HttpRequestException` with 404. The first step of the pass
-     probes whether `CultMeshContentTransferService` can drive the connector
-     without Odin; if it can, it verifies instead of the test's own hashing.
-   - TS reader leg: a child `node` process with `NODE_EXTRA_CA_CERTS` set to
-     the fixture PEM runs `fetchVerifiedContent` from built
-     `cultmesh-browser/dist` against the same `https://127.0.0.1:<port>`
-     endpoint, through the real global `fetch` (no injection), and prints
-     the SHA-256 of each body. The parent compares them with the manifests'.
-     A child process, because the trust anchor must be set before the
-     process starts. `cultmesh-ts` gains `cultmesh-browser` as a workspace
-     devDependency, which is test-only.
-   - Corrupt leg: one stored file is flipped after serving starts. The C#
-     connector then fails on the 500 (`EnsureSuccessStatusCode`), the reader
-     rejects with `http-status` 500, and `onServerFault` fired with
-     `hash-mismatch`.
-   - CI: a step in `cultmesh-portability.yml` after the content-vector step
-     (`npm run test:interop --workspace packages/cultmesh-ts`). That job
-     already has .NET 10 and Node on both OSes.
-   - Negative: the git diff of `src/GameCult.Mesh/` over the cut prints
-     nothing (the connector is unmodified).
-   - Size: about 350 lines and one fixture pair; one Hands pass.
+4. **C4 `c4-parity`** (`cut-c4-parity.r1`, branch
+   `hands/cultmesh-ts-content-c4-parity` from `7adbf3cb` plus the C3 merge),
+   waiting on C2 and C3. The spec carries the plan. In one paragraph: a
+   node:test orchestrator in `cultmesh-browser/test/interop` packs three
+   artifacts (multi-chunk, single and empty) and spawns the C2 provider as its
+   own `node:https` process with three mounts: honest, tampered and corrupt
+   store. It runs the C3 reader in a child with `NODE_EXTRA_CA_CERTS`, once
+   more without it as a control, and then `dotnet test` over a new
+   `CultMeshHttpsContentInteropTests`. That suite drives the unmodified
+   connector through `CultMeshContentTransferService` and trusts the committed
+   fixture through `CustomRootTrust`. The orchestrator then judges URL parity
+   and the provider's fault log. CI gains the step on both OSes, and the
+   browser and `cultmesh-ts` steps swap to follow the workspace order (F31).
 5. **C5 `c5-release`**, waiting on C4 and the Soul passes of C2 to C4. Ruling
    `release-shape-gitlink`: merged to CultLib `main` with version bumps,
    CHANGELOGs and git tags, and no npm publish. Line-level plan:
@@ -274,8 +265,12 @@ remains:
      a patch bump, 0.14.0 to 0.14.1 (its version at `b8b825e1`).
    - Dependency ranges: `cultmesh-ts` and `cultmesh-browser` move
      `cultnet-ts` to `^0.3.0`. `cultnet-ts`'s `^0.14.0` on
-     `@gamecult/cultcache-ts` already admits 0.14.1 and stays. `npm install
-     --no-package-lock` and the four workspace tests run after the bumps.
+     `@gamecult/cultcache-ts` already admits 0.14.1 and stays. C4 gives
+     `cultmesh-browser` a devDependency `cultmesh-ts: ^0.1.1`, which does not
+     admit 0.2.0, so it moves to `^0.2.0` in the same commit. Otherwise npm
+     looks for 0.2.0 on the registry and the install fails. `npm install
+     --no-package-lock`, the four workspace tests and the browser's
+     `test:interop` run after the bumps.
    - A `CHANGELOG.md` per bumped package. None exists in any package at
      `b8b825e1`, so C5 creates four, each naming the live surface and not the
      history (Keep a Changelog headings).
