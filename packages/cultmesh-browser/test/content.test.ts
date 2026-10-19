@@ -24,6 +24,13 @@ const withChunk = (manifest: CultMeshCdnArtifactManifest, index: number, change:
 const codeOf = (code: CultMeshContentErrorCode, extra: object = {}) => (error: unknown) =>
   error instanceof CultMeshContentError && error.code === code && Object.entries(extra).every(([key, value]) => (error as unknown as Record<string, unknown>)[key] === value);
 
+/** Fails a stalled promise with a timeout instead of letting the test runner wait for it forever. */
+const within = <T>(promise: Promise<T>, ms = 3000): Promise<T> => {
+  let timer: NodeJS.Timeout;
+  const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`did not settle within ${ms} ms`)), ms); });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+};
+
 interface Call { url: string; init: RequestInit }
 type Handler = (call: Call, index: number) => Response | Promise<Response>;
 
@@ -58,7 +65,7 @@ const hangUntilAborted = (call: Call) => new Promise<Response>((_, reject) => {
 
 test("request URLs equal the .NET BuildChunkUri AbsoluteUri for every probed endpoint shape", async () => {
   const { manifest, chunks } = await pack(1, 4);
-  const hex = manifest.chunks[0]!.chunkHash;
+  const hex = manifest.chunks[0]!.chunkHash!;
   const cases: [string, string, string][] = [
     ["https://ygg.example/content", "mesh:cdn:chunk:" + hex, `https://ygg.example/content?chunkHash=${hex}&recordKey=mesh%3Acdn%3Achunk%3A${hex}`],
     ["https://ygg.example/content?tenant=sp", "k", `https://ygg.example/content?tenant=sp&chunkHash=${hex}&recordKey=k`],
@@ -87,9 +94,95 @@ test("request URLs equal the .NET BuildChunkUri AbsoluteUri for every probed end
   assert.equal(absent.calls[0]!.url, `${ENDPOINT}?chunkHash=${hex}&recordKey=`);
 });
 
+// Rows probed with .NET 10 UriBuilder (the BuildChunkUri body) at the same endpoints: each accepted endpoint yields exactly the
+// AbsoluteUri .NET yields (<Q> stands for the chunkHash and recordKey query tail); each refused endpoint is a spelling on which
+// .NET and WHATWG URL disagree (or .NET throws), so the reader refuses it rather than request a different URL.
+const PARITY_ACCEPTED: [string, string][] = [
+  ["https://h/a%2fb", "https://h/a%2fb?<Q>"],
+  ["https://h/./a/../b", "https://h/b?<Q>"],
+  ["https://h/x?a=b#f?g", "https://h/x?a=b&<Q>#f?g"],
+  ["https://h/x?#f", "https://h/x?&<Q>#f"],
+  ["https://h:0443/x", "https://h/x?<Q>"],
+  ["https://h./x", "https://h./x?<Q>"],
+  ["https://h/x?a=[b]", "https://h/x?a=[b]&<Q>"],
+  ["https://u:p@h/x", "https://u:p@h/x?<Q>"],
+  ["https://h/x?a=1&&", "https://h/x?a=1&&&<Q>"],
+  ["https://h/x?%3F", "https://h/x?%3F&<Q>"],
+  ["https://h:/x", "https://h/x?<Q>"],
+  ["https://h/x?a=b?c", "https://h/x?a=b?c&<Q>"],
+  ["https://h/a;b=c,d", "https://h/a;b=c,d?<Q>"],
+  ["https://h/a!$&()*+,;=:@b", "https://h/a!$&()*+,;=:@b?<Q>"],
+  ["https://h/x?a!$()*+,;=:@/?", "https://h/x?a!$()*+,;=:@/?&<Q>"],
+  ["https://h//x", "https://h//x?<Q>"],
+  ["https://h/x/", "https://h/x/?<Q>"],
+  ["https://H:443", "https://h/?<Q>"],
+  ["https://1.2.3.4/x", "https://1.2.3.4/x?<Q>"],
+  ["https://0x7f.1/x", "https://127.0.0.1/x?<Q>"],
+  ["https://127.1/", "https://127.0.0.1/?<Q>"],
+  ["https://h/x#", "https://h/x?<Q>#"],
+  ["https://h/x?a#", "https://h/x?a&<Q>#"],
+  ["https://h/x?a=1#f", "https://h/x?a=1&<Q>#f"],
+  ["https://h/a/./b", "https://h/a/b?<Q>"],
+  ["https://h/a/../../b", "https://h/b?<Q>"],
+  ["https://h/%2F", "https://h/%2F?<Q>"],
+  ["https://h/a%20b", "https://h/a%20b?<Q>"],
+  ["https://h/a%25b", "https://h/a%25b?<Q>"],
+  ["https://h/x?a=%25", "https://h/x?a=%25&<Q>"],
+  ["https://h/x?a=%2f", "https://h/x?a=%2f&<Q>"],
+  ["https://[::1]/x", "https://[::1]/x?<Q>"],
+  ["https://[2001:DB8::1]:8443/x", "https://[2001:db8::1]:8443/x?<Q>"],
+  ["https://h/x?a=b%3Dc", "https://h/x?a=b%3Dc&<Q>"],
+  ["https://h/-._~", "https://h/-._~?<Q>"],
+  ["https://h/x?=", "https://h/x?=&<Q>"],
+  ["https://h/x?&", "https://h/x?&&<Q>"],
+  ["https://h/x?a&&b", "https://h/x?a&&b&<Q>"],
+  ["http://127.0.0.1:80/x", "http://127.0.0.1/x?<Q>"],
+  ["http://127.0.0.1:8080", "http://127.0.0.1:8080/?<Q>"],
+];
+const PARITY_REFUSED: string[] = [
+  "https://h/x?a='b",
+  "https://h/x?a={b}|^",
+  "https://h/x?a=\"<>`",
+  "https://h/x?a=b c",
+  "https://h/x?a=%7e",
+  "https://h/x?a=é",
+  "https://h/{x}",
+  "https://h/a|b",
+  "https://h/a^b",
+  "https://h/a'b",
+  "https://ex%41mple.com/",
+  "https://Bücher.de/",
+  "https://h/%7e",
+  "https://h/x?a=%zz",
+  "https://h/x?a=\\b",
+  "https://h/a\\b",
+  "https://h/x? ",
+  "https://h:99999/x",
+  "https://h/%41",
+  "https://h/x#a b",
+  "https://h/x#é",
+];
+
+test("request URLs equal .NET UriBuilder's for every plain endpoint spelling, and endpoints on which the two disagree are refused", async () => {
+  const { manifest, chunks } = await pack(1, 4);
+  const hex = manifest.chunks[0]!.chunkHash!;
+  const tail = `chunkHash=${hex}&recordKey=k`;
+  for (const [endpoint, expected] of PARITY_ACCEPTED) {
+    const server = chunkServer(chunks);
+    await fetchVerifiedContent(endpoint, withChunk(manifest, 0, { recordKey: "k" }), { fetch: server.fetch });
+    assert.equal(server.calls[0]!.url, expected.replace("<Q>", tail), endpoint);
+  }
+  for (const endpoint of PARITY_REFUSED) {
+    const server = chunkServer(chunks);
+    await assert.rejects(fetchVerifiedContent(endpoint, manifest, { fetch: server.fetch }), codeOf("insecure-endpoint"), endpoint);
+    await assert.rejects(fetchVerifiedChunk(endpoint, hex, 1, { fetch: server.fetch }), codeOf("insecure-endpoint"), endpoint);
+    assert.equal(server.calls.length, 0, endpoint);
+  }
+});
+
 test("hash spellings are normalized into the URL: a prefixed upper-case manifest hash is requested as bare lower-case hex", async () => {
   const { manifest, chunks } = await pack(5, 5);
-  const hex = manifest.chunks[0]!.chunkHash;
+  const hex = manifest.chunks[0]!.chunkHash!;
   const server = chunkServer(chunks);
   const spelled = { ...withChunk(manifest, 0, { chunkHash: `SHA256:${hex.toUpperCase()}` }), contentHash: hex.toUpperCase() };
   assert.deepEqual(await fetchVerifiedContent(ENDPOINT, spelled, { fetch: server.fetch }), body(5));
@@ -118,7 +211,7 @@ test("with 10 chunks, maxConcurrentChunkRequests 3 peaks at exactly 3 in flight 
   for (const maxConcurrentChunkRequests of [0, 33, 1.5, Number.NaN]) {
     const server = chunkServer(chunks);
     await assert.rejects(fetchVerifiedContent(ENDPOINT, manifest, { fetch: server.fetch, maxConcurrentChunkRequests }), RangeError);
-    await assert.rejects(fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash, 10, { fetch: server.fetch, maxConcurrentChunkRequests }), RangeError);
+    await assert.rejects(fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash!, 10, { fetch: server.fetch, maxConcurrentChunkRequests }), RangeError);
     assert.equal(server.calls.length, 0);
   }
   for (const maxBytes of [-1, 1.5, Number.NaN]) await assert.rejects(fetchVerifiedContent(ENDPOINT, manifest, { maxBytes }), RangeError);
@@ -142,6 +235,12 @@ test("a zero-size chunk beside others is manifest-invalid with no fetch", async 
   const flood = { ...manifest, chunks: [first, { ...first, chunkHash: EMPTY_SHA256, offset: 4, sizeBytes: 0 }, second] };
   const server = double(() => { throw new Error("no request expected"); });
   await assert.rejects(fetchVerifiedContent(ENDPOINT, flood, { fetch: server.fetch }), codeOf("manifest-invalid"));
+  // two refs are enough, and the empty one may come last or first
+  const one = (await pack(4, 4)).manifest;
+  const empty = { ...one.chunks[0]!, chunkHash: EMPTY_SHA256, sizeBytes: 0 };
+  for (const chunks of [[one.chunks[0]!, { ...empty, offset: 4 }], [{ ...empty, offset: 0 }, one.chunks[0]!], [{ ...empty, offset: 0 }, { ...empty, offset: 0 }]]) {
+    await assert.rejects(fetchVerifiedContent(ENDPOINT, { ...one, sizeBytes: chunks.reduce((sum, chunk) => sum + chunk.sizeBytes, 0), chunks }, { fetch: server.fetch }), codeOf("manifest-invalid"));
+  }
   assert.equal(server.calls.length, 0);
 });
 
@@ -149,10 +248,10 @@ test("the byte cap is checked before any request: one over maxBytes and one over
   const { manifest, chunks } = await pack(10, 5);
   const server = chunkServer(chunks);
   await assert.rejects(fetchVerifiedContent(ENDPOINT, manifest, { fetch: server.fetch, maxBytes: 9 }), codeOf("too-large"));
-  await assert.rejects(fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash, 5, { fetch: server.fetch, maxBytes: 4 }), codeOf("too-large"));
+  await assert.rejects(fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash!, 5, { fetch: server.fetch, maxBytes: 4 }), codeOf("too-large"));
   assert.equal(server.calls.length, 0);
   assert.deepEqual(await fetchVerifiedContent(ENDPOINT, manifest, { fetch: server.fetch, maxBytes: 10 }), body(10));
-  assert.deepEqual(await fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash, 5, { fetch: server.fetch, maxBytes: 5 }), body(5));
+  assert.deepEqual(await fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash!, 5, { fetch: server.fetch, maxBytes: 5 }), body(5));
   const huge = (size: number) => ({ ...manifest, sizeBytes: size, chunks: [{ ...manifest.chunks[0]!, offset: 0, sizeBytes: size }] });
   const refuses = double(() => { throw new TypeError("offline"); });
   await assert.rejects(fetchVerifiedContent(ENDPOINT, huge(268435457), { fetch: refuses.fetch }), codeOf("too-large"));
@@ -162,10 +261,10 @@ test("the byte cap is checked before any request: one over maxBytes and one over
 
 test("https is required, http only on loopback; ftp and unparseable endpoints are insecure-endpoint with no fetch", async () => {
   const { manifest, chunks } = await pack(5, 5);
-  for (const endpoint of ["http://example.com/c", "ftp://127.0.0.1/c", "not a url", "", "//cdn.example/c"]) {
+  for (const endpoint of ["http://example.com/c", "http://cdn.example:8080/c", "http://localhost.example/c", "http://127.0.0.1.example/c", "http://10.0.0.1:80/c", "ftp://127.0.0.1/c", "not a url", "", "//cdn.example/c"]) {
     const server = chunkServer(chunks);
     await assert.rejects(fetchVerifiedContent(endpoint, manifest, { fetch: server.fetch }), codeOf("insecure-endpoint"), endpoint);
-    await assert.rejects(fetchVerifiedChunk(endpoint, manifest.chunks[0]!.chunkHash, 5, { fetch: server.fetch }), codeOf("insecure-endpoint"), endpoint);
+    await assert.rejects(fetchVerifiedChunk(endpoint, manifest.chunks[0]!.chunkHash!, 5, { fetch: server.fetch }), codeOf("insecure-endpoint"), endpoint);
     assert.equal(server.calls.length, 0);
   }
   for (const endpoint of ["http://127.0.0.1:8080/c", "http://localhost/c", "http://[::1]:9/c", "https://cdn.example/c"]) {
@@ -188,19 +287,20 @@ test("non-hex hashes and a gapped manifest are manifest-invalid with no fetch, i
     { ...manifest, sizeBytes: Infinity, chunks: [{ ...manifest.chunks[0]!, sizeBytes: Infinity }] },
   ];
   for (const candidate of bad) await assert.rejects(fetchVerifiedContent(ENDPOINT, candidate, { fetch: server.fetch }), codeOf("manifest-invalid"));
-  for (const [hash, size] of [["xyz", 5], [manifest.chunks[0]!.chunkHash, -1], [manifest.chunks[0]!.chunkHash, 1.5], [manifest.chunks[0]!.chunkHash, Number.NaN]] as const) {
+  for (const [hash, size] of [["xyz", 5], [manifest.chunks[0]!.chunkHash!, -1], [manifest.chunks[0]!.chunkHash!, 1.5], [manifest.chunks[0]!.chunkHash!, Number.NaN]] as const) {
     await assert.rejects(fetchVerifiedChunk(ENDPOINT, hash, size, { fetch: server.fetch }), codeOf("manifest-invalid"));
   }
   assert.equal(server.calls.length, 0);
 });
 
-test("statuses 404, 500, 206 and 304 are http-status carrying the status, and the body is cancelled", async () => {
+test("every status but 200 (404, 500, 206, 304 and each other 2xx and 3xx tried) is http-status carrying the status, and the body is cancelled", async () => {
   const { manifest } = await pack(5, 5);
-  for (const status of [404, 500, 206, 304]) {
+  for (const status of [404, 500, 206, 304, 201, 202, 203, 204, 205, 299, 301]) {
     let cancelled = false;
-    const server = double(() => new Response(status === 304 ? null : streamOf(body(5), () => { cancelled = true; }), { status }));
-    await assert.rejects(fetchVerifiedContent(ENDPOINT, manifest, { fetch: server.fetch }), codeOf("http-status", { status, chunkHash: manifest.chunks[0]!.chunkHash }));
-    assert.equal(cancelled, status !== 304, String(status));
+    const bodyless = [204, 205, 304].includes(status);
+    const server = double(() => new Response(bodyless ? null : streamOf(body(5), () => { cancelled = true; }), { status }));
+    await assert.rejects(fetchVerifiedContent(ENDPOINT, manifest, { fetch: server.fetch }), codeOf("http-status", { status, chunkHash: manifest.chunks[0]!.chunkHash! }));
+    assert.equal(cancelled, !bodyless, String(status));
   }
 });
 
@@ -211,8 +311,8 @@ test("wrong bytes of the right length are chunk-hash-mismatch naming the chunk; 
     signals.push(call.init.signal!);
     return index === 0 ? new Response(new Uint8Array(10).fill(9)) : hangUntilAborted(call);
   });
-  await assert.rejects(fetchVerifiedContent(ENDPOINT, manifest, { fetch: server.fetch, maxConcurrentChunkRequests: 3 }),
-    codeOf("chunk-hash-mismatch", { chunkHash: chunks[0]!.chunkHash }));
+  await assert.rejects(within(fetchVerifiedContent(ENDPOINT, manifest, { fetch: server.fetch, maxConcurrentChunkRequests: 3 })),
+    codeOf("chunk-hash-mismatch", { chunkHash: chunks[0]!.chunkHash! }));
   assert.equal(signals.length, 3);
   assert.deepEqual(signals.map(signal => signal.aborted), [true, true, true]);
 });
@@ -255,13 +355,14 @@ test("a pre-aborted signal rejects with its reason and no fetch; an abort mid-fl
   const reason = new Error("caller gave up");
   const server = double(hangUntilAborted);
   await assert.rejects(fetchVerifiedContent(ENDPOINT, manifest, { fetch: server.fetch, signal: AbortSignal.abort(reason) }), (error: unknown) => error === reason);
-  await assert.rejects(fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash, 10, { fetch: server.fetch, signal: AbortSignal.abort(reason) }), (error: unknown) => error === reason);
+  await assert.rejects(fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash!, 10, { fetch: server.fetch, signal: AbortSignal.abort(reason) }), (error: unknown) => error === reason);
   assert.equal(server.calls.length, 0);
   const controller = new AbortController();
   const pending = fetchVerifiedContent(ENDPOINT, manifest, { fetch: server.fetch, signal: controller.signal, maxConcurrentChunkRequests: 2 });
-  while (server.calls.length < 2) await new Promise(resolve => setTimeout(resolve, 1));
+  for (let waited = 0; server.calls.length < 2 && waited < 2000; waited++) await new Promise(resolve => setTimeout(resolve, 1));
+  assert.equal(server.calls.length, 2, "two requests are in flight before the abort");
   controller.abort(reason);
-  await assert.rejects(pending, (error: unknown) => error === reason);
+  await assert.rejects(within(pending), (error: unknown) => error === reason);
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(server.calls.length, 2);
 });
@@ -274,7 +375,7 @@ test("with crypto.subtle shadowed, both exports are webcrypto-unavailable before
     for (const value of [{}, undefined]) {
       Object.defineProperty(globalThis, "crypto", { value, configurable: true });
       await assert.rejects(fetchVerifiedContent(ENDPOINT, manifest, { fetch: server.fetch }), codeOf("webcrypto-unavailable"));
-      await assert.rejects(fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash, 5, { fetch: server.fetch }), codeOf("webcrypto-unavailable"));
+      await assert.rejects(fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash!, 5, { fetch: server.fetch }), codeOf("webcrypto-unavailable"));
     }
   } finally { Object.defineProperty(globalThis, "crypto", original); }
   assert.equal(server.calls.length, 0);
@@ -282,7 +383,7 @@ test("with crypto.subtle shadowed, both exports are webcrypto-unavailable before
 
 test("fetchVerifiedChunk sends the packed record key, verifies, sends nothing for size 0, and refuses wrong bytes", async () => {
   const { manifest, chunks } = await pack(10, 10);
-  const hex = manifest.chunks[0]!.chunkHash;
+  const hex = manifest.chunks[0]!.chunkHash!;
   const server = chunkServer(chunks);
   assert.deepEqual(await fetchVerifiedChunk(ENDPOINT, hex.toUpperCase(), 10, { fetch: server.fetch }), body(10));
   assert.equal(server.calls[0]!.url, `${ENDPOINT}?chunkHash=${hex}&recordKey=mesh%3Acdn%3Achunk%3A${hex}`);
@@ -385,6 +486,107 @@ test("stub server through the real global fetch: gzip verifies, a short body is 
     modes.set("missing", (_, response) => { response.writeHead(404, { "access-control-allow-origin": "*" }); response.end("nope"); });
     await assert.rejects(via("missing"), codeOf("http-status", { status: 404 }));
   } finally { await server.close(); }
+});
+
+const flipped = (bytes: Uint8Array, at: number): Uint8Array => { const copy = bytes.slice(); copy[at] ^= 1; return copy; };
+
+test("wrong bytes of the right length are refused at every size, whichever byte differs: both exports, one chunk and several", async () => {
+  for (const size of [1, 999, 1000, 1001, 65537, 4 * 1024 * 1024 + 1]) {
+    const { manifest, chunks } = await pack(size, size);
+    const hash = manifest.chunks[0]!.chunkHash!;
+    for (const at of [0, size >> 1, size - 1]) {
+      const wrong = double(() => new Response(flipped(chunks[0]!.payload, at) as BodyInit));
+      await assert.rejects(fetchVerifiedChunk(ENDPOINT, hash, size, { fetch: wrong.fetch }), codeOf("chunk-hash-mismatch", { chunkHash: hash }), `chunk ${size} byte ${at}`);
+      await assert.rejects(fetchVerifiedContent(ENDPOINT, manifest, { fetch: wrong.fetch }), codeOf("chunk-hash-mismatch", { chunkHash: hash }), `content ${size} byte ${at}`);
+    }
+  }
+  const { manifest, chunks } = await pack(4500, 1500);
+  const middle = manifest.chunks[1]!.chunkHash!;
+  const wrongMiddle = double(call => {
+    const asked = new URL(call.url).searchParams.get("chunkHash");
+    const payload = chunks.find(chunk => chunk.chunkHash === asked)!.payload;
+    return new Response((asked === middle ? flipped(payload, 1499) : payload) as BodyInit);
+  });
+  await assert.rejects(fetchVerifiedContent(ENDPOINT, manifest, { fetch: wrongMiddle.fetch }), codeOf("chunk-hash-mismatch", { chunkHash: middle }));
+});
+
+test("a body of the wrong length in one chunk of several is length-mismatch naming that chunk, whichever way it is wrong", async () => {
+  const { manifest, chunks } = await pack(30, 10);
+  const target = manifest.chunks[2]!.chunkHash!;
+  for (const length of [0, 9, 11, 20]) {
+    const server = double(call => {
+      const asked = new URL(call.url).searchParams.get("chunkHash");
+      const payload = chunks.find(chunk => chunk.chunkHash === asked)!.payload;
+      return new Response((asked === target ? new Uint8Array(length).fill(payload[0]!) : payload) as BodyInit);
+    });
+    await assert.rejects(within(fetchVerifiedContent(ENDPOINT, manifest, { fetch: server.fetch })), codeOf("length-mismatch", { chunkHash: target }), `length ${length}`);
+  }
+});
+
+test("a failure is thrown without waiting for a fetch whose body ignores the abort, and so is a caller abort", async () => {
+  const { manifest } = await pack(30, 10);
+  const stalled = () => new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(body(3)); } }));
+  const firstWrong = double((_, index) => index === 0 ? new Response(new Uint8Array(10)) : stalled());
+  await assert.rejects(within(fetchVerifiedContent(ENDPOINT, manifest, { fetch: firstWrong.fetch, maxConcurrentChunkRequests: 3 })), codeOf("chunk-hash-mismatch"));
+  const reason = new Error("stop waiting");
+  const never = double(() => new Promise<Response>(() => {}));
+  const early = new AbortController();
+  const noResponse = fetchVerifiedContent(ENDPOINT, manifest, { fetch: never.fetch, signal: early.signal });
+  early.abort(reason);
+  await assert.rejects(within(noResponse), (error: unknown) => error === reason);
+  const stalledBodies = double(stalled);
+  const late = new AbortController();
+  const waiting = fetchVerifiedContent(ENDPOINT, manifest, { fetch: stalledBodies.fetch, signal: late.signal });
+  for (let waited = 0; stalledBodies.calls.length < 3 && waited < 2000; waited++) await new Promise(resolve => setTimeout(resolve, 1));
+  late.abort(reason);
+  await assert.rejects(within(waiting), (error: unknown) => error === reason);
+});
+
+test("an abort that lands while the last bytes are hashed rejects with its reason: no success for a cancelled caller", async () => {
+  const { manifest, chunks } = await pack(10, 10);
+  const subtle = globalThis.crypto.subtle;
+  const digest = subtle.digest.bind(subtle);
+  const reason = new Error("cancelled late");
+  const hash = manifest.chunks[0]!.chunkHash!;
+  try {
+    // digest 1 hashes the only chunk, digest 2 the whole body; fetchVerifiedChunk has no second digest
+    for (const [name, abortOnDigest, run] of [
+      ["content", 1, (signal: AbortSignal) => fetchVerifiedContent(ENDPOINT, manifest, { fetch: chunkServer(chunks).fetch, signal })],
+      ["content", 2, (signal: AbortSignal) => fetchVerifiedContent(ENDPOINT, manifest, { fetch: chunkServer(chunks).fetch, signal })],
+      ["chunk", 1, (signal: AbortSignal) => fetchVerifiedChunk(ENDPOINT, hash, 10, { fetch: chunkServer(chunks).fetch, signal })],
+    ] as const) {
+      const controller = new AbortController();
+      let digests = 0;
+      Object.defineProperty(subtle, "digest", { configurable: true, writable: true, value: (...args: Parameters<typeof digest>) => { if (++digests === abortOnDigest) controller.abort(reason); return digest(...args); } });
+      const outcome = await run(controller.signal).then(() => "resolved", error => error);
+      assert.equal(outcome, reason, `${name} abort on digest ${abortOnDigest}`);
+    }
+  } finally { delete (subtle as unknown as Record<string, unknown>).digest; }
+});
+
+test("a size the runtime cannot allocate is too-large in both exports, not a RangeError, and nothing is requested", async () => {
+  const { manifest } = await pack(10, 10);
+  const size = Number.MAX_SAFE_INTEGER;
+  const huge = { ...manifest, sizeBytes: size, chunks: [{ ...manifest.chunks[0]!, offset: 0, sizeBytes: size }] };
+  const server = double(() => { throw new Error("no request expected"); });
+  await assert.rejects(fetchVerifiedContent(ENDPOINT, huge, { fetch: server.fetch, maxBytes: size }), codeOf("too-large"));
+  await assert.rejects(fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash!, size, { fetch: server.fetch, maxBytes: size }), codeOf("too-large"));
+  assert.equal(server.calls.length, 0);
+});
+
+test("redirects are refused: the fetch is told so, and a real redirect to another origin is network with nothing requested there", async () => {
+  const { manifest, chunks } = await pack(10, 10);
+  const seen = chunkServer(chunks);
+  await fetchVerifiedContent(ENDPOINT, manifest, { fetch: seen.fetch });
+  assert.equal(seen.calls[0]!.init.redirect, "error");
+  let elsewhereCalls = 0;
+  const elsewhere = await stub((_, response) => { elsewhereCalls++; response.end(chunks[0]!.payload); });
+  const here = await stub((_, response) => { response.writeHead(302, { location: `${elsewhere.endpoint}?x=1` }); response.end(); });
+  try {
+    await assert.rejects(fetchVerifiedContent(here.endpoint, manifest), codeOf("network"));
+    await assert.rejects(fetchVerifiedChunk(here.endpoint, manifest.chunks[0]!.chunkHash!, 10), codeOf("network"));
+    assert.equal(elsewhereCalls, 0);
+  } finally { await here.close(); await elsewhere.close(); }
 });
 
 test("esbuild bundles dist/content.js with platform 'browser', and a node:crypto import fails the same bundle", async () => {
