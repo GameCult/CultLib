@@ -94,6 +94,27 @@
       },
       "recordKey": "mesh:cdn:artifact:pixel-heroes-hüt:v1-beta:89f4ff56a25dd1db06a4ce6033603775d705fb96f30f8693733fef602a1ca532",
       "messagePackBase64": "mrVQaXhlbCBIZXJvZXMvSMO8dCDimIOlYXNzZXSnVjEgQmV0YdlAODlmNGZmNTZhMjVkZDFkYjA2YTRjZTYwMzM2MDM3NzVkNzA1ZmI5NmYzMGY4NjkzNzMzZmVmNjAyYTFjYTUzMs0D6L9hcHBsaWNhdGlvbi94LWN1bHRuZXQtdHMtdmVjdG9y2SEyMDI2LTEwLTE5VDAwOjAwOjAwLjAwMDAwMDArMDA6MDCRlNlAODlmNGZmNTZhMjVkZDFkYjA2YTRjZTYwMzM2MDM3NzVkNzA1ZmI5NmYzMGY4NjkzNzMzZmVmNjAyYTFjYTUzMgDNA+jZT21lc2g6Y2RuOmNodW5rOjg5ZjRmZjU2YTI1ZGQxZGIwNmE0Y2U2MDMzNjAzNzc1ZDcwNWZiOTZmMzBmODY5MzczM2ZlZjYwMmExY2E1MzKQgA=="
+    },
+    {
+      "label": "ts whitespace version, padded kind and mime",
+      "kind": "manifest",
+      "input": {
+        "artifactId": "Pixel Heroes/Hüt ☃",
+        "kind": " build ",
+        "version": "  ",
+        "mimeType": "  text/plain; charset=utf-8  ",
+        "createdAtUtc": "2026-10-19T00:00:00.0000000+00:00",
+        "chunkSizeBytes": 4194304,
+        "tags": [],
+        "metadata": [],
+        "body": {
+          "length": 1000,
+          "multiplier": 7,
+          "modulus": 256
+        }
+      },
+      "recordKey": "mesh:cdn:artifact:pixel-heroes-hüt:unversioned:89f4ff56a25dd1db06a4ce6033603775d705fb96f30f8693733fef602a1ca532",
+      "messagePackBase64": "mrVQaXhlbCBIZXJvZXMvSMO8dCDimIOnIGJ1aWxkIKIgINlAODlmNGZmNTZhMjVkZDFkYjA2YTRjZTYwMzM2MDM3NzVkNzA1ZmI5NmYzMGY4NjkzNzMzZmVmNjAyYTFjYTUzMs0D6L0gIHRleHQvcGxhaW47IGNoYXJzZXQ9dXRmLTggINkhMjAyNi0xMC0xOVQwMDowMDowMC4wMDAwMDAwKzAwOjAwkZTZQDg5ZjRmZjU2YTI1ZGQxZGIwNmE0Y2U2MDMzNjAzNzc1ZDcwNWZiOTZmMzBmODY5MzczM2ZlZjYwMmExY2E1MzIAzQPo2U9tZXNoOmNkbjpjaHVuazo4OWY0ZmY1NmEyNWRkMWRiMDZhNGNlNjAzMzYwMzc3NWQ3MDVmYjk2ZjMwZjg2OTM3MzNmZWY2MDJhMWNhNTMykIA="
     }
   ]
 }

@@ -120,8 +120,8 @@ test("packContent refuses a blank artifact id, a chunk size outside 1..214748364
 
 test("default createdAtUtc matches the C# round-trip 'O' format", async () => {
   const { manifest } = await packContent("x", new Uint8Array(1));
-  assert.match(manifest.createdAtUtc, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{7}\+00:00$/);
-  assert.ok(Math.abs(Date.parse(manifest.createdAtUtc.replace(/(\.\d{3})\d{4}\+00:00$/, "$1Z")) - Date.now()) < 60_000);
+  assert.match(manifest.createdAtUtc!, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{7}\+00:00$/);
+  assert.ok(Math.abs(Date.parse(manifest.createdAtUtc!.replace(/(\.\d{3})\d{4}\+00:00$/, "$1Z")) - Date.now()) < 60_000);
 });
 
 test("manifest_out_of_order decodes and validates, and its chunks keep wire order", () => {
@@ -144,18 +144,16 @@ test("a manifest with a duplicated metadata key is refused, in decode and in val
   validateManifest(manifestOf({ metadata: [["a", "1"], ["b", "1"]] }));
 });
 
-test("a metadata key that is not a string, and a __proto__ key, are refused", () => {
+test("a metadata key that is not a string is refused", () => {
   const withMap = (...entry: Uint8Array[]) => Uint8Array.from([...wire().slice(0, -5), 0x81, ...entry.flatMap(part => Array.from(part))]);
   decodeManifest(withMap(encode("k"), encode("v")));
   refusal(withMap(encode(5), encode("v")));
   refusal(withMap(encode(new Uint8Array(2)), encode("v")));
-  refusal(withMap(encode("__proto__"), encode("v")));
 });
 
 test("an integer field accepts any width and refuses what a JS number cannot hold exactly", () => {
   const empty = { 4: 0, 7: [] as unknown[] };
   // Past the integer rule, a size nothing sums to fails the sum check; a refused integer fails the type check first.
-  assert.throws(() => decodeManifest(wire({ ...empty, 4: 2 ** 53 - 1 })), /do not sum/);
   assert.throws(() => decodeManifest(wire({ ...empty, 4: 2n ** 53n - 1n })), /do not sum/);
   assert.throws(() => decodeManifest(wire({ ...empty, 4: 2n ** 53n })), /wrong type/);
   assert.throws(() => decodeManifest(wire({ ...empty, 4: 2n ** 53n + 1n })), /wrong type/);
@@ -173,7 +171,7 @@ test("a chunk size outside int32 is refused as the reference's int cannot hold i
   const chunk = (size: number) => decodeManifest(wire({ 4: size, 7: [[HASH, 0, size, "k"]] }));
   assert.equal(chunk(2 ** 31 - 1).chunks[0]!.sizeBytes, 2 ** 31 - 1);
   assert.throws(() => chunk(2 ** 31), /chunks\.sizeBytes.*wrong type/);
-  assert.throws(() => decodeManifest(wire({ 4: -(2 ** 31) - 1, 7: [[HASH, 0, -(2 ** 31) - 1, "k"]] })), /chunks\.sizeBytes.*wrong type/);
+  assert.throws(() => decodeManifest(wire({ 4: -(2n ** 31n) - 1n, 7: [[HASH, 0, -(2n ** 31n) - 1n, "k"]] })), /chunks\.sizeBytes.*wrong type/);
   assert.throws(() => decodeManifest(wire({ 4: 0, 7: [[HASH, 0, -(2 ** 31), "k"]] })), /chunk has a negative size/);
 });
 
@@ -192,25 +190,23 @@ test("a manifest of the wrong shape is refused naming the field and never the va
   const canary = "CANARY-7f3a91";
   const chunk = (...parts: unknown[]) => wire({ 7: [parts] });
   const cases: [Uint8Array, string][] = [
-    [wire({ 0: 5 }), "artifactId"], [wire({ 0: null }), "artifactId"], [wire({ 1: 5 }), "kind"], [wire({ 2: 5 }), "version"],
+    [wire({ 0: 5 }), "artifactId"], [wire({ 1: 5 }), "kind"], [wire({ 2: 5 }), "version"],
     [wire({ 3: 5 }), "contentHash"], [wire({ 5: 5 }), "mimeType"], [wire({ 6: 5 }), "createdAtUtc"],
     [wire({ 4: canary }), "sizeBytes"], [wire({ 4: "4" }), "sizeBytes"], [wire({ 4: null }), "sizeBytes"], [wire({ 4: 0.5 }), "sizeBytes"],
-    [wire({ 7: canary }), "chunks"], [wire({ 7: [canary] }), "chunks"], [chunk(HASH, 0, 4), "chunks"], [chunk(HASH, 0, 4, "k", canary), "chunks"],
+    [wire({ 7: canary }), "chunks"], [wire({ 7: [canary] }), "chunks"], 
     [chunk(5, 0, 4, "k"), "chunks.chunkHash"], [chunk(HASH, canary, 4, "k"), "chunks.offset"], [chunk(HASH, 0, canary, "k"), "chunks.sizeBytes"],
     [chunk(HASH, 0, 4, 5), "chunks.recordKey"],
     [wire({ 8: canary }), "tags"], [wire({ 8: [5] }), "tags"],
-    [wire({ 9: canary }), "metadata"], [wire({ 9: { k: 5 } }), "metadata"], [wire({ 9: null }), "metadata"], [wire({ 9: [] }), "metadata"],
+    [wire({ 9: canary }), "metadata"], [wire({ 9: { k: 5 } }), "metadata"], [wire({ 9: [] }), "metadata"],
     [wire({ 9: new Uint8Array(2) }), "metadata"],
-    [encode(fieldsOf().slice(0, 9)), "manifest"], [wire({ 10: canary }), "manifest"], [encode([canary]), "manifest"], [encode(canary), "manifest"],
+    [encode(canary), "manifest"], [encode({ [canary]: canary }), "manifest"],
   ];
   for (const [bytes, field] of cases) {
     assert.throws(() => decodeManifest(bytes), (error: unknown) =>
       error instanceof Error && error.message.includes(`'${field}'`) && !error.message.includes(canary), field);
   }
-  // Refusals that are not shape: truncated, trailing bytes. Neither echoes the value.
-  for (const bytes of [encode(canary).slice(0, 4), Uint8Array.from([...wire(), 0xc0])]) {
-    assert.throws(() => decodeManifest(bytes), (error: unknown) => error instanceof Error && !error.message.includes(canary));
-  }
+  // A payload that ends early is not a shape; it does not echo the value either.
+  assert.throws(() => decodeManifest(encode([canary]).slice(0, 4)), (error: unknown) => error instanceof Error && !error.message.includes(canary));
   assert.equal(decodeManifest(wire()).chunks.length, 1, "the unmodified fixture decodes");
 });
 
@@ -338,6 +334,83 @@ test("the metadata map header is the minimal MessagePack header at every size bo
     const expected = encode(Object.fromEntries(entries));
     const bytes = encodeManifest(manifestOf({ metadata: entries }));
     assert.deepEqual(bytes.slice(bytes.length - expected.length), expected, `${count} entries`);
-    assert.equal(decodeManifest(bytes).metadata.length, count);
+    assert.equal(decodeManifest(bytes).metadata!.length, count);
   }
+});
+
+// The reference's acceptance, case by case: `contracts/cultmesh/content-acceptance-vectors.json` is written by the C# test
+// from `MessagePackSerializer.Deserialize` plus `ValidateManifest`; an accepted case carries the bytes the reference
+// writes back and the key it derives. Nothing in the file is authored on this side.
+test("decodeManifest accepts and refuses exactly what the reference does, and re-encodes what it re-encodes", async () => {
+  const file = JSON.parse(readFileSync(join(CONTRACTS, "content-acceptance-vectors.json"), "utf8")) as {
+    cases: { label: string; inputBase64: string; accepted: boolean; reencodedBase64: string | null; recordKey: string | null }[];
+  };
+  const bytes = (base64: string) => new Uint8Array(Buffer.from(base64, "base64"));
+  assert.ok(file.cases.filter(c => c.accepted).length > 30 && file.cases.filter(c => !c.accepted).length > 30, "the file holds both verdicts in quantity");
+  assert.equal(new Set(file.cases.map(c => c.label)).size, file.cases.length);
+  for (const c of file.cases) {
+    if (!c.accepted) {
+      assert.throws(() => decodeManifest(bytes(c.inputBase64)), /./, `${c.label}: the reference refuses`);
+      continue;
+    }
+    const manifest = decodeManifest(bytes(c.inputBase64));
+    assert.deepEqual(encodeManifest(manifest), bytes(c.reencodedBase64!), `${c.label}: the reference's bytes`);
+    if (c.recordKey === null) await assert.rejects(artifactRecordKey(manifest.artifactId, manifest.version, manifest.contentHash), /./, `${c.label}: no key`);
+    else assert.equal(await artifactRecordKey(manifest.artifactId, manifest.version, manifest.contentHash), c.recordKey, `${c.label}: key`);
+  }
+});
+
+test("a manifest written as a map names the manifest, not a field inside it", () => {
+  assert.throws(() => decodeManifest(encode({ 0: "a", 9: { k: "v" } })), /field 'manifest' has the wrong type/);
+});
+
+test("nil in a reference slot reads as null and writes back as nil; a missing trailing slot takes the initialiser", () => {
+  const nils = wire({ 0: null, 2: null, 8: null, 9: null });
+  const manifest = decodeManifest(nils);
+  assert.deepEqual([manifest.artifactId, manifest.version, manifest.tags, manifest.metadata], [null, null, null, null]);
+  assert.deepEqual(encodeManifest(manifest), nils);
+  const short = decodeManifest(encode(["id"]));
+  assert.deepEqual(short, { artifactId: "id", kind: "asset", version: "", contentHash: "", sizeBytes: 0, mimeType: "application/octet-stream", createdAtUtc: "", chunks: [], tags: [], metadata: [] });
+});
+
+// Refusals that are the same refusal in the reference but would read differently if the wrong rule fired: the message
+// names the true cause (the sign, the nil chunk, the reserved code, the early end), never a neighbouring field.
+test("a refusal names its true cause", () => {
+  const refuses = (bytes: Uint8Array, message: RegExp) => assert.throws(() => decodeManifest(bytes), message);
+  refuses(wire({ 4: -1, 7: [] }), /negative size/);
+  refuses(wire({ 4: -32, 7: [] }), /negative size/);
+  refuses(wire({ 4: -(2n ** 53n - 1n), 7: [] }), /negative size/);
+  refuses(wire({ 4: -(2n ** 53n), 7: [] }), /field 'sizeBytes' has the wrong type/);
+  refuses(wire({ 4: 0, 7: [[HASH, 0, -32, "k"]] }), /chunk has a negative size/);
+  refuses(wire({ 7: null }), /field 'chunks' has the wrong type/);
+  refuses(wire({ 7: [null] }), /field 'chunks' has the wrong type/);
+  refuses(Uint8Array.of(0xc0), /field 'manifest' has the wrong type/);
+  refuses(wire().slice(0, 8), /ends before its last field/);
+  refuses(Uint8Array.of(0x91, 0xa3, 0x41), /ends before its last field/);
+  refuses(Uint8Array.from([0x9b, ...wire().slice(1), 0xc1]), /field 'manifest' has the wrong type/);
+});
+
+test("a lone surrogate is written as U+FFFD at every string length, short and long alike, in every string slot", async () => {
+  const base = (await packContent("x", Uint8Array.of(1, 2, 3), { createdAtUtc: "2026-09-22T00:00:00.0000000+00:00" })).manifest;
+  // @msgpack/msgpack switches encoders past 50 UTF-16 units; the reference writes U+FFFD on both sides of that line.
+  for (const length of [1, 2, 16, 31, 32, 49, 50, 51, 52, 64, 200]) {
+    for (const [lone, replaced] of [["\ud800", "\ufffd"], ["\udfff", "\ufffd"]]) {
+      const filler = "a".repeat(length - 1);
+      const bad = `${filler}${lone}`;
+      const good = `${filler}${replaced}`;
+      const withText = (value: string): CultMeshCdnArtifactManifest => ({
+        ...base,
+        artifactId: value, kind: value, version: value, mimeType: value, createdAtUtc: value,
+        chunks: [{ ...base.chunks[0]!, recordKey: value }],
+        tags: [value],
+        metadata: [[value, value]],
+      });
+      const bytes = encodeManifest(withText(bad));
+      assert.deepEqual(bytes, encodeManifest(withText(good)), `length ${length}`);
+      assert.ok(!bytes.some((b, i) => b === 0xed && bytes[i + 1]! >= 0xa0 && bytes[i + 1]! <= 0xbf), `no CESU surrogate bytes at length ${length}`);
+      assert.equal(decodeManifest(bytes).artifactId, good, `length ${length} reads back as written`);
+    }
+  }
+  const packed = await packContent(`a${"b".repeat(60)}\ud800`, Uint8Array.of(1), { kind: "k\udc00", createdAtUtc: "2026-09-22T00:00:00.0000000+00:00" });
+  assert.equal(decodeManifest(encodeManifest(packed.manifest)).kind, "k\ufffd");
 });
