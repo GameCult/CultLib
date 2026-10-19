@@ -196,3 +196,6 @@ https://h/%	https://h/%25?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b
 https://h/%g0	https://h/%25g0?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
 https://h/x?a=%a	https://h/x?a=%25a&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
 https://h/x?a=%%41	https://h/x?a=%25A&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https:h/x?a=b://c	
+https:/h/x?u=http://z	
+https:h/x#a://b	
