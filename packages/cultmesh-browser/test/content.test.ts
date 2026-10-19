@@ -24,6 +24,12 @@ const withChunk = (manifest: CultMeshCdnArtifactManifest, index: number, change:
 const codeOf = (code: CultMeshContentErrorCode, extra: object = {}) => (error: unknown) =>
   error instanceof CultMeshContentError && error.code === code && Object.entries(extra).every(([key, value]) => (error as unknown as Record<string, unknown>)[key] === value);
 
+/** A manifest-invalid rejection whose kept cause has a message matching `pattern`. */
+const causeIs = (pattern: RegExp) => (error: unknown) => {
+  const cause = (error as Error).cause;
+  return codeOf("manifest-invalid")(error) && cause instanceof Error && pattern.test(cause.message);
+};
+
 /** Fails a stalled promise with a timeout instead of letting the test runner wait for it forever. */
 const within = <T>(promise: Promise<T>, ms = 3000): Promise<T> => {
   let timer: NodeJS.Timeout;
@@ -138,6 +144,12 @@ const PARITY_ACCEPTED: [string, string][] = [
   ["https://h/x?a&&b", "https://h/x?a&&b&<Q>"],
   ["http://127.0.0.1:80/x", "http://127.0.0.1/x?<Q>"],
   ["http://127.0.0.1:8080", "http://127.0.0.1:8080/?<Q>"],
+  ["https://h/%40/x", "https://h/%40/x?<Q>"],
+  ["https://h/x?a=%5B%5D", "https://h/x?a=%5B%5D&<Q>"],
+  ["https://h/%60", "https://h/%60?<Q>"],
+  ["https://h/x?a=%7B%7D", "https://h/x?a=%7B%7D&<Q>"],
+  ["https://h/x?a=%2F%3A%2C", "https://h/x?a=%2F%3A%2C&<Q>"],
+  ["https://h/x?a=%2c%5b%7b", "https://h/x?a=%2c%5b%7b&<Q>"],
 ];
 const PARITY_REFUSED: string[] = [
   "https://h/x?a='b",
@@ -161,6 +173,20 @@ const PARITY_REFUSED: string[] = [
   "https://h/%41",
   "https://h/x#a b",
   "https://h/x#é",
+  "https://h/%50",
+  "https://h/x?a=%5A",
+  "https://h/x?a=%5f",
+  "https://h/x?a=%61",
+  "https://h/%6F",
+  "https://h/%7a",
+  "https://h/x?a=%7E",
+  "https://h/%30",
+  "https://h/x?a=%39",
+  "https://h/%2d",
+  "https://h/x?a=%2E",
+  "https://h/x?a=%4z",
+  "https://h/%4",
+  "https://h/x?%",
 ];
 
 test("request URLs equal .NET UriBuilder's for every plain endpoint spelling, and endpoints on which the two disagree are refused", async () => {
@@ -172,7 +198,7 @@ test("request URLs equal .NET UriBuilder's for every plain endpoint spelling, an
     await fetchVerifiedContent(endpoint, withChunk(manifest, 0, { recordKey: "k" }), { fetch: server.fetch });
     assert.equal(server.calls[0]!.url, expected.replace("<Q>", tail), endpoint);
   }
-  for (const endpoint of PARITY_REFUSED) {
+  for (const endpoint of [...PARITY_REFUSED, "https://h/%", "https://h/%g0", "https://h/x?a=%a", "https://h/x?a=%%41"]) {
     const server = chunkServer(chunks);
     await assert.rejects(fetchVerifiedContent(endpoint, manifest, { fetch: server.fetch }), codeOf("insecure-endpoint"), endpoint);
     await assert.rejects(fetchVerifiedChunk(endpoint, hex, 1, { fetch: server.fetch }), codeOf("insecure-endpoint"), endpoint);
@@ -234,7 +260,7 @@ test("a zero-size chunk beside others is manifest-invalid with no fetch", async 
   const [first, second] = manifest.chunks as [typeof manifest.chunks[number], typeof manifest.chunks[number]];
   const flood = { ...manifest, chunks: [first, { ...first, chunkHash: EMPTY_SHA256, offset: 4, sizeBytes: 0 }, second] };
   const server = double(() => { throw new Error("no request expected"); });
-  await assert.rejects(fetchVerifiedContent(ENDPOINT, flood, { fetch: server.fetch }), codeOf("manifest-invalid"));
+  await assert.rejects(fetchVerifiedContent(ENDPOINT, flood, { fetch: server.fetch }), causeIs(/^A zero-size chunk must be the only chunk\.$/));
   // two refs are enough, and the empty one may come last or first
   const one = (await pack(4, 4)).manifest;
   const empty = { ...one.chunks[0]!, chunkHash: EMPTY_SHA256, sizeBytes: 0 };
@@ -287,6 +313,11 @@ test("non-hex hashes and a gapped manifest are manifest-invalid with no fetch, i
     { ...manifest, sizeBytes: Infinity, chunks: [{ ...manifest.chunks[0]!, sizeBytes: Infinity }] },
   ];
   for (const candidate of bad) await assert.rejects(fetchVerifiedContent(ENDPOINT, candidate, { fetch: server.fetch }), codeOf("manifest-invalid"));
+  // the kept cause names which field was wrong
+  await assert.rejects(fetchVerifiedContent(ENDPOINT, bad[0]!, { fetch: server.fetch }), causeIs(/'chunkHash'/));
+  await assert.rejects(fetchVerifiedContent(ENDPOINT, bad[1]!, { fetch: server.fetch }), causeIs(/'contentHash'/));
+  await assert.rejects(fetchVerifiedChunk(ENDPOINT, "xyz", 5, { fetch: server.fetch }), causeIs(/'chunkHash'/));
+  await assert.rejects(fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash!, 1.5, { fetch: server.fetch }), causeIs(/^Size must be a safe integer\.$/));
   for (const [hash, size] of [["xyz", 5], [manifest.chunks[0]!.chunkHash!, -1], [manifest.chunks[0]!.chunkHash!, 1.5], [manifest.chunks[0]!.chunkHash!, Number.NaN]] as const) {
     await assert.rejects(fetchVerifiedChunk(ENDPOINT, hash, size, { fetch: server.fetch }), codeOf("manifest-invalid"));
   }

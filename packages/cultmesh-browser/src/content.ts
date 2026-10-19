@@ -106,7 +106,7 @@ async function readChunk(r: Resolved, signal: AbortSignal, { url, hash, slot }: 
 async function readChunks(r: Resolved, jobs: readonly Job[]): Promise<void> {
   const internal = new AbortController();
   const relay = () => internal.abort(r.caller!.reason);
-  r.caller?.addEventListener("abort", relay, { once: true });
+  r.caller?.addEventListener("abort", relay);
   let next = 0;
   const worker = async () => {
     for (let job = jobs[next++]; job && !internal.signal.aborted; job = jobs[next++]) {
@@ -114,7 +114,7 @@ async function readChunks(r: Resolved, jobs: readonly Job[]): Promise<void> {
     }
   };
   // The rejection waits for no worker: a fetch that ignores its signal must not hold a failure back.
-  const failed = new Promise<never>((_, reject) => internal.signal.addEventListener("abort", () => reject(internal.signal.reason), { once: true }));
+  const failed = new Promise<never>((_, reject) => internal.signal.addEventListener("abort", () => reject(internal.signal.reason)));
   try { await Promise.race([Promise.all(Array.from({ length: Math.min(r.concurrency, jobs.length) }, worker)), failed]); }
   finally { r.caller?.removeEventListener("abort", relay); }
 }
