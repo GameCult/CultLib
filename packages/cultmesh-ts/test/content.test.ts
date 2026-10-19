@@ -343,6 +343,7 @@ test("a store that overwrites its buffer on any microtask hop never gets other b
 test("a FIFO named by a hash is refused as not a regular file at once and holds no thread: other chunks are still served", { skip: process.platform === "win32" }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cm-content-"));
   let fifoPath: string | undefined;
+  const started: Promise<unknown>[] = [];
   try {
     const chunk = await packed("hello chunk");
     await writeFile(join(root, chunk.chunkHash), chunk.payload);
@@ -351,6 +352,7 @@ test("a FIFO named by a hash is refused as not a regular file at once and holds 
     execFileSync("mkfifo", [fifoPath]);
     const store = createDirectoryChunkStore(root);
     const within = async <T,>(work: Promise<T>): Promise<T> => {
+      started.push(work.catch(() => undefined));
       let timer: NodeJS.Timeout | undefined;
       try { return await Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("blocked")), 3000); })]); }
       finally { clearTimeout(timer); }
@@ -362,9 +364,10 @@ test("a FIFO named by a hash is refused as not a regular file at once and holds 
     assert.equal((await within(createContentChunkHandler(store)({ method: "GET", url: `/?chunkHash=${fifoHash}` }))).status, 500);
   } finally {
     // A reverted non-blocking open leaves pool threads waiting for a writer, which would keep the process alive past the failure.
-    // Opening the FIFO read-write releases them, so the revert fails the test in seconds. It is synchronous and needs no
-    // hash: both hashing and async fs calls queue behind the full pool.
-    if (fifoPath) try { closeSync(openSync(fifoPath, fsConstants.O_RDWR | fsConstants.O_NONBLOCK)); } catch { /* already gone */ }
+    // A read-write open (synchronous: hashing and async fs calls queue behind the full pool) is a writer; held until every
+    // started read has settled, it releases the queued opens too, so the revert fails the test in seconds instead of hanging.
+    const writer = fifoPath ? openSync(fifoPath, fsConstants.O_RDWR | fsConstants.O_NONBLOCK) : undefined;
+    try { await Promise.all(started); } finally { if (writer !== undefined) closeSync(writer); }
     await rm(root, { recursive: true, force: true });
   }
 });
