@@ -119,13 +119,14 @@ jobs:
       - name: Verify the browser client against the shared TypeScript verifier
         run: npm run test --workspace packages/cultmesh-browser
 
-      # The realtime frame codec. Its byte parity rests on two vector files,
+      # The realtime frame codec and the HTTP content chunk provider (content.test.ts,
+      # its answers over node:http). The codec's byte parity rests on two vector files,
       # contracts/cultmesh/realtime-frame-vectors.json written by the C#
       # reference and decoded by this step, and realtime-frame-vectors.ts-written.json
       # written by this codec and decoded by the C# step below. Neither half ran
       # in CI on any OS until these two steps existed, so a codec that agreed
       # only with itself would have gone green.
-      - name: Verify the realtime frame codec with the TypeScript codec
+      - name: Verify the realtime frame codec and the content provider with the TypeScript runtime
         run: npm run test --workspace packages/cultmesh-ts
 
       # Both directions of the CultMesh authority vectors: the C#-written
