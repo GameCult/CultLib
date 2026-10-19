@@ -77,7 +77,10 @@ to it before and after route rotation.
 The endpoint comes from CultMesh and never from content: a manifest carries no
 URL. No byte is released that failed its chunk or whole-body SHA-256 (WebCrypto,
 so a secure context in browsers). Only https is accepted, and http only on
-loopback. Options: `maxConcurrentChunkRequests` (1 to 32, default 4), `maxBytes`
+loopback; a redirect is a `network` failure, and an endpoint spelling on which
+.NET `UriBuilder` and WHATWG `URL` would build different request URLs (non-ASCII,
+`'` `{` `}` `|` `^` `\` or a space, a stray `%`, an escaped unreserved character)
+is `insecure-endpoint`. A size the runtime cannot allocate is `too-large`. Options: `maxConcurrentChunkRequests` (1 to 32, default 4), `maxBytes`
 (default 256 MiB, checked before any request), `signal` (an abort rejects with
 the signal's own reason). Failures are `CultMeshContentError` with a `code`
 (`manifest-invalid`, `too-large`, `insecure-endpoint`, `webcrypto-unavailable`,
