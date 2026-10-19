@@ -61,7 +61,7 @@ export function createContentChunkHandler(store: ContentChunkStore, options: Con
       const query = new URL(url, "http://provider.invalid").searchParams;
       const [hash, ...otherHashes] = query.getAll("chunkHash");
       const [key = "", ...otherKeys] = query.getAll("recordKey");
-      hex = parseSha256Hex(hash ?? "", "chunkHash");
+      hex = parseSha256Hex(hash ?? "");
       if (otherHashes.length || otherKeys.length || (key.trim() !== "" && key !== chunkRecordKey(hex))) return refusal(400);
     } catch { return refusal(400); }
     if (hex === EMPTY_SHA256) return chunkAnswer(new Uint8Array());
@@ -99,10 +99,10 @@ export function createDirectoryChunkStore(root: string): ContentChunkStore {
   };
 }
 
-/** Mounts a handler on `node:http` or `node:https`: method and URL in, status, headers and body out. */
+/** Mounts a handler on `node:http` or `node:https`: method and URL in, status, headers and body out. A server request always has both. */
 export const toNodeListener = (handler: (request: ContentChunkRequest) => Promise<ContentChunkAnswer>) =>
   (req: IncomingMessage, res: ServerResponse): void => {
-    handler({ method: req.method ?? "", url: req.url ?? "/" }).catch(() => refusal(500)).then(({ status, headers, body }) => {
+    handler({ method: req.method!, url: req.url! }).catch(() => refusal(500)).then(({ status, headers, body }) => {
       res.writeHead(status, headers);
       res.end(body);
     });

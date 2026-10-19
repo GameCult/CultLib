@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import fsp from "node:fs/promises";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { mock } from "node:test";
 
 import { EMPTY_SHA256, chunkRecordKey, packContent, sha256Hex } from "cultnet-ts/content";
 
@@ -92,6 +93,8 @@ test("a recordKey for another hash, a repeated recordKey, a missing or repeated 
     const answer = await ask(store, url);
     assert.equal(answer.status, 400, url);
     assert.equal(answer.headers["Cache-Control"], "no-store");
+    assert.equal(answer.headers["Content-Type"], "text/plain; charset=utf-8");
+    assert.equal(decode(answer), "invalid chunk request");
   }
   assert.deepEqual(store.calls, []);
 });
@@ -140,6 +143,9 @@ test("a valid 17-byte chunk with maxChunkBytes 16 answers 500 too-large, a store
   assert.deepEqual(kinds, ["too-large", "too-large", "store-error"]);
   assert.equal((await ask(spyStore({ [chunk.chunkHash]: chunk.payload }), url, "GET", { maxChunkBytes: 17 })).status, 200);
   for (const bad of [0, 2 ** 31, 1.5, Number.NaN]) assert.throws(() => createContentChunkHandler(spyStore({}), { maxChunkBytes: bad }), RangeError, String(bad));
+  assert.throws(() => createContentChunkHandler(spyStore({}), { maxChunkBytes: 0 }), /maxChunkBytes/);
+  const one = await packed("x");
+  assert.equal((await ask(spyStore({ [one.chunkHash]: one.payload }), `/c?chunkHash=${one.chunkHash}`, "GET", { maxChunkBytes: 1 })).status, 200);
   assert.doesNotThrow(() => createContentChunkHandler(spyStore({}), { maxChunkBytes: 2 ** 31 - 1 }));
 });
 
@@ -150,6 +156,7 @@ test("POST, PUT, DELETE and OPTIONS answer 405 with Allow: GET, HEAD", async () 
     const answer = await ask(store, `/c?chunkHash=${chunk.chunkHash}`, method);
     assert.equal(answer.status, 405, method);
     assert.equal(answer.headers.Allow, "GET, HEAD");
+    assert.equal(decode(answer), "method not allowed");
     assert.equal(answer.headers["Access-Control-Allow-Origin"], "*");
   }
   assert.deepEqual(store.calls, []);
@@ -187,13 +194,16 @@ test("directory store reads canonical hex and rejects non-canonical names, a dir
     assert.equal(await store.readChunk(await sha256Hex(new Uint8Array([1])), 17), undefined);
     // The root does not exist for these, so only the name check can reject them before a filesystem call.
     const nowhere = createDirectoryChunkStore(join(root, "missing"));
+    await assert.rejects(nowhere.readChunk(chunk.chunkHash.toUpperCase(), 17), /canonical/);
     for (const name of [chunk.chunkHash.toUpperCase(), `sha256:${chunk.chunkHash}`, `../${chunk.chunkHash}`, chunk.chunkHash.slice(1), ` ${chunk.chunkHash}`]) {
       await assert.rejects(nowhere.readChunk(name, 17), name);
     }
     await assert.rejects(store.readChunk(chunk.chunkHash, 16), (error: unknown) => error instanceof ContentChunkTooLargeError && error.sizeBytes === 17);
     const dirHash = await sha256Hex(new Uint8Array([2]));
     await mkdir(join(root, dirHash));
-    await assert.rejects(store.readChunk(dirHash, 17));
+    await assert.rejects(store.readChunk(dirHash, 1 << 20), process.platform === "win32" ? Error : /regular file/);
+    // Only a missing file is "not found": a root that is a file is a store fault (ENOTDIR on POSIX; Windows reports ENOENT).
+    if (process.platform !== "win32") await assert.rejects(createDirectoryChunkStore(join(root, chunk.chunkHash)).readChunk(chunk.chunkHash, 17), { code: "ENOTDIR" });
     // Through the handler: a file whose bytes do not match its name is a 500, and the right bytes are a 200.
     const wrongHash = await sha256Hex(new Uint8Array([3]));
     await writeFile(join(root, wrongHash), chunk.payload);
@@ -230,4 +240,23 @@ test("over node:http through toNodeListener: GET with Range and Accept-Encoding:
     assert.equal(response.status, 500);
     assert.equal(await response.text(), "chunk unavailable");
   });
+});
+
+test("directory store closes every handle it opens, whether it returns bytes, finds a directory or refuses an oversized file", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cm-content-"));
+  const opened: Awaited<ReturnType<typeof fsp.open>>[] = [];
+  const original = fsp.open;
+  const spy = mock.method(fsp, "open", async (...args: Parameters<typeof original>) => { const handle = await original(...args); opened.push(handle); return handle; });
+  try {
+    const chunk = await packed("0123456789abcdefg");
+    const dirHash = await sha256Hex(new Uint8Array([2]));
+    await writeFile(join(root, chunk.chunkHash), chunk.payload);
+    await mkdir(join(root, dirHash));
+    const store = createDirectoryChunkStore(root);
+    await store.readChunk(chunk.chunkHash, 17);
+    await assert.rejects(store.readChunk(chunk.chunkHash, 16));
+    await store.readChunk(dirHash, 17).catch(() => undefined);
+    assert.ok(opened.length >= 2, "the store opened its files through node:fs/promises open");
+    assert.deepEqual(opened.map(handle => handle.fd), opened.map(() => -1));
+  } finally { spy.mock.restore(); await rm(root, { recursive: true, force: true }); }
 });
