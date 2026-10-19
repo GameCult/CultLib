@@ -69,3 +69,31 @@ Run `scripts/verify-eve-browser-network.mjs --eve-root <path-to-Eve>` for the
 real Chromium + C# headless chronology. The witness publishes a lower-priority
 decoy endpoint owned by another runtime and proves that neither client connects
 to it before and after route rotation.
+
+## Verified content
+
+`fetchVerifiedContent(endpoint, manifest)` and
+`fetchVerifiedChunk(endpoint, hash, size)` read CultMesh CDN content over HTTP.
+The endpoint comes from CultMesh and never from content: a manifest carries no
+URL. No byte is released that failed its chunk or whole-body SHA-256 (WebCrypto,
+so a secure context in browsers). Only https is accepted, and http only on
+loopback; a redirect is a `network` failure, and an endpoint spelling on which
+.NET `UriBuilder` and WHATWG `URL` would build different request URLs (non-ASCII,
+`'` `{` `}` `|` `^` `\` or a space, a stray `%`, an escaped unreserved character)
+is `insecure-endpoint`. A size the runtime cannot allocate is `too-large`. Options: `maxConcurrentChunkRequests` (1 to 32, default 4), `maxBytes`
+(default 256 MiB, checked before any request), `signal` (an abort rejects with
+the signal's own reason). Failures are `CultMeshContentError` with a `code`
+(`manifest-invalid`, `too-large`, `insecure-endpoint`, `webcrypto-unavailable`,
+`network`, `http-status`, `length-mismatch`, `chunk-hash-mismatch`,
+`content-hash-mismatch`); messages never carry the endpoint or body bytes. The
+byte count actually received is judged, never a length header, because Fetch
+decodes content codings.
+
+```ts
+import { fetchVerifiedContent } from "cultmesh-browser";
+
+const bytes = await fetchVerifiedContent(endpoint, manifest, {
+  signal: AbortSignal.timeout(30_000),
+  maxConcurrentChunkRequests: 8,
+});
+```
