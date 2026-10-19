@@ -34,6 +34,7 @@ public sealed class CultMeshContentVectorTests
         if (Environment.GetEnvironmentVariable("CULTNET_WRITE_VECTORS") != "1")
             Assert.Ignore("Set CULTNET_WRITE_VECTORS=1 to (re)write the committed vector file.");
         File.WriteAllText(VectorPath("content-vectors.cs-written.json"), ToJson(BuildVectors(out _, out _)));
+        File.WriteAllText(VectorPath("cdn-record-key-vectors.json"), RecordKeyVectorsToJson(BuildRecordKeyVectors()));
     }
 
     [Test]
@@ -96,6 +97,56 @@ public sealed class CultMeshContentVectorTests
         Reencode(artifact.Manifest).Should().Equal(committed.Bytes);
         var rust = ReadVectors("content-vectors.rs-written.json").Single(v => v.Label == "manifest");
         rust.Bytes.Should().Equal(committed.Bytes, "Rust's pack_content and the reference pack the same bytes to the same manifest");
+    }
+
+    [Test]
+    public void CommittedRecordKeyVectorsEqualAFreshDerivation()
+    {
+        var path = VectorPath("cdn-record-key-vectors.json");
+        File.Exists(path).Should().BeTrue($"{path} is written by this fixture under CULTNET_WRITE_VECTORS=1");
+        File.ReadAllText(path).Should().Be(RecordKeyVectorsToJson(BuildRecordKeyVectors()), "the key grammar drifted from the committed vectors");
+    }
+
+    [Test]
+    public void TypeScriptManifestVectorsMatchTheReference()
+    {
+        var path = VectorPath("content-vectors.ts-written.json");
+        File.Exists(path).Should().BeTrue($"{path} is written by scripts/write-cultmesh-content-vectors.mjs");
+        using var document = JsonDocument.Parse(File.ReadAllText(path));
+        var vectors = document.RootElement.GetProperty("vectors").EnumerateArray().ToList();
+        vectors.Should().NotBeEmpty();
+        foreach (var vector in vectors)
+        {
+            var label = vector.GetProperty("label").GetString()!;
+            var bytes = Convert.FromBase64String(vector.GetProperty("messagePackBase64").GetString()!);
+            var manifest = MessagePackSerializer.Deserialize<CultMeshCdnArtifactManifest>(bytes, CultNetSchemaMessageSerialization.Options);
+            Reencode(manifest).Should().Equal(bytes, $"{label}: the reference reads and rewrites the TypeScript bytes unchanged");
+            CultMeshCdnArtifactManifest.CreateRecordKey(manifest).Value.Should().Be(vector.GetProperty("recordKey").GetString(), label);
+
+            var input = vector.GetProperty("input");
+            var body = input.GetProperty("body");
+            var multiplier = body.GetProperty("multiplier").GetInt64();
+            var modulus = body.GetProperty("modulus").GetInt64();
+            var packed = CultMeshCdn.PackArtifact(
+                input.GetProperty("artifactId").GetString()!,
+                Enumerable.Range(0, body.GetProperty("length").GetInt32()).Select(i => (byte)(i * multiplier % modulus)).ToArray(),
+                new CultMeshCdnPackOptions
+                {
+                    Kind = input.GetProperty("kind").GetString()!,
+                    Version = input.GetProperty("version").GetString()!,
+                    MimeType = input.GetProperty("mimeType").GetString()!,
+                    CreatedAtUtc = input.GetProperty("createdAtUtc").GetString()!,
+                    ChunkSizeBytes = input.GetProperty("chunkSizeBytes").GetInt32(),
+                    Tags = input.GetProperty("tags").EnumerateArray().Select(t => t.GetString()!).ToArray(),
+                    Metadata = input.GetProperty("metadata").EnumerateArray()
+                        .Aggregate(new Dictionary<string, string>(), (map, pair) =>
+                        {
+                            map[pair[0].GetString()!] = pair[1].GetString()!;
+                            return map;
+                        })
+                });
+            Reencode(packed.Manifest).Should().Equal(bytes, $"{label}: the reference packs the declared input to the TypeScript bytes");
+        }
     }
 
     private static byte[] Body() =>
@@ -271,6 +322,54 @@ public sealed class CultMeshContentVectorTests
                 Convert.FromBase64String(v.GetProperty("messagePackBase64").GetString()!)))
             .ToList();
     }
+
+    private static string[] KeyHashes()
+    {
+        var empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        return new[]
+        {
+            empty, "SHA256:" + empty.ToUpperInvariant(), "  " + empty + "  ", " sha256:" + empty,
+            "sha256:sha256:" + empty, "Sha256:\u0130\u03A3\U00010400", "sha256:"
+        };
+    }
+
+    private sealed record KeyVectors(
+        List<(string Id, string Version, string Hash, string Key)> Artifacts,
+        List<(string Hash, string Key)> Chunks);
+
+    /// <summary>Every key is derived by the reference's public CreateRecordKey, never spelled by hand.</summary>
+    private static KeyVectors BuildRecordKeyVectors()
+    {
+        var ids = new[]
+        {
+            "eureka/content-vector", "  Mixed Case/Path  ", "\u0130stanbul", "\u0391\u03A3", "\uFEFFbom", "\u0085nel\u0085",
+            "\u65E5\u672C\u8A9E/\u8CC7\u7523", "\U0001F642 smile", "---", "a\uD800b", "\uD800", "x\u00B2y", "\u0663d", "\U00010400A"
+        };
+        var versions = new[] { string.Empty, "   ", "1.0.0", "V2 Beta", "\u00FC" };
+        var hashes = KeyHashes();
+        var artifacts = ids.Select((id, i) => (id, versions[i % versions.Length], hashes[i % hashes.Length]))
+            .Concat(versions.Select(version => (ids[0], version, hashes[0])))
+            .Select(t => (t.Item1, t.Item2, t.Item3, CultMeshCdnArtifactManifest.CreateRecordKey(t.Item1, t.Item2, t.Item3).Value))
+            .ToList();
+        var chunks = hashes.Select(hash => (hash, CultMeshCdnArtifactChunk.CreateRecordKey(hash).Value)).ToList();
+        return new KeyVectors(artifacts, chunks);
+    }
+
+    /// <summary>String inputs are stored as UTF-16 code-unit arrays, so a lone surrogate survives the JSON file.</summary>
+    private static string RecordKeyVectorsToJson(KeyVectors vectors) =>
+        JsonSerializer.Serialize(
+            new
+            {
+                artifacts = vectors.Artifacts.Select(a => new
+                {
+                    artifactIdUnits = a.Id.Select(c => (int)c),
+                    versionUnits = a.Version.Select(c => (int)c),
+                    contentHash = a.Hash,
+                    recordKey = a.Key
+                }),
+                chunks = vectors.Chunks.Select(c => new { chunkHash = c.Hash, recordKey = c.Key })
+            },
+            new JsonSerializerOptions { WriteIndented = true });
 
     private static string VectorPath(string name) => Path.Combine(RepoRoot(), "contracts", "cultmesh", name);
 
