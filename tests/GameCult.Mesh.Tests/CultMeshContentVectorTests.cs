@@ -262,6 +262,24 @@ public sealed class CultMeshContentVectorTests
         AddFields("chunk_3", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0)))));
         AddFields("chunk_5", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0), Str("k"), Nil))));
         AddFields("chunk_5_nested", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0), Str("k"), Arr(Raw(1), Raw(2))))));
+        // An extra slot inside a chunk reference is followed by more bytes, so a skip that stops short shows.
+        var extras = new (string Name, byte[] Value)[]
+        {
+            ("map", MapOf(Str("a"), Str("b"), Str("c"), Str("d"))), ("map16", Cat(Raw(0xde, 0, 2), Raw(1), Raw(2), Raw(3), Raw(4))),
+            ("map32", Cat(Raw(0xdf, 0, 0, 0, 1), Raw(1), Raw(2))), ("array", Arr(Raw(1), Raw(2), Raw(3))),
+            ("array16", Cat(Raw(0xdc, 0, 2), Raw(1), Raw(2))), ("array32", Cat(Raw(0xdd, 0, 0, 0, 1), Raw(1))),
+            ("fixext1", Raw(0xd4, 1, 2)), ("fixext2", Raw(0xd5, 1, 2, 3)), ("fixext4", Raw(0xd6, 1, 2, 3, 4, 5)),
+            ("fixext8", Raw(0xd7, 1, 2, 3, 4, 5, 6, 7, 8, 9)), ("fixext16", Cat(Raw(0xd8, 1), new byte[16])),
+            ("ext8", Raw(0xc7, 2, 1, 7, 7)), ("ext16", Raw(0xc8, 0, 2, 1, 7, 7)), ("ext32", Raw(0xc9, 0, 0, 0, 2, 1, 7, 7)),
+            ("bin8", Raw(0xc4, 2, 1, 2)), ("bin16", Raw(0xc5, 0, 2, 1, 2)), ("bin32", Raw(0xc6, 0, 0, 0, 2, 1, 2)),
+            ("str8", Raw(0xd9, 2, 0x41, 0x42)), ("str16", Raw(0xda, 0, 2, 0x41, 0x42)), ("str32", Raw(0xdb, 0, 0, 0, 2, 0x41, 0x42)),
+            ("fixstr", Str("ab")), ("f32", F32(1)), ("f64", F64(1)), ("u8", Raw(0xcc, 1)), ("u16", Be(0xcd, 1, 2)), ("u32", Be(0xce, 1, 4)),
+            ("u64", Be(0xcf, 1, 8)), ("i8", Raw(0xd0, 1)), ("i16", Be(0xd1, 1, 2)), ("i32", Be(0xd2, 1, 4)), ("i64", Be(0xd3, 1, 8)),
+            ("true", Raw(0xc3)), ("false", Raw(0xc2)), ("nil", Nil), ("negfixint", Raw(0xff)), ("reserved", Raw(0xc1)),
+            ("nested", Arr(MapOf(Str("a"), Arr(Raw(1), Raw(2))), Arr()))
+        };
+        foreach (var (name, value) in extras)
+            AddFields($"chunk_extra_{name}", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0), Str("k"), value))));
         AddFields("chunk_1", (7, Arr(Arr(Str(EmptyHash)))));
         AddFields("chunk_0", (7, Arr(Arr())));
         AddFields("chunk_is_map", (7, Arr(MapOf(Str("a"), Str("b")))));
