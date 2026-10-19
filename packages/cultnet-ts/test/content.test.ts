@@ -154,7 +154,6 @@ test("a metadata key that is not a string is refused", () => {
 test("an integer field accepts any width and refuses what a JS number cannot hold exactly", () => {
   const empty = { 4: 0, 7: [] as unknown[] };
   // Past the integer rule, a size nothing sums to fails the sum check; a refused integer fails the type check first.
-  assert.throws(() => decodeManifest(wire({ ...empty, 4: 2 ** 53 - 1 })), /do not sum/);
   assert.throws(() => decodeManifest(wire({ ...empty, 4: 2n ** 53n - 1n })), /do not sum/);
   assert.throws(() => decodeManifest(wire({ ...empty, 4: 2n ** 53n })), /wrong type/);
   assert.throws(() => decodeManifest(wire({ ...empty, 4: 2n ** 53n + 1n })), /wrong type/);
@@ -172,7 +171,7 @@ test("a chunk size outside int32 is refused as the reference's int cannot hold i
   const chunk = (size: number) => decodeManifest(wire({ 4: size, 7: [[HASH, 0, size, "k"]] }));
   assert.equal(chunk(2 ** 31 - 1).chunks[0]!.sizeBytes, 2 ** 31 - 1);
   assert.throws(() => chunk(2 ** 31), /chunks\.sizeBytes.*wrong type/);
-  assert.throws(() => decodeManifest(wire({ 4: -(2 ** 31) - 1, 7: [[HASH, 0, -(2 ** 31) - 1, "k"]] })), /chunks\.sizeBytes.*wrong type/);
+  assert.throws(() => decodeManifest(wire({ 4: -(2n ** 31n) - 1n, 7: [[HASH, 0, -(2n ** 31n) - 1n, "k"]] })), /chunks\.sizeBytes.*wrong type/);
   assert.throws(() => decodeManifest(wire({ 4: 0, 7: [[HASH, 0, -(2 ** 31), "k"]] })), /chunk has a negative size/);
 });
 
