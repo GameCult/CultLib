@@ -21,6 +21,10 @@ const repoRoot = resolve(packageRoot, "../..");
 const fixtures = join(packageRoot, "test/fixtures");
 const keyPem = join(fixtures, "content-https-test-key.pem");
 const certPem = join(fixtures, "content-https-test-cert.pem");
+// A chunk recordKey with every character Uri.EscapeDataString treats specially: ! ' ( ) * (which encodeURIComponent leaves bare), a space,
+// a non-ASCII character and a lone percent sign. RecordKey is a free string on a chunk ref, and the connector sends it verbatim into the query.
+const escapeKey = "k!'()* é%41+~";
+const escapedKey = "k%21%27%28%29%2A%20%C3%A9%2541%2B~";
 const dotnet = process.env.DOTNET ?? "dotnet";
 
 const haveDotnet = (() => { try { execFileSync(dotnet, ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
@@ -74,16 +78,19 @@ test("the TS provider serves both consumers: parity, refusal and the fault log",
   const multi = await packContent("c4/multi", xorshiftBytes(229_376, 0x9e3779b9), { chunkSizeBytes: 65_536, createdAtUtc });
   const single = await packContent("c4/single", xorshiftBytes(10_000, 0x85ebca6b), { createdAtUtc });
   const empty = await packContent("c4/empty", new Uint8Array(0), { createdAtUtc });
+  const escaped = await packContent("c4/escape", xorshiftBytes(5_000, 0xc2b2ae35), { createdAtUtc });
+  const escapeManifest = { ...escaped.manifest, chunks: escaped.manifest.chunks.map(chunk => ({ ...chunk, recordKey: escapeKey })) };
+  const escapeHash = escaped.chunks[0]!.chunkHash;
   const multiHashes = multi.chunks.map(chunk => chunk.chunkHash);
   assert.equal(multi.chunks.length, 4);
   assert.equal(new Set(multiHashes).size, 4, "a parity fixture needs four distinct chunk hashes");
-  for (const chunk of [...multi.chunks, ...single.chunks, ...empty.chunks]) writeFileSync(join(store, chunk.chunkHash), chunk.payload);
+  for (const chunk of [...multi.chunks, ...single.chunks, ...empty.chunks, ...escaped.chunks]) writeFileSync(join(store, chunk.chunkHash), chunk.payload);
   const flipped = single.chunks[0]!.payload.slice();
   flipped[0]! ^= 1;
   writeFileSync(join(corrupt, single.chunks[0]!.chunkHash), flipped);
-  for (const [name, packed] of Object.entries({ multi, single, empty })) writeFileSync(join(manifests, `${name}.manifest`), encodeManifest(packed.manifest));
+  for (const [name, manifest] of Object.entries({ multi: multi.manifest, single: single.manifest, empty: empty.manifest, escape: escapeManifest })) writeFileSync(join(manifests, `${name}.manifest`), encodeManifest(manifest));
 
-  const provider = startProvider([store, corrupt, keyPem, certPem]);
+  const provider = startProvider([store, corrupt, keyPem, certPem, escapeKey]);
   try {
     const endpoints = (await provider.next(line => line.status === "ready", "ready")).endpoints!;
     const endpointsJson = JSON.stringify(endpoints);
@@ -104,6 +111,7 @@ test("the TS provider serves both consumers: parity, refusal and the fault log",
     for (const [name, packed] of [["honest-multi", multi], ["honest-single", single], ["honest-empty", empty]] as const) {
       assert.deepEqual(read[name], { case: name, ok: true, sha256: packed.manifest.contentHash?.replace(/^sha256:/i, "") }, name);
     }
+    assert.deepEqual(read["honest-escape"], { case: "honest-escape", ok: true, sha256: escaped.manifest.contentHash?.replace(/^sha256:/i, "") }, "honest-escape");
     assert.deepEqual(read["honest-single-chunk"], { case: "honest-single-chunk", ok: true, sha256: single.manifest.contentHash?.replace(/^sha256:/i, "") });
     assert.equal(read["tampered-multi"]?.ok, false);
     assert.equal(read["tampered-multi"]?.code, "chunk-hash-mismatch");
@@ -130,6 +138,10 @@ test("the TS provider serves both consumers: parity, refusal and the fault log",
     const multiUrls = (phase: string) => new Set(requests(phase, "honest").map(line => line.url!).filter(url => multiHashes.some(hash => url.includes(`chunkHash=${hash}`))));
     assert.equal(multiUrls("reader").size, 4);
     assert.deepEqual([...multiUrls("dotnet")].sort(), [...multiUrls("reader")].sort());
+    // (a2) the escape chunk: the C# connector's URL and the TS reader's URL are the same bytes, and they are the RFC 3986 escaping of escapeKey
+    const escapeUrls = (phase: string) => requests(phase, "honest").map(line => line.url!).filter(url => url.includes(`chunkHash=${escapeHash}`));
+    assert.deepEqual(escapeUrls("reader"), [`/honest/content?chunkHash=${escapeHash}&recordKey=${escapedKey}`]);
+    assert.deepEqual(escapeUrls("dotnet"), escapeUrls("reader"));
     // (b) F30: C# asks for the empty chunk; the reader verifies it locally
     assert.ok(requests("dotnet", "honest").some(line => line.url!.includes(`chunkHash=${EMPTY_SHA256}`)));
     assert.ok(!requests("reader", "honest").some(line => line.url!.includes(`chunkHash=${EMPTY_SHA256}`)));

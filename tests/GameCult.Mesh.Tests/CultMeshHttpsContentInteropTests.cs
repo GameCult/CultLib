@@ -101,7 +101,7 @@ public sealed class CultMeshHttpsContentInteropTests
     public async Task HttpsTransferFetchesFromExternalTypeScriptProvider()
     {
         using var rig = Build(_honest, _anchor, _dir);
-        foreach (var name in new[] { "multi", "single", "empty" })
+        foreach (var name in new[] { "multi", "single", "empty", "escape" })
         {
             var manifest = Manifest(name);
             var path = await rig.Transfer.FetchAsync(manifest);

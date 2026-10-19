@@ -15,6 +15,7 @@ const cases: Record<string, () => Promise<Uint8Array>> = {
   "honest-multi": () => fetchVerifiedContent(endpoints.honest, manifest("multi")),
   "honest-single": () => fetchVerifiedContent(endpoints.honest, single),
   "honest-empty": () => fetchVerifiedContent(endpoints.honest, manifest("empty")),
+  "honest-escape": () => fetchVerifiedContent(endpoints.honest, manifest("escape")),
   "honest-single-chunk": () => fetchVerifiedChunk(endpoints.honest, single.chunks[0]!.chunkHash!, single.chunks[0]!.sizeBytes),
   "tampered-multi": () => fetchVerifiedContent(endpoints.tampered, manifest("multi")),
   "corrupt-single": () => fetchVerifiedContent(endpoints.corrupt, single),
