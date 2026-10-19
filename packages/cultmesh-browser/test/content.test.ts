@@ -6,6 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { readFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -100,108 +101,51 @@ test("request URLs equal the .NET BuildChunkUri AbsoluteUri for every probed end
   assert.equal(absent.calls[0]!.url, `${ENDPOINT}?chunkHash=${hex}&recordKey=`);
 });
 
-// Rows probed with .NET 10 UriBuilder (the BuildChunkUri body) at the same endpoints: each accepted endpoint yields exactly the
-// AbsoluteUri .NET yields (<Q> stands for the chunkHash and recordKey query tail); each refused endpoint is a spelling on which
-// .NET and WHATWG URL disagree (or .NET throws), so the reader refuses it rather than request a different URL.
-const PARITY_ACCEPTED: [string, string][] = [
-  ["https://h/a%2fb", "https://h/a%2fb?<Q>"],
-  ["https://h/./a/../b", "https://h/b?<Q>"],
-  ["https://h/x?a=b#f?g", "https://h/x?a=b&<Q>#f?g"],
-  ["https://h/x?#f", "https://h/x?&<Q>#f"],
-  ["https://h:0443/x", "https://h/x?<Q>"],
-  ["https://h./x", "https://h./x?<Q>"],
-  ["https://h/x?a=[b]", "https://h/x?a=[b]&<Q>"],
-  ["https://u:p@h/x", "https://u:p@h/x?<Q>"],
-  ["https://h/x?a=1&&", "https://h/x?a=1&&&<Q>"],
-  ["https://h/x?%3F", "https://h/x?%3F&<Q>"],
-  ["https://h:/x", "https://h/x?<Q>"],
-  ["https://h/x?a=b?c", "https://h/x?a=b?c&<Q>"],
-  ["https://h/a;b=c,d", "https://h/a;b=c,d?<Q>"],
-  ["https://h/a!$&()*+,;=:@b", "https://h/a!$&()*+,;=:@b?<Q>"],
-  ["https://h/x?a!$()*+,;=:@/?", "https://h/x?a!$()*+,;=:@/?&<Q>"],
-  ["https://h//x", "https://h//x?<Q>"],
-  ["https://h/x/", "https://h/x/?<Q>"],
-  ["https://H:443", "https://h/?<Q>"],
-  ["https://1.2.3.4/x", "https://1.2.3.4/x?<Q>"],
-  ["https://0x7f.1/x", "https://127.0.0.1/x?<Q>"],
-  ["https://127.1/", "https://127.0.0.1/?<Q>"],
-  ["https://h/x#", "https://h/x?<Q>#"],
-  ["https://h/x?a#", "https://h/x?a&<Q>#"],
-  ["https://h/x?a=1#f", "https://h/x?a=1&<Q>#f"],
-  ["https://h/a/./b", "https://h/a/b?<Q>"],
-  ["https://h/a/../../b", "https://h/b?<Q>"],
-  ["https://h/%2F", "https://h/%2F?<Q>"],
-  ["https://h/a%20b", "https://h/a%20b?<Q>"],
-  ["https://h/a%25b", "https://h/a%25b?<Q>"],
-  ["https://h/x?a=%25", "https://h/x?a=%25&<Q>"],
-  ["https://h/x?a=%2f", "https://h/x?a=%2f&<Q>"],
-  ["https://[::1]/x", "https://[::1]/x?<Q>"],
-  ["https://[2001:DB8::1]:8443/x", "https://[2001:db8::1]:8443/x?<Q>"],
-  ["https://h/x?a=b%3Dc", "https://h/x?a=b%3Dc&<Q>"],
-  ["https://h/-._~", "https://h/-._~?<Q>"],
-  ["https://h/x?=", "https://h/x?=&<Q>"],
-  ["https://h/x?&", "https://h/x?&&<Q>"],
-  ["https://h/x?a&&b", "https://h/x?a&&b&<Q>"],
-  ["http://127.0.0.1:80/x", "http://127.0.0.1/x?<Q>"],
-  ["http://127.0.0.1:8080", "http://127.0.0.1:8080/?<Q>"],
-  ["https://h/%40/x", "https://h/%40/x?<Q>"],
-  ["https://h/x?a=%5B%5D", "https://h/x?a=%5B%5D&<Q>"],
-  ["https://h/%60", "https://h/%60?<Q>"],
-  ["https://h/x?a=%7B%7D", "https://h/x?a=%7B%7D&<Q>"],
-  ["https://h/x?a=%2F%3A%2C", "https://h/x?a=%2F%3A%2C&<Q>"],
-  ["https://h/x?a=%2c%5b%7b", "https://h/x?a=%2c%5b%7b&<Q>"],
-];
-const PARITY_REFUSED: string[] = [
-  "https://h/x?a='b",
-  "https://h/x?a={b}|^",
-  "https://h/x?a=\"<>`",
-  "https://h/x?a=b c",
-  "https://h/x?a=%7e",
-  "https://h/x?a=é",
-  "https://h/{x}",
-  "https://h/a|b",
-  "https://h/a^b",
-  "https://h/a'b",
-  "https://ex%41mple.com/",
-  "https://Bücher.de/",
-  "https://h/%7e",
-  "https://h/x?a=%zz",
-  "https://h/x?a=\\b",
-  "https://h/a\\b",
-  "https://h/x? ",
-  "https://h:99999/x",
-  "https://h/%41",
-  "https://h/x#a b",
-  "https://h/x#é",
-  "https://h/%50",
-  "https://h/x?a=%5A",
-  "https://h/x?a=%5f",
-  "https://h/x?a=%61",
-  "https://h/%6F",
-  "https://h/%7a",
-  "https://h/x?a=%7E",
-  "https://h/%30",
-  "https://h/x?a=%39",
-  "https://h/%2d",
-  "https://h/x?a=%2E",
-  "https://h/x?a=%4z",
-  "https://h/%4",
-  "https://h/x?%",
-];
+// test/fixtures/chunk-uri-dotnet.tsv holds, for each endpoint, the AbsoluteUri .NET 10 builds (or the exception UriBuilder throws);
+// chunk-uri-dotnet.fsx produced it, and nothing in this file spells an expected URL by hand. The reader may refuse an endpoint
+// on which the two runtimes could disagree, but one it accepts must request exactly the URL .NET does, and one .NET refuses it
+// must refuse too.
+const FIXTURE_HASH = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+const DOTNET_ROWS = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "test", "fixtures", "chunk-uri-dotnet.tsv"), "utf8")
+  .split(/\r?\n/).filter(line => line !== "").map(line => { const [endpoint, uri] = line.split("\t"); return { endpoint: endpoint!, uri: uri! }; });
 
-test("request URLs equal .NET UriBuilder's for every plain endpoint spelling, and endpoints on which the two disagree are refused", async () => {
+test("request URLs equal what .NET builds for every endpoint the reader accepts, and endpoints .NET refuses are refused", async () => {
   const { manifest, chunks } = await pack(1, 4);
   const hex = manifest.chunks[0]!.chunkHash!;
-  const tail = `chunkHash=${hex}&recordKey=k`;
-  for (const [endpoint, expected] of PARITY_ACCEPTED) {
-    const server = chunkServer(chunks);
-    await fetchVerifiedContent(endpoint, withChunk(manifest, 0, { recordKey: "k" }), { fetch: server.fetch });
-    assert.equal(server.calls[0]!.url, expected.replace("<Q>", tail), endpoint);
+  const requested = (uri: string) => uri.replace(`chunkHash=${FIXTURE_HASH}`, `chunkHash=${hex}`);
+  let accepted = 0;
+  for (const { endpoint, uri } of DOTNET_ROWS) {
+    const viaContent = chunkServer(chunks);
+    const viaChunk = chunkServer(chunks);
+    const content = await fetchVerifiedContent(endpoint, withChunk(manifest, 0, { recordKey: "k" }), { fetch: viaContent.fetch }).then(() => null, (error: unknown) => error);
+    const chunk = await fetchVerifiedChunk(endpoint, hex, 1, { fetch: viaChunk.fetch }).then(() => null, (error: unknown) => error);
+    if (content === null && chunk === null) {
+      accepted++;
+      assert.notEqual(viaContent.calls.length, 0, endpoint);
+      assert.ok(!uri.startsWith("THROW"), `${endpoint} is refused by .NET but requested`);
+      assert.equal(viaContent.calls[0]!.url, requested(uri), endpoint);
+      assert.equal(viaChunk.calls[0]!.url, requested(uri).replace("recordKey=k", `recordKey=${encodeURIComponent(`mesh:cdn:chunk:${hex}`)}`), endpoint);
+    } else {
+      assert.ok(codeOf("insecure-endpoint")(content) && codeOf("insecure-endpoint")(chunk), `${endpoint} is refused for another reason`);
+      assert.equal(viaContent.calls.length + viaChunk.calls.length, 0, endpoint);
+    }
   }
-  for (const endpoint of [...PARITY_REFUSED, "https://h/%", "https://h/%g0", "https://h/x?a=%a", "https://h/x?a=%%41"]) {
+  assert.ok(accepted >= 90, `only ${accepted} fixture endpoints are accepted`);
+});
+
+test("the spellings on which the reader once differed from .NET are rows of the fixture and are refused", async () => {
+  const { manifest, chunks } = await pack(1, 4);
+  const rows = new Map(DOTNET_ROWS.map(row => [row.endpoint, row.uri]));
+  const refused = [
+    "https:h/x", "https:/h/x", "https:///h/x", "HTTPS:/evil.example/c", "https:////h/x", "https://[::FFFF:127.0.0.1]/x", "https://[::ffff:7f00:1]/x",
+    "https://[::7f00:1]/x", "https://[::ffff:0:7f00:1]/x", "https://[0:0:0:0:0:ffff:7f00:1]/x", "https://h/x?a=%e2%82%ac", "https://h/x?a=%c3%a9", "https://h/%c3%a9",
+    "https://h/%80", "https://h/x?a=%C3%A9",
+  ];
+  for (const endpoint of refused) {
+    assert.ok(rows.has(endpoint), `${endpoint} is not a fixture row`);
     const server = chunkServer(chunks);
     await assert.rejects(fetchVerifiedContent(endpoint, manifest, { fetch: server.fetch }), codeOf("insecure-endpoint"), endpoint);
-    await assert.rejects(fetchVerifiedChunk(endpoint, hex, 1, { fetch: server.fetch }), codeOf("insecure-endpoint"), endpoint);
+    await assert.rejects(fetchVerifiedChunk(endpoint, manifest.chunks[0]!.chunkHash!, 1, { fetch: server.fetch }), codeOf("insecure-endpoint"), endpoint);
     assert.equal(server.calls.length, 0, endpoint);
   }
 });
@@ -527,8 +471,12 @@ test("wrong bytes of the right length are refused at every size, whichever byte 
     const hash = manifest.chunks[0]!.chunkHash!;
     for (const at of [0, size >> 1, size - 1]) {
       const wrong = double(() => new Response(flipped(chunks[0]!.payload, at) as BodyInit));
-      await assert.rejects(fetchVerifiedChunk(ENDPOINT, hash, size, { fetch: wrong.fetch }), codeOf("chunk-hash-mismatch", { chunkHash: hash }), `chunk ${size} byte ${at}`);
-      await assert.rejects(fetchVerifiedContent(ENDPOINT, manifest, { fetch: wrong.fetch }), codeOf("chunk-hash-mismatch", { chunkHash: hash }), `content ${size} byte ${at}`);
+      // no size may sit past a threshold that follows from an option: the cap equal to the size, and the least and most concurrency, are tried at every size
+      for (const options of [{}, { maxBytes: size }, { maxConcurrentChunkRequests: 1 }, { maxConcurrentChunkRequests: 32 }, { maxBytes: size, maxConcurrentChunkRequests: 1 }]) {
+        const label = `${size} byte ${at} ${JSON.stringify(options)}`;
+        await assert.rejects(fetchVerifiedChunk(ENDPOINT, hash, size, { fetch: wrong.fetch, ...options }), codeOf("chunk-hash-mismatch", { chunkHash: hash }), `chunk ${label}`);
+        await assert.rejects(fetchVerifiedContent(ENDPOINT, manifest, { fetch: wrong.fetch, ...options }), codeOf("chunk-hash-mismatch", { chunkHash: hash }), `content ${label}`);
+      }
     }
   }
   const { manifest, chunks } = await pack(4500, 1500);
@@ -554,23 +502,39 @@ test("a body of the wrong length in one chunk of several is length-mismatch nami
   }
 });
 
-test("a failure is thrown without waiting for a fetch whose body ignores the abort, and so is a caller abort", async () => {
-  const { manifest } = await pack(30, 10);
+/** Whether `promise` settles before a timer started now fires: rejection is judged where it is decided, not against a generous test timeout. */
+const settlesWithin = async (promise: Promise<unknown>, ms: number): Promise<boolean> => {
+  let timer: NodeJS.Timeout;
+  const late = new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), ms); });
+  return Promise.race([promise.then(() => true, () => true), late]).finally(() => clearTimeout(timer));
+};
+
+test("a failure is thrown at once, without waiting for a fetch whose body ignores the abort, and so is a caller abort; nothing is requested after either", async () => {
+  const { manifest } = await pack(100, 10);
   const stalled = () => new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(body(3)); } }));
   const firstWrong = double((_, index) => index === 0 ? new Response(new Uint8Array(10)) : stalled());
-  await assert.rejects(within(fetchVerifiedContent(ENDPOINT, manifest, { fetch: firstWrong.fetch, maxConcurrentChunkRequests: 3 })), codeOf("chunk-hash-mismatch"));
+  const failing = fetchVerifiedContent(ENDPOINT, manifest, { fetch: firstWrong.fetch, maxConcurrentChunkRequests: 3 });
+  assert.ok(await settlesWithin(failing, 100), "the first failure waited");
+  await assert.rejects(failing, codeOf("chunk-hash-mismatch"));
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(firstWrong.calls.length, 3, "a request started after the first failure");
   const reason = new Error("stop waiting");
   const never = double(() => new Promise<Response>(() => {}));
   const early = new AbortController();
   const noResponse = fetchVerifiedContent(ENDPOINT, manifest, { fetch: never.fetch, signal: early.signal });
   early.abort(reason);
-  await assert.rejects(within(noResponse), (error: unknown) => error === reason);
+  assert.ok(await settlesWithin(noResponse, 100), "the caller's abort waited");
+  await assert.rejects(noResponse, (error: unknown) => error === reason);
   const stalledBodies = double(stalled);
   const late = new AbortController();
   const waiting = fetchVerifiedContent(ENDPOINT, manifest, { fetch: stalledBodies.fetch, signal: late.signal });
-  for (let waited = 0; stalledBodies.calls.length < 3 && waited < 2000; waited++) await new Promise(resolve => setTimeout(resolve, 1));
+  for (let waited = 0; stalledBodies.calls.length < 4 && waited < 2000; waited++) await new Promise(resolve => setTimeout(resolve, 1));
+  assert.equal(stalledBodies.calls.length, 4);
   late.abort(reason);
-  await assert.rejects(within(waiting), (error: unknown) => error === reason);
+  assert.ok(await settlesWithin(waiting, 100), "the caller's abort waited for the stalled bodies");
+  await assert.rejects(waiting, (error: unknown) => error === reason);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(stalledBodies.calls.length, 4, "a request started after the caller's abort");
 });
 
 test("an abort that lands while the last bytes are hashed rejects with its reason: no success for a cancelled caller", async () => {
