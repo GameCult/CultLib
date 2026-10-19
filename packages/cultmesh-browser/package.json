@@ -1,6 +1,6 @@
 {
   "name": "cultmesh-browser",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Browser-safe CultMesh document leases and typed operations over CultNet WebSocket transport.",
   "type": "module",
   "main": "dist/index.js",
@@ -42,11 +42,11 @@
   },
   "dependencies": {
     "@gamecult/cultcache-ts": "^0.14.0",
-    "cultnet-ts": "^0.2.0"
+    "cultnet-ts": "^0.3.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "cultmesh-ts": "^0.1.1",
+    "cultmesh-ts": "^0.2.0",
     "typescript": "^5.9.0"
   }
 }

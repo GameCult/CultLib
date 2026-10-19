@@ -89,6 +89,11 @@ the signal's own reason). Failures are `CultMeshContentError` with a `code`
 byte count actually received is judged, never a length header, because Fetch
 decodes content codings.
 
+Browser floor: the reader needs `String.prototype.toWellFormed` (ES2024) and
+WebCrypto `crypto.subtle`; without WebCrypto it fails with
+`webcrypto-unavailable`. Redirects are refused, including https to https: the
+endpoint CultMesh resolved is the only host the reader trusts.
+
 ```ts
 import { fetchVerifiedContent } from "cultmesh-browser";
 
