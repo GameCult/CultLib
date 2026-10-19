@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using FluentAssertions;
 using GameCult.Caching;
+using GameCult.Caching.MessagePack;
 using GameCult.Networking;
 using MessagePack;
 using NUnit.Framework;
@@ -72,7 +73,7 @@ public sealed class CultMeshContentVectorTests
                     Reencode(response).Should().Equal(vector.Bytes, vector.Label);
                     break;
                 case "manifest":
-                    var manifest = MessagePackSerializer.Deserialize<CultMeshCdnArtifactManifest>(vector.Bytes, CultNetSchemaMessageSerialization.Options);
+                    var manifest = ReadManifest(vector.Bytes);
                     manifest.Should().BeEquivalentTo((CultMeshCdnArtifactManifest)expected);
                     Reencode(manifest).Should().Equal(vector.Bytes, vector.Label);
                     break;
@@ -121,7 +122,7 @@ public sealed class CultMeshContentVectorTests
         {
             var label = vector.GetProperty("label").GetString()!;
             var bytes = Convert.FromBase64String(vector.GetProperty("messagePackBase64").GetString()!);
-            var manifest = MessagePackSerializer.Deserialize<CultMeshCdnArtifactManifest>(bytes, CultNetSchemaMessageSerialization.Options);
+            var manifest = ReadManifest(bytes);
             Reencode(manifest).Should().Equal(bytes, $"{label}: the reference reads and rewrites the TypeScript bytes unchanged");
             CultMeshCdnArtifactManifest.CreateRecordKey(manifest).Value.Should().Be(vector.GetProperty("recordKey").GetString(), label);
 
@@ -171,7 +172,7 @@ public sealed class CultMeshContentVectorTests
         CultMeshCdnArtifactManifest manifest;
         try
         {
-            manifest = MessagePackSerializer.Deserialize<CultMeshCdnArtifactManifest>(input, CultNetSchemaMessageSerialization.Options);
+            manifest = ReadManifest(input);
             CultMeshCdn.ValidateManifest(manifest);
         }
         catch (Exception)
@@ -185,6 +186,7 @@ public sealed class CultMeshContentVectorTests
         return new Acceptance(label, input, true, Reencode(manifest), key);
     }
 
+    private static byte[] Deep(int depth) => Cat(Enumerable.Repeat((byte)0x91, depth).ToArray(), Nil);
     private static byte[] Cat(params byte[][] parts) => parts.SelectMany(p => p).ToArray();
     private static byte[] Raw(params byte[] bytes) => bytes;
     private static readonly byte[] Nil = { 0xc0 };
@@ -258,6 +260,12 @@ public sealed class CultMeshContentVectorTests
         Add("extra_12", Doc(fields.Append(Nil).Append(Str("y"))));
         Add("extra_11_reserved_code", Doc(fields.Append(Raw(0xc1))));
         Add("extra_11_truncated", Doc(fields.Append(Raw(0x92, 1))));
+        // The production reader refuses payloads nested past CultPayloadDepth (256); the extra slot is skipped, so only that rule can refuse it.
+        foreach (var depth in new[] { 250, 253, 254, 255, 256, 257, 300 })
+        {
+            Add($"deep_extra_{depth}", Doc(fields.Append(Deep(depth))));
+            AddFields($"deep_chunkextra_{depth}", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0), Str("k"), Deep(depth)))));
+        }
 
         AddFields("chunk_3", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0)))));
         AddFields("chunk_5", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0), Str("k"), Nil))));
@@ -449,8 +457,12 @@ public sealed class CultMeshContentVectorTests
     private static byte[] Reencode(CultMeshContentChunkResponseMessage message) =>
         CultNetSchemaMessageSerialization.Serialize(message);
 
+    /// <summary>The one reader of manifest bytes: the document reader production stores and reads manifests with (CultPayloadDepth 256 included).</summary>
+    private static CultMeshCdnArtifactManifest ReadManifest(byte[] bytes) =>
+        (CultMeshCdnArtifactManifest)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(CultMeshCdnArtifactManifest), bytes);
+
     private static byte[] Reencode(CultMeshCdnArtifactManifest manifest) =>
-        MessagePackSerializer.Serialize(manifest, CultNetSchemaMessageSerialization.Options);
+        CultDocumentMessagePackSerialization.SerializeUntyped(manifest, typeof(CultMeshCdnArtifactManifest));
 
     private static CultMeshContentChunkRequestMessage Request(string id, string hash, string key, int size) => new()
     {
