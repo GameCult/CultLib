@@ -41,6 +41,9 @@ const inputs = [
   ["ts multi-chunk body", { ...common, body: { length: 777777, multiplier: 7, modulus: 256 } }],
   ["ts empty body", { ...common, body: { length: 0, multiplier: 7, modulus: 256 } }],
   ["ts single chunk, versioned", { ...common, version: "V1 Beta", chunkSizeBytes: 4194304, tags: [], metadata: [], body: { length: 1000, multiplier: 7, modulus: 256 } }],
+  // Padding the reference keeps: a whitespace version stays as written (the key reads it as unversioned), kind and MIME are
+  // only replaced when blank.
+  ["ts whitespace version, padded kind and mime", { ...common, kind: " build ", version: "  ", mimeType: "  text/plain; charset=utf-8  ", chunkSizeBytes: 4194304, tags: [], metadata: [], body: { length: 1000, multiplier: 7, modulus: 256 } }],
 ];
 
 const vectors = [];

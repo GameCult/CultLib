@@ -8,13 +8,18 @@
  * A value is therefore in bounds exactly when this returns it unchanged.
  */
 export function truncateUtf8Bytes(value: string, maxBytes: number): string {
-  const wellFormed = (value as string & { toWellFormed(): string }).toWellFormed();
+  const text = wellFormed(value);
   let bytes = 0;
   let end = 0;
-  for (const char of wellFormed) {
+  for (const char of text) {
     bytes += Buffer.byteLength(char, "utf8");
     if (bytes > maxBytes) break;
     end += char.length;
   }
-  return wellFormed.slice(0, end);
+  return text.slice(0, end);
+}
+
+/** `value` with every lone surrogate replaced by U+FFFD: the one spelling every TypeScript writer puts on a wire. */
+export function wellFormed(value: string): string {
+  return (value as string & { toWellFormed(): string }).toWellFormed();
 }
