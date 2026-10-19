@@ -9,6 +9,11 @@
       "types": "./dist/index.d.ts",
       "require": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./content": {
+      "types": "./dist/content.d.ts",
+      "require": "./dist/content.js",
+      "default": "./dist/content.js"
     }
   },
   "files": [

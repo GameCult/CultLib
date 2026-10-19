@@ -1,0 +1,233 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import { EMPTY_SHA256, chunkRecordKey, packContent, sha256Hex } from "cultnet-ts/content";
+
+import {
+  ContentChunkTooLargeError,
+  createContentChunkHandler,
+  createDirectoryChunkStore,
+  toNodeListener,
+  type ContentChunkAnswer,
+  type ContentChunkHandlerOptions,
+  type ContentChunkStore,
+} from "../src/content";
+
+// Chunks come from the packer, so the hashes are the ones a publisher writes.
+const packed = async (text: string) => (await packContent("a", new TextEncoder().encode(text))).chunks[0]!;
+const decode = (answer: ContentChunkAnswer) => new TextDecoder().decode(answer.body ?? new Uint8Array());
+const OK_HEADERS = {
+  "Content-Type": "application/octet-stream",
+  "X-Content-Type-Options": "nosniff",
+  "Cache-Control": "public, max-age=31536000, immutable, no-transform",
+  "Access-Control-Allow-Origin": "*",
+};
+
+function spyStore(chunks: Record<string, Uint8Array>): ContentChunkStore & { calls: string[] } {
+  const calls: string[] = [];
+  return { calls, readChunk: async hash => { calls.push(hash); return chunks[hash]; } };
+}
+const ask = (store: ContentChunkStore, url: string, method = "GET", options?: ContentChunkHandlerOptions) =>
+  createContentChunkHandler(store, options)({ method, url });
+
+test("GET of a stored chunk answers 200 with exactly its bytes and the 200 header set", async () => {
+  const chunk = await packed("hello chunk");
+  const answer = await ask(spyStore({ [chunk.chunkHash]: chunk.payload }), `/c?chunkHash=${chunk.chunkHash}`);
+  assert.equal(answer.status, 200);
+  assert.deepEqual(answer.body, chunk.payload);
+  assert.deepEqual(answer.headers, { ...OK_HEADERS, "Content-Length": String(chunk.payload.length) });
+});
+
+test("HEAD answers the same status and headers as GET with no body, and HEAD of a corrupt chunk answers 500", async () => {
+  const chunk = await packed("hello chunk");
+  const url = `/c?chunkHash=${chunk.chunkHash}`;
+  const get = await ask(spyStore({ [chunk.chunkHash]: chunk.payload }), url);
+  const head = await ask(spyStore({ [chunk.chunkHash]: chunk.payload }), url, "HEAD");
+  assert.equal(head.status, 200);
+  assert.deepEqual(head.headers, get.headers);
+  assert.equal(head.body, undefined);
+  const corrupt = await ask(spyStore({ [chunk.chunkHash]: new TextEncoder().encode("hello chunK") }), url, "HEAD");
+  assert.equal(corrupt.status, 500);
+  assert.equal(corrupt.body, undefined);
+});
+
+test("chunkHash 'SHA256:<UPPER HEX> ' answers like the canonical hash; recordKey absent, empty or exact answers 200", async () => {
+  const chunk = await packed("hello chunk");
+  const store = spyStore({ [chunk.chunkHash]: chunk.payload });
+  const hash = encodeURIComponent(`SHA256:${chunk.chunkHash.toUpperCase()} `);
+  const keys = ["", "&recordKey=", "&recordKey=%20%20", `&recordKey=${encodeURIComponent(chunkRecordKey(chunk.chunkHash))}`];
+  for (const key of keys) {
+    const answer = await ask(store, `/c?chunkHash=${hash}${key}`);
+    assert.equal(answer.status, 200, key);
+    assert.deepEqual(answer.body, chunk.payload);
+  }
+  assert.deepEqual(new Set(store.calls), new Set([chunk.chunkHash]));
+});
+
+test("a recordKey for another hash, a repeated recordKey, a missing or repeated chunkHash, 63 hex, non-hex, '../x' and '%2e%2e%2f' answer 400 and the store is never called", async () => {
+  const chunk = await packed("hello chunk");
+  const other = await packed("another");
+  const store = spyStore({ [chunk.chunkHash]: chunk.payload });
+  const h = chunk.chunkHash;
+  const key = encodeURIComponent(chunkRecordKey(h));
+  const urls = [
+    `/c?chunkHash=${h}&recordKey=${encodeURIComponent(chunkRecordKey(other.chunkHash))}`,
+    `/c?chunkHash=${h}&recordKey=x`,
+    `/c?chunkHash=${h}&recordKey=${key}&recordKey=${key}`,
+    `/c?recordKey=${key}`,
+    "/c",
+    `/c?chunkHash=${h}&chunkHash=${h}`,
+    `/c?chunkHash=${h.slice(1)}`,
+    `/c?chunkHash=${"g".repeat(64)}`,
+    "/c?chunkHash=../x",
+    "/c?chunkHash=%2e%2e%2f",
+    "/c?chunkHash=",
+  ];
+  for (const url of urls) {
+    const answer = await ask(store, url);
+    assert.equal(answer.status, 400, url);
+    assert.equal(answer.headers["Cache-Control"], "no-store");
+  }
+  assert.deepEqual(store.calls, []);
+});
+
+test("a valid unknown hash answers 404 with Cache-Control: no-store", async () => {
+  const chunk = await packed("hello chunk");
+  const answer = await ask(spyStore({}), `/c?chunkHash=${chunk.chunkHash}`);
+  assert.equal(answer.status, 404);
+  assert.equal(answer.headers["Cache-Control"], "no-store");
+  assert.equal(decode(answer), "chunk not found");
+});
+
+test("the empty hash answers 200 with Content-Length 0 from a store that throws when called", async () => {
+  const store: ContentChunkStore = { readChunk: async () => { throw new Error("must not be called"); } };
+  const answer = await ask(store, `/c?chunkHash=${EMPTY_SHA256}`);
+  assert.equal(answer.status, 200);
+  assert.equal(answer.headers["Content-Length"], "0");
+  assert.equal(answer.body?.length, 0);
+});
+
+test("stored bytes that do not hash to their name answer 500, the body holds none of them, and onServerFault gets hash-mismatch; a throwing hook still yields 500", async () => {
+  const chunk = await packed("hello chunk");
+  const canary = "CANARY-corrupt-bytes";
+  const store = spyStore({ [chunk.chunkHash]: new TextEncoder().encode(canary) });
+  const faults: unknown[] = [];
+  const answer = await ask(store, `/c?chunkHash=${chunk.chunkHash}`, "GET", { onServerFault: f => faults.push(f) });
+  assert.equal(answer.status, 500);
+  assert.equal(decode(answer), "chunk unavailable");
+  assert.equal(JSON.stringify(answer).includes(canary), false);
+  assert.deepEqual(faults, [{ chunkHash: chunk.chunkHash, kind: "hash-mismatch", error: undefined }]);
+  const throwing = await ask(store, `/c?chunkHash=${chunk.chunkHash}`, "GET", { onServerFault: () => { throw new Error("hook"); } });
+  assert.equal(throwing.status, 500);
+});
+
+test("a valid 17-byte chunk with maxChunkBytes 16 answers 500 too-large, a store rejection answers 500 store-error, and maxChunkBytes 0, 2^31 and 1.5 throw RangeError", async () => {
+  const chunk = await packed("0123456789abcdefg");
+  assert.equal(chunk.payload.length, 17);
+  const kinds: string[] = [];
+  const options = { maxChunkBytes: 16, onServerFault: (f: { kind: string }) => kinds.push(f.kind) };
+  const url = `/c?chunkHash=${chunk.chunkHash}`;
+  assert.equal((await ask(spyStore({ [chunk.chunkHash]: chunk.payload }), url, "GET", options)).status, 500);
+  const refusing: ContentChunkStore = { readChunk: async () => { throw new ContentChunkTooLargeError(17); } };
+  assert.equal((await ask(refusing, url, "GET", options)).status, 500);
+  const failing: ContentChunkStore = { readChunk: async () => { throw new Error("disk"); } };
+  assert.equal((await ask(failing, url, "GET", options)).status, 500);
+  assert.deepEqual(kinds, ["too-large", "too-large", "store-error"]);
+  assert.equal((await ask(spyStore({ [chunk.chunkHash]: chunk.payload }), url, "GET", { maxChunkBytes: 17 })).status, 200);
+  for (const bad of [0, 2 ** 31, 1.5, Number.NaN]) assert.throws(() => createContentChunkHandler(spyStore({}), { maxChunkBytes: bad }), RangeError, String(bad));
+  assert.doesNotThrow(() => createContentChunkHandler(spyStore({}), { maxChunkBytes: 2 ** 31 - 1 }));
+});
+
+test("POST, PUT, DELETE and OPTIONS answer 405 with Allow: GET, HEAD", async () => {
+  const chunk = await packed("hello chunk");
+  const store = spyStore({ [chunk.chunkHash]: chunk.payload });
+  for (const method of ["POST", "PUT", "DELETE", "OPTIONS", ""]) {
+    const answer = await ask(store, `/c?chunkHash=${chunk.chunkHash}`, method);
+    assert.equal(answer.status, 405, method);
+    assert.equal(answer.headers.Allow, "GET, HEAD");
+    assert.equal(answer.headers["Access-Control-Allow-Origin"], "*");
+  }
+  assert.deepEqual(store.calls, []);
+});
+
+test("'/anything/../etc/passwd?chunkHash=<h>' answers exactly as '/?chunkHash=<h>', and '/<h>' with no query answers 400", async () => {
+  const chunk = await packed("hello chunk");
+  const store = spyStore({ [chunk.chunkHash]: chunk.payload });
+  const plain = await ask(store, `/?chunkHash=${chunk.chunkHash}`);
+  assert.deepEqual(await ask(store, `/anything/../etc/passwd?chunkHash=${chunk.chunkHash}`), plain);
+  assert.equal((await ask(store, `/${chunk.chunkHash}`)).status, 400);
+});
+
+test("error answers carry ACAO * and never echo the request's hash or key", async () => {
+  const canary = "CANARY-request-input";
+  const chunk = await packed("hello chunk");
+  const urls = [`/c?chunkHash=${canary}`, `/c?chunkHash=${chunk.chunkHash}&recordKey=${canary}`, `/${canary}?chunkHash=${chunk.chunkHash}`];
+  for (const url of urls) {
+    for (const answer of [await ask(spyStore({}), url), await ask(spyStore({}), url, "POST")]) {
+      assert.equal(answer.headers["Access-Control-Allow-Origin"], "*");
+      assert.equal(answer.headers["X-Content-Type-Options"], "nosniff");
+      assert.equal(answer.headers["Content-Length"], String(answer.body?.length));
+      assert.equal(JSON.stringify(answer).includes(canary), false);
+    }
+  }
+});
+
+test("directory store reads canonical hex and rejects non-canonical names, a directory and an oversized file", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cm-content-"));
+  try {
+    const chunk = await packed("0123456789abcdefg");
+    const store = createDirectoryChunkStore(root);
+    await writeFile(join(root, chunk.chunkHash), chunk.payload);
+    assert.deepEqual(await store.readChunk(chunk.chunkHash, 17), chunk.payload);
+    assert.equal(await store.readChunk(await sha256Hex(new Uint8Array([1])), 17), undefined);
+    // The root does not exist for these, so only the name check can reject them before a filesystem call.
+    const nowhere = createDirectoryChunkStore(join(root, "missing"));
+    for (const name of [chunk.chunkHash.toUpperCase(), `sha256:${chunk.chunkHash}`, `../${chunk.chunkHash}`, chunk.chunkHash.slice(1), ` ${chunk.chunkHash}`]) {
+      await assert.rejects(nowhere.readChunk(name, 17), name);
+    }
+    await assert.rejects(store.readChunk(chunk.chunkHash, 16), (error: unknown) => error instanceof ContentChunkTooLargeError && error.sizeBytes === 17);
+    const dirHash = await sha256Hex(new Uint8Array([2]));
+    await mkdir(join(root, dirHash));
+    await assert.rejects(store.readChunk(dirHash, 17));
+    // Through the handler: a file whose bytes do not match its name is a 500, and the right bytes are a 200.
+    const wrongHash = await sha256Hex(new Uint8Array([3]));
+    await writeFile(join(root, wrongHash), chunk.payload);
+    const handler = createContentChunkHandler(store);
+    assert.equal((await handler({ method: "GET", url: `/?chunkHash=${wrongHash}` })).status, 500);
+    assert.equal((await handler({ method: "GET", url: `/?chunkHash=${chunk.chunkHash}` })).status, 200);
+    assert.equal((await handler({ method: "GET", url: `/?chunkHash=${dirHash}` })).status, 500);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("over node:http through toNodeListener: GET with Range and Accept-Encoding: gzip gets 200 with the full identity body; HEAD carries Content-Length; a handler rejection answers 500", async () => {
+  const chunk = await packed("hello chunk over http");
+  const handler = createContentChunkHandler(spyStore({ [chunk.chunkHash]: chunk.payload }));
+  const serve = async (listener: ReturnType<typeof toNodeListener>, run: (base: string) => Promise<void>) => {
+    const server: Server = createServer(listener);
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    try { await run(`http://127.0.0.1:${(server.address() as AddressInfo).port}`); }
+    finally { await new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); }); }
+  };
+  await serve(toNodeListener(handler), async base => {
+    const url = `${base}/mount?chunkHash=${chunk.chunkHash}`;
+    const get = await fetch(url, { headers: { Range: "bytes=2-5", "Accept-Encoding": "gzip" } });
+    assert.equal(get.status, 200);
+    assert.equal(get.headers.get("content-encoding"), null);
+    assert.equal(get.headers.get("accept-ranges"), null);
+    assert.deepEqual(new Uint8Array(await get.arrayBuffer()), chunk.payload);
+    const head = await fetch(url, { method: "HEAD" });
+    assert.equal(head.status, 200);
+    assert.equal(head.headers.get("content-length"), String(chunk.payload.length));
+    assert.equal((await head.arrayBuffer()).byteLength, 0);
+  });
+  await serve(toNodeListener(async () => { throw new Error("boom"); }), async base => {
+    const response = await fetch(`${base}/`);
+    assert.equal(response.status, 500);
+    assert.equal(await response.text(), "chunk unavailable");
+  });
+});
