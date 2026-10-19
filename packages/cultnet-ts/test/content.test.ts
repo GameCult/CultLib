@@ -372,3 +372,20 @@ test("nil in a reference slot reads as null and writes back as nil; a missing tr
   const short = decodeManifest(encode(["id"]));
   assert.deepEqual(short, { artifactId: "id", kind: "asset", version: "", contentHash: "", sizeBytes: 0, mimeType: "application/octet-stream", createdAtUtc: "", chunks: [], tags: [], metadata: [] });
 });
+
+// Refusals that are the same refusal in the reference but would read differently if the wrong rule fired: the message
+// names the true cause (the sign, the nil chunk, the reserved code, the early end), never a neighbouring field.
+test("a refusal names its true cause", () => {
+  const refuses = (bytes: Uint8Array, message: RegExp) => assert.throws(() => decodeManifest(bytes), message);
+  refuses(wire({ 4: -1, 7: [] }), /negative size/);
+  refuses(wire({ 4: -32, 7: [] }), /negative size/);
+  refuses(wire({ 4: -(2n ** 53n - 1n), 7: [] }), /negative size/);
+  refuses(wire({ 4: -(2n ** 53n), 7: [] }), /field 'sizeBytes' has the wrong type/);
+  refuses(wire({ 4: 0, 7: [[HASH, 0, -32, "k"]] }), /chunk has a negative size/);
+  refuses(wire({ 7: null }), /field 'chunks' has the wrong type/);
+  refuses(wire({ 7: [null] }), /field 'chunks' has the wrong type/);
+  refuses(Uint8Array.of(0xc0), /field 'manifest' has the wrong type/);
+  refuses(wire().slice(0, 8), /ends before its last field/);
+  refuses(Uint8Array.of(0x91, 0xa3, 0x41), /ends before its last field/);
+  refuses(Uint8Array.from([0x9b, ...wire().slice(1), 0xc1]), /field 'manifest' has the wrong type/);
+});

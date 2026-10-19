@@ -276,6 +276,8 @@ public sealed class CultMeshContentVectorTests
             ("fixstr", Str("ab")), ("f32", F32(1)), ("f64", F64(1)), ("u8", Raw(0xcc, 1)), ("u16", Be(0xcd, 1, 2)), ("u32", Be(0xce, 1, 4)),
             ("u64", Be(0xcf, 1, 8)), ("i8", Raw(0xd0, 1)), ("i16", Be(0xd1, 1, 2)), ("i32", Be(0xd2, 1, 4)), ("i64", Be(0xd3, 1, 8)),
             ("true", Raw(0xc3)), ("false", Raw(0xc2)), ("nil", Nil), ("negfixint", Raw(0xff)), ("reserved", Raw(0xc1)),
+            ("fixint_max", Raw(0x7f)), ("negfixint_min", Raw(0xe0)), ("fixstr_31", Cat(Raw(0xbf), new byte[31])),
+            ("fixmap_15", Cat(Raw(0x8f), Cat(Enumerable.Range(0, 15).Select(_ => Raw(1, 2)).ToArray()))), ("fixarray_15", Cat(Raw(0x9f), new byte[15])),
             ("nested", Arr(MapOf(Str("a"), Arr(Raw(1), Raw(2))), Arr()))
         };
         foreach (var (name, value) in extras)
@@ -333,7 +335,9 @@ public sealed class CultMeshContentVectorTests
                      ("i8", Raw(0xd0, 0)), ("i16", Be(0xd1, 0, 2)), ("i32", Be(0xd2, 0, 4)), ("i64", Be(0xd3, 0, 8)),
                      ("f32", F32(0)), ("f32_negzero", F32(int.MinValue)), ("f64", F64(0)), ("f64_negzero", F64(long.MinValue)),
                      ("f64_one", F64(0x3FF0000000000000)),
-                     ("true", Raw(0xc3)), ("false", Raw(0xc2)), ("str", Str("0")), ("bin", Raw(0xc4, 1, 0)), ("array", Arr()), ("ext", Raw(0xd4, 1, 0))
+                     ("true", Raw(0xc3)), ("false", Raw(0xc2)), ("str", Str("0")), ("bin", Raw(0xc4, 1, 0)), ("array", Arr()), ("ext", Raw(0xd4, 1, 0)),
+                     // Zero-filled so that a reader which took them for an int32 would read 0.
+                     ("fixext4", Cat(Raw(0xd6), new byte[5])), ("fixext8", Cat(Raw(0xd7), new byte[9])), ("fixext16", Cat(Raw(0xd8), new byte[17]))
                  })
         {
             AddFields($"size_{name}", (4, zero));
@@ -376,6 +380,40 @@ public sealed class CultMeshContentVectorTests
         AddFields("id_blank", (0, Str("  ")));
         AddFields("hash_blank", (3, Str("  ")));
         AddFields("hash_prefix_upper_long_s", (3, Str("ſha256:abc")));
+        // Shapes that end early, and header families a lenient reader would take for another.
+        var whole = Doc(fields);
+        Add("truncated_string_body", whole[..^1]);
+        Add("truncated_str8_length", Raw(0x91, 0xd9));
+        Add("truncated_u16", Cat(Raw(0x95), Str("a"), Str("k"), Str("v"), Str(EmptyHash), Raw(0xcd, 0)));
+        Add("truncated_u64", Cat(Raw(0x95), Str("a"), Str("k"), Str("v"), Str(EmptyHash), Raw(0xcf, 0, 0, 0)));
+        Add("truncated_array16", Raw(0xdc, 0));
+        Add("extra_11_truncated_string", Doc(fields.Append(Raw(0xa5, 0x41))));
+        Add("extra_11_truncated_str8_length", Doc(fields.Append(Raw(0xd9))));
+        Add("array_15", Doc(fields.Concat(Enumerable.Repeat(Nil, 5))));
+        AddFields("metadata_15_entries", (9, Cat(Raw(0x8f), Cat(Enumerable.Range(0, 15).Select(i => Cat(Str($"k{i}"), Str("v"))).ToArray()))));
+        Add("tags_fixint_then_trailing", Cat(Raw(0x99), Cat(fields[..8]), Raw(1), Str("a")));
+        Add("tags_fixmap", Cat(Raw(0x99), Cat(fields[..8]), MapOf(Str("a"), Str("b"))));
+        Add("metadata_fixint_then_trailing", Cat(Raw(0x9a), Cat(fields[..9]), Raw(1), Str("a"), Str("b")));
+        Add("metadata_array_then_trailing", Cat(Raw(0x9a), Cat(fields[..9]), Arr(Str("a"), Str("b")), Str("c"), Str("d")));
+
+        // Every integer family at a value that needs its full width and its own signedness: as the sizes, then as an offset.
+        foreach (var (name, value, n) in new (string, byte[], long)[]
+                 {
+                     ("u8_200", Raw(0xcc, 200), 200), ("u16_258", Be(0xcd, 258, 2), 258), ("u16_40000", Be(0xcd, 40000, 2), 40000),
+                     ("u32_258", Be(0xce, 258, 4), 258), ("u64_258", Be(0xcf, 258, 8), 258), ("i8_100", Raw(0xd0, 100), 100),
+                     ("i16_258", Be(0xd1, 258, 2), 258), ("i32_258", Be(0xd2, 258, 4), 258), ("i64_258", Be(0xd3, 258, 8), 258),
+                     ("fixint_127", Raw(0x7f), 127)
+                 })
+        {
+            AddFields($"width_{name}", (4, value), (7, Arr(Chunk(Raw(0), value))));
+            AddFields($"width_{name}_offset", (4, Be(0xcd, n + 1, 2)), (7, Arr(Chunk(Raw(0), Be(0xcd, n, 2)), Chunk(value, Raw(1)))));
+        }
+        AddFields("width_u32_over_int32", (4, Be(0xce, 3_000_000_000, 4)),
+            (7, Arr(Chunk(Raw(0), Be(0xce, int.MaxValue, 4)), Chunk(Be(0xce, int.MaxValue, 4), Be(0xce, 3_000_000_000 - int.MaxValue, 4)))));
+        AddFields("width_negative_fixint", (4, Raw(0xff)));
+        AddFields("width_negative_fixint_min", (4, Raw(0xe0)));
+        AddFields("width_negative_i64_safe", (4, Be(0xd3, -((1L << 53) - 1), 8)));
+        AddFields("width_negative_i64_unsafe", (4, Be(0xd3, -(1L << 53), 8)));
         return cases;
     }
 

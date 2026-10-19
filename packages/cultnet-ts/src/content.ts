@@ -62,8 +62,8 @@ const lowerInvariant = (text: string): string =>
 
 /** `CultMeshCdn.NormalizeHash`: a case-insensitive `sha256:` prefix is stripped before the trim, and nothing checks for hex. */
 export function normalizeHash(hash: string | null | undefined, parameterName = "hash"): string {
-  if (hash === null || hash === undefined || isNullOrWhiteSpaceCSharp(hash)) throw new Error(`Hash must be non-empty. (Parameter '${parameterName}')`);
-  return lowerInvariant(trimCSharp(hash.slice(0, 7).toLowerCase() === "sha256:" ? hash.slice(7) : hash));
+  if (isNullOrWhiteSpaceCSharp(hash)) throw new Error(`Hash must be non-empty. (Parameter '${parameterName}')`);
+  return lowerInvariant(trimCSharp(hash!.slice(0, 7).toLowerCase() === "sha256:" ? hash!.slice(7) : hash!));
 }
 
 /** The hash a file name or a fetch may rest on: `normalizeHash`, then exactly 64 lowercase hexadecimal digits. */
@@ -89,9 +89,9 @@ async function stableToken(value: string): Promise<string> {
 }
 
 export async function artifactRecordKey(artifactId: string | null, version: string | null, contentHash: string | null): Promise<string> {
-  if (artifactId === null || isNullOrWhiteSpaceCSharp(artifactId)) throw new Error("Value must be non-empty. (Parameter 'artifactId')");
-  const versioned = version === null || isNullOrWhiteSpaceCSharp(version) ? "unversioned" : await stableToken(version);
-  return `mesh:cdn:artifact:${await stableToken(artifactId)}:${versioned}:${normalizeHash(contentHash, "contentHash")}`;
+  if (isNullOrWhiteSpaceCSharp(artifactId)) throw new Error("Value must be non-empty. (Parameter 'artifactId')");
+  const versioned = isNullOrWhiteSpaceCSharp(version) ? "unversioned" : await stableToken(version!);
+  return `mesh:cdn:artifact:${await stableToken(artifactId!)}:${versioned}:${normalizeHash(contentHash, "contentHash")}`;
 }
 
 // ---- validation ------------------------------------------------------------------------------------------------------
