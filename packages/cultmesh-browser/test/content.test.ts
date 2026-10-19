@@ -562,7 +562,10 @@ test("an abort that lands while the last bytes are hashed rejects with its reaso
 test("a size the runtime cannot allocate is too-large in both exports, not a RangeError, and nothing is requested", async () => {
   const { manifest } = await pack(10, 10);
   const size = Number.MAX_SAFE_INTEGER;
-  const huge = { ...manifest, sizeBytes: size, chunks: [{ ...manifest.chunks[0]!, offset: 0, sizeBytes: size }] };
+  // chunks are ints, so a manifest this large is many of them: 32768 of 2147483647 bytes is about 64 TiB
+  const int32Max = 2 ** 31 - 1;
+  const count = 2 ** 15;
+  const huge = { ...manifest, sizeBytes: count * int32Max, chunks: Array.from({ length: count }, (_, index) => ({ ...manifest.chunks[0]!, offset: index * int32Max, sizeBytes: int32Max })) };
   const server = double(() => { throw new Error("no request expected"); });
   await assert.rejects(fetchVerifiedContent(ENDPOINT, huge, { fetch: server.fetch, maxBytes: size }), codeOf("too-large"));
   await assert.rejects(fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash!, size, { fetch: server.fetch, maxBytes: size }), codeOf("too-large"));
