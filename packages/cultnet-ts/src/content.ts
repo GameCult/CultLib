@@ -7,7 +7,7 @@
 // No `node:` import. A manifest names its chunks by hash and carries no address: where bytes are fetched from is the
 // caller's to resolve through CultMesh.
 
-import { Decoder, encode } from "@msgpack/msgpack";
+import { encode } from "@msgpack/msgpack";
 import { checkPayloadDepth } from "@gamecult/cultcache-ts/document";
 import { isNullOrWhiteSpaceCSharp, trimCSharp } from "./cultmesh-authority";
 
@@ -15,25 +15,27 @@ export const CULTMESH_CDN_MANIFEST_SCHEMA = "gamecult.mesh.cdn_artifact_manifest
 export const DEFAULT_CHUNK_SIZE_BYTES = 4 * 1024 * 1024;
 export const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
+// The reference's value model: a string, the tag array and the metadata map are reference types there, so MessagePack
+// nil reads as null and writes back as nil. `chunks` is the exception: `ValidateManifest` refuses a nil one.
 export interface CultMeshCdnChunkRef {
-  readonly chunkHash: string;
+  readonly chunkHash: string | null;
   readonly offset: number;
   readonly sizeBytes: number;
-  readonly recordKey: string;
+  readonly recordKey: string | null;
 }
 
 // Metadata is ordered entries, never an object: a JS object reorders integer-like keys, and the entry order is wire bytes.
 export interface CultMeshCdnArtifactManifest {
-  readonly artifactId: string;
-  readonly kind: string;
-  readonly version: string;
-  readonly contentHash: string;
+  readonly artifactId: string | null;
+  readonly kind: string | null;
+  readonly version: string | null;
+  readonly contentHash: string | null;
   readonly sizeBytes: number;
-  readonly mimeType: string;
-  readonly createdAtUtc: string;
+  readonly mimeType: string | null;
+  readonly createdAtUtc: string | null;
   readonly chunks: readonly CultMeshCdnChunkRef[];
-  readonly tags: readonly string[];
-  readonly metadata: readonly (readonly [string, string])[];
+  readonly tags: readonly (string | null)[] | null;
+  readonly metadata: readonly (readonly [string, string | null])[] | null;
 }
 
 export interface CultMeshCdnPackOptions {
@@ -59,13 +61,13 @@ const lowerInvariant = (text: string): string =>
   Array.from(text, character => { const lower = character.toLowerCase(); return Array.from(lower).length === 1 ? lower : character; }).join("");
 
 /** `CultMeshCdn.NormalizeHash`: a case-insensitive `sha256:` prefix is stripped before the trim, and nothing checks for hex. */
-export function normalizeHash(hash: string, parameterName = "hash"): string {
-  if (isNullOrWhiteSpaceCSharp(hash)) throw new Error(`Hash must be non-empty. (Parameter '${parameterName}')`);
+export function normalizeHash(hash: string | null | undefined, parameterName = "hash"): string {
+  if (hash === null || hash === undefined || isNullOrWhiteSpaceCSharp(hash)) throw new Error(`Hash must be non-empty. (Parameter '${parameterName}')`);
   return lowerInvariant(trimCSharp(hash.slice(0, 7).toLowerCase() === "sha256:" ? hash.slice(7) : hash));
 }
 
 /** The hash a file name or a fetch may rest on: `normalizeHash`, then exactly 64 lowercase hexadecimal digits. */
-export function parseSha256Hex(hash: string, parameterName = "hash"): string {
+export function parseSha256Hex(hash: string | null | undefined, parameterName = "hash"): string {
   const hex = normalizeHash(hash, parameterName);
   if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error(`Hash must be 64 hexadecimal digits. (Parameter '${parameterName}')`);
   return hex;
@@ -77,7 +79,7 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(await subtle.digest("SHA-256", bytes as BufferSource)), byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-export const chunkRecordKey = (chunkHash: string): string => `mesh:cdn:chunk:${normalizeHash(chunkHash, "chunkHash")}`;
+export const chunkRecordKey = (chunkHash: string | null | undefined): string => `mesh:cdn:chunk:${normalizeHash(chunkHash, "chunkHash")}`;
 
 // `CultMeshCdn.StableToken`, unit by unit: a letter or decimal digit, `-`, `_` and `.` survive, anything else (a lone
 // surrogate included) becomes `-`, and a token that is empty after the trim falls back to the hash of the original.
@@ -86,9 +88,9 @@ async function stableToken(value: string): Promise<string> {
   return token || sha256Hex(new TextEncoder().encode(value));
 }
 
-export async function artifactRecordKey(artifactId: string, version: string, contentHash: string): Promise<string> {
-  if (isNullOrWhiteSpaceCSharp(artifactId)) throw new Error("Value must be non-empty. (Parameter 'artifactId')");
-  const versioned = isNullOrWhiteSpaceCSharp(version) ? "unversioned" : await stableToken(version);
+export async function artifactRecordKey(artifactId: string | null, version: string | null, contentHash: string | null): Promise<string> {
+  if (artifactId === null || isNullOrWhiteSpaceCSharp(artifactId)) throw new Error("Value must be non-empty. (Parameter 'artifactId')");
+  const versioned = version === null || isNullOrWhiteSpaceCSharp(version) ? "unversioned" : await stableToken(version);
   return `mesh:cdn:artifact:${await stableToken(artifactId)}:${versioned}:${normalizeHash(contentHash, "contentHash")}`;
 }
 
@@ -104,7 +106,8 @@ export function validateManifest(manifest: CultMeshCdnArtifactManifest): void {
     expectedOffset += reference.sizeBytes;
   }
   if (expectedOffset !== manifest.sizeBytes) throw new Error("CDN artifact chunk sizes do not sum to the manifest size.");
-  if (new Set(manifest.metadata.map(([key]) => key)).size !== manifest.metadata.length) {
+  const metadata = manifest.metadata ?? [];
+  if (new Set(metadata.map(([key]) => key)).size !== metadata.length) {
     throw new Error("CDN artifact manifest metadata has a duplicate key.");
   }
 }
@@ -130,49 +133,140 @@ export function encodeManifest(manifest: CultMeshCdnArtifactManifest): Uint8Arra
     ...[artifactId, kind, version, contentHash, sizeBytes, mimeType, createdAtUtc].map(field => encode(field)),
     encode(chunks.map(c => [c.chunkHash, c.offset, c.sizeBytes, c.recordKey])),
     encode(tags),
-    mapHeader(metadata.length),
-    ...metadata.flatMap(([key, value]) => [encode(key), encode(value)]),
+    ...(metadata === null ? [encode(null)] : [mapHeader(metadata.length), ...metadata.flatMap(([key, value]) => [encode(key), encode(value)])]),
   ]);
 }
 
 const wrongType = (field: string): never => { throw new Error(`CDN artifact manifest field '${field}' has the wrong type.`); };
-const text = (value: unknown, field: string): string => typeof value === "string" ? value : wrongType(field);
-const list = (value: unknown, field: string): unknown[] => Array.isArray(value) ? value : wrongType(field);
-const record = (value: unknown, field: string): Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value) && !(value instanceof Uint8Array) ? value as Record<string, unknown> : wrongType(field);
-// Any integer width, as the reference reads. A 64-bit value a JS number cannot hold exactly rounds to 2^53 or beyond, which is
-// never a safe integer: it is refused, never silently rounded.
-const integer = (value: unknown, field: string): number => Number.isSafeInteger(value) ? value as number : wrongType(field);
 
-/** The reference's reader: depth first, exact types, then `validateManifest`. */
+// MessagePack-CSharp's reader for the manifest, family by family: the integer rule must see the wire family (a float
+// encoding of 0 is not an integer there), a string is `str` or nil, an array header is an array, and the invalid UTF-8
+// of a string decodes to U+FFFD as .NET decodes it. `ignoreBOM` keeps a leading U+FEFF, as `Encoding.GetString` does.
+const utf8 = new TextDecoder("utf-8", { ignoreBOM: true });
+const SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+// Payload size after the code byte, or the width of the length that precedes a variable payload.
+const FIXED: Readonly<Record<number, number>> = { 0xca: 4, 0xcb: 8, 0xcc: 1, 0xcd: 2, 0xce: 4, 0xcf: 8, 0xd0: 1, 0xd1: 2, 0xd2: 4, 0xd3: 8, 0xd4: 2, 0xd5: 3, 0xd6: 5, 0xd7: 9, 0xd8: 17 };
+const BYTES: Readonly<Record<number, number>> = { 0xc4: 1, 0xc5: 2, 0xc6: 4, 0xd9: 1, 0xda: 2, 0xdb: 4 };
+const EXT: Readonly<Record<number, number>> = { 0xc7: 1, 0xc8: 2, 0xc9: 4 };
+const ARRAY: Readonly<Record<number, number>> = { 0xdc: 2, 0xdd: 4 };
+const MAP: Readonly<Record<number, number>> = { 0xde: 2, 0xdf: 4 };
+
+class Reader {
+  position = 0;
+  private readonly view: DataView;
+  constructor(private readonly bytes: Uint8Array) {
+    this.view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  }
+
+  private take(count: number): number {
+    const start = this.position;
+    if (count > this.bytes.length - start) throw new Error("CDN artifact manifest ends before its last field.");
+    this.position += count;
+    return start;
+  }
+
+  private code(): number { return this.bytes[this.take(1)]!; }
+
+  private width(size: number): number {
+    const at = this.take(size);
+    return size === 1 ? this.view.getUint8(at) : size === 2 ? this.view.getUint16(at) : this.view.getUint32(at);
+  }
+
+  nil(): boolean {
+    if (this.bytes[this.position] !== 0xc0) return false;
+    this.position += 1;
+    return true;
+  }
+
+  array(field: string): number {
+    const code = this.code();
+    return code >= 0x90 && code <= 0x9f ? code & 0x0f : ARRAY[code] ? this.width(ARRAY[code]!) : wrongType(field);
+  }
+
+  map(field: string): number {
+    const code = this.code();
+    return code >= 0x80 && code <= 0x8f ? code & 0x0f : MAP[code] ? this.width(MAP[code]!) : wrongType(field);
+  }
+
+  string(field: string): string | null {
+    if (this.nil()) return null;
+    const code = this.code();
+    const length = code >= 0xa0 && code <= 0xbf ? code & 0x1f : code === 0xd9 || code === 0xda || code === 0xdb ? this.width(BYTES[code]!) : wrongType(field);
+    const start = this.take(length);
+    return utf8.decode(this.bytes.subarray(start, start + length));
+  }
+
+  // Any integer family; a 64-bit value a JS number cannot hold exactly is refused, never silently rounded.
+  integer(field: string): number {
+    const code = this.code();
+    if (code <= 0x7f) return code;
+    if (code >= 0xe0) return code - 0x100;
+    const at = (code >= 0xcc && code <= 0xd3) ? this.take(FIXED[code]!) : wrongType(field);
+    const big = code === 0xcf ? this.view.getBigUint64(at) : code === 0xd3 ? this.view.getBigInt64(at) : undefined;
+    if (big !== undefined) return big >= -SAFE && big <= SAFE ? Number(big) : wrongType(field);
+    return code === 0xcc ? this.view.getUint8(at) : code === 0xcd ? this.view.getUint16(at) : code === 0xce ? this.view.getUint32(at)
+      : code === 0xd0 ? this.view.getInt8(at) : code === 0xd1 ? this.view.getInt16(at) : this.view.getInt32(at);
+  }
+
+  // `MessagePackReader.Skip`: one value of any family, nested containers included (the depth rule has already bounded them).
+  skip(): void {
+    for (let pending = 1; pending > 0; pending -= 1) {
+      const code = this.code();
+      if (code <= 0x7f || code >= 0xe0 || code === 0xc0 || code === 0xc2 || code === 0xc3) continue;
+      if (code <= 0x8f) pending += 2 * (code & 0x0f);
+      else if (code <= 0x9f) pending += code & 0x0f;
+      else if (code <= 0xbf) this.take(code & 0x1f);
+      else if (FIXED[code]) this.take(FIXED[code]!);
+      else if (BYTES[code]) this.take(this.width(BYTES[code]!));
+      else if (EXT[code]) this.take(this.width(EXT[code]!) + 1);
+      else if (ARRAY[code]) pending += this.width(ARRAY[code]!);
+      else if (MAP[code]) pending += 2 * this.width(MAP[code]!);
+      else wrongType("manifest");
+    }
+  }
+}
+
+/** The reference's reader then `validateManifest`: depth first, then the positional array as MessagePack-CSharp reads it. */
 export function decodeManifest(bytes: Uint8Array): CultMeshCdnArtifactManifest {
   checkPayloadDepth(bytes, "CDN artifact manifest");
-  // The decoder builds a JS object, which reorders integer-like keys; the converter sees the keys in wire order.
-  const keys: string[] = [];
-  const decoder = new Decoder({ mapKeyConverter: key => { keys.push(text(key, "metadata")); return key as string; } });
-  const fields = list(decoder.decode(bytes), "manifest");
-  if (fields.length !== 10) wrongType("manifest");
-  const map = record(fields[9], "metadata");
+  const reader = new Reader(bytes);
+  if (reader.nil()) wrongType("manifest");
+  // A slot the array does not reach keeps the property initialiser; a slot past the tenth is skipped. Trailing bytes are not read.
+  const count = reader.array("manifest");
+  let index = 0;
+  const slot = <T>(read: () => T, initial: T): T => index++ < count ? read() : initial;
   const manifest: CultMeshCdnArtifactManifest = {
-    artifactId: text(fields[0], "artifactId"),
-    kind: text(fields[1], "kind"),
-    version: text(fields[2], "version"),
-    contentHash: text(fields[3], "contentHash"),
-    sizeBytes: integer(fields[4], "sizeBytes"),
-    mimeType: text(fields[5], "mimeType"),
-    createdAtUtc: text(fields[6], "createdAtUtc"),
-    chunks: list(fields[7], "chunks").map(item => {
-      const chunk = list(item, "chunks");
-      if (chunk.length !== 4) wrongType("chunks");
-      const sizeBytes = integer(chunk[2], "chunks.sizeBytes");
-      return { chunkHash: text(chunk[0], "chunks.chunkHash"), offset: integer(chunk[1], "chunks.offset"),
-        sizeBytes: sizeBytes >= -(2 ** 31) && sizeBytes < 2 ** 31 ? sizeBytes : wrongType("chunks.sizeBytes"), recordKey: text(chunk[3], "chunks.recordKey") };
-    }),
-    tags: list(fields[8], "tags").map(tag => text(tag, "tags")),
-    metadata: keys.map(key => [key, text(map[key], "metadata")] as const),
+    artifactId: slot(() => reader.string("artifactId"), ""),
+    kind: slot(() => reader.string("kind"), "asset"),
+    version: slot(() => reader.string("version"), ""),
+    contentHash: slot(() => reader.string("contentHash"), ""),
+    sizeBytes: slot(() => reader.integer("sizeBytes"), 0),
+    mimeType: slot(() => reader.string("mimeType"), "application/octet-stream"),
+    createdAtUtc: slot(() => reader.string("createdAtUtc"), ""),
+    chunks: slot(() => Array.from({ length: reader.nil() ? wrongType("chunks") : reader.array("chunks") }, () => readChunkRef(reader)), []),
+    tags: slot(() => reader.nil() ? null : Array.from({ length: reader.array("tags") }, () => reader.string("tags")), []),
+    metadata: slot(() => reader.nil() ? null : Array.from({ length: reader.map("metadata") }, () =>
+      [reader.string("metadata") ?? wrongType("metadata"), reader.string("metadata")] as const), []),
   };
+  for (; index < count; index += 1) reader.skip();
   validateManifest(manifest);
   return manifest;
+}
+
+function readChunkRef(reader: Reader): CultMeshCdnChunkRef {
+  if (reader.nil()) wrongType("chunks");
+  const count = reader.array("chunks");
+  let index = 0;
+  const slot = <T>(read: () => T, initial: T): T => index++ < count ? read() : initial;
+  const chunk = {
+    chunkHash: slot(() => reader.string("chunks.chunkHash"), ""),
+    offset: slot(() => reader.integer("chunks.offset"), 0),
+    // The reference's `int`.
+    sizeBytes: slot(() => { const size = reader.integer("chunks.sizeBytes"); return size >= -(2 ** 31) && size < 2 ** 31 ? size : wrongType("chunks.sizeBytes"); }, 0),
+    recordKey: slot(() => reader.string("chunks.recordKey"), ""),
+  };
+  for (; index < count; index += 1) reader.skip();
+  return chunk;
 }
 
 // ---- packing ---------------------------------------------------------------------------------------------------------
