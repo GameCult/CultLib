@@ -29,6 +29,11 @@
       "types": "./dist/cultmesh-authority.d.ts",
       "require": "./dist/cultmesh-authority.js",
       "default": "./dist/cultmesh-authority.js"
+    },
+    "./content": {
+      "types": "./dist/content.d.ts",
+      "require": "./dist/content.js",
+      "default": "./dist/content.js"
     }
   },
   "files": [
