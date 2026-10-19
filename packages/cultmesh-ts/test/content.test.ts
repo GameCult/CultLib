@@ -342,11 +342,13 @@ test("a store that overwrites its buffer on any microtask hop never gets other b
 
 test("a FIFO named by a hash is refused as not a regular file at once and holds no thread: other chunks are still served", { skip: process.platform === "win32" }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cm-content-"));
+  let fifoPath: string | undefined;
   try {
     const chunk = await packed("hello chunk");
     await writeFile(join(root, chunk.chunkHash), chunk.payload);
     const fifoHash = await sha256Hex(new Uint8Array([9]));
-    execFileSync("mkfifo", [join(root, fifoHash)]);
+    fifoPath = join(root, fifoHash);
+    execFileSync("mkfifo", [fifoPath]);
     const store = createDirectoryChunkStore(root);
     const within = async <T,>(work: Promise<T>): Promise<T> => {
       let timer: NodeJS.Timeout | undefined;
@@ -360,8 +362,9 @@ test("a FIFO named by a hash is refused as not a regular file at once and holds 
     assert.equal((await within(createContentChunkHandler(store)({ method: "GET", url: `/?chunkHash=${fifoHash}` }))).status, 500);
   } finally {
     // A reverted non-blocking open leaves pool threads waiting for a writer, which would keep the process alive past the failure.
-    // Opening the FIFO read-write (synchronously: the pool is full) releases them, so the revert fails the test in seconds.
-    try { closeSync(openSync(join(root, await sha256Hex(new Uint8Array([9]))), fsConstants.O_RDWR | fsConstants.O_NONBLOCK)); } catch { /* already gone */ }
+    // Opening the FIFO read-write releases them, so the revert fails the test in seconds. It is synchronous and needs no
+    // hash: both hashing and async fs calls queue behind the full pool.
+    if (fifoPath) try { closeSync(openSync(fifoPath, fsConstants.O_RDWR | fsConstants.O_NONBLOCK)); } catch { /* already gone */ }
     await rm(root, { recursive: true, force: true });
   }
 });
