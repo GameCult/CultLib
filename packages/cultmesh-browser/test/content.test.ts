@@ -70,6 +70,8 @@ test("request URLs equal the .NET BuildChunkUri AbsoluteUri for every probed end
     ["https://h/x?a=%20b+c", "k", `https://h/x?a=%20b+c&chunkHash=${hex}&recordKey=k`],
     ["https://h/x?", "k", `https://h/x?&chunkHash=${hex}&recordKey=k`],
     ["https://h/x??a=1", "k", `https://h/x?a=1&chunkHash=${hex}&recordKey=k`],
+    ["https://h/x???a=1", "k", `https://h/x?a=1&chunkHash=${hex}&recordKey=k`],
+    ["https://h/x?a=?b", "k", `https://h/x?a=?b&chunkHash=${hex}&recordKey=k`],
     ["https://[::1]:8443/c", "k", `https://[::1]:8443/c?chunkHash=${hex}&recordKey=k`],
     ["https://h/x", "", `https://h/x?chunkHash=${hex}&recordKey=`],
     ["https://h/x", "k with space/ü&=?#", `https://h/x?chunkHash=${hex}&recordKey=k%20with%20space%2F%C3%BC%26%3D%3F%23`],
@@ -317,6 +319,7 @@ test("every error code has its own fixed message, and a cause only when one was 
   assert.equal(new Set(messages).size, codes.length);
   assert.ok(messages.every(message => message.length > 0 && !/https?:/.test(message)));
   assert.equal("cause" in new CultMeshContentError("network"), false);
+  assert.equal(new CultMeshContentError("network").name, "CultMeshContentError");
   assert.equal(new CultMeshContentError("network", undefined, undefined, 0).cause, 0);
 });
 
