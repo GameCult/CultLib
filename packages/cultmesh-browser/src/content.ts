@@ -152,6 +152,5 @@ export async function fetchVerifiedChunk(endpoint: string, chunkHash: string, si
   requireWebCrypto();
   const slot = allocate(sizeBytes);
   await readChunks(r, [{ url: chunkUrl(endpoint, hash, chunkRecordKey(hash)), hash, slot }]);
-  r.caller?.throwIfAborted();
   return slot;
 }
