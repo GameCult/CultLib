@@ -126,6 +126,27 @@ Current wire-contract options:
 So the transport can stay developer-friendly while the binary stops freelancing
 away from the C# lineage.
 
+## Content
+
+`cultnet-ts/content` owns the TypeScript shapes of the CultMesh CDN
+(`src/content.ts`, the twin of `CultMeshCdn.cs`): the artifact manifest and chunk
+reference, their MessagePack form, hash normalization, both record-key grammars,
+SHA-256 hashing through WebCrypto, and `packContent`. It is browser-safe: it
+imports no `node:` module, so a browser bundle can take it.
+
+- A manifest names its chunks by hash and carries no endpoint. Where the bytes
+  are fetched from is the caller's to resolve through CultMesh.
+- Metadata is an ordered list of `[key, value]` entries, never an object: a JS
+  object reorders integer-like keys, and the entry order is the wire bytes.
+  Duplicate keys, integers a JS number cannot hold exactly, and payloads nested
+  past the shared depth limit are refused.
+- Bytes and keys are held to files the C# reference writes
+  (`contracts/cultmesh/content-vectors.cs-written.json`,
+  `cdn-record-key-vectors.json`) and to `content-vectors.rs-written.json`.
+  The TypeScript-written `content-vectors.ts-written.json` is judged by the C#
+  reference. Regenerate it with `npm run build --workspace packages/cultnet-ts`
+  and `node scripts/write-cultmesh-content-vectors.mjs`; never edit it by hand.
+
 ## Local Fast Lane
 
 For direct-pipe neighbors that already share the same CultCache formatter

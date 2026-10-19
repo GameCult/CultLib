@@ -101,7 +101,8 @@ jobs:
       # pull requests: cultnet-interop.yml is windows-latest and main-only, so
       # until these steps existed the shared verifier's tests never ran on
       # Linux at all, and the browser client's never ran in CI on any OS.
-      # packages/cultnet-ts verifies both vector files; cultmesh-browser proves
+      # packages/cultnet-ts verifies both vector files (content.test.ts judges both
+      # C# content files, the Rust one and its own); cultmesh-browser proves
       # the browser client reads the shared rules rather than its own.
       # No workflow ran cultcache-ts's tests, and its test script listed two files by hand while a third sat compiled
       # and unrun. The wiring check fails when any TypeScript test file is run by no script, and the cache's own suite
@@ -146,4 +147,15 @@ jobs:
         run: >-
           dotnet test tests/GameCult.Mesh.Tests/GameCult.Mesh.Tests.csproj
           --filter FullyQualifiedName~RealtimeWireProtocol
+          --logger "console;verbosity=minimal"
+
+      # The content plane: the reference writes the manifest and record-key
+      # vectors and judges the manifests the TypeScript packer wrote
+      # (content-vectors.ts-written.json). This suite also holds the C#/Rust
+      # content parity, which no CI step ran before this one. CULTNET_WRITE_VECTORS
+      # is never set in CI: the committed files are the contract.
+      - name: Verify the content vectors with the C# reference
+        run: >-
+          dotnet test tests/GameCult.Mesh.Tests/GameCult.Mesh.Tests.csproj
+          --filter FullyQualifiedName~CultMeshContentVectorTests
           --logger "console;verbosity=minimal"
