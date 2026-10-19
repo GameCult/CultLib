@@ -48,10 +48,10 @@ const isByteCount = (value: number): boolean => Number.isSafeInteger(value) && v
 // Uri.EscapeDataString: encodeURIComponent, plus the five characters it leaves bare.
 const escapeData = (value: string): string => encodeURIComponent(value).replace(/[!'()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 
-/** `CultMeshHttpsContentTransportConnector.BuildChunkUri`: an existing query (even an empty one) is kept and joined with `&`. */
+/** `CultMeshHttpsContentTransportConnector.BuildChunkUri`: an existing query (even an empty one, leading `?`s trimmed) is kept and joined with `&`. */
 function chunkUrl(endpoint: string, hash: string, recordKey: string): string {
   const url = new URL(endpoint);
-  const kept = url.href.split("#")[0]!.includes("?") ? `${url.search.slice(1)}&` : "";
+  const kept = url.href.split("#")[0]!.includes("?") ? `${url.search.replace(/^\?+/, "")}&` : "";
   url.search = `${kept}chunkHash=${escapeData(hash)}&recordKey=${escapeData(recordKey)}`;
   return url.href;
 }
@@ -114,8 +114,8 @@ export async function fetchVerifiedContent(endpoint: string, manifest: CultMeshC
   try {
     validateManifest(manifest);
     contentHash = parseSha256Hex(manifest.contentHash, "contentHash");
-    const refs = [...manifest.chunks].sort((a, b) => a.offset - b.offset);
-    if (!isByteCount(manifest.sizeBytes) || !refs.every(ref => isByteCount(ref.offset) && isByteCount(ref.sizeBytes))) throw new Error("Sizes must be safe integers.");
+    const refs = manifest.chunks;
+    if (!isByteCount(manifest.sizeBytes) || !refs.every(ref => isByteCount(ref.sizeBytes))) throw new Error("Sizes must be safe integers.");
     if (refs.length > 1 && refs.some(ref => ref.sizeBytes === 0)) throw new Error("A zero-size chunk must be the only chunk.");
     planned = refs.map(ref => { const hash = parseSha256Hex(ref.chunkHash, "chunkHash"); return { hash, url: chunkUrl(endpoint, hash, ref.recordKey ?? ""), offset: ref.offset, size: ref.sizeBytes }; });
   } catch (cause) { throw fail("manifest-invalid", undefined, undefined, cause); }

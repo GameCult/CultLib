@@ -69,6 +69,7 @@ test("request URLs equal the .NET BuildChunkUri AbsoluteUri for every probed end
     ["https://h/x#frag", "k", `https://h/x?chunkHash=${hex}&recordKey=k#frag`],
     ["https://h/x?a=%20b+c", "k", `https://h/x?a=%20b+c&chunkHash=${hex}&recordKey=k`],
     ["https://h/x?", "k", `https://h/x?&chunkHash=${hex}&recordKey=k`],
+    ["https://h/x??a=1", "k", `https://h/x?a=1&chunkHash=${hex}&recordKey=k`],
     ["https://[::1]:8443/c", "k", `https://[::1]:8443/c?chunkHash=${hex}&recordKey=k`],
     ["https://h/x", "", `https://h/x?chunkHash=${hex}&recordKey=`],
     ["https://h/x", "k with space/ü&=?#", `https://h/x?chunkHash=${hex}&recordKey=k%20with%20space%2F%C3%BC%26%3D%3F%23`],
@@ -79,6 +80,9 @@ test("request URLs equal the .NET BuildChunkUri AbsoluteUri for every probed end
     await fetchVerifiedContent(endpoint, withChunk(manifest, 0, { recordKey }), { fetch: server.fetch });
     assert.equal(server.calls[0]!.url, expected, endpoint);
   }
+  const absent = chunkServer(chunks);
+  await fetchVerifiedContent(ENDPOINT, withChunk(manifest, 0, { recordKey: undefined }), { fetch: absent.fetch });
+  assert.equal(absent.calls[0]!.url, `${ENDPOINT}?chunkHash=${hex}&recordKey=`);
 });
 
 test("hash spellings are normalized into the URL: a prefixed upper-case manifest hash is requested as bare lower-case hex", async () => {
@@ -116,6 +120,8 @@ test("with 10 chunks, maxConcurrentChunkRequests 3 peaks at exactly 3 in flight 
     assert.equal(server.calls.length, 0);
   }
   for (const maxBytes of [-1, 1.5, Number.NaN]) await assert.rejects(fetchVerifiedContent(ENDPOINT, manifest, { maxBytes }), RangeError);
+  await assert.rejects(fetchVerifiedContent(ENDPOINT, manifest, { maxConcurrentChunkRequests: 0 }), /maxConcurrentChunkRequests/);
+  await assert.rejects(fetchVerifiedContent(ENDPOINT, manifest, { maxBytes: -1 }), /maxBytes/);
 });
 
 test("an empty artifact returns an empty array with no fetch, but still answers to its content hash", async () => {
@@ -144,6 +150,7 @@ test("the byte cap is checked before any request: one over maxBytes and one over
   await assert.rejects(fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash, 5, { fetch: server.fetch, maxBytes: 4 }), codeOf("too-large"));
   assert.equal(server.calls.length, 0);
   assert.deepEqual(await fetchVerifiedContent(ENDPOINT, manifest, { fetch: server.fetch, maxBytes: 10 }), body(10));
+  assert.deepEqual(await fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash, 5, { fetch: server.fetch, maxBytes: 5 }), body(5));
   const huge = (size: number) => ({ ...manifest, sizeBytes: size, chunks: [{ ...manifest.chunks[0]!, offset: 0, sizeBytes: size }] });
   const refuses = double(() => { throw new TypeError("offline"); });
   await assert.rejects(fetchVerifiedContent(ENDPOINT, huge(268435457), { fetch: refuses.fetch }), codeOf("too-large"));
@@ -174,6 +181,9 @@ test("non-hex hashes and a gapped manifest are manifest-invalid with no fetch, i
     withChunk(manifest, 1, { offset: 6 }),
     { ...manifest, sizeBytes: 11 },
     { ...manifest, sizeBytes: 10.5 },
+    // fractional chunk sizes that still tile the manifest, and an infinite one: contiguous, so only a size check refuses them
+    { ...manifest, chunks: [{ ...manifest.chunks[0]!, sizeBytes: 4 }, { ...manifest.chunks[1]!, offset: 4, sizeBytes: 1.5 }, { ...manifest.chunks[1]!, offset: 5.5, sizeBytes: 4.5 }] },
+    { ...manifest, sizeBytes: Infinity, chunks: [{ ...manifest.chunks[0]!, sizeBytes: Infinity }] },
   ];
   for (const candidate of bad) await assert.rejects(fetchVerifiedContent(ENDPOINT, candidate, { fetch: server.fetch }), codeOf("manifest-invalid"));
   for (const [hash, size] of [["xyz", 5], [manifest.chunks[0]!.chunkHash, -1], [manifest.chunks[0]!.chunkHash, 1.5], [manifest.chunks[0]!.chunkHash, Number.NaN]] as const) {
@@ -258,10 +268,12 @@ test("with crypto.subtle shadowed, both exports are webcrypto-unavailable before
   const { manifest, chunks } = await pack(5, 5);
   const server = chunkServer(chunks);
   const original = Object.getOwnPropertyDescriptor(globalThis, "crypto")!;
-  Object.defineProperty(globalThis, "crypto", { value: {}, configurable: true });
   try {
-    await assert.rejects(fetchVerifiedContent(ENDPOINT, manifest, { fetch: server.fetch }), codeOf("webcrypto-unavailable"));
-    await assert.rejects(fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash, 5, { fetch: server.fetch }), codeOf("webcrypto-unavailable"));
+    for (const value of [{}, undefined]) {
+      Object.defineProperty(globalThis, "crypto", { value, configurable: true });
+      await assert.rejects(fetchVerifiedContent(ENDPOINT, manifest, { fetch: server.fetch }), codeOf("webcrypto-unavailable"));
+      await assert.rejects(fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash, 5, { fetch: server.fetch }), codeOf("webcrypto-unavailable"));
+    }
   } finally { Object.defineProperty(globalThis, "crypto", original); }
   assert.equal(server.calls.length, 0);
 });
@@ -296,6 +308,33 @@ test("no error message contains the endpoint, its secret query, or a body byte",
     const error = await fetchVerifiedContent(code === "insecure-endpoint" ? "http://example.com/c?token=CANARYSECRET" : secret, manifest, { fetch: server.fetch }).then(() => undefined, reason => reason);
     assert.ok(codeOf(code)(error), code);
     for (const text of [(error as Error).message, String(error)]) { assert.doesNotMatch(text, /CANARY|cdn\.example|token/); }
+  }
+});
+
+test("every error code has its own fixed message, and a cause only when one was given", () => {
+  const codes: CultMeshContentErrorCode[] = ["manifest-invalid", "too-large", "insecure-endpoint", "webcrypto-unavailable", "network", "http-status", "length-mismatch", "chunk-hash-mismatch", "content-hash-mismatch"];
+  const messages = codes.map(code => new CultMeshContentError(code).message);
+  assert.equal(new Set(messages).size, codes.length);
+  assert.ok(messages.every(message => message.length > 0 && !/https?:/.test(message)));
+  assert.equal("cause" in new CultMeshContentError("network"), false);
+  assert.equal(new CultMeshContentError("network", undefined, undefined, 0).cause, 0);
+});
+
+test("the caller's abort listener is added once and removed again, after success and after failure", async () => {
+  const { manifest, chunks } = await pack(10, 5);
+  for (const handler of [undefined, () => new Response(null, { status: 500 })]) {
+    const controller = new AbortController();
+    const added: unknown[] = [];
+    const removed: unknown[] = [];
+    const add = controller.signal.addEventListener.bind(controller.signal);
+    const remove = controller.signal.removeEventListener.bind(controller.signal);
+    controller.signal.addEventListener = ((type: string, listener: EventListener, options?: unknown) => { added.push([type, listener]); add(type, listener, options as AddEventListenerOptions); }) as typeof add;
+    controller.signal.removeEventListener = ((type: string, listener: EventListener) => { removed.push([type, listener]); remove(type, listener); }) as typeof remove;
+    const server = handler ? double(handler) : chunkServer(chunks);
+    await fetchVerifiedContent(ENDPOINT, manifest, { fetch: server.fetch, signal: controller.signal }).catch(() => undefined);
+    assert.equal(added.length, 1);
+    assert.deepEqual(removed, added);
+    assert.equal((added[0] as [string])[0], "abort");
   }
 });
 
