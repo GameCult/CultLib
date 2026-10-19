@@ -230,7 +230,6 @@ class Reader {
 export function decodeManifest(bytes: Uint8Array): CultMeshCdnArtifactManifest {
   checkPayloadDepth(bytes, "CDN artifact manifest");
   const reader = new Reader(bytes);
-  if (reader.nil()) wrongType("manifest");
   // A slot the array does not reach keeps the property initialiser; a slot past the tenth is skipped. Trailing bytes are not read.
   const count = reader.array("manifest");
   let index = 0;
@@ -243,7 +242,7 @@ export function decodeManifest(bytes: Uint8Array): CultMeshCdnArtifactManifest {
     sizeBytes: slot(() => reader.integer("sizeBytes"), 0),
     mimeType: slot(() => reader.string("mimeType"), "application/octet-stream"),
     createdAtUtc: slot(() => reader.string("createdAtUtc"), ""),
-    chunks: slot(() => Array.from({ length: reader.nil() ? wrongType("chunks") : reader.array("chunks") }, () => readChunkRef(reader)), []),
+    chunks: slot(() => Array.from({ length: reader.array("chunks") }, () => readChunkRef(reader)), []),
     tags: slot(() => reader.nil() ? null : Array.from({ length: reader.array("tags") }, () => reader.string("tags")), []),
     metadata: slot(() => reader.nil() ? null : Array.from({ length: reader.map("metadata") }, () =>
       [reader.string("metadata") ?? wrongType("metadata"), reader.string("metadata")] as const), []),
@@ -254,7 +253,6 @@ export function decodeManifest(bytes: Uint8Array): CultMeshCdnArtifactManifest {
 }
 
 function readChunkRef(reader: Reader): CultMeshCdnChunkRef {
-  if (reader.nil()) wrongType("chunks");
   const count = reader.array("chunks");
   let index = 0;
   const slot = <T>(read: () => T, initial: T): T => index++ < count ? read() : initial;
