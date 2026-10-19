@@ -140,9 +140,16 @@ imports no `node:` module, so a browser bundle can take it.
   object reorders integer-like keys, and the entry order is the wire bytes.
   Duplicate keys, integers a JS number cannot hold exactly, and payloads nested
   past the shared depth limit are refused.
+- The decoder reads what MessagePack-CSharp reads and refuses what it refuses:
+  nil in a string, tag or metadata slot is `null` and is written back as nil,
+  a missing trailing slot takes the reference's default, extra slots and trailing
+  bytes are skipped, a float-encoded integer is refused, and invalid UTF-8
+  decodes to U+FFFD. A nil `chunks` is refused, as the reference's
+  `ValidateManifest` refuses it. `content-acceptance-vectors.json` is the
+  reference's own verdict on each of those shapes.
 - Bytes and keys are held to files the C# reference writes
   (`contracts/cultmesh/content-vectors.cs-written.json`,
-  `cdn-record-key-vectors.json`) and to `content-vectors.rs-written.json`.
+  `cdn-record-key-vectors.json`, `content-acceptance-vectors.json`) and to `content-vectors.rs-written.json`.
   The TypeScript-written `content-vectors.ts-written.json` is judged by the C#
   reference. Regenerate it with `npm run build --workspace packages/cultnet-ts`
   and `node scripts/write-cultmesh-content-vectors.mjs`; never edit it by hand.
