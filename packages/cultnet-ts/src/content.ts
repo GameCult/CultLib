@@ -12,6 +12,9 @@ import { checkPayloadDepth } from "@gamecult/cultcache-ts/document";
 import { isNullOrWhiteSpaceCSharp, trimCSharp } from "./cultmesh-authority";
 import { wellFormed } from "./utf8-bound";
 
+/** C#'s `string.IsNullOrWhiteSpace`, the one blank rule every consumer of the content shapes shares. */
+export { isNullOrWhiteSpaceCSharp };
+
 export const CULTMESH_CDN_MANIFEST_SCHEMA = "gamecult.mesh.cdn_artifact_manifest.v1";
 export const DEFAULT_CHUNK_SIZE_BYTES = 4 * 1024 * 1024;
 export const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";

@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
-import { DEFAULT_CHUNK_SIZE_BYTES, EMPTY_SHA256, chunkRecordKey, parseSha256Hex, sha256Hex } from "cultnet-ts/content";
+import { DEFAULT_CHUNK_SIZE_BYTES, EMPTY_SHA256, chunkRecordKey, isNullOrWhiteSpaceCSharp, parseSha256Hex, sha256Hex } from "cultnet-ts/content";
 
 /** What the provider reads of a request. The path and the headers are never read: the route is the query alone. */
 export interface ContentChunkRequest { method: string; url: string; }
@@ -63,7 +63,7 @@ export function createContentChunkHandler(store: ContentChunkStore, options: Con
       const [hash, ...otherHashes] = query.getAll("chunkHash");
       const [key = "", ...otherKeys] = query.getAll("recordKey");
       hex = parseSha256Hex(hash ?? "");
-      if (otherHashes.length || otherKeys.length || (key.trim() !== "" && key !== chunkRecordKey(hex))) return refusal(400);
+      if (otherHashes.length || otherKeys.length || (!isNullOrWhiteSpaceCSharp(key) && key !== chunkRecordKey(hex))) return refusal(400);
     } catch { return refusal(400); }
     if (hex === EMPTY_SHA256) return chunkAnswer(new Uint8Array());
     let bytes: Uint8Array | undefined;
