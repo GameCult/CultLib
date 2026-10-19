@@ -100,18 +100,23 @@ export async function artifactRecordKey(artifactId: string | null, version: stri
 
 // ---- validation ------------------------------------------------------------------------------------------------------
 
+const INT32_MAX = 2 ** 31 - 1;
+
 /**
  * `ValidateManifestShape`, in its order and with its messages, then the metadata keys a dictionary could not hold twice.
- * C# sizes are `long`, so a fraction, NaN or Infinity cannot exist on the wire; a hand-built manifest is refused here, once.
+ * Sizes are the reference's types: the manifest total and every offset a `long` (held here below 2^53, the largest integer a
+ * number keeps exact) and a chunk size an `int`. A fraction, NaN, Infinity or a size past those bounds cannot exist on the wire
+ * and is refused here, once, whether it was decoded or hand-built.
  */
 export function validateManifest(manifest: CultMeshCdnArtifactManifest): void {
   if (manifest.sizeBytes < 0) throw new Error("CDN artifact manifest has a negative size.");
-  if (!Number.isInteger(manifest.sizeBytes)) throw new Error("CDN artifact manifest size is not a whole number.");
+  if (!Number.isSafeInteger(manifest.sizeBytes)) throw new Error("CDN artifact manifest size is not a whole number below 2^53.");
   let expectedOffset = 0;
   for (const reference of [...manifest.chunks].sort((a, b) => a.offset - b.offset)) {
     if (reference.offset !== expectedOffset) throw new Error("CDN artifact chunks are not contiguous.");
     if (reference.sizeBytes < 0) throw new Error("CDN artifact chunk has a negative size.");
-    if (!Number.isInteger(reference.sizeBytes)) throw new Error("CDN artifact chunk size is not a whole number.");
+    if (!Number.isSafeInteger(reference.sizeBytes)) throw new Error("CDN artifact chunk size is not a whole number below 2^53.");
+    if (reference.sizeBytes > INT32_MAX) throw new Error("CDN artifact chunk size is larger than 2147483647.");
     expectedOffset += reference.sizeBytes;
   }
   if (expectedOffset !== manifest.sizeBytes) throw new Error("CDN artifact chunk sizes do not sum to the manifest size.");
@@ -289,7 +294,7 @@ export async function packContent(
 ): Promise<{ manifest: CultMeshCdnArtifactManifest; chunks: CultMeshCdnPackedChunk[] }> {
   if (isNullOrWhiteSpaceCSharp(artifactId)) throw new Error("Artifact id must be non-empty. (Parameter 'artifactId')");
   const size = options.chunkSizeBytes ?? DEFAULT_CHUNK_SIZE_BYTES;
-  if (!Number.isInteger(size) || size < 1 || size > 2 ** 31 - 1) throw new Error("ChunkSizeBytes must be between 1 and 2147483647.");
+  if (!Number.isInteger(size) || size < 1 || size > INT32_MAX) throw new Error("ChunkSizeBytes must be between 1 and 2147483647.");
   const offsets = bytes.length === 0 ? [0] : Array.from({ length: Math.ceil(bytes.length / size) }, (_, index) => index * size);
   const chunks = await Promise.all(offsets.map(async offset => {
     const payload = bytes.slice(offset, offset + size);

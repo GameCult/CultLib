@@ -231,12 +231,12 @@ test("validateManifest refuses negative size, a gap, an overlap and a size-sum m
   validateManifest(manifestOf({ sizeBytes: 0, chunks: [] }));
 });
 
-test("validateManifest refuses a size that is not a whole number: a fraction, NaN or Infinity, in the manifest or in a chunk", () => {
+test("validateManifest refuses a size that is not a whole number below 2^53 and a chunk size an int cannot hold, whether decoded or hand-built", () => {
   const chunk = (offset: number, sizeBytes: number) => ({ chunkHash: HASH, offset, sizeBytes, recordKey: "k" });
   const refuses = (over: Partial<CultMeshCdnArtifactManifest>, message: string) =>
     assert.throws(() => validateManifest(manifestOf(over)), new Error(message));
-  const manifestMessage = "CDN artifact manifest size is not a whole number.";
-  const chunkMessage = "CDN artifact chunk size is not a whole number.";
+  const manifestMessage = "CDN artifact manifest size is not a whole number below 2^53.";
+  const chunkMessage = "CDN artifact chunk size is not a whole number below 2^53.";
   for (const size of [1.5, Number.NaN, Number.POSITIVE_INFINITY]) refuses({ sizeBytes: size, chunks: [] }, manifestMessage);
   // fractional chunk sizes that still tile the manifest are contiguous, so only the whole-number rule refuses them
   refuses({ sizeBytes: 6, chunks: [chunk(0, 4), chunk(4, 1.5), chunk(5.5, 0.5)] }, chunkMessage);
@@ -245,7 +245,22 @@ test("validateManifest refuses a size that is not a whole number: a fraction, Na
   refuses({ sizeBytes: Number.POSITIVE_INFINITY, chunks: [chunk(0, Number.POSITIVE_INFINITY)] }, manifestMessage);
   refuses({ sizeBytes: 4, chunks: [chunk(0, 2), chunk(2, Number.POSITIVE_INFINITY)] }, chunkMessage);
   refuses({ sizeBytes: 0, chunks: [chunk(0, -1)] }, "CDN artifact chunk has a negative size.");
-  validateManifest(manifestOf({ sizeBytes: 2 ** 53 - 1, chunks: [chunk(0, 2 ** 53 - 1)] }));
+  // C# holds the manifest total and offsets in a long, a chunk size in an int; a number holds integers exactly only below 2^53
+  const int32Max = 2 ** 31 - 1;
+  const tooBig = "CDN artifact chunk size is larger than 2147483647.";
+  refuses({ sizeBytes: 2 ** 31, chunks: [chunk(0, 2 ** 31)] }, tooBig);
+  refuses({ sizeBytes: 2 ** 31 + 5, chunks: [chunk(0, 5), chunk(5, 2 ** 31)] }, tooBig);
+  refuses({ sizeBytes: 2 ** 53 - 1, chunks: [chunk(0, 2 ** 53 - 1)] }, tooBig);
+  for (const size of [2 ** 53, 2 ** 63, 2 ** 64]) {
+    refuses({ sizeBytes: size, chunks: [] }, manifestMessage);
+    refuses({ sizeBytes: size, chunks: [chunk(0, size)] }, manifestMessage);
+    refuses({ sizeBytes: 4, chunks: [chunk(0, size)] }, chunkMessage);
+  }
+  // the sum can only pass 2^53 by exceeding the manifest total, which is below it; an offset past 2^53 matches no sum
+  refuses({ sizeBytes: 2 ** 53, chunks: [chunk(0, int32Max), chunk(int32Max, 2 ** 53 - int32Max)] }, manifestMessage);
+  refuses({ sizeBytes: 1, chunks: [chunk(2 ** 53, 1)] }, "CDN artifact chunks are not contiguous.");
+  validateManifest(manifestOf({ sizeBytes: 2 ** 31 + 2, chunks: [chunk(0, 1), chunk(1, int32Max), chunk(2 ** 31, 2)] }));
+  validateManifest(manifestOf({ sizeBytes: int32Max, chunks: [chunk(0, int32Max)] }));
 });
 
 test("normalizeHash: 'SHA256:ABC ' -> 'abc', ' sha256:abc' -> 'sha256:abc', blank throws", () => {

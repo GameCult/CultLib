@@ -50,11 +50,15 @@ const escapeData = (value: string): string => encodeURIComponent(value).replace(
 
 // An endpoint the request URL of which is the same string in .NET `UriBuilder` and WHATWG `URL`. Both are free to rewrite what
 // they dislike (`'` in a query, `{}|^\` and non-ASCII anywhere, a percent sign that is not an escape, an escaped unreserved
-// character, an IDN host), and they rewrite it differently, which would split CDN cache entries between runtimes; so those
-// spellings are refused instead of translated.
+// character, an escaped byte past ASCII, an IDN host, an IPv6 literal that embeds an IPv4 address), and they rewrite it
+// differently, which would split CDN cache entries between runtimes; so those spellings are refused instead of translated.
+// A scheme not followed by exactly `//` and a host is no authority form: the C# connector refuses it, and `URL` repairs it.
+const AUTHORITY_FORM = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/]/;
 const PLAIN_ENDPOINT = /^(?:[A-Za-z0-9\-._~:/?#@!$&*()+,;=[\]]|%[0-9A-Fa-f]{2})*$/;
-const ESCAPED_UNRESERVED = /%(?:2[de]|3\d|4[1-9a-f]|5[0-9af]|6[1-9a-f]|7[0-9ae])/i;
-const isPlainEndpoint = (endpoint: string): boolean => PLAIN_ENDPOINT.test(endpoint) && !ESCAPED_UNRESERVED.test(endpoint);
+const ESCAPE_DIVERGES = /%(?:2[de]|3\d|4[1-9a-f]|5[0-9af]|6[1-9a-f]|7[0-9ae]|[89a-f][0-9a-f])/i;
+const EMBEDS_IPV4 = /^\[::(?:ffff(?::0)?:)?[0-9a-f]{1,4}:[0-9a-f]{1,4}\]$/;
+const isPlainEndpoint = (endpoint: string): boolean =>
+  AUTHORITY_FORM.test(endpoint) && PLAIN_ENDPOINT.test(endpoint) && !ESCAPE_DIVERGES.test(endpoint) && !EMBEDS_IPV4.test(new URL(endpoint).hostname);
 
 /** `CultMeshHttpsContentTransportConnector.BuildChunkUri`: an existing query (even an empty one, leading `?`s trimmed) is kept and joined with `&`. */
 function chunkUrl(endpoint: string, hash: string, recordKey: string): string {
