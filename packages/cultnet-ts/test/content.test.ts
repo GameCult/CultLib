@@ -389,3 +389,28 @@ test("a refusal names its true cause", () => {
   refuses(Uint8Array.of(0x91, 0xa3, 0x41), /ends before its last field/);
   refuses(Uint8Array.from([0x9b, ...wire().slice(1), 0xc1]), /field 'manifest' has the wrong type/);
 });
+
+test("a lone surrogate is written as U+FFFD at every string length, short and long alike, in every string slot", async () => {
+  const base = (await packContent("x", Uint8Array.of(1, 2, 3), { createdAtUtc: "2026-09-22T00:00:00.0000000+00:00" })).manifest;
+  // @msgpack/msgpack switches encoders past 50 UTF-16 units; the reference writes U+FFFD on both sides of that line.
+  for (const length of [1, 2, 16, 31, 32, 49, 50, 51, 52, 64, 200]) {
+    for (const [lone, replaced] of [["\ud800", "\ufffd"], ["\udfff", "\ufffd"]]) {
+      const filler = "a".repeat(length - 1);
+      const bad = `${filler}${lone}`;
+      const good = `${filler}${replaced}`;
+      const withText = (value: string): CultMeshCdnArtifactManifest => ({
+        ...base,
+        artifactId: value, kind: value, version: value, mimeType: value, createdAtUtc: value,
+        chunks: [{ ...base.chunks[0]!, recordKey: value }],
+        tags: [value],
+        metadata: [[value, value]],
+      });
+      const bytes = encodeManifest(withText(bad));
+      assert.deepEqual(bytes, encodeManifest(withText(good)), `length ${length}`);
+      assert.ok(!bytes.some((b, i) => b === 0xed && bytes[i + 1]! >= 0xa0 && bytes[i + 1]! <= 0xbf), `no CESU surrogate bytes at length ${length}`);
+      assert.equal(decodeManifest(bytes).artifactId, good, `length ${length} reads back as written`);
+    }
+  }
+  const packed = await packContent(`a${"b".repeat(60)}\ud800`, Uint8Array.of(1), { kind: "k\udc00", createdAtUtc: "2026-09-22T00:00:00.0000000+00:00" });
+  assert.equal(decodeManifest(encodeManifest(packed.manifest)).kind, "k\ufffd");
+});

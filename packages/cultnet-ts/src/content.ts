@@ -10,6 +10,7 @@
 import { encode } from "@msgpack/msgpack";
 import { checkPayloadDepth } from "@gamecult/cultcache-ts/document";
 import { isNullOrWhiteSpaceCSharp, trimCSharp } from "./cultmesh-authority";
+import { wellFormed } from "./utf8-bound";
 
 export const CULTMESH_CDN_MANIFEST_SCHEMA = "gamecult.mesh.cdn_artifact_manifest.v1";
 export const DEFAULT_CHUNK_SIZE_BYTES = 4 * 1024 * 1024;
@@ -125,15 +126,18 @@ const mapHeader = (count: number): Uint8Array =>
     : count < 0x10000 ? Uint8Array.of(0xde, count >> 8, count & 0xff)
       : Uint8Array.of(0xdf, count >>> 24, (count >> 16) & 0xff, (count >> 8) & 0xff, count & 0xff);
 
+/** A string slot is written as C# writes it: a lone surrogate has no UTF-8 encoding and becomes U+FFFD at every length. */
+const text = <T>(field: T): T => (typeof field === "string" ? wellFormed(field) : field) as T;
+
 /** The positional ten-array of the C# `[MessagePackObject]`: chunk references are four-arrays, metadata a map in entry order. */
 export function encodeManifest(manifest: CultMeshCdnArtifactManifest): Uint8Array {
   const { artifactId, kind, version, contentHash, sizeBytes, mimeType, createdAtUtc, chunks, tags, metadata } = manifest;
   return concat([
     Uint8Array.of(0x9a),
-    ...[artifactId, kind, version, contentHash, sizeBytes, mimeType, createdAtUtc].map(field => encode(field)),
-    encode(chunks.map(c => [c.chunkHash, c.offset, c.sizeBytes, c.recordKey])),
-    encode(tags),
-    ...(metadata === null ? [encode(null)] : [mapHeader(metadata.length), ...metadata.flatMap(([key, value]) => [encode(key), encode(value)])]),
+    ...[artifactId, kind, version, contentHash, sizeBytes, mimeType, createdAtUtc].map(field => encode(text(field))),
+    encode(chunks.map(c => [text(c.chunkHash), c.offset, c.sizeBytes, text(c.recordKey)])),
+    encode(tags === null ? null : tags.map(text)),
+    ...(metadata === null ? [encode(null)] : [mapHeader(metadata.length), ...metadata.flatMap(([key, value]) => [encode(text(key)), encode(text(value))])]),
   ]);
 }
 
