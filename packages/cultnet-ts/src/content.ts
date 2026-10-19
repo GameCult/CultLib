@@ -97,13 +97,18 @@ export async function artifactRecordKey(artifactId: string | null, version: stri
 
 // ---- validation ------------------------------------------------------------------------------------------------------
 
-/** `ValidateManifestShape`, in its order and with its messages, then the metadata keys a dictionary could not hold twice. */
+/**
+ * `ValidateManifestShape`, in its order and with its messages, then the metadata keys a dictionary could not hold twice.
+ * C# sizes are `long`, so a fraction, NaN or Infinity cannot exist on the wire; a hand-built manifest is refused here, once.
+ */
 export function validateManifest(manifest: CultMeshCdnArtifactManifest): void {
   if (manifest.sizeBytes < 0) throw new Error("CDN artifact manifest has a negative size.");
+  if (!Number.isInteger(manifest.sizeBytes)) throw new Error("CDN artifact manifest size is not a whole number.");
   let expectedOffset = 0;
   for (const reference of [...manifest.chunks].sort((a, b) => a.offset - b.offset)) {
     if (reference.offset !== expectedOffset) throw new Error("CDN artifact chunks are not contiguous.");
     if (reference.sizeBytes < 0) throw new Error("CDN artifact chunk has a negative size.");
+    if (!Number.isInteger(reference.sizeBytes)) throw new Error("CDN artifact chunk size is not a whole number.");
     expectedOffset += reference.sizeBytes;
   }
   if (expectedOffset !== manifest.sizeBytes) throw new Error("CDN artifact chunk sizes do not sum to the manifest size.");
