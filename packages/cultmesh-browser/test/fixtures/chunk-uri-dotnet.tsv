@@ -148,51 +148,51 @@ http://[::1]:80/x	http://[::1]/x?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae4
 http://[::1]:8080/x?a=1	http://[::1]:8080/x?a=1&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
 https://h/x?a=%e2%82%ac%c3%a9	https://h/x?a=%E2%82%AC%C3%A9&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
 https://h/x?a=%E2%82%ac	https://h/x?a=%E2%82%AC&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
-https://h/a;b=c,d	
-https://h/a!$&()*+,;=:@b	
-https://h/x?a!$()*+,;=:@/?	
-https://h/x/	
-https://H:443	
-https://1.2.3.4/x	
-https://127.1/	
-https://h/x?a#	
-https://h/x?a=1#f	
-https://h/a/./b	
-https://h/a/../../b	
-https://h/%2F	
-https://h/a%20b	
-https://h/a%25b	
-https://[::1]/x	
-https://[2001:DB8::1]:8443/x	
-https://h/x?a=b%3Dc	
-https://h/-._~	
-https://h/x?=	
-https://h/x?a&&b	
-http://127.0.0.1:80/x	
-http://127.0.0.1:8080	
-https://h/%40/x	
-https://h/x?a=%5B%5D	
-https://h/x?a=%7B%7D	
-https://h/x?a=%2F%3A%2C	
-https://h/x?a=%2c%5b%7b	
-https://h:99999/x	
-https://h/x#a b	
-https://h/x#é	
-https://h/%50	
-https://h/x?a=%5A	
-https://h/x?a=%5f	
-https://h/x?a=%61	
-https://h/%6F	
-https://h/%7a	
-https://h/x?a=%7E	
-https://h/%30	
-https://h/x?a=%39	
-https://h/%2d	
-https://h/x?a=%2E	
-https://h/x?a=%4z	
-https://h/%4	
-https://h/x?%	
-https://h/%	
-https://h/%g0	
-https://h/x?a=%a	
-https://h/x?a=%%41	
+https://h/a;b=c,d	https://h/a;b=c,d?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/a!$&()*+,;=:@b	https://h/a!$&()*+,;=:@b?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?a!$()*+,;=:@/?	https://h/x?a!$()*+,;=:@/?&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x/	https://h/x/?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://H:443	https://h/?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://1.2.3.4/x	https://1.2.3.4/x?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://127.1/	https://127.0.0.1/?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?a#	https://h/x?a&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k#
+https://h/x?a=1#f	https://h/x?a=1&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k#f
+https://h/a/./b	https://h/a/b?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/a/../../b	https://h/b?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/%2F	https://h/%2F?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/a%20b	https://h/a%20b?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/a%25b	https://h/a%25b?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://[::1]/x	https://[::1]/x?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://[2001:DB8::1]:8443/x	https://[2001:db8::1]:8443/x?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?a=b%3Dc	https://h/x?a=b%3Dc&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/-._~	https://h/-._~?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?=	https://h/x?=&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?a&&b	https://h/x?a&&b&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+http://127.0.0.1:80/x	http://127.0.0.1/x?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+http://127.0.0.1:8080	http://127.0.0.1:8080/?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/%40/x	https://h/%40/x?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?a=%5B%5D	https://h/x?a=%5B%5D&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?a=%7B%7D	https://h/x?a=%7B%7D&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?a=%2F%3A%2C	https://h/x?a=%2F%3A%2C&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?a=%2c%5b%7b	https://h/x?a=%2c%5b%7b&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h:99999/x	THROW UriFormatException
+https://h/x#a b	https://h/x?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k#a%20b
+https://h/x#é	https://h/x?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k#%C3%A9
+https://h/%50	https://h/P?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?a=%5A	https://h/x?a=Z&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?a=%5f	https://h/x?a=_&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?a=%61	https://h/x?a=a&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/%6F	https://h/o?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/%7a	https://h/z?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?a=%7E	https://h/x?a=~&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/%30	https://h/0?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?a=%39	https://h/x?a=9&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/%2d	https://h/-?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?a=%2E	https://h/x?a=.&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?a=%4z	https://h/x?a=%254z&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/%4	https://h/%254?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?%	https://h/x?%25&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/%	https://h/%25?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/%g0	https://h/%25g0?chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?a=%a	https://h/x?a=%25a&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
+https://h/x?a=%%41	https://h/x?a=%25A&chunkHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&recordKey=k
