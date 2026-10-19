@@ -61,8 +61,10 @@ URLs; clients resolve content through CultMesh.
   fetches content from the TypeScript provider unmodified, in a cross-process
   test. The TypeScript reader fetches the same chunks from the same provider.
 - `verify-before-use`: the reader releases no byte that failed its chunk hash
-  or the whole-body hash, and refuses a response whose length differs from the
-  advertised size before reading it all.
+  or the whole-body hash. It refuses a body longer than the advertised size at
+  its first excess byte, and a shorter one at its end. It does not trust
+  response length headers, because Fetch decodes content codings and a proxy
+  can rewrite them (research 2026-10-19, section 6).
 - `verify-before-serve`: the provider serves only bytes whose SHA-256 equals
   the requested chunk hash.
 - `chunk-only-route`: the provider answers only chunk requests. A path, a
