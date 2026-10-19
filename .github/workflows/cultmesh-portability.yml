@@ -117,9 +117,8 @@ jobs:
       - name: Verify the CultMesh authority rules with the TypeScript verifier
         run: npm run test --workspace packages/cultnet-ts
 
-      - name: Verify the browser client against the shared TypeScript verifier
-        run: npm run test --workspace packages/cultmesh-browser
-
+      # cultmesh-browser's test compiles test/interop, which imports cultmesh-ts/content, so cultmesh-ts builds first,
+      # as in scripts/run-typescript-workspaces.mjs.
       # The realtime frame codec and the HTTP content chunk provider (content.test.ts,
       # its answers over node:http). The codec's byte parity rests on two vector files,
       # contracts/cultmesh/realtime-frame-vectors.json written by the C#
@@ -129,6 +128,9 @@ jobs:
       # only with itself would have gone green.
       - name: Verify the realtime frame codec and the content provider with the TypeScript runtime
         run: npm run test --workspace packages/cultmesh-ts
+
+      - name: Verify the browser client against the shared TypeScript verifier
+        run: npm run test --workspace packages/cultmesh-browser
 
       # Both directions of the CultMesh authority vectors: the C#-written
       # file (contracts/cultmesh/authority-route-vectors.json) and the
@@ -161,3 +163,9 @@ jobs:
           dotnet test tests/GameCult.Mesh.Tests/GameCult.Mesh.Tests.csproj
           --filter FullyQualifiedName~CultMeshContentVectorTests
           --logger "console;verbosity=minimal"
+
+      # The cross-process HTTPS content parity: the C# transfer service over the unmodified HTTPS connector and the
+      # TypeScript reader fetch from the TypeScript provider in its own process. Both refuse bytes tampered in flight,
+      # and the provider refuses a corrupt store.
+      - name: Verify HTTPS content parity across C#, the TypeScript provider and the TypeScript reader
+        run: npm run test:interop --workspace packages/cultmesh-browser
