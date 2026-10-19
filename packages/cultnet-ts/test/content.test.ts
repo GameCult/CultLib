@@ -14,6 +14,8 @@ import { encode } from "@msgpack/msgpack";
 import { CultCachePayloadDepthError } from "@gamecult/cultcache-ts/document";
 
 import {
+  CULTMESH_CDN_MANIFEST_SCHEMA,
+  DEFAULT_CHUNK_SIZE_BYTES,
   EMPTY_SHA256,
   artifactRecordKey,
   chunkRecordKey,
@@ -51,13 +53,14 @@ const manifestOf = (over: Partial<CultMeshCdnArtifactManifest> = {}): CultMeshCd
   ...over,
 });
 // Wire bytes of a ten-array with any field replaced, metadata as a plain object (no integer-like keys).
-const wire = (over: Record<number, unknown> = {}) => {
+const fieldsOf = (over: Record<number, unknown> = {}) => {
   const m = manifestOf();
   const fields: unknown[] = [m.artifactId, m.kind, m.version, m.contentHash, m.sizeBytes, m.mimeType, m.createdAtUtc,
     m.chunks.map(c => [c.chunkHash, c.offset, c.sizeBytes, c.recordKey]), m.tags, { k: "v" }];
   for (const [index, value] of Object.entries(over)) fields[Number(index)] = value;
-  return encode(fields, { useBigInt64: true, maxDepth: 1000 });
+  return fields;
 };
+const wire = (over: Record<number, unknown> = {}) => encode(fieldsOf(over), { useBigInt64: true, maxDepth: 1000 });
 const refusal = (bytes: Uint8Array) => assert.throws(() => decodeManifest(bytes), /./);
 
 test("each C# manifest vector decodes and re-encodes byte-identically", () => {
@@ -134,14 +137,6 @@ test("metadata is ordered entries, immune to JS integer-key ordering", () => {
   assert.deepEqual(encodeManifest(decodeManifest(bytes)), bytes);
 });
 
-test("a map larger than a fixmap round-trips in entry order", () => {
-  for (const count of [16, 70_000]) {
-    const metadata = Array.from({ length: count }, (_, i) => [`k${count - i}`, "v"] as const);
-    const bytes = encodeManifest(manifestOf({ metadata }));
-    assert.deepEqual(decodeManifest(bytes).metadata, metadata);
-  }
-});
-
 test("a manifest with a duplicated metadata key is refused, in decode and in validate", () => {
   const metadata = [["a", "1"], ["b", "x"], ["a", "2"]] as const;
   assert.throws(() => decodeManifest(encodeManifest(manifestOf({ metadata }))), /duplicate key/);
@@ -162,7 +157,9 @@ test("an integer field accepts any width and refuses what a JS number cannot hol
   // Past the integer rule, a size nothing sums to fails the sum check; a refused integer fails the type check first.
   assert.throws(() => decodeManifest(wire({ ...empty, 4: 2 ** 53 - 1 })), /do not sum/);
   assert.throws(() => decodeManifest(wire({ ...empty, 4: 2n ** 53n - 1n })), /do not sum/);
+  assert.throws(() => decodeManifest(wire({ ...empty, 4: 2n ** 53n })), /wrong type/);
   assert.throws(() => decodeManifest(wire({ ...empty, 4: 2n ** 53n + 1n })), /wrong type/);
+  assert.throws(() => decodeManifest(wire({ ...empty, 4: 2 ** 53 })), /wrong type/);
   assert.throws(() => decodeManifest(wire({ ...empty, 4: -(2n ** 53n) })), /wrong type/);
   assert.throws(() => decodeManifest(wire({ ...empty, 4: 0.5 })), /wrong type/);
   // A 64-bit encoding of a small value is the same value.
@@ -175,13 +172,15 @@ test("an integer field accepts any width and refuses what a JS number cannot hol
 test("a chunk size outside int32 is refused as the reference's int cannot hold it", () => {
   const chunk = (size: number) => decodeManifest(wire({ 4: size, 7: [[HASH, 0, size, "k"]] }));
   assert.equal(chunk(2 ** 31 - 1).chunks[0]!.sizeBytes, 2 ** 31 - 1);
-  assert.throws(() => chunk(2 ** 31), /wrong type/);
-  assert.throws(() => decodeManifest(wire({ 4: -(2 ** 31) - 1, 7: [[HASH, 0, -(2 ** 31) - 1, "k"]] })), /wrong type/);
+  assert.throws(() => chunk(2 ** 31), /chunks\.sizeBytes.*wrong type/);
+  assert.throws(() => decodeManifest(wire({ 4: -(2 ** 31) - 1, 7: [[HASH, 0, -(2 ** 31) - 1, "k"]] })), /chunks\.sizeBytes.*wrong type/);
+  assert.throws(() => decodeManifest(wire({ 4: 0, 7: [[HASH, 0, -(2 ** 31), "k"]] })), /chunk has a negative size/);
 });
 
 test("a payload nested 257 deep is refused before decoding and 256 is not refused for depth", () => {
   const nest = (depth: number) => Uint8Array.from([...Array<number>(depth).fill(0x91), 0xc0]);
-  assert.throws(() => decodeManifest(nest(257)), CultCachePayloadDepthError);
+  assert.throws(() => decodeManifest(nest(257)), (error: unknown) =>
+    error instanceof CultCachePayloadDepthError && /CDN artifact manifest nests 257 .* limit is 256/.test(error.message));
   assert.throws(() => decodeManifest(nest(256)), (error: unknown) => error instanceof Error && !(error instanceof CultCachePayloadDepthError));
   // The nesting is inside a field of an otherwise valid manifest: the outer array is depth 1.
   const inside = (depth: number) => wire({ 8: Array.from({ length: depth }).reduce<unknown>(value => [value], null) });
@@ -191,15 +190,33 @@ test("a payload nested 257 deep is refused before decoding and 256 is not refuse
 
 test("a manifest of the wrong shape is refused naming the field and never the value", () => {
   const canary = "CANARY-7f3a91";
-  for (const bytes of [
-    wire({ 0: 5 }), wire({ 1: 5 }), wire({ 2: 5 }), wire({ 3: 5 }), wire({ 5: 5 }), wire({ 6: 5 }),
-    wire({ 4: canary }), wire({ 7: canary }), wire({ 7: [canary] }), wire({ 7: [[HASH, 0, 4]] }), wire({ 7: [[HASH, canary, 4, "k"]] }),
-    wire({ 7: [[5, 0, 4, "k"]] }), wire({ 7: [[HASH, 0, 4, 5]] }), wire({ 8: canary }), wire({ 8: [5] }), wire({ 9: canary }), wire({ 9: { k: 5 } }),
-    wire({ 9: null }), wire({ 9: [] }), wire({ 0: null }), encode([canary]), encode(canary), encode(canary).slice(0, 4),
-    Uint8Array.from([...wire(), 0xc0]), encode([...Array<unknown>(11).fill(canary)]), wire({ 7: [[HASH, 0, 4, "k", canary]] }),
-  ]) {
-    assert.throws(() => decodeManifest(bytes), (error: unknown) => error instanceof Error && !error.message.includes(canary) && error.message.length > 0);
+  const chunk = (...parts: unknown[]) => wire({ 7: [parts] });
+  const cases: [Uint8Array, string][] = [
+    [wire({ 0: 5 }), "artifactId"], [wire({ 0: null }), "artifactId"], [wire({ 1: 5 }), "kind"], [wire({ 2: 5 }), "version"],
+    [wire({ 3: 5 }), "contentHash"], [wire({ 5: 5 }), "mimeType"], [wire({ 6: 5 }), "createdAtUtc"],
+    [wire({ 4: canary }), "sizeBytes"], [wire({ 4: "4" }), "sizeBytes"], [wire({ 4: null }), "sizeBytes"], [wire({ 4: 0.5 }), "sizeBytes"],
+    [wire({ 7: canary }), "chunks"], [wire({ 7: [canary] }), "chunks"], [chunk(HASH, 0, 4), "chunks"], [chunk(HASH, 0, 4, "k", canary), "chunks"],
+    [chunk(5, 0, 4, "k"), "chunks.chunkHash"], [chunk(HASH, canary, 4, "k"), "chunks.offset"], [chunk(HASH, 0, canary, "k"), "chunks.sizeBytes"],
+    [chunk(HASH, 0, 4, 5), "chunks.recordKey"],
+    [wire({ 8: canary }), "tags"], [wire({ 8: [5] }), "tags"],
+    [wire({ 9: canary }), "metadata"], [wire({ 9: { k: 5 } }), "metadata"], [wire({ 9: null }), "metadata"], [wire({ 9: [] }), "metadata"],
+    [wire({ 9: new Uint8Array(2) }), "metadata"],
+    [encode(fieldsOf().slice(0, 9)), "manifest"], [wire({ 10: canary }), "manifest"], [encode([canary]), "manifest"], [encode(canary), "manifest"],
+  ];
+  for (const [bytes, field] of cases) {
+    assert.throws(() => decodeManifest(bytes), (error: unknown) =>
+      error instanceof Error && error.message.includes(`'${field}'`) && !error.message.includes(canary), field);
   }
+  // Refusals that are not shape: truncated, trailing bytes. Neither echoes the value.
+  for (const bytes of [encode(canary).slice(0, 4), Uint8Array.from([...wire(), 0xc0])]) {
+    assert.throws(() => decodeManifest(bytes), (error: unknown) => error instanceof Error && !error.message.includes(canary));
+  }
+  assert.equal(decodeManifest(wire()).chunks.length, 1, "the unmodified fixture decodes");
+});
+
+test("a metadata key that is not a string names the field", () => {
+  const withMap = (...entry: Uint8Array[]) => Uint8Array.from([...wire().slice(0, -5), 0x81, ...entry.flatMap(part => Array.from(part))]);
+  assert.throws(() => decodeManifest(withMap(encode(5), encode("v"))), /'metadata'/);
 });
 
 test("validateManifest refuses negative size, a gap, an overlap and a size-sum mismatch with the C# messages", () => {
@@ -226,13 +243,17 @@ test("normalizeHash: 'SHA256:ABC ' -> 'abc', ' sha256:abc' -> 'sha256:abc', blan
   assert.equal(normalizeHash("sha256:   "), "");
   assert.equal(normalizeHash("\u00a0\u0130X\u00a0"), "\u0130x");
   for (const blank of ["", "   ", "\u0085\u2003"]) assert.throws(() => normalizeHash(blank, "chunkHash"), /Hash must be non-empty\. \(Parameter 'chunkHash'\)/);
+  assert.throws(() => normalizeHash(""), /Hash must be non-empty\. \(Parameter 'hash'\)/);
 });
 
 test("parseSha256Hex accepts 64 hex digits in any case and prefix, and refuses anything else without echoing it", () => {
   assert.equal(parseSha256Hex(`SHA256: ${"AB".repeat(32)} `), "ab".repeat(32));
-  for (const bad of ["a".repeat(63), "a".repeat(65), `${"a".repeat(63)}g`, "", "sha256:", `sha256:CANARY-${"a".repeat(50)}`]) {
-    assert.throws(() => parseSha256Hex(bad), (error: unknown) => error instanceof Error && !error.message.includes("CANARY"));
+  for (const bad of ["a".repeat(63), "a".repeat(65), `${"a".repeat(63)}g`, "sha256:", `sha256:CANARY-${"a".repeat(50)}`]) {
+    assert.throws(() => parseSha256Hex(bad), (error: unknown) =>
+      error instanceof Error && error.message === "Hash must be 64 hexadecimal digits. (Parameter 'hash')");
   }
+  assert.throws(() => parseSha256Hex("zz", "chunkHash"), /\(Parameter 'chunkHash'\)/);
+  assert.throws(() => parseSha256Hex(""), /Hash must be non-empty\. \(Parameter 'hash'\)/);
 });
 
 test("every entry in cdn-record-key-vectors.json derives to its recordKey", async () => {
@@ -286,5 +307,37 @@ test("the committed ts-written file re-packs from its declared inputs to the sam
     assert.deepEqual(encodeManifest(manifest), bytes, label);
     assert.deepEqual(encodeManifest(decodeManifest(bytes)), bytes, label);
     assert.equal(await artifactRecordKey(manifest.artifactId, manifest.version, manifest.contentHash), recordKey, label);
+  }
+});
+
+test("the schema id and the default chunk size are the reference's", async () => {
+  assert.equal(CULTMESH_CDN_MANIFEST_SCHEMA, "gamecult.mesh.cdn_artifact_manifest.v1");
+  assert.equal(DEFAULT_CHUNK_SIZE_BYTES, 4_194_304);
+  const body = new Uint8Array(DEFAULT_CHUNK_SIZE_BYTES + 1);
+  assert.deepEqual((await packContent("x", body)).manifest.chunks.map(c => c.sizeBytes), [DEFAULT_CHUNK_SIZE_BYTES, 1]);
+  assert.equal((await packContent("x", body.subarray(0, DEFAULT_CHUNK_SIZE_BYTES))).chunks.length, 1);
+  assert.deepEqual((await packContent("x", new Uint8Array(3), { chunkSizeBytes: 1 })).manifest.chunks.map(c => c.offset), [0, 1, 2]);
+});
+
+test("sha256Hex names its refusal when WebCrypto is missing, whether crypto or only subtle is absent", async () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "crypto")!;
+  try {
+    for (const replacement of [undefined, {}]) {
+      Object.defineProperty(globalThis, "crypto", { value: replacement, configurable: true, writable: true });
+      await assert.rejects(sha256Hex(new Uint8Array(1)), new Error("WebCrypto SHA-256 is unavailable."));
+    }
+  } finally {
+    Object.defineProperty(globalThis, "crypto", original);
+  }
+  assert.equal(await sha256Hex(new Uint8Array(0)), EMPTY_SHA256);
+});
+
+test("the metadata map header is the minimal MessagePack header at every size boundary", () => {
+  for (const count of [0, 15, 16, 65535, 65536]) {
+    const entries = Array.from({ length: count }, (_, i) => [`k${i}`, "v"] as const);
+    const expected = encode(Object.fromEntries(entries));
+    const bytes = encodeManifest(manifestOf({ metadata: entries }));
+    assert.deepEqual(bytes.slice(bytes.length - expected.length), expected, `${count} entries`);
+    assert.equal(decodeManifest(bytes).metadata.length, count);
   }
 });

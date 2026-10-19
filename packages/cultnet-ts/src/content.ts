@@ -81,16 +81,15 @@ export const chunkRecordKey = (chunkHash: string): string => `mesh:cdn:chunk:${n
 
 // `CultMeshCdn.StableToken`, unit by unit: a letter or decimal digit, `-`, `_` and `.` survive, anything else (a lone
 // surrogate included) becomes `-`, and a token that is empty after the trim falls back to the hash of the original.
-async function stableToken(value: string, parameterName: string): Promise<string> {
-  if (isNullOrWhiteSpaceCSharp(value)) throw new Error(`Value must be non-empty. (Parameter '${parameterName}')`);
-  const token = lowerInvariant(trimCSharp(value)).split("").map(unit => /^[\p{L}\p{Nd}\-_.]$/u.test(unit) ? unit : "-").join("").replace(/^-+|-+$/g, "");
+async function stableToken(value: string): Promise<string> {
+  const token = lowerInvariant(trimCSharp(value)).split("").map(unit => /[\p{L}\p{Nd}\-_.]/u.test(unit) ? unit : "-").join("").replace(/^-+|-+$/g, "");
   return token || sha256Hex(new TextEncoder().encode(value));
 }
 
 export async function artifactRecordKey(artifactId: string, version: string, contentHash: string): Promise<string> {
-  const artifact = await stableToken(artifactId, "artifactId");
-  const versioned = isNullOrWhiteSpaceCSharp(version) ? "unversioned" : await stableToken(version, "version");
-  return `mesh:cdn:artifact:${artifact}:${versioned}:${normalizeHash(contentHash, "contentHash")}`;
+  if (isNullOrWhiteSpaceCSharp(artifactId)) throw new Error("Value must be non-empty. (Parameter 'artifactId')");
+  const versioned = isNullOrWhiteSpaceCSharp(version) ? "unversioned" : await stableToken(version);
+  return `mesh:cdn:artifact:${await stableToken(artifactId)}:${versioned}:${normalizeHash(contentHash, "contentHash")}`;
 }
 
 // ---- validation ------------------------------------------------------------------------------------------------------
@@ -141,19 +140,16 @@ const text = (value: unknown, field: string): string => typeof value === "string
 const list = (value: unknown, field: string): unknown[] => Array.isArray(value) ? value : wrongType(field);
 const record = (value: unknown, field: string): Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value) && !(value instanceof Uint8Array) ? value as Record<string, unknown> : wrongType(field);
-const SAFE = BigInt(Number.MAX_SAFE_INTEGER);
-// Any integer width, as the reference reads; a value a JS number cannot hold exactly is refused, never rounded.
-const integer = (value: unknown, field: string): number => {
-  const number = typeof value === "bigint" ? (value >= -SAFE && value <= SAFE ? Number(value) : NaN) : value;
-  return typeof number === "number" && Number.isSafeInteger(number) ? number : wrongType(field);
-};
+// Any integer width, as the reference reads. A 64-bit value a JS number cannot hold exactly rounds to 2^53 or beyond, which is
+// never a safe integer: it is refused, never silently rounded.
+const integer = (value: unknown, field: string): number => Number.isSafeInteger(value) ? value as number : wrongType(field);
 
 /** The reference's reader: depth first, exact types, then `validateManifest`. */
 export function decodeManifest(bytes: Uint8Array): CultMeshCdnArtifactManifest {
   checkPayloadDepth(bytes, "CDN artifact manifest");
   // The decoder builds a JS object, which reorders integer-like keys; the converter sees the keys in wire order.
   const keys: string[] = [];
-  const decoder = new Decoder({ useBigInt64: true, mapKeyConverter: key => { keys.push(text(key, "metadata")); return key as string; } });
+  const decoder = new Decoder({ mapKeyConverter: key => { keys.push(text(key, "metadata")); return key as string; } });
   const fields = list(decoder.decode(bytes), "manifest");
   if (fields.length !== 10) wrongType("manifest");
   const map = record(fields[9], "metadata");
