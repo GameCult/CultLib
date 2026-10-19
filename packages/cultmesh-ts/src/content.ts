@@ -1,3 +1,4 @@
+import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
@@ -70,7 +71,9 @@ export function createContentChunkHandler(store: ContentChunkStore, options: Con
     catch (error) { return fault(hex, error instanceof ContentChunkTooLargeError ? "too-large" : "store-error", error); }
     if (!bytes) return refusal(404);
     if (bytes.length > maxChunkBytes) return fault(hex, "too-large");
-    return await sha256Hex(bytes) === hex ? chunkAnswer(bytes) : fault(hex, "hash-mismatch");
+    // The copy is the provider's own: the bytes hashed are exactly the bytes sent, whatever the store does with its buffer afterwards.
+    const owned = new Uint8Array(bytes);
+    return await sha256Hex(owned) === hex ? chunkAnswer(owned) : fault(hex, "hash-mismatch");
   };
 
   return async ({ method, url }) => {
@@ -80,12 +83,12 @@ export function createContentChunkHandler(store: ContentChunkStore, options: Con
   };
 }
 
-/** A read-only flat directory: the chunk whose hash is `<hex>` lives in `<root>/<hex>`. It writes, lists and caches nothing. */
+/** A read-only flat directory (opened non-blocking, so a FIFO named by a hash is refused by fstat instead of holding a thread): the chunk whose hash is `<hex>` lives in `<root>/<hex>`. It writes, lists and caches nothing. */
 export function createDirectoryChunkStore(root: string): ContentChunkStore {
   return {
     async readChunk(chunkHash, maxBytes) {
       if (parseSha256Hex(chunkHash) !== chunkHash) throw new Error("chunkHash must be canonical lowercase hex.");
-      const file = await open(join(root, chunkHash), "r").catch(error => { if (error?.code === "ENOENT") return undefined; throw error; });
+      const file = await open(join(root, chunkHash), constants.O_RDONLY | constants.O_NONBLOCK).catch(error => { if (error?.code === "ENOENT") return undefined; throw error; });
       if (!file) return undefined;
       try {
         const stat = await file.stat();

@@ -6,6 +6,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { mock } from "node:test";
+import { execFileSync } from "node:child_process";
 
 import { EMPTY_SHA256, chunkRecordKey, packContent, sha256Hex } from "cultnet-ts/content";
 
@@ -259,4 +260,80 @@ test("directory store closes every handle it opens, whether it returns bytes, fi
     assert.ok(opened.length >= 2, "the store opened its files through node:fs/promises open");
     assert.deepEqual(opened.map(handle => handle.fd), opened.map(() => -1));
   } finally { spy.mock.restore(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a recordKey is compared exactly: padded and re-cased forms of the right key answer 400, tab and newline keys are blank and answer 200", async () => {
+  const chunk = await packed("hello chunk");
+  const store = spyStore({ [chunk.chunkHash]: chunk.payload });
+  const key = chunkRecordKey(chunk.chunkHash);
+  const q = (value: string) => `/c?chunkHash=${chunk.chunkHash}&recordKey=${encodeURIComponent(value)}`;
+  for (const forged of [` ${key}`, `${key} `, `\t${key}`, key.toUpperCase(), key.replace("mesh", "Mesh")]) {
+    assert.equal((await ask(store, q(forged))).status, 400, JSON.stringify(forged));
+  }
+  assert.deepEqual(store.calls, []);
+  for (const blank of ["\t", "\n", "\r\n", " \t "]) assert.equal((await ask(store, q(blank))).status, 200, JSON.stringify(blank));
+  assert.equal((await ask(store, q(key))).status, 200);
+});
+
+test("only the empty chunk's own hash is answered without the store: hashes sharing its prefix or differing in the last digit reach the store", async () => {
+  const flipped = EMPTY_SHA256.slice(0, -1) + (EMPTY_SHA256.endsWith("5") ? "6" : "5");
+  const prefixed = EMPTY_SHA256.slice(0, 8) + "0".repeat(56);
+  for (const hash of [flipped, prefixed]) {
+    assert.equal(hash.length, 64);
+    const store = spyStore({});
+    const answer = await ask(store, `/c?chunkHash=${hash}`);
+    assert.equal(answer.status, 404, hash);
+    assert.deepEqual(store.calls, [hash]);
+  }
+});
+
+test("a GET reads the store once and serves the bytes it hashed, not a later read", async () => {
+  const first = await packed("first read");
+  const second = await packed("second read");
+  const reads: Uint8Array[] = [first.payload, second.payload];
+  const store: ContentChunkStore = { readChunk: async () => reads.shift() };
+  const answer = await ask(store, `/c?chunkHash=${first.chunkHash}`);
+  assert.equal(answer.status, 200);
+  assert.deepEqual(answer.body, first.payload);
+  assert.equal(reads.length, 1, "the store was read exactly once");
+});
+
+test("a store that reuses its buffer cannot change the bytes after the hash: the answer is the hashed content, from a private copy", async () => {
+  const chunk = await packed("hello chunk");
+  const shared = Buffer.from(chunk.payload);
+  // The overwrite lands in a microtask chain that runs after the handler resumes and has started hashing, before the digest resolves.
+  const store: ContentChunkStore = {
+    readChunk: async () => {
+      let hops = 0;
+      const hop = (): void => { if (++hops < 4) queueMicrotask(hop); else shared.fill(0x58); };
+      queueMicrotask(hop);
+      return shared;
+    },
+  };
+  const answer = await ask(store, `/c?chunkHash=${chunk.chunkHash}`);
+  assert.equal(shared[0], 0x58, "the store's buffer was overwritten while the request was in flight");
+  assert.equal(answer.status, 200);
+  assert.deepEqual(answer.body, chunk.payload);
+  assert.notEqual(answer.body?.buffer, shared.buffer);
+});
+
+test("a FIFO named by a hash is refused as not a regular file at once and holds no thread: other chunks are still served", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cm-content-"));
+  try {
+    const chunk = await packed("hello chunk");
+    await writeFile(join(root, chunk.chunkHash), chunk.payload);
+    const fifoHash = await sha256Hex(new Uint8Array([9]));
+    execFileSync("mkfifo", [join(root, fifoHash)]);
+    const store = createDirectoryChunkStore(root);
+    const within = async <T,>(work: Promise<T>): Promise<T> => {
+      let timer: NodeJS.Timeout | undefined;
+      try { return await Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("blocked")), 3000); })]); }
+      finally { clearTimeout(timer); }
+    };
+    // More than the libuv pool (4) so a blocking open would starve the pool.
+    const refusals = Array.from({ length: 8 }, () => within(store.readChunk(fifoHash, 1 << 20)).then(() => "read", (error: Error) => error.message));
+    assert.deepEqual(await Promise.all(refusals), Array(8).fill("Chunk is not a regular file."));
+    assert.deepEqual(await within(store.readChunk(chunk.chunkHash, 1 << 20)), chunk.payload);
+    assert.equal((await within(createContentChunkHandler(store)({ method: "GET", url: `/?chunkHash=${fifoHash}` }))).status, 500);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

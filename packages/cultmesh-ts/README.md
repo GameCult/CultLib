@@ -528,8 +528,9 @@ process, and chunks are never served by path.
 The directory store reads a flat `<root>/<hex>` layout. The publisher writes it
 from `packContent`'s chunks (an artifact of one chunk is the file named by its
 content hash). The store never writes, lists or caches. TLS and concurrency
-bounds belong to the host: memory is at most `maxChunkBytes` per in-flight
-request. `onServerFault` reports every 500 (`hash-mismatch`, `too-large`,
+bounds belong to the host: memory is at most two buffers of `maxChunkBytes` per
+in-flight request (the store's, and the private copy that is hashed and sent, so a
+host store may reuse its buffer). `onServerFault` reports every 500 (`hash-mismatch`, `too-large`,
 `store-error`) for health.
 
 ```ts
