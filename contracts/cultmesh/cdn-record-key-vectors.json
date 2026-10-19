@@ -1,0 +1,438 @@
+{
+  "artifacts": [
+    {
+      "artifactIdUnits": [
+        101,
+        117,
+        114,
+        101,
+        107,
+        97,
+        47,
+        99,
+        111,
+        110,
+        116,
+        101,
+        110,
+        116,
+        45,
+        118,
+        101,
+        99,
+        116,
+        111,
+        114
+      ],
+      "versionUnits": [],
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recordKey": "mesh:cdn:artifact:eureka-content-vector:unversioned:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "artifactIdUnits": [
+        32,
+        32,
+        77,
+        105,
+        120,
+        101,
+        100,
+        32,
+        67,
+        97,
+        115,
+        101,
+        47,
+        80,
+        97,
+        116,
+        104,
+        32,
+        32
+      ],
+      "versionUnits": [
+        32,
+        32,
+        32
+      ],
+      "contentHash": "SHA256:E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "recordKey": "mesh:cdn:artifact:mixed-case-path:unversioned:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "artifactIdUnits": [
+        304,
+        115,
+        116,
+        97,
+        110,
+        98,
+        117,
+        108
+      ],
+      "versionUnits": [
+        49,
+        46,
+        48,
+        46,
+        48
+      ],
+      "contentHash": "  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  ",
+      "recordKey": "mesh:cdn:artifact:\u0130stanbul:1.0.0:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "artifactIdUnits": [
+        913,
+        931
+      ],
+      "versionUnits": [
+        86,
+        50,
+        32,
+        66,
+        101,
+        116,
+        97
+      ],
+      "contentHash": " sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recordKey": "mesh:cdn:artifact:\u03B1\u03C3:v2-beta:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "artifactIdUnits": [
+        65279,
+        98,
+        111,
+        109
+      ],
+      "versionUnits": [
+        252
+      ],
+      "contentHash": "sha256:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recordKey": "mesh:cdn:artifact:bom:\u00FC:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "artifactIdUnits": [
+        133,
+        110,
+        101,
+        108,
+        133
+      ],
+      "versionUnits": [],
+      "contentHash": "Sha256:\u0130\u03A3\uD801\uDC00",
+      "recordKey": "mesh:cdn:artifact:nel:unversioned:\u0130\u03C3\uD801\uDC28"
+    },
+    {
+      "artifactIdUnits": [
+        26085,
+        26412,
+        35486,
+        47,
+        36039,
+        29987
+      ],
+      "versionUnits": [
+        32,
+        32,
+        32
+      ],
+      "contentHash": "sha256:",
+      "recordKey": "mesh:cdn:artifact:\u65E5\u672C\u8A9E-\u8CC7\u7523:unversioned:"
+    },
+    {
+      "artifactIdUnits": [
+        55357,
+        56898,
+        32,
+        115,
+        109,
+        105,
+        108,
+        101
+      ],
+      "versionUnits": [
+        49,
+        46,
+        48,
+        46,
+        48
+      ],
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recordKey": "mesh:cdn:artifact:smile:1.0.0:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "artifactIdUnits": [
+        45,
+        45,
+        45
+      ],
+      "versionUnits": [
+        86,
+        50,
+        32,
+        66,
+        101,
+        116,
+        97
+      ],
+      "contentHash": "SHA256:E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "recordKey": "mesh:cdn:artifact:cb3f91d54eee30e53e35b2b99905f70f169ed549fd78909d3dac2defc9ed8d3b:v2-beta:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "artifactIdUnits": [
+        97,
+        55296,
+        98
+      ],
+      "versionUnits": [
+        252
+      ],
+      "contentHash": "  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  ",
+      "recordKey": "mesh:cdn:artifact:a-b:\u00FC:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "artifactIdUnits": [
+        55296
+      ],
+      "versionUnits": [],
+      "contentHash": " sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recordKey": "mesh:cdn:artifact:83d544ccc223c057d2bf80d3f2a32982c32c3c0db8e2674820da5064783fb097:unversioned:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "artifactIdUnits": [
+        120,
+        178,
+        121
+      ],
+      "versionUnits": [
+        32,
+        32,
+        32
+      ],
+      "contentHash": "sha256:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recordKey": "mesh:cdn:artifact:x-y:unversioned:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "artifactIdUnits": [
+        1635,
+        100
+      ],
+      "versionUnits": [
+        49,
+        46,
+        48,
+        46,
+        48
+      ],
+      "contentHash": "Sha256:\u0130\u03A3\uD801\uDC00",
+      "recordKey": "mesh:cdn:artifact:\u0663d:1.0.0:\u0130\u03C3\uD801\uDC28"
+    },
+    {
+      "artifactIdUnits": [
+        55297,
+        56320,
+        65
+      ],
+      "versionUnits": [
+        86,
+        50,
+        32,
+        66,
+        101,
+        116,
+        97
+      ],
+      "contentHash": "sha256:",
+      "recordKey": "mesh:cdn:artifact:a:v2-beta:"
+    },
+    {
+      "artifactIdUnits": [
+        101,
+        117,
+        114,
+        101,
+        107,
+        97,
+        47,
+        99,
+        111,
+        110,
+        116,
+        101,
+        110,
+        116,
+        45,
+        118,
+        101,
+        99,
+        116,
+        111,
+        114
+      ],
+      "versionUnits": [],
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recordKey": "mesh:cdn:artifact:eureka-content-vector:unversioned:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "artifactIdUnits": [
+        101,
+        117,
+        114,
+        101,
+        107,
+        97,
+        47,
+        99,
+        111,
+        110,
+        116,
+        101,
+        110,
+        116,
+        45,
+        118,
+        101,
+        99,
+        116,
+        111,
+        114
+      ],
+      "versionUnits": [
+        32,
+        32,
+        32
+      ],
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recordKey": "mesh:cdn:artifact:eureka-content-vector:unversioned:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "artifactIdUnits": [
+        101,
+        117,
+        114,
+        101,
+        107,
+        97,
+        47,
+        99,
+        111,
+        110,
+        116,
+        101,
+        110,
+        116,
+        45,
+        118,
+        101,
+        99,
+        116,
+        111,
+        114
+      ],
+      "versionUnits": [
+        49,
+        46,
+        48,
+        46,
+        48
+      ],
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recordKey": "mesh:cdn:artifact:eureka-content-vector:1.0.0:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "artifactIdUnits": [
+        101,
+        117,
+        114,
+        101,
+        107,
+        97,
+        47,
+        99,
+        111,
+        110,
+        116,
+        101,
+        110,
+        116,
+        45,
+        118,
+        101,
+        99,
+        116,
+        111,
+        114
+      ],
+      "versionUnits": [
+        86,
+        50,
+        32,
+        66,
+        101,
+        116,
+        97
+      ],
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recordKey": "mesh:cdn:artifact:eureka-content-vector:v2-beta:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "artifactIdUnits": [
+        101,
+        117,
+        114,
+        101,
+        107,
+        97,
+        47,
+        99,
+        111,
+        110,
+        116,
+        101,
+        110,
+        116,
+        45,
+        118,
+        101,
+        99,
+        116,
+        111,
+        114
+      ],
+      "versionUnits": [
+        252
+      ],
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recordKey": "mesh:cdn:artifact:eureka-content-vector:\u00FC:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "chunks": [
+    {
+      "chunkHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recordKey": "mesh:cdn:chunk:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "chunkHash": "SHA256:E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "recordKey": "mesh:cdn:chunk:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "chunkHash": "  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  ",
+      "recordKey": "mesh:cdn:chunk:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "chunkHash": " sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recordKey": "mesh:cdn:chunk:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "chunkHash": "sha256:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recordKey": "mesh:cdn:chunk:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "chunkHash": "Sha256:\u0130\u03A3\uD801\uDC00",
+      "recordKey": "mesh:cdn:chunk:\u0130\u03C3\uD801\uDC28"
+    },
+    {
+      "chunkHash": "sha256:",
+      "recordKey": "mesh:cdn:chunk:"
+    }
+  ]
+}

@@ -104,7 +104,7 @@ public sealed class CultMeshContentVectorTests
     {
         var path = VectorPath("cdn-record-key-vectors.json");
         File.Exists(path).Should().BeTrue($"{path} is written by this fixture under CULTNET_WRITE_VECTORS=1");
-        File.ReadAllText(path).Should().Be(RecordKeyVectorsToJson(BuildRecordKeyVectors()), "the key grammar drifted from the committed vectors");
+        Lines(File.ReadAllText(path)).Should().Be(Lines(RecordKeyVectorsToJson(BuildRecordKeyVectors())), "the key grammar drifted from the committed vectors");
     }
 
     [Test]
@@ -322,6 +322,8 @@ public sealed class CultMeshContentVectorTests
                 Convert.FromBase64String(v.GetProperty("messagePackBase64").GetString()!)))
             .ToList();
     }
+
+    private static string Lines(string text) => text.Replace("\r\n", "\n").TrimEnd('\n');
 
     private static string[] KeyHashes()
     {
