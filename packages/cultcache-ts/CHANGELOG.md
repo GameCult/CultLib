@@ -10,8 +10,9 @@ All notable changes to `@gamecult/cultcache-ts` are recorded here, following
   interoperable with the C# and Rust runtimes (`flock` on Unix, `LockFileEx` on Windows).
   `push` and `delete` read the current file, merge and replace it under the lock, so concurrent
   TypeScript and Rust writers no longer lose each other's records across those calls. A full
-  `pushAll` still replaces the whole store, and so does any C# write, so records a concurrent
-  writer added are still lost to either of them.
+  `pushAll` still replaces the whole store, so records a concurrent writer added are lost to it.
+  C# writes are not all alike: a conditional commit on a clean store lands onto the file as it
+  is, but C# writers can still overwrite records a concurrent TypeScript writer added.
 - The staged file is fsynced before the replace, and on Unix the directory after it. A
   directory sync failure after the replace is reported as replaced but not durable.
 
