@@ -529,6 +529,25 @@ test("a read of a current store never waits for the store lock, and a missing st
   }
 });
 
+// A share-none open succeeds only when no other handle on the file is open, as C# readers and
+// writers need it to.
+function canOpenShareNone(path: string): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const koffi = require("koffi");
+  const lib = koffi.load("kernel32.dll");
+  const createFileW = lib.func(
+    "intptr_t CreateFileW(str16 name, uint32_t access, uint32_t share, void *security, uint32_t disposition, uint32_t flags, void *template)",
+  );
+  const closeHandle = lib.func("int CloseHandle(intptr_t handle)");
+  const handle = Number(createFileW(path, 0x80000000, 0, null, 3, 0x80, null));
+  if (handle === -1) {
+    return false;
+  }
+
+  closeHandle(handle);
+  return true;
+}
+
 test(
   "windows: the real kernel replaces through both primitives and reports the Win32 error of a missing source",
   { skip: process.platform !== "win32" },
@@ -545,6 +564,7 @@ test(
         await writeFile(store, Buffer.from([1]));
         await writeFile(staged, Buffer.from([2]));
         assert.equal(replace(staged, store), 0, name);
+        assert.ok(canOpenShareNone(store), `${name}: the replace left a handle open on the store`);
         assert.deepEqual([...(await readFile(store))], [2], name);
         assert.deepEqual(await readdir(directory).then((names) => names.filter((n) => n === `${name}.tmp`)), [], name);
         assert.equal(replace(join(directory, "missing.tmp"), store), 2, `${name}: ERROR_FILE_NOT_FOUND`);
@@ -556,13 +576,16 @@ test(
 );
 
 test(
-  "windows: after a write the lock file is held by no handle, so a share-none open (C#'s lock) succeeds",
+  "windows: after a write and after a waiter gave up, the lock file is held by no handle, so a share-none open (C#'s lock) succeeds",
   { skip: process.platform !== "win32" },
   async () => {
     const directory = await scratch();
     try {
       const store = join(directory, "store.cc");
-      await withStoreWriteLock(store, async () => undefined);
+      await withStoreWriteLock(store, async () => {
+        // A waiter that polls and gives up must not leave a handle on the lock file either.
+        await assert.rejects(withStoreWriteLock(store, async () => undefined, { timeoutMs: 100 }), /timed out/);
+      });
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const koffi = require("koffi");
       const lib = koffi.load("kernel32.dll");
