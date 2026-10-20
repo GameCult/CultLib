@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { decode, encode } from "@msgpack/msgpack";
@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import { documentPayloadBytes, documentPayloadFromBytes } from "./document";
 import { checkPayloadDepth } from "./payload-depth";
+import { commitStoreFile } from "./store-file";
 import { STORE_FORMAT_VERSION, isV1Snapshot, requireV1RecordSlots } from "./store-format";
 import type {
   CacheBackingStore,
@@ -149,17 +150,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   async #writeAll(entries: CultCacheEnvelope[]): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
 
-    const tempPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2)}`;
-
-    try {
-      await writeFile(tempPath, encode(encodeSnapshot(entries)));
-      await renameWithRetry(tempPath, this.filePath);
-    } catch (error) {
-      await rm(tempPath, { force: true }).catch(() => undefined);
-      throw error;
-    }
+    await commitStoreFile(this.filePath, encode(encodeSnapshot(entries)));
   }
 }
 
@@ -188,32 +179,6 @@ async function readStore(path: string): Promise<Uint8Array | undefined> {
   }
 
   throw Object.assign(new Error(`CultCache store ${path} is a symbolic link whose target does not exist.`), { code: "ENOENT" });
-}
-
-async function renameWithRetry(source: string, destination: string): Promise<void> {
-  let delayMs = 10;
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 10; attempt++) {
-    try {
-      await rename(source, destination);
-      return;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") {
-        throw error;
-      }
-
-      lastError = error;
-      await delay(delayMs);
-      delayMs *= 2;
-    }
-  }
-
-  throw lastError;
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 type PersistedRecord = {
