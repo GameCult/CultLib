@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 
 import { decode, encode } from "@msgpack/msgpack";
 
-import { documentPayloadFromBytes } from "../src/document";
+import { documentPayloadBytes, documentPayloadFromBytes } from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
 import type { CultCacheEnvelope } from "../src/types";
 
@@ -101,6 +101,7 @@ test("a commit that fails before the replace leaves the store byte for byte and 
     assert.deepEqual([...(await readFile(store))], [9, 9, 9]);
     assert.deepEqual(await readdir(directory), ["store.cc"]);
     assert.ok(calls.includes("remove"));
+    assert.equal(calls.filter((call) => call === "close").length, 1, "the staged handle is closed exactly once");
     assert.ok(!calls.includes("syncDirectory"));
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -123,6 +124,7 @@ test("a commit whose staged file cannot be synced never replaces the store", asy
     await assert.rejects(commitStoreFile(store, new Uint8Array([1]), ops), /disk full/);
 
     assert.ok(!calls.includes("replace"));
+    assert.ok(calls.indexOf("close") !== -1 && calls.indexOf("close") < calls.indexOf("remove"), "the staged handle is closed, then the file removed");
     assert.deepEqual([...(await readFile(store))], [9]);
     assert.deepEqual(await readdir(directory), ["store.cc"]);
   } finally {
@@ -147,6 +149,7 @@ test(
       await assert.rejects(commitStoreFile(store, new Uint8Array([1]), ops), (error: unknown) => {
         assert.ok(error instanceof StoreReplacedNotDurableError);
         assert.equal(error.replaced, true);
+        assert.equal(error.name, "StoreReplacedNotDurableError");
         assert.match(error.message, /was replaced/);
         return true;
       });
@@ -198,8 +201,23 @@ test("the Windows replace falls back to write-through MoveFileExW where POSIX re
   for (const transient of [5, 32, 33]) {
     const { kernel, log, sleeps } = fakeKernel([transient, transient, 0], []);
     await replaceStoreFileWindows("a", "b", kernel);
-    assert.equal(log.length, 3);
+    assert.deepEqual(log, ["posix", "posix", "posix"], "a transient error retries the same primitive");
     assert.deepEqual(sleeps, [20, 20]);
+  }
+
+  // A POSIX rename that works is the whole replace.
+  {
+    const { kernel, log, sleeps } = fakeKernel([0], []);
+    await replaceStoreFileWindows("a", "b", kernel);
+    assert.deepEqual(log, ["posix"]);
+    assert.deepEqual(sleeps, []);
+  }
+
+  // After the fallback, an "unsupported" code is an error, not another fallback.
+  for (const unsupported of [1, 50, 87]) {
+    const { kernel, log } = fakeKernel([87], [unsupported]);
+    await assert.rejects(replaceStoreFileWindows("a", "b", kernel), new RegExp(`Win32 error ${unsupported}`));
+    assert.deepEqual(log, ["posix", "moveex:9"]);
   }
 
   {
@@ -301,10 +319,10 @@ test(
 // ---------------------------------------------------------------------------------------------
 // The cross-process write lock (TypeScript against TypeScript; C# and Rust are in cult-cache.test.ts).
 
-const entryOf = (key: string): CultCacheEnvelope => ({
+const entryOf = (key: string, type = "t", marker = 0): CultCacheEnvelope => ({
   key,
-  type: "t",
-  payload: documentPayloadFromBytes(Uint8Array.of(0x90)),
+  type,
+  payload: documentPayloadFromBytes(Uint8Array.of(0x91, marker)),
   storedAt: "2026-10-20T00:00:00Z",
 });
 
@@ -432,6 +450,72 @@ test("two TypeScript processes pushing distinct keys to one store lose none", as
     const keys = (await new SingleFileMessagePackBackingStore(path).pullAll()).map((entry) => entry.key).sort();
     assert.equal(keys.length, 80);
     assert.equal(new Set(keys).size, 80);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+const snapshotOf = async (store: SingleFileMessagePackBackingStore): Promise<string[]> =>
+  (await store.pullAll())
+    .map((entry) => `${entry.type}/${entry.key}:${[...documentPayloadBytes(entry.payload)].at(-1)}`)
+    .sort();
+
+test("push replaces the record at the same type and key and keeps every other", async () => {
+  const directory = await scratch();
+  try {
+    const store = new SingleFileMessagePackBackingStore(join(directory, "store.cc"));
+    await store.pushAll([entryOf("a", "t", 1), entryOf("b", "t", 2), entryOf("a", "u", 3)]);
+    await store.push(entryOf("a", "t", 9));
+    assert.deepEqual(await snapshotOf(store), ["t/a:9", "t/b:2", "u/a:3"]);
+    await store.push(entryOf("c", "t", 4));
+    assert.deepEqual(await snapshotOf(store), ["t/a:9", "t/b:2", "t/c:4", "u/a:3"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("delete removes only the record at that type and key", async () => {
+  const directory = await scratch();
+  try {
+    const store = new SingleFileMessagePackBackingStore(join(directory, "store.cc"));
+    await store.pushAll([entryOf("a", "t", 1), entryOf("b", "t", 2), entryOf("a", "u", 3)]);
+    await store.delete(entryOf("a", "t"));
+    assert.deepEqual(await snapshotOf(store), ["t/b:2", "u/a:3"]);
+    await store.delete(entryOf("zzz", "t"));
+    assert.deepEqual(await snapshotOf(store), ["t/b:2", "u/a:3"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("pushAll replaces the whole store, and a soft pushAll leaves an existing store alone", async () => {
+  const directory = await scratch();
+  try {
+    const path = join(directory, "store.cc");
+    const store = new SingleFileMessagePackBackingStore(path);
+    await store.pushAll([entryOf("a", "t", 1)], { soft: true });
+    assert.deepEqual(await snapshotOf(store), ["t/a:1"]);
+    const before = await readFile(path);
+    await store.pushAll([entryOf("b", "t", 2)], { soft: true });
+    assert.deepEqual([...(await readFile(path))], [...before], "soft leaves an existing store byte for byte");
+    await store.pushAll([entryOf("b", "t", 2)]);
+    assert.deepEqual(await snapshotOf(store), ["t/b:2"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a read of a current store never waits for the store lock, and a missing store reads empty", async () => {
+  const directory = await scratch();
+  try {
+    const path = join(directory, "store.cc");
+    const store = new SingleFileMessagePackBackingStore(path);
+    await store.push(entryOf("a"));
+    await withStoreWriteLock(path, async () => {
+      assert.deepEqual(await within(store.pullAll().then((rows) => rows.map((row) => row.key)), 2000, "a read"), ["a"]);
+      const missing = new SingleFileMessagePackBackingStore(join(directory, "absent.cc"));
+      assert.deepEqual(await within(missing.pullAll(), 2000, "a read of a missing store"), []);
+    });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
