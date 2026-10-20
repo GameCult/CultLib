@@ -132,11 +132,7 @@ export async function replaceStoreFileWindows(
   let lastCode = 0;
   for (let attempt = 1; attempt <= REPLACE_ATTEMPTS; attempt++) {
     let code = posix ? kernel.renamePosix(staged, destination) : kernel.moveFileEx(staged, destination, MOVEFILE_REPLACE_WRITE_THROUGH);
-    if (
-      posix &&
-      code !== 0 &&
-      (code === 1 || code === ERROR_NOT_SUPPORTED || code === ERROR_INVALID_PARAMETER)
-    ) {
+    if (posix && (code === 1 || code === ERROR_NOT_SUPPORTED || code === ERROR_INVALID_PARAMETER)) {
       // POSIX semantics are unsupported here (FAT, exFAT, before Windows 10 1607): the rest of this call is write-through.
       posix = false;
       code = kernel.moveFileEx(staged, destination, MOVEFILE_REPLACE_WRITE_THROUGH);
@@ -312,7 +308,8 @@ function loadLibc(platform: "linux" | "darwin"): Libc {
   return libcCache;
 }
 
-function windowsKernel(): ReplaceKernel {
+/** The bound kernel32 replace calls; exported for the tests that run them against the real kernel. */
+export function windowsKernel(): ReplaceKernel {
   const k = loadKernel32();
   return {
     renamePosix: (staged, destination) => {

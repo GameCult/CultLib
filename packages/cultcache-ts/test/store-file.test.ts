@@ -19,6 +19,7 @@ import {
   nodeStoreFileOps,
   replaceStoreFile,
   replaceStoreFileWindows,
+  windowsKernel,
   withStoreWriteLock,
 } from "../src/store-file";
 import type { ReplaceKernel, StoreFileOps } from "../src/store-file";
@@ -211,6 +212,13 @@ test("the Windows replace falls back to write-through MoveFileExW where POSIX re
     await replaceStoreFileWindows("a", "b", kernel);
     assert.deepEqual(log, ["posix"]);
     assert.deepEqual(sleeps, []);
+  }
+
+  // Once on MoveFileExW, an "unsupported" code is an error in any later attempt, never another fallback.
+  {
+    const { kernel, log } = fakeKernel([87], [32, 87]);
+    await assert.rejects(replaceStoreFileWindows("a", "b", kernel), /Win32 error 87/);
+    assert.deepEqual(log, ["posix", "moveex:9", "moveex:9"]);
   }
 
   // After the fallback, an "unsupported" code is an error, not another fallback.
@@ -516,6 +524,92 @@ test("a read of a current store never waits for the store lock, and a missing st
       const missing = new SingleFileMessagePackBackingStore(join(directory, "absent.cc"));
       assert.deepEqual(await within(missing.pullAll(), 2000, "a read of a missing store"), []);
     });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test(
+  "windows: the real kernel replaces through both primitives and reports the Win32 error of a missing source",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const directory = await scratch();
+    try {
+      const kernel = windowsKernel();
+      for (const [name, replace] of [
+        ["posix", (staged: string, store: string) => kernel.renamePosix(staged, store)],
+        ["moveex", (staged: string, store: string) => kernel.moveFileEx(staged, store, MOVEFILE_REPLACE_WRITE_THROUGH)],
+      ] as const) {
+        const store = join(directory, `${name}.cc`);
+        const staged = join(directory, `${name}.tmp`);
+        await writeFile(store, Buffer.from([1]));
+        await writeFile(staged, Buffer.from([2]));
+        assert.equal(replace(staged, store), 0, name);
+        assert.deepEqual([...(await readFile(store))], [2], name);
+        assert.deepEqual(await readdir(directory).then((names) => names.filter((n) => n === `${name}.tmp`)), [], name);
+        assert.equal(replace(join(directory, "missing.tmp"), store), 2, `${name}: ERROR_FILE_NOT_FOUND`);
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "windows: after a write the lock file is held by no handle, so a share-none open (C#'s lock) succeeds",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const directory = await scratch();
+    try {
+      const store = join(directory, "store.cc");
+      await withStoreWriteLock(store, async () => undefined);
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const koffi = require("koffi");
+      const lib = koffi.load("kernel32.dll");
+      const createFileW = lib.func(
+        "intptr_t CreateFileW(str16 name, uint32_t access, uint32_t share, void *security, uint32_t disposition, uint32_t flags, void *template)",
+      );
+      const closeHandle = lib.func("int CloseHandle(intptr_t handle)");
+      const handle = Number(createFileW(`${store}.lock`, 0xc0000000, 0, null, 4, 0x80, null));
+      assert.notEqual(handle, -1, "the lock file is still held open after the write");
+      closeHandle(handle);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test("a store file of an unrecognized shape is refused, and a store naming a missing schema id is refused naming the record", async () => {
+  const directory = await scratch();
+  try {
+    const odd = join(directory, "odd.cc");
+    await writeFile(odd, encode({ not: "a store" }));
+    await assert.rejects(new SingleFileMessagePackBackingStore(odd).pullAll(), /is not a recognized CultCache MessagePack store/);
+
+    const dangling = join(directory, "dangling.cc");
+    await writeFile(dangling, encode(["cultcache.store.v1", [], [["rec:1", "sha256:missing", "2026-10-20T00:00:00Z", Uint8Array.of(0x90)]]]));
+    await assert.rejects(
+      new SingleFileMessagePackBackingStore(dangling).pullAll(),
+      /persisted record "rec:1" references missing schema id "sha256:missing"/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("opening a store that needs no healing writes nothing: a missing store leaves no lock file, a legacy store with byte payloads keeps its bytes", async () => {
+  const directory = await scratch();
+  try {
+    const absent = join(directory, "nested", "absent.cc");
+    assert.deepEqual(await new SingleFileMessagePackBackingStore(absent).pullAll(), []);
+    assert.deepEqual(await readdir(directory), [], "a read of a missing store creates neither its directory nor its lock");
+
+    const legacyBytes = encode([{ key: "k", type: "t", payload: Uint8Array.of(0x90), storedAt: "2026-10-20T00:00:00Z" }]);
+    const path = join(directory, "legacy-bytes.cc");
+    await writeFile(path, legacyBytes);
+    assert.deepEqual((await new SingleFileMessagePackBackingStore(path).pullAll()).map((entry) => entry.key), ["k"]);
+    assert.deepEqual([...(await readFile(path))], [...legacyBytes], "a legacy store whose payloads are already bytes is not rewritten");
+    assert.deepEqual((await readdir(directory)).sort(), ["legacy-bytes.cc"]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
