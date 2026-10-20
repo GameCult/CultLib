@@ -8,8 +8,10 @@ All notable changes to `@gamecult/cultcache-ts` are recorded here, following
 ### Added
 - `SingleFileMessagePackBackingStore` takes a cross-process write lock on `<file>.lock`,
   interoperable with the C# and Rust runtimes (`flock` on Unix, `LockFileEx` on Windows).
-  Each write reads the current file, merges and replaces it under the lock, so concurrent
-  writers no longer lose each other's records.
+  `push` and `delete` read the current file, merge and replace it under the lock, so concurrent
+  TypeScript and Rust writers no longer lose each other's records across those calls. A full
+  `pushAll` still replaces the whole store, and so does any C# write, so records a concurrent
+  writer added are still lost to either of them.
 - The staged file is fsynced before the replace, and on Unix the directory after it. A
   directory sync failure after the replace is reported as replaced but not durable.
 
