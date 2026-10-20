@@ -114,6 +114,11 @@ jobs:
       - name: Verify the CultCache document owner with the TypeScript cache
         run: npm run test --workspace packages/cultcache-ts
 
+      # Packs the four TypeScript packages and installs them into a clean consumer, so a package that builds but does
+      # not install or load fails here.
+      - name: Verify the packed TypeScript packages install and load from a clean consumer
+        run: npm run test:pack:ts
+
       - name: Verify the CultMesh authority rules with the TypeScript verifier
         run: npm run test --workspace packages/cultnet-ts
 
