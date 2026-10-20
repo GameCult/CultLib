@@ -240,8 +240,13 @@ replaces; writers bump a minted timestamp by one tick when it is not later.
   wait bound (30 seconds).
 - A conditional commit on a store with staged single-record writes throws:
   flush first.
-- Single-file stores lock a sidecar `<path>.lock` opened exclusively. Directory
-  stores use their existing commit lease.
+- Single-file stores lock a sidecar `<path>.lock`: C# by an exclusive
+  (share-none) open, Rust and TypeScript by an exclusive `LockFileEx` on a
+  shared open on Windows, and every runtime by `flock(LOCK_EX)` on Unix. Each
+  excludes the others (TypeScript tests: "a TypeScript write waits while a C#
+  writer holds the store lock", "... a Rust writer ...", "a C# writer waits
+  while a TypeScript writer holds the store lock", "a Rust writer waits ...").
+  Directory stores use their existing commit lease.
 - A directory store with no `.commit.lock` (no writer has created it yet, or
   the store was copied without it) gives a pull no lease, and opening it
   creates none. Such a pull re-reads the manifest after loading its pages and
@@ -265,9 +270,11 @@ against another writer; processes sharing a store must all use it.
   in that store, and leaves the store clean.
 - A conditional commit lands the batch onto the file as it is under the lock.
 
-A store is written by one runtime at a time. Whether a Rust `fs2` lock and a C#
-exclusive open of the same lock file exclude each other is not established, and
-another runtime need not obey the `storedAt` rule.
+C#, Rust and TypeScript writers exclude each other on the shared lock file;
+Python takes no cross-process lock yet (`variants:follow_up:py-shared-write-lock`),
+and Rust's open fails rather than waits while a C# writer holds the lock
+(`variants:follow_up:rust-lock-open-waits`). Another runtime need not obey the
+`storedAt` rule.
 
 ## Serialization options
 
