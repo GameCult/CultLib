@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { mkdirSync, readFileSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import fsp = require("node:fs/promises");
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
@@ -80,6 +82,52 @@ test("a commit syncs the staged file before it replaces the store, and the direc
     assert.deepEqual([...(await readFile(store))], [1, 2, 3]);
     assert.deepEqual(await readdir(directory), ["store.cc"]);
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// The default write path, with nothing injected: every file handle it opens is observed through
+// fs/promises.open (the module object, read at call time), recording what the handle did and what the
+// store held at that moment. The replace is seen as the store's bytes changing, so the order holds on
+// every platform without a seam in the replace itself.
+test("the default write path syncs and closes the staged file before the store changes, and syncs the directory after (Unix)", async () => {
+  const directory = await scratch();
+  const realOpen = fsp.open;
+  try {
+    const store = join(directory, "store.cc");
+    await writeFile(store, "old");
+    const storeNow = () => readFileSync(store, "utf8");
+    const events: string[] = [];
+    (fsp as { open: typeof fsp.open }).open = (async (path: string, flags?: string) => {
+      const handle = await realOpen(path, flags as never);
+      const kind = basename(String(path)) === basename(directory) ? "dir" : String(path).includes(".tmp-") ? "staged" : "other";
+      const sync = handle.sync.bind(handle);
+      const close = handle.close.bind(handle);
+      handle.sync = () => {
+        events.push(`sync:${kind}:${storeNow()}`);
+        return sync();
+      };
+      handle.close = () => {
+        events.push(`close:${kind}:${storeNow()}`);
+        return close();
+      };
+      return handle;
+    }) as typeof fsp.open;
+
+    await commitStoreFile(store, new TextEncoder().encode("new"));
+    (fsp as { open: typeof fsp.open }).open = realOpen;
+
+    // The staged file is synced, then closed, while the store still holds its old bytes.
+    assert.deepEqual(events.filter((event) => event.includes(":staged:")), ["sync:staged:old", "close:staged:old"]);
+    if (process.platform === "win32") {
+      assert.deepEqual(events.filter((event) => event.includes(":dir:")), [], "Windows relies on the replace and opens no directory");
+    } else {
+      // The directory is synced and closed after the store changed.
+      assert.deepEqual(events.filter((event) => event.includes(":dir:")), ["sync:dir:new", "close:dir:new"]);
+    }
+    assert.equal(storeNow(), "new");
+  } finally {
+    (fsp as { open: typeof fsp.open }).open = realOpen;
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -378,6 +426,35 @@ test("the store lock gives up after its wait bound and names the lock path", asy
     });
     // The failed waiter released nothing it did not hold: the lock is free again.
     assert.equal(await withStoreWriteLock(store, async () => "free", { timeoutMs: 200 }), "free");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a directory at the lock path fails at once with the lock path named, not after the 30 s wait", async () => {
+  const directory = await scratch();
+  try {
+    const store = join(directory, "store.cc");
+    mkdirSync(`${store}.lock`);
+    const started = Date.now();
+    let ran = false;
+    // The default wait bound (30 s) is in force: only a failure that does not wait can beat the race.
+    const outcome = await Promise.race([
+      withStoreWriteLock(store, async () => {
+        ran = true;
+      }).then(
+        () => ({ error: undefined as Error | undefined }),
+        (error: Error) => ({ error }),
+      ),
+      new Promise<"waiting">((resolveWait) => setTimeout(() => resolveWait("waiting"), 3000).unref()),
+    ]);
+    assert.notEqual(outcome, "waiting", "the lock attempt was still waiting after 3 s");
+    const { error } = outcome as { error: Error | undefined };
+    assert.ok(error, "locking a directory must fail");
+    assert.ok(error.message.includes(`${store}.lock`), error.message);
+    assert.ok(!/timed out/.test(error.message), error.message);
+    assert.ok(Date.now() - started < 3000);
+    assert.equal(ran, false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
