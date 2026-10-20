@@ -30,15 +30,32 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let mode = args
         .next()
-        .ok_or_else(|| anyhow!("expected mode: write | read"))?;
+        .ok_or_else(|| anyhow!("expected mode: write | read | hold-lock"))?;
     let options = parse_args(args.collect());
     let file = require_arg(&options, "file")?;
 
     match mode.as_str() {
         "write" => write_note(file, require_arg(&options, "runtime-id")?)?,
         "read" => read_note(file)?,
+        "hold-lock" => hold_lock(file, require_arg(&options, "ms")?.parse()?)?,
         _ => return Err(anyhow!("unknown mode {mode}")),
     }
+    Ok(())
+}
+
+/// Holds the store lock as the library opens it (`<file>.lock`, fs2 exclusive), for `ms`.
+fn hold_lock(file: &str, ms: u64) -> Result<()> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .truncate(false)
+        .write(true)
+        .open(format!("{file}.lock"))?;
+    fs2::FileExt::lock_exclusive(&lock)?;
+    println!("{}", json!({ "held": true }));
+    std::io::Write::flush(&mut std::io::stdout())?;
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+    fs2::FileExt::unlock(&lock)?;
     Ok(())
 }
 
