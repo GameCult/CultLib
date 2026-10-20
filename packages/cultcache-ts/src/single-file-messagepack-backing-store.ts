@@ -6,7 +6,7 @@ import { z } from "zod";
 
 import { documentPayloadBytes, documentPayloadFromBytes } from "./document";
 import { checkPayloadDepth } from "./payload-depth";
-import { commitStoreFile } from "./store-file";
+import { commitStoreFile, withStoreWriteLock } from "./store-file";
 import { STORE_FORMAT_VERSION, isV1Snapshot, requireV1RecordSlots } from "./store-format";
 import type {
   CacheBackingStore,
@@ -44,17 +44,32 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   }
 
   async pullAll(): Promise<CultCacheEnvelope[]> {
+    const { envelopes, healLegacy } = await this.#readDisk();
+    if (healLegacy) {
+      // The heal decides from its own read, taken under the store lock.
+      await this.#enqueue(async () => {
+        const again = await this.#readDisk();
+        if (again.healLegacy) {
+          await this.#writeAll(again.envelopes);
+        }
+      });
+    }
+
+    return envelopes;
+  }
+
+  async #readDisk(): Promise<{ envelopes: CultCacheEnvelope[]; healLegacy: boolean }> {
     // An empty file is not a store, since no CultCache writer leaves one, so it is
     // decoded and refused. Only a read that finds nothing at the path is an empty store.
     const data = await readStore(this.filePath);
     if (data === undefined) {
-      return [];
+      return { envelopes: [], healLegacy: false };
     }
 
     const decoded = decode(data);
     const snapshot = decodeSnapshot(decoded);
     if (snapshot) {
-      return snapshot.records.map((record) => {
+      const envelopes = snapshot.records.map((record) => {
         const catalogEntry = resolveCatalogEntryForRecord(record, snapshot.catalogBySchemaId);
         if (!catalogEntry) {
           throw new Error(`CultCache persisted record "${record.key}" references missing schema id "${record.schemaId}".`);
@@ -69,6 +84,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
           storedAt: record.storedAt,
         };
       });
+      return { envelopes, healLegacy: false };
     }
 
     const legacy = decodeLegacyEnvelopeArray(decoded);
@@ -90,11 +106,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
         payload: documentPayloadFromBytes(entry.payload),
       }));
 
-      if (repairedLegacyPayload) {
-        await this.#writeAll(parsed);
-      }
-
-      return parsed;
+      return { envelopes: parsed, healLegacy: repairedLegacyPayload };
     }
 
     throw new Error(`CultCache file ${this.filePath} is not a recognized CultCache MessagePack store.`);
@@ -102,7 +114,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
 
   async push(entry: CultCacheEnvelope): Promise<void> {
     await this.#enqueue(async () => {
-      const existing = await this.pullAll();
+      const existing = (await this.#readDisk()).envelopes;
       const filtered = existing.filter(
         (candidate) => !(candidate.type === entry.type && candidate.key === entry.key),
       );
@@ -113,7 +125,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
 
   async delete(entry: CultCacheEnvelope): Promise<void> {
     await this.#enqueue(async () => {
-      const existing = await this.pullAll();
+      const existing = (await this.#readDisk()).envelopes;
       const filtered = existing.filter(
         (candidate) => !(candidate.type === entry.type && candidate.key === entry.key),
       );
@@ -134,9 +146,11 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   async #enqueue<T>(operation: () => Promise<T>): Promise<T> {
     let result!: T;
 
-    const next = this.#writeQueue.then(async () => {
-      result = await operation();
-    });
+    const next = this.#writeQueue.then(() =>
+      withStoreWriteLock(this.filePath, async () => {
+        result = await operation();
+      }),
+    );
 
     this.#writeQueue = next.then(
       () => undefined,

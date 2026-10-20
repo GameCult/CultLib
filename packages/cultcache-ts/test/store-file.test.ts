@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
+
+import { decode, encode } from "@msgpack/msgpack";
+
+import { documentPayloadFromBytes } from "../src/document";
+import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
+import type { CultCacheEnvelope } from "../src/types";
 
 import {
   MOVEFILE_REPLACE_WRITE_THROUGH,
@@ -11,8 +19,11 @@ import {
   nodeStoreFileOps,
   replaceStoreFile,
   replaceStoreFileWindows,
+  withStoreWriteLock,
 } from "../src/store-file";
 import type { ReplaceKernel, StoreFileOps } from "../src/store-file";
+
+const execFileAsync = promisify(execFile);
 
 async function scratch(): Promise<string> {
   return mkdtemp(join(tmpdir(), "cultcache-store-file-"));
@@ -286,3 +297,142 @@ test(
     }
   },
 );
+
+// ---------------------------------------------------------------------------------------------
+// The cross-process write lock (TypeScript against TypeScript; C# and Rust are in cult-cache.test.ts).
+
+const entryOf = (key: string): CultCacheEnvelope => ({
+  key,
+  type: "t",
+  payload: documentPayloadFromBytes(Uint8Array.of(0x90)),
+  storedAt: "2026-10-20T00:00:00Z",
+});
+
+function sleepFor(milliseconds: number): Promise<void> {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
+}
+
+function within<T>(promise: Promise<T>, milliseconds: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} did not finish within ${milliseconds} ms (deadlock)`)), milliseconds);
+  });
+  return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
+}
+
+test("a second writer in this process waits for the store lock and runs after release", async () => {
+  const directory = await scratch();
+  try {
+    const store = join(directory, "store.cc");
+    const order: string[] = [];
+    let second: Promise<void> | undefined;
+    await withStoreWriteLock(store, async () => {
+      second = withStoreWriteLock(store, async () => {
+        order.push("second");
+      });
+      await sleepFor(150);
+      order.push("first-done");
+    });
+    await second;
+    assert.deepEqual(order, ["first-done", "second"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the store lock gives up after its wait bound and names the lock path", async () => {
+  const directory = await scratch();
+  try {
+    const store = join(directory, "store.cc");
+    await withStoreWriteLock(store, async () => {
+      await assert.rejects(
+        withStoreWriteLock(store, async () => undefined, { timeoutMs: 200 }),
+        (error: Error) => error.message.includes(`${store}.lock`) && /200 ms/.test(error.message),
+      );
+    });
+    // The failed waiter released nothing it did not hold: the lock is free again.
+    assert.equal(await withStoreWriteLock(store, async () => "free", { timeoutMs: 200 }), "free");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the store lock is released when the operation throws", async () => {
+  const directory = await scratch();
+  try {
+    const store = join(directory, "store.cc");
+    await assert.rejects(withStoreWriteLock(store, async () => Promise.reject(new Error("boom"))), /boom/);
+    assert.equal(await withStoreWriteLock(store, async () => "free", { timeoutMs: 200 }), "free");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+const legacyObjectPayload = (): Uint8Array =>
+  encode([{ key: "note:hello", type: "note", payload: { title: "Hello" }, storedAt: "2026-10-20T00:00:00Z" }]);
+
+test("an open that heals a legacy store waits for the store lock and heals from its own read", async () => {
+  const directory = await scratch();
+  try {
+    const path = join(directory, "legacy.cc");
+    const legacy = legacyObjectPayload();
+    await writeFile(path, legacy);
+    const store = new SingleFileMessagePackBackingStore(path);
+    let healed: Promise<unknown> | undefined;
+    let settled = false;
+    await withStoreWriteLock(path, async () => {
+      healed = store.pullAll().then(() => {
+        settled = true;
+      });
+      await sleepFor(300);
+      assert.equal(settled, false, "the heal must wait for the lock");
+      assert.deepEqual([...(await readFile(path))], [...legacy], "the file keeps its legacy bytes while the lock is held elsewhere");
+    });
+    await within(healed!, 5000, "the heal");
+    assert.equal((decode(await readFile(path)) as unknown[])[0], "cultcache.store.v1");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("push and delete over a legacy store that needs healing finish instead of waiting on their own lock", async () => {
+  const directory = await scratch();
+  try {
+    const path = join(directory, "legacy.cc");
+    await writeFile(path, legacyObjectPayload());
+    const store = new SingleFileMessagePackBackingStore(path);
+    await within(store.push(entryOf("a")), 5000, "push");
+    await writeFile(path, legacyObjectPayload());
+    await within(store.delete(entryOf("a")), 5000, "delete");
+    const keys = (await store.pullAll()).map((entry) => entry.key);
+    assert.deepEqual(keys, ["note:hello"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("two TypeScript processes pushing distinct keys to one store lose none", async () => {
+  const directory = await scratch();
+  try {
+    const path = join(directory, "store.cc");
+    const dist = resolve(__dirname, "..", "..", "dist");
+    const script = `
+      const { SingleFileMessagePackBackingStore } = require(${JSON.stringify(join(dist, "single-file-messagepack-backing-store.js"))});
+      const { documentPayloadFromBytes } = require(${JSON.stringify(join(dist, "document.js"))});
+      (async () => {
+        const store = new SingleFileMessagePackBackingStore(${JSON.stringify(path)});
+        for (let i = 0; i < 40; i++) {
+          await store.push({ key: process.argv[1] + "-" + i, type: "t", payload: documentPayloadFromBytes(Uint8Array.of(0x90)), storedAt: "2026-10-20T00:00:00Z" });
+        }
+      })().catch((error) => { console.error(error); process.exit(1); });
+    `;
+    await Promise.all(
+      ["p", "q"].map((name) => execFileAsync(process.execPath, ["-e", script, name], { timeout: 120_000 })),
+    );
+    const keys = (await new SingleFileMessagePackBackingStore(path).pullAll()).map((entry) => entry.key).sort();
+    assert.equal(keys.length, 80);
+    assert.equal(new Set(keys).size, 80);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
