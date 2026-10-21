@@ -393,7 +393,7 @@ namespace GameCult.Caching
         /// <summary>
         /// The schema id this record is durably stored under, as its backing store last read or wrote it. It differs from
         /// <see cref="CultDocumentDescriptor.SchemaId"/> only for a record loaded under compatible schema drift that its
-        /// store has not rewritten since; a store records its rewrite with <see cref="CacheBackingStore.MarkWritten"/>.
+        /// store has not rewritten since; a store records its rewrite of an entry it holds with <see cref="CacheBackingStore.MarkWritten"/>.
         /// Conditional commit compares this id and <see cref="StoredAt"/> with the disk.
         /// </summary>
         public string PersistedSchemaId => _persisted.SchemaId;
@@ -3331,8 +3331,16 @@ namespace GameCult.Caching
         /// kept is not marked. A rewrite left unmarked makes conditional commit compare the schema id the record was read
         /// under, which fails closed until the next pull.
         /// </summary>
-        protected static void MarkWritten(CultStoredDocument entry) =>
-            (entry ?? throw new ArgumentNullException(nameof(entry))).MarkWritten();
+        /// <exception cref="ArgumentException"><paramref name="entry"/> is not the entry this store holds in
+        /// <see cref="Entries"/> at its key: a store marks only its own rewrite.</exception>
+        protected void MarkWritten(CultStoredDocument entry)
+        {
+            if (entry == null)
+                throw new ArgumentNullException(nameof(entry));
+            if (!Entries.TryGetValue(entry.Key.Value, out var held) || !ReferenceEquals(held, entry))
+                throw new ArgumentException($"Record '{entry.Key.Value}' is not the entry this store holds; a store marks only what it wrote.", nameof(entry));
+            entry.MarkWritten();
+        }
     }
 
     public abstract class SingleFileBackingStore : CacheBackingStore
