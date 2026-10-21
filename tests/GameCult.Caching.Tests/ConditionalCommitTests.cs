@@ -162,6 +162,26 @@ namespace GameCult.Caching.Tests
             Assert.That(reader.Get<ConditionalDriftNarrow>(DriftKey)!.Value, Is.EqualTo(2));
         }
 
+        // A store marks only what it holds: another cache's copy of the same record is refused and left as read.
+        [Test]
+        public void ACustomStoreCannotMarkAnEntryItDoesNotHold()
+        {
+            SeedDrift(directory: false);
+            using var owner = new CultCache(NarrowDrift);
+            var ownerStore = new WholeFileStore(PathOf("drift.cc"));
+            owner.AddBackingStore(ownerStore);
+            ownerStore.PullAll();
+            using var other = new CultCache(NarrowDrift);
+            var otherStore = new WholeFileStore(PathOf("drift.cc"));
+            other.AddBackingStore(otherStore);
+            otherStore.PullAll();
+            var foreign = owner.GetStored(DriftKey)!;
+            var persisted = foreign.PersistedSchemaId;
+
+            Assert.Throws<ArgumentException>(() => otherStore.Mark(foreign), "a store marked another cache's entry");
+            Assert.That(foreign.PersistedSchemaId, Is.EqualTo(persisted), "a refused mark changed the entry");
+        }
+
         [Test]
         public void OwnUnconditionalCommitKeepsDriftedExpectHolding()
         {
@@ -1061,6 +1081,8 @@ namespace GameCult.Caching.Tests
             });
 
             public override void Delete(CultStoredDocument entry) => throw new NotSupportedException();
+
+            public void Mark(CultStoredDocument entry) => MarkWritten(entry);
 
             public override void PushAll() => Held(Write);
 
