@@ -234,8 +234,10 @@ one tick when it is not later. An entry loaded under compatible schema drift
 keeps its persisted id until its store rewrites it; a store records each
 record its completed write rewrote with the protected instance method
 `CacheBackingStore.MarkWritten`, which refuses an entry that is not the one
-the store holds in its own `Entries` at that key, so a store cannot mark
-another store's or another cache's copy. A store that does not mark leaves
+the store holds in its own `Entries` at that key. That guards against a store
+marking by mistake an entry it never held; a store that writes another copy
+into its own `Entries` and then marks it is trusted to have rewritten that
+record, so a mark is the store's own claim. A store that does not mark leaves
 the entry's `Expect` failing closed until the next pull. A whole-file flush or
 unconditional commit rewrites every record under the writer's current schema
 and keeps its `storedAt`, so another cache's `Expect` on a drifted record it
