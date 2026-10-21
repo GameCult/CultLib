@@ -19,6 +19,12 @@ backfilled here; see `docs/semver-policy.md` for why.
   inlined until it recompiles. `af_snoise` and `af_fbm` read it, so their
   remainder terms are slightly tighter.
 
+### Changed
+
+- The package license expression is `MIT AND MPL-2.0 AND Apache-2.0` (was
+  `MIT AND MPL-2.0`): the Cycles files below are Apache-2.0 (`LICENSE.md`,
+  `THIRD-PARTY-NOTICES.md`).
+
 ### Added
 
 - Cycles node semantics (Apache-2.0, `math.Cycles.cs` and the new
@@ -33,14 +39,15 @@ backfilled here; see `docs/semver-policy.md` for why.
   Blender 5.2.2's CPU Cycles.
 - `CultMath.Expr`: an immutable scalar SSA expression graph (`ExprGraph`, built by
   `ExprBuilder` with substitution, validated by `ExprGraph.Create` on build and on
-  decode), parameter bindings (`ExprBindings`), an evaluator (`ExprEvaluator`), the
-  op table (`ExprOps`) and a MessagePack shape (`ExprGraph.FormatVersion` 1).
+  decode), parameter bindings (`ExprBindings`), an evaluator (`ExprEvaluator`) and
+  the op table (`ExprOps`). The package carries no serializer for it.
 - Site cells: `math.power_score`, `multiplicative_score`, the `CultSiteCells`
-  accumulator (`site_cells_empty`, `site_cells_insert`, `site_cells_border`),
-  `power_cells`, `multiplicative_cells`, the exact power cell border
-  (`power_border`, `power_border_step`), `gabriel_margin` and
-  `soft_gabriel_gate`, with HLSL twins. The shader forms take a fixed-capacity
-  site array of `CULTMATH_MAX_SITES` (128 unless defined before the include).
+  accumulator (`site_cells_empty`, `site_cells_insert`, `site_cells_border`), the
+  exact power cell border (`power_border`, `power_border_step`) and
+  `gabriel_margin`, each with an HLSL twin (`cultmath_` prefix); the shader
+  `cultmath_power_border` takes a fixed-capacity site array of
+  `CULTMATH_MAX_SITES` (128 unless defined before the include). `power_cells`,
+  `multiplicative_cells` and `soft_gabriel_gate` are C# only.
 - Weighted lattice cells: `math.weighted_lattice_cells` with an exact ring-exit
   search and its four public steps (`lattice_site`, `lattice_weight`,
   `lattice_distance`, `lattice_smooth_step`), the range constants
