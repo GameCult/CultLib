@@ -263,6 +263,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         var keysToWrite = _dirtyKeys.Keys
             .OrderBy(value => value, StringComparer.Ordinal)
             .ToArray();
+        var written = new List<CultStoredDocument>(keysToWrite.Length);
         foreach (var key in keysToWrite)
         {
             if (!Entries.TryGetValue(key, out var stored))
@@ -281,11 +282,15 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             WriteFileAtomically(
                 ContentAddressedRecordPath(indexRecord),
                 pagePayload);
+            written.Add(stored);
         }
 
         WriteManifest(targetCatalog, currentIndex.Values
             .OrderBy(record => record.Key, StringComparer.Ordinal)
             .ToArray());
+        // The manifest names the new pages: each was written under its own descriptor.
+        foreach (var stored in written)
+            MarkWritten(stored);
 
         DeleteUnreferencedRecordPages(currentIndex.Values);
 

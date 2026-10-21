@@ -393,7 +393,8 @@ namespace GameCult.Caching
         /// <summary>
         /// The schema id this record is durably stored under, as its backing store last read or wrote it. It differs from
         /// <see cref="CultDocumentDescriptor.SchemaId"/> only for a record loaded under compatible schema drift that its
-        /// store has not rewritten since. Conditional commit compares this id and <see cref="StoredAt"/> with the disk.
+        /// store has not rewritten since; a store records its rewrite with <see cref="CacheBackingStore.MarkWritten"/>.
+        /// Conditional commit compares this id and <see cref="StoredAt"/> with the disk.
         /// </summary>
         public string PersistedSchemaId => _persisted.SchemaId;
 
@@ -411,7 +412,7 @@ namespace GameCult.Caching
 
         internal CultStoredDocument Resolved(object document) => new(Key, StoredAt, Descriptor, Variant!, document, _persisted);
 
-        // Only a store calls this, under the hold, after its completed durable write rewrote the record under its descriptor.
+        // Reached only through CacheBackingStore.MarkWritten, the one way a store records a rewrite.
         internal void MarkWritten() => _persisted.SchemaId = Descriptor.SchemaId;
 
         private sealed class PersistedIdentity
@@ -3322,6 +3323,16 @@ namespace GameCult.Caching
         {
             IsDirty = false;
         }
+
+        /// <summary>
+        /// Records that this store's completed durable write stored <paramref name="entry"/> under its descriptor, so its
+        /// <see cref="CultStoredDocument.PersistedSchemaId"/> is <see cref="CultDocumentDescriptor.SchemaId"/> again. Call it
+        /// under <c>Held</c>, once the write is durable, for each record the write rewrote; a record whose bytes the write
+        /// kept is not marked. A rewrite left unmarked makes conditional commit compare the schema id the record was read
+        /// under, which fails closed until the next pull.
+        /// </summary>
+        protected static void MarkWritten(CultStoredDocument entry) =>
+            (entry ?? throw new ArgumentNullException(nameof(entry))).MarkWritten();
     }
 
     public abstract class SingleFileBackingStore : CacheBackingStore
@@ -3416,7 +3427,7 @@ namespace GameCult.Caching
                 }
 
                 foreach (var entry in Entries.Values)
-                    entry.MarkWritten();
+                    MarkWritten(entry);
                 MarkFlushSucceeded();
             });
         }
@@ -3465,7 +3476,7 @@ namespace GameCult.Caching
             if (!ontoDisk)
             {
                 foreach (var entry in Entries.Values)
-                    entry.MarkWritten();
+                    MarkWritten(entry);
             }
 
             MarkFlushSucceeded();
