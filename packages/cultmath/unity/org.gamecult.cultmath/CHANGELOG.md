@@ -12,14 +12,12 @@ backfilled here; see `docs/semver-policy.md` for why.
 - `CultPhasor.cos` and `.sin` are now `.cosine` and `.sine` in C#, HLSL and GLSL,
   constructor parameters included, because SPIRV-Cross renames members that match
   GLSL builtins.
-
-### Changed
-
-- `math.SNOISE_HESSIAN` (and `CULTMATH_SNOISE_HESSIAN`) is re-pinned from
-  56.050385 to 55.642143, measured on the analytic `snoise_hessian` instead of
+- The `const` `math.SNOISE_HESSIAN` (and `CULTMATH_SNOISE_HESSIAN`) is re-pinned
+  from 56.050385 to 55.642143, measured on the analytic `snoise_hessian` instead of
   central differences of `snoise_grad`, whose rounding read high
-  (`NoiseBoundTests`). `af_snoise` and `af_fbm` read it, so their remainder
-  terms are slightly tighter.
+  (`NoiseBoundTests`). A consumer compiled against 0.4.x keeps the old value
+  inlined until it recompiles. `af_snoise` and `af_fbm` read it, so their
+  remainder terms are slightly tighter.
 
 ### Added
 
