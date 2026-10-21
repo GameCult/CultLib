@@ -31,11 +31,12 @@ All notable changes to this package are documented in this file.
   stored under, as its backing store last read or wrote it. It differs from
   `Descriptor.SchemaId` only for a record loaded under compatible schema drift
   that its store has not rewritten since.
-- `CacheBackingStore.MarkWritten(CultStoredDocument)` (protected): a backing
-  store records that its completed durable write stored a record under its
-  descriptor, so `PersistedSchemaId` follows the rewrite. The single-file and
-  directory stores mark every record they rewrite; a custom store calls it for
-  each record its own write rewrote.
+- `CacheBackingStore.MarkWritten(CultStoredDocument)` (protected instance
+  method): a backing store records that its completed durable write stored a
+  record under its descriptor, so `PersistedSchemaId` follows the rewrite. It
+  throws `ArgumentException` for an entry that is not the one the store holds
+  in its own `Entries`. The single-file and directory stores mark every record
+  they rewrite; a custom store calls it for each record its own write rewrote.
 
 ### Changed
 

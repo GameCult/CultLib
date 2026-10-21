@@ -232,9 +232,11 @@ not the one this cache decodes it as. A value change mints a `storedAt`
 strictly later than the record it replaces; writers bump a minted timestamp by
 one tick when it is not later. An entry loaded under compatible schema drift
 keeps its persisted id until its store rewrites it; a store records each
-record its completed write rewrote with the protected
-`CacheBackingStore.MarkWritten`, and one that does not leaves the entry's
-`Expect` failing closed until the next pull. A whole-file flush or
+record its completed write rewrote with the protected instance method
+`CacheBackingStore.MarkWritten`, which refuses an entry that is not the one
+the store holds in its own `Entries` at that key, so a store cannot mark
+another store's or another cache's copy. A store that does not mark leaves
+the entry's `Expect` failing closed until the next pull. A whole-file flush or
 unconditional commit rewrites every record under the writer's current schema
 and keeps its `storedAt`, so another cache's `Expect` on a drifted record it
 read before that rewrite fails until it re-reads the store.
