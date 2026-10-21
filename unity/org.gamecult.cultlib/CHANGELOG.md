@@ -25,6 +25,27 @@ All notable changes to this package are documented in this file.
   an integer is refused with the same union-naming refusal, and a variant
   override holding an unknown arm names the schema id.
 
+### Added
+
+- `CultStoredDocument.PersistedSchemaId`: the schema id a record is durably
+  stored under, as its backing store last read or wrote it. It differs from
+  `Descriptor.SchemaId` only for a record loaded under compatible schema drift
+  that its store has not rewritten since.
+
+### Changed
+
+- After another writer's whole-file flush or unconditional commit rewrites a
+  drifted record under a schema id this cache did not read it under, keeping its
+  `storedAt`, an `Expect` captured before fails until this cache re-reads the
+  store (`PullAll`), as for any other lost race.
+
+### Fixed
+
+- `Expect` and `ExpectUnchanged` hold on an unchanged record loaded under
+  compatible schema drift (written under one version of its type, read by a
+  cache that knows another). Before, they always failed: conditional commit
+  compared the record's persisted schema id with the id this cache decodes it as.
+
 ## [1.0.60]
 
 ### Changed
