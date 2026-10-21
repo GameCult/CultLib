@@ -226,9 +226,15 @@ against what is durably on disk at that moment:
   cache last loaded from it, compared as the ordered list of
   `(key, schemaId, storedAt)`. Any insert, delete or replace fails it.
 
-Record identity for conditions is `(schemaId, storedAt)`. It is sound because
-every write to a key mints a `storedAt` strictly later than the record it
-replaces; writers bump a minted timestamp by one tick when it is not later.
+Record identity for conditions is `(schemaId, storedAt)`, where `schemaId` is
+the id the record is persisted under (`CultStoredDocument.PersistedSchemaId`),
+not the one this cache decodes it as. A value change mints a `storedAt`
+strictly later than the record it replaces; writers bump a minted timestamp by
+one tick when it is not later. An entry loaded under compatible schema drift
+keeps its persisted id until its store rewrites it. A whole-file flush or
+unconditional commit rewrites every record under the writer's current schema
+and keeps its `storedAt`, so another cache's `Expect` on a drifted record it
+read before that rewrite fails until it re-reads the store.
 
 - A failed condition is a lost race, not an error: `Commit` returns false and
   nothing is written, changed in memory, or published. `TryCommit` makes one
