@@ -5,14 +5,68 @@ All notable changes to this package are documented in this file.
 Earlier releases (0.2.0-0.2.3) predate this package's changelog and are not
 backfilled here; see `docs/semver-policy.md` for why.
 
-## [Unreleased]
+## [0.5.0]
 
 ### Breaking
 
 - `CultPhasor.cos` and `.sin` are now `.cosine` and `.sine` in C#, HLSL and GLSL,
   constructor parameters included, because SPIRV-Cross renames members that match
-  GLSL builtins. This is a minor bump on 0.y.z, so the next cultmath-unity release
-  is 0.5.0.
+  GLSL builtins.
+- The `const` `math.SNOISE_HESSIAN` (and `CULTMATH_SNOISE_HESSIAN`) is re-pinned
+  from 56.050385 to 55.642143, measured on the analytic `snoise_hessian` instead of
+  central differences of `snoise_grad`, whose rounding read high
+  (`NoiseBoundTests`). A consumer compiled against 0.4.x keeps the old value
+  inlined until it recompiles. `af_snoise` and `af_fbm` read it, so their
+  remainder terms are slightly tighter.
+
+### Changed
+
+- The package license expression is `MIT AND MPL-2.0 AND Apache-2.0` (was
+  `MIT AND MPL-2.0`): the Cycles files below are Apache-2.0 (`LICENSE.md`,
+  `THIRD-PARTY-NOTICES.md`).
+
+### Added
+
+- Cycles node semantics (Apache-2.0, `math.Cycles.cs` and the new
+  `Shaders/CultMath.Cycles.hlsl`): `math.cycles_*` and `cultmath_cycles_*` compute
+  what Blender's Cycles computes for the Math node operations whose results differ
+  from a plain intrinsic (`cycles_divide`, `cycles_power`, `cycles_modulo`,
+  `cycles_wrap`, `cycles_pingpong`, `cycles_smooth_min`, `cycles_arctan2`, ...),
+  Map Range (`linear`, `stepped`, `smoothstep`, `smootherstep`), Clamp, Mix
+  (`cycles_mix_float`, `cycles_mix_vector` and every colour blend mode as
+  `cycles_mix_<mode>`), RGB to BW, HSV conversion and `cycles_ramp_index`.
+  `CyclesOracleTests` holds the C# and the HLSL mirror to fixtures recorded from
+  Blender 5.2.2's CPU Cycles.
+- `CultMath.Expr`: an immutable scalar SSA expression graph (`ExprGraph`, built by
+  `ExprBuilder` with substitution, validated by `ExprGraph.Create` on build and on
+  decode), parameter bindings (`ExprBindings`), an evaluator (`ExprEvaluator`) and
+  the op table (`ExprOps`). The package carries no serializer for it.
+- Site cells: `math.power_score`, `multiplicative_score`, the `CultSiteCells`
+  accumulator (`site_cells_empty`, `site_cells_insert`, `site_cells_border`), the
+  exact power cell border (`power_border`, `power_border_step`) and
+  `gabriel_margin`, each with an HLSL twin (`cultmath_` prefix); the shader
+  `cultmath_power_border` takes a fixed-capacity site array of
+  `CULTMATH_MAX_SITES` (128 unless defined before the include). `power_cells`,
+  `multiplicative_cells` and `soft_gabriel_gate` are C# only.
+- Weighted lattice cells: `math.weighted_lattice_cells` with an exact ring-exit
+  search and its four public steps (`lattice_site`, `lattice_weight`,
+  `lattice_distance`, `lattice_smooth_step`), the range constants
+  `LatticeMaxBoost`, `LatticeMaxStretch`, `LatticeMaxSmoothing` and
+  `LatticeMaxRing`, and the HLSL twins (`cultmath_weighted_lattice_cells`,
+  `cultmath_lattice_cell_distance`).
+- Span stages: `math.span_fbm` and `span_ridged` over a `SpanPath` and a
+  `SpanStage` return `SpanNoise` (field, curvature and fold), widened by float
+  rounding allowances, with HLSL twins; `cultmath_span_rounding` and
+  `cultmath_span_slack` own the allowances.
+- `math.snoise_hessian(float3)` (`float3x3`), the next-order bound
+  `SNOISE_THIRD` (535.8009), and the snoise read rounding constants
+  `CULTMATH_SNOISE_READ_VALUE` and `CULTMATH_SNOISE_READ_GRADIENT` in HLSL.
+- `math.integral_clamp_linear(a, b, lo, hi, t0, t1)`, the integral of
+  `clamp(a + b t, lo, hi)` over `[t0, t1]` in closed form, with its HLSL twin. It
+  is finite for an infinite clamp bound, and `lo` above `hi` clamps to `hi`
+  everywhere, as `clamp` does.
+- `math.segment_closest` and the out-free `distance_to_segment` for `float2`
+  and `float3`, with HLSL twins.
 
 ## [0.4.1]
 
