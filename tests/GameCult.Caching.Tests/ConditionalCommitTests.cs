@@ -97,14 +97,19 @@ namespace GameCult.Caching.Tests
             Assert.That(DriftCommit(cache, observed, 2), Is.False, "a record rewritten under another schema passed Expect on storedAt alone");
         }
 
-        [Test]
-        public void AnotherWritersNormalisingFlushFailsExpectUntilReRead()
+        // The directory store rewrites only what is pushed to it, so the other writer pushes the record it read unchanged.
+        [TestCase(false)]
+        [TestCase(true)]
+        public void AnotherWritersNormalisingFlushFailsExpectUntilReRead(bool directory)
         {
-            SeedDrift(directory: false);
-            using var cache = Drift(false, NarrowDrift).Open();
+            SeedDrift(directory);
+            using var cache = Drift(directory, NarrowDrift).Open();
             var observed = cache.Get(DriftKey)!;
-            using (var other = Drift(false, NarrowDrift).Open())
+            using (var other = Drift(directory, NarrowDrift).Open())
+            {
+                other.BackingStores[0].Push(other.GetStored(DriftKey)!);
                 other.BackingStores[0].PushAll();
+            }
 
             Assert.That(DriftCommit(cache, observed, 2), Is.False, "Expect held across a rewrite under a schema id this cache did not read");
             cache.BackingStores[0].PullAll();
