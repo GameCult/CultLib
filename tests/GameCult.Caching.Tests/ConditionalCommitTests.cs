@@ -145,6 +145,20 @@ namespace GameCult.Caching.Tests
             }), Is.True, "ExpectUnchanged failed on a store nobody touched");
         }
 
+        [Test]
+        public void UpsertUnderTheCurrentSchemaMovesThePersistedId()
+        {
+            SeedDrift(directory: false);
+            using var cache = Drift(false, NarrowDrift).Open();
+            var loaded = cache.GetStored(DriftKey)!;
+            Assert.That(loaded.PersistedSchemaId, Is.EqualTo("tests.conditional_drift.v1"));
+            Assert.That(loaded.Descriptor.SchemaId, Is.EqualTo("tests.conditional_drift.v2"));
+
+            Assert.That(DriftCommit(cache, cache.Get(DriftKey)!, 2), Is.True);
+            Assert.That(cache.GetStored(DriftKey)!.PersistedSchemaId, Is.EqualTo("tests.conditional_drift.v2"));
+            Assert.That(DriftCommit(cache, cache.Get(DriftKey)!, 3), Is.True, "Expect failed on the record this cache just wrote");
+        }
+
         // The lock is a FileShare.None handle, which excludes another handle in this process exactly as it does one in
         // another process, so two store instances on two threads prove the property without a process boundary.
         [Test]

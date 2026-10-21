@@ -110,7 +110,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             .Where(pair => !Staged(pair.Key) &&
                            (!Entries.TryGetValue(pair.Key, out var existing) ||
                             existing.StoredAt != pair.Value.StoredAt ||
-                            existing.Descriptor.SchemaId != pair.Value.Descriptor.SchemaId))
+                            existing.PersistedSchemaId != pair.Value.PersistedSchemaId))
             .Select(pair => pair.Value)
             .ToArray();
         var departed = _hydratedKeys

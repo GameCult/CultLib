@@ -338,11 +338,19 @@ namespace GameCult.Caching
             string storedAt,
             CultDocumentDescriptor descriptor,
             object document)
+            : this(key, storedAt, descriptor, null, document, new PersistedIdentity(descriptor.SchemaId))
         {
-            Key = key;
-            StoredAt = storedAt;
-            Descriptor = descriptor;
-            _document = document;
+        }
+
+        // A plain record its store read: persistedSchemaId is the schema id its durable bytes are stored under.
+        internal CultStoredDocument(
+            CultRecordKey key,
+            string storedAt,
+            CultDocumentDescriptor descriptor,
+            object document,
+            string persistedSchemaId)
+            : this(key, storedAt, descriptor, null, document, new PersistedIdentity(persistedSchemaId))
+        {
         }
 
         // A variant: the delta is what is stored; the cache resolves it against its base in the hold that admits it.
@@ -351,20 +359,43 @@ namespace GameCult.Caching
             string storedAt,
             CultDocumentDescriptor descriptor,
             CultVariantDelta variant,
-            object? resolved)
+            object? resolved,
+            string persistedSchemaId)
+            : this(key, storedAt, descriptor, variant, resolved, new PersistedIdentity(persistedSchemaId))
+        {
+        }
+
+        private CultStoredDocument(
+            CultRecordKey key,
+            string storedAt,
+            CultDocumentDescriptor descriptor,
+            CultVariantDelta? variant,
+            object? document,
+            PersistedIdentity persisted)
         {
             Key = key;
             StoredAt = storedAt;
             Descriptor = descriptor;
             Variant = variant;
-            _document = resolved;
+            _document = document;
+            _persisted = persisted;
         }
 
         private readonly object? _document;
 
+        // One record's, shared by a variant and its resolved view: the store holds the one and the cache the other.
+        private readonly PersistedIdentity _persisted;
+
         public CultRecordKey Key { get; }
         public string StoredAt { get; }
         public CultDocumentDescriptor Descriptor { get; }
+
+        /// <summary>
+        /// The schema id this record is durably stored under, as its backing store last read or wrote it. It differs from
+        /// <see cref="CultDocumentDescriptor.SchemaId"/> only for a record loaded under compatible schema drift that its
+        /// store has not rewritten since. Conditional commit compares this id and <see cref="StoredAt"/> with the disk.
+        /// </summary>
+        public string PersistedSchemaId => _persisted.SchemaId;
 
         // The complete document. For a variant, the resolved view: derived, never written back.
         public object Document => _document ??
@@ -378,7 +409,17 @@ namespace GameCult.Caching
 
         internal bool IsResolved => _document != null;
 
-        internal CultStoredDocument Resolved(object document) => new(Key, StoredAt, Descriptor, Variant!, document);
+        internal CultStoredDocument Resolved(object document) => new(Key, StoredAt, Descriptor, Variant!, document, _persisted);
+
+        // Only a store calls this, under the hold, after its completed durable write rewrote the record under its descriptor.
+        internal void MarkWritten() => _persisted.SchemaId = Descriptor.SchemaId;
+
+        private sealed class PersistedIdentity
+        {
+            public PersistedIdentity(string schemaId) => SchemaId = schemaId;
+
+            public string SchemaId;
+        }
     }
 
     public sealed class CultDocumentRegistry
@@ -1673,7 +1714,8 @@ namespace GameCult.Caching
         public bool HasConditions => Expected.Count > 0 || ExpectUnchanged;
 
         // durable is what the store holds on disk now; observed is what its cache last loaded or committed.
-        // Identity is (schemaId, storedAt), sound because every write to a key mints a later storedAt.
+        // Identity is (the schema id the record is persisted under, storedAt). A value change mints a later storedAt; a
+        // whole-file write keeps storedAt and rewrites a drifted record under another schema id, which the schema half sees.
         public bool ConditionsHold(IReadOnlyCollection<CultPersistedRecord> durable, IEnumerable<CultStoredDocument> observed)
         {
             var byKey = durable.ToDictionary(record => record.Key, StringComparer.Ordinal);
@@ -1691,7 +1733,7 @@ namespace GameCult.Caching
                    durable.Select(record => Identity(record.Key, record.SchemaId, record.StoredAt))
                        .OrderBy(identity => identity, StringComparer.Ordinal)
                        .SequenceEqual(observed
-                           .Select(stored => Identity(stored.Key.Value, stored.Descriptor.SchemaId, stored.StoredAt))
+                           .Select(stored => Identity(stored.Key.Value, stored.PersistedSchemaId, stored.StoredAt))
                            .OrderBy(identity => identity, StringComparer.Ordinal));
         }
 
@@ -1768,8 +1810,8 @@ namespace GameCult.Caching
         public void Expect(CultRecordKey key, object? current)
         {
             ThrowIfSealed();
-            var observed = _cache.Observe(key, current);
-            Expected.Add((key, observed?.Descriptor.SchemaId, observed?.StoredAt));
+            var identity = _cache.Observe(key, current);
+            Expected.Add((key, identity?.SchemaId, identity?.StoredAt));
         }
 
         public void ExpectUnchanged()
@@ -2279,7 +2321,7 @@ namespace GameCult.Caching
 
         // An unresolved variant: the admitting hold resolves it against its base before anything lands.
         private CultStoredDocument StampVariant(CultRecordKey key, CultDocumentDescriptor descriptor, CultVariantDelta delta) =>
-            new(key, MintStoredAt(PreviousStoredAt(key)), descriptor, delta, null);
+            new(key, MintStoredAt(PreviousStoredAt(key)), descriptor, delta, null, descriptor.SchemaId);
 
         // The plain record a Flatten stages: the variant's resolved document, under the variant's own key and schema.
         private CultStoredDocument StampFlatten(CultRecordKey key)
@@ -2323,7 +2365,8 @@ namespace GameCult.Caching
             }
         }
 
-        internal CultStoredDocument? Observe(CultRecordKey key, object? current)
+        // The durable identity of the record holding current, read under the gate, where a store's write moves it.
+        internal (string SchemaId, string StoredAt)? Observe(CultRecordKey key, object? current)
         {
             if (current == null)
                 return null;
@@ -2331,7 +2374,7 @@ namespace GameCult.Caching
             {
                 if (_handles.TryGetValue(current, out var box) && box.Key.Equals(key) &&
                     _entries.TryGetValue(key.Value, out var stored) && ReferenceEquals(stored.Document, current))
-                    return stored;
+                    return (stored.PersistedSchemaId, stored.StoredAt);
             }
 
             throw new ArgumentException($"Expect({key.Value}) was given an instance this cache does not hold at that key.", nameof(current));
@@ -2402,7 +2445,7 @@ namespace GameCult.Caching
                     if (request.HasConditions && _stores.Count > 0)
                         throw new InvalidOperationException("A conditional batch names its home store through a record it upserts or removes.");
                     var inMemory = _entries.Values
-                        .Select(entry => new CultPersistedRecord { Key = entry.Key.Value, SchemaId = entry.Descriptor.SchemaId, StoredAt = entry.StoredAt })
+                        .Select(entry => new CultPersistedRecord { Key = entry.Key.Value, SchemaId = entry.PersistedSchemaId, StoredAt = entry.StoredAt })
                         .ToArray();
                     return request.ConditionsHold(inMemory, _entries.Values) ? CultCommitOutcome.Committed : CultCommitOutcome.Mismatch;
                 });
@@ -3246,7 +3289,8 @@ namespace GameCult.Caching
                     record.StoredAt,
                     descriptor,
                     new CultVariantDelta(record.Variant.BaseKey, record.Variant.Overrides.Where(Has).ToArray()),
-                    null);
+                    null,
+                    record.SchemaId);
             }
 
             object document;
@@ -3265,7 +3309,8 @@ namespace GameCult.Caching
                 new CultRecordKey(record.Key),
                 record.StoredAt,
                 resolution.Descriptor,
-                document);
+                document,
+                record.SchemaId);
         }
 
         protected void SetLastSchemaMigrationReports(IEnumerable<CultSchemaMigrationReport> reports)
@@ -3323,7 +3368,7 @@ namespace GameCult.Caching
             var loaded = persisted.Values
                 .Where(stored => !Entries.TryGetValue(stored.Key.Value, out var existing) ||
                                  existing.StoredAt != stored.StoredAt ||
-                                 existing.Descriptor.SchemaId != stored.Descriptor.SchemaId)
+                                 existing.PersistedSchemaId != stored.PersistedSchemaId)
                 .ToArray();
             var dropped = Entries.Values.Where(existing => !persisted.ContainsKey(existing.Key.Value)).ToArray();
             if (loaded.Length > 0 || dropped.Length > 0)
@@ -3370,6 +3415,8 @@ namespace GameCult.Caching
                         Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()));
                 }
 
+                foreach (var entry in Entries.Values)
+                    entry.MarkWritten();
                 MarkFlushSucceeded();
             });
         }
@@ -3414,6 +3461,13 @@ namespace GameCult.Caching
                 Entries.TryRemove(entry.Key.Value, out _);
             foreach (var entry in request.Upserts)
                 Entries[entry.Key.Value] = entry;
+            // The whole view was written, each record under its own descriptor; onto the disk, the rest kept their bytes.
+            if (!ontoDisk)
+            {
+                foreach (var entry in Entries.Values)
+                    entry.MarkWritten();
+            }
+
             MarkFlushSucceeded();
             return CultCommitOutcome.Committed;
         }
@@ -3436,7 +3490,7 @@ namespace GameCult.Caching
             {
                 if (landing.Contains(record.Key) || removing.Contains(record.Key))
                     continue;
-                if (Entries.TryGetValue(record.Key, out var known) && known.StoredAt == record.StoredAt && known.Descriptor.SchemaId == record.SchemaId)
+                if (Entries.TryGetValue(record.Key, out var known) && known.StoredAt == record.StoredAt && known.PersistedSchemaId == record.SchemaId)
                     continue;
                 arriving.Add(ToStoredDocument(record, disk.SchemaCatalog, DeserializePayload, out _));
             }
