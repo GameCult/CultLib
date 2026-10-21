@@ -154,13 +154,17 @@ namespace GameCult.Caching.Tests
         public void UpsertUnderTheCurrentSchemaMovesThePersistedId()
         {
             SeedDrift(directory: false);
+            string wide;
+            using (var writer = Drift(false, WideDrift).Open())
+                wide = writer.GetStored(DriftKey)!.Descriptor.SchemaId;
             using var cache = Drift(false, NarrowDrift).Open();
             var loaded = cache.GetStored(DriftKey)!;
-            Assert.That(loaded.PersistedSchemaId, Is.EqualTo("tests.conditional_drift.v1"));
-            Assert.That(loaded.Descriptor.SchemaId, Is.EqualTo("tests.conditional_drift.v2"));
+            Assert.That(loaded.PersistedSchemaId, Is.EqualTo(wide), "the entry carries the schema id its record is stored under");
+            Assert.That(loaded.Descriptor.SchemaId, Is.Not.EqualTo(wide));
 
             Assert.That(DriftCommit(cache, cache.Get(DriftKey)!, 2), Is.True);
-            Assert.That(cache.GetStored(DriftKey)!.PersistedSchemaId, Is.EqualTo("tests.conditional_drift.v2"));
+            var written = cache.GetStored(DriftKey)!;
+            Assert.That(written.PersistedSchemaId, Is.EqualTo(written.Descriptor.SchemaId));
             Assert.That(DriftCommit(cache, cache.Get(DriftKey)!, 3), Is.True, "Expect failed on the record this cache just wrote");
         }
 
