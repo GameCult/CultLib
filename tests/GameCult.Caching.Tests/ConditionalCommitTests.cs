@@ -126,6 +126,42 @@ namespace GameCult.Caching.Tests
             Assert.That(DriftCommit(cache, cache.Get(DriftKey)!, 2), Is.True, "Expect failed after this cache's own flush rewrote the record");
         }
 
+        // A store rewrites what is pushed to it under the entry's descriptor; the entry then names that schema id.
+        [TestCase(false)]
+        [TestCase(true)]
+        public void OwnPushOfALoadedDriftedEntryKeepsExpectHolding(bool directory)
+        {
+            SeedDrift(directory);
+            using var cache = Drift(directory, NarrowDrift).Open();
+            cache.BackingStores[0].Push(cache.GetStored(DriftKey)!);
+            cache.BackingStores[0].PushAll();
+
+            var stored = cache.GetStored(DriftKey)!;
+            Assert.That(stored.PersistedSchemaId, Is.EqualTo(stored.Descriptor.SchemaId), "the rewrite was not recorded");
+            Assert.That(DriftCommit(cache, cache.Get(DriftKey)!, 2), Is.True, "Expect failed after this cache's own push rewrote the record");
+        }
+
+        // A store written outside the library marks its own rewrite through the base class.
+        [Test]
+        public void ACustomStoreMarksItsOwnWholeFileRewrite()
+        {
+            SeedDrift(directory: false);
+            using var cache = new CultCache(NarrowDrift);
+            var store = new WholeFileStore(PathOf("drift.cc"));
+            cache.AddBackingStore(store);
+            store.PullAll();
+            var loaded = cache.GetStored(DriftKey)!;
+            Assert.That(loaded.PersistedSchemaId, Is.Not.EqualTo(loaded.Descriptor.SchemaId), "the record was not loaded under drift");
+
+            store.Push(loaded);
+            store.PushAll();
+
+            Assert.That(cache.GetStored(DriftKey)!.PersistedSchemaId, Is.EqualTo(loaded.Descriptor.SchemaId), "the custom store's rewrite was not recorded");
+            Assert.That(DriftCommit(cache, cache.Get(DriftKey)!, 2), Is.True, "Expect failed after the custom store rewrote the record");
+            using var reader = Drift(false, NarrowDrift).Open();
+            Assert.That(reader.Get<ConditionalDriftNarrow>(DriftKey)!.Value, Is.EqualTo(2));
+        }
+
         [Test]
         public void OwnUnconditionalCommitKeepsDriftedExpectHolding()
         {
@@ -995,6 +1031,63 @@ namespace GameCult.Caching.Tests
             batch.Expect(DriftKey, observed);
             batch.Upsert(new ConditionalDriftNarrow { Name = "drift", Value = value }, new CultRecordHandle<ConditionalDriftNarrow>(DriftKey));
         });
+
+        // A store derived from CacheBackingStore alone, as a consumer would write one: it rewrites the whole file on every
+        // write, in the single-file MessagePack format, and marks each record it rewrote.
+        private sealed class WholeFileStore : CacheBackingStore
+        {
+            private readonly string _path;
+
+            public WholeFileStore(string path) => _path = path;
+
+            private CultPersistedStoreSnapshot Read() => CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(_path));
+
+            public override void PullAll() => Held(() =>
+            {
+                var snapshot = Read();
+                var loaded = snapshot.Records
+                    .Select(record => ToStoredDocument(record, snapshot.SchemaCatalog,
+                        (type, payload) => CultDocumentMessagePackSerialization.DeserializeUntyped(type, payload, Registry), out _))
+                    .ToArray();
+                Loaded?.Invoke(loaded, Array.Empty<CultStoredDocument>());
+                foreach (var stored in loaded)
+                    Entries[stored.Key.Value] = stored;
+            });
+
+            public override void Push(CultStoredDocument entry) => Held(() =>
+            {
+                Entries[entry.Key.Value] = entry;
+                IsDirty = true;
+            });
+
+            public override void Delete(CultStoredDocument entry) => throw new NotSupportedException();
+
+            public override void PushAll() => Held(Write);
+
+            public override CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait) => Held(() =>
+            {
+                if (!request.ConditionsHold(Read().Records, Entries.Values))
+                    return CultCommitOutcome.Mismatch;
+                foreach (var entry in request.Upserts)
+                    Entries[entry.Key.Value] = entry;
+                Write();
+                return CultCommitOutcome.Committed;
+            });
+
+            private void Write()
+            {
+                var snapshot = new CultPersistedStoreSnapshot
+                {
+                    Records = Entries.Values.Select(entry => ToPersistedRecord(entry,
+                        document => CultDocumentMessagePackSerialization.SerializeUntyped(document, document.GetType(), Registry))).ToArray(),
+                    SchemaCatalog = Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()).ToArray()
+                };
+                File.WriteAllBytes(_path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+                foreach (var entry in Entries.Values)
+                    MarkWritten(entry);
+                MarkFlushSucceeded();
+            }
+        }
 
         // Pauses a pull between reading the file and handing the records to the cache.
         private sealed class PausingStore : SingleFileMessagePackBackingStore

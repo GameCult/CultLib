@@ -945,6 +945,40 @@ namespace GameCult.Caching.Tests
             Assert.That(reopened.Get<VariantGear>(BigKey)!.Name, Is.EqualTo("laser big"));
         }
 
+        // The cache holds a copy of the base another writer has since renamed; the merge is judged on the renamed base.
+        [Test]
+        public void AConditionalCommitIsJudgedOnAnotherWritersChangeToARecordThisCacheHolds()
+        {
+            var path = PathOf("gear.cc");
+            var other = new CultRecordKey("other");
+            using (var seed = Open(path))
+                Assert.That(seed.Commit(batch =>
+                {
+                    batch.Upsert(typeof(VariantGear), Laser(), BaseKey);
+                    batch.Upsert(typeof(VariantGear), Named("other", "o1"), other);
+                }), Is.True);
+
+            using (var a = Open(path))
+            {
+                using (var w = Open(path))
+                    Assert.That(w.Commit(batch => batch.Upsert(typeof(VariantGear), Named("x", "l1"), BaseKey)), Is.True);
+
+                var refused = Refused(() => a.Commit(batch =>
+                {
+                    batch.Expect(other, a.Get(other));
+                    batch.UpsertVariant(BigKey, BaseKey, new[]
+                    {
+                        a.Override<VariantGear>(nameof(VariantGear.Name), "x"),
+                        a.Override<VariantGear>(nameof(VariantGear.Code), "big")
+                    });
+                }));
+                Assert.That(refused.Message, Does.Contain(BigKey.Value).And.Contain(BaseKey.Value).And.Contain("x"));
+            }
+
+            using var reopened = Open(path, readOnly: true);
+            Assert.That(reopened.GetStored(BigKey), Is.Null, "nothing landed on the file");
+        }
+
         [Test]
         public void AConditionalCommitThatIsSoundOnTheMergedSetStillLands()
         {
