@@ -53,6 +53,98 @@ namespace GameCult.Caching.Tests
             UnrelatedInsert(DirectoryStore(PathOf("insert.cc")));
         }
 
+        // ---- a record loaded under compatible schema drift: written under v1, read by a cache that knows only v2 ----
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void UnchangedDriftedRecordSatisfiesExpect(bool directory)
+        {
+            SeedDrift(directory);
+            using var cache = Drift(directory, NarrowDrift).Open();
+
+            Assert.That(DriftCommit(cache, cache.Get(DriftKey)!, 2), Is.True, "an unchanged drifted record failed Expect");
+            using var reader = Drift(directory, NarrowDrift).Open();
+            Assert.That(reader.Get<ConditionalDriftNarrow>(DriftKey)!.Value, Is.EqualTo(2));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ValueChangedDriftedRecordFailsExpect(bool directory)
+        {
+            SeedDrift(directory);
+            using var cache = Drift(directory, NarrowDrift).Open();
+            var observed = cache.Get(DriftKey)!;
+            using (var other = Drift(directory, NarrowDrift).Open())
+                Assert.That(other.Commit(batch => batch.Upsert(new ConditionalDriftNarrow { Name = "drift", Value = 9 }, new CultRecordHandle<ConditionalDriftNarrow>(DriftKey))), Is.True);
+
+            Assert.That(DriftCommit(cache, observed, 2), Is.False, "a value another writer changed passed Expect");
+            using var reader = Drift(directory, NarrowDrift).Open();
+            Assert.That(reader.Get<ConditionalDriftNarrow>(DriftKey)!.Value, Is.EqualTo(9));
+        }
+
+        [Test]
+        public void RecordRewrittenUnderAnotherSchemaWithItsStoredAtFailsExpect()
+        {
+            SeedDrift(directory: false);
+            using var cache = Drift(false, NarrowDrift).Open();
+            var observed = cache.Get(DriftKey)!;
+            var storedAt = cache.GetStored(DriftKey)!.StoredAt;
+            using (var other = Drift(false, ReusedDrift).Open())
+                other.BackingStores[0].PushAll();
+            using (var reader = Drift(false, ReusedDrift).Open())
+                Assert.That(reader.GetStored(DriftKey)!.StoredAt, Is.EqualTo(storedAt), "the rewrite kept storedAt");
+
+            Assert.That(DriftCommit(cache, observed, 2), Is.False, "a record rewritten under another schema passed Expect on storedAt alone");
+        }
+
+        [Test]
+        public void AnotherWritersNormalisingFlushFailsExpectUntilReRead()
+        {
+            SeedDrift(directory: false);
+            using var cache = Drift(false, NarrowDrift).Open();
+            var observed = cache.Get(DriftKey)!;
+            using (var other = Drift(false, NarrowDrift).Open())
+                other.BackingStores[0].PushAll();
+
+            Assert.That(DriftCommit(cache, observed, 2), Is.False, "Expect held across a rewrite under a schema id this cache did not read");
+            cache.BackingStores[0].PullAll();
+            Assert.That(DriftCommit(cache, cache.Get(DriftKey)!, 3), Is.True, "a re-read did not refresh the persisted schema id");
+        }
+
+        [Test]
+        public void OwnFlushKeepsDriftedExpectHolding()
+        {
+            SeedDrift(directory: false);
+            using var cache = Drift(false, NarrowDrift).Open();
+            cache.BackingStores[0].PushAll();
+
+            Assert.That(DriftCommit(cache, cache.Get(DriftKey)!, 2), Is.True, "Expect failed after this cache's own flush rewrote the record");
+        }
+
+        [Test]
+        public void OwnUnconditionalCommitKeepsDriftedExpectHolding()
+        {
+            SeedDrift(directory: false);
+            using var cache = Drift(false, NarrowDrift).Open();
+            Assert.That(cache.Commit(batch => batch.Upsert(new ConditionalDriftNarrow { Name = "other" }, new CultRecordHandle<ConditionalDriftNarrow>(new CultRecordKey("other")))), Is.True);
+
+            Assert.That(DriftCommit(cache, cache.Get(DriftKey)!, 2), Is.True, "Expect failed after this cache's own whole-file commit rewrote the record");
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ExpectUnchangedHoldsOnAnUntouchedDriftedStore(bool directory)
+        {
+            SeedDrift(directory);
+            using var cache = Drift(directory, NarrowDrift).Open();
+
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.ExpectUnchanged();
+                batch.Upsert(new ConditionalDriftNarrow { Name = "other" }, new CultRecordHandle<ConditionalDriftNarrow>(new CultRecordKey("other")));
+            }), Is.True, "ExpectUnchanged failed on a store nobody touched");
+        }
+
         // The lock is a FileShare.None handle, which excludes another handle in this process exactly as it does one in
         // another process, so two store instances on two threads prove the property without a process boundary.
         [Test]
@@ -852,9 +944,34 @@ namespace GameCult.Caching.Tests
 
         private static readonly CultDocumentRegistry Registry = CultDocumentRegistry.ForTypes(new[] { typeof(Counter), typeof(Tally), typeof(Slow) });
 
-        private static StoreFactory SingleFile(string path) => new(path, () => new SingleFileMessagePackBackingStore(path));
+        private static StoreFactory SingleFile(string path, CultDocumentRegistry? registry = null) =>
+            new(path, () => new SingleFileMessagePackBackingStore(path), registry);
 
-        private static StoreFactory DirectoryStore(string path) => new(path, () => new DirectoryMessagePackBackingStore(path));
+        private static StoreFactory DirectoryStore(string path, CultDocumentRegistry? registry = null) =>
+            new(path, () => new DirectoryMessagePackBackingStore(path), registry);
+
+        private static readonly CultRecordKey DriftKey = new("drift");
+        private static readonly CultDocumentRegistry WideDrift = CultDocumentRegistry.ForTypes(new[] { typeof(ConditionalDriftWide) });
+        private static readonly CultDocumentRegistry NarrowDrift = CultDocumentRegistry.ForTypes(new[] { typeof(ConditionalDriftNarrow) });
+        private static readonly CultDocumentRegistry ReusedDrift = CultDocumentRegistry.ForTypes(new[] { typeof(ConditionalDriftReused) });
+
+        private StoreFactory Drift(bool directory, CultDocumentRegistry registry) =>
+            directory ? DirectoryStore(PathOf("drift.cc"), registry) : SingleFile(PathOf("drift.cc"), registry);
+
+        // The record at DriftKey, written under v1.
+        private void SeedDrift(bool directory)
+        {
+            using var cache = Drift(directory, WideDrift).Open();
+            Assert.That(cache.Commit(batch => batch.Upsert(
+                new ConditionalDriftWide { Name = "drift", Value = 1, Extra = "extra" },
+                new CultRecordHandle<ConditionalDriftWide>(DriftKey))), Is.True);
+        }
+
+        private static bool DriftCommit(CultCache cache, object observed, int value) => cache.Commit(batch =>
+        {
+            batch.Expect(DriftKey, observed);
+            batch.Upsert(new ConditionalDriftNarrow { Name = "drift", Value = value }, new CultRecordHandle<ConditionalDriftNarrow>(DriftKey));
+        });
 
         // Pauses a pull between reading the file and handing the records to the cache.
         private sealed class PausingStore : SingleFileMessagePackBackingStore
@@ -894,17 +1011,20 @@ namespace GameCult.Caching.Tests
         {
             private readonly Func<CacheBackingStore> _create;
 
-            public StoreFactory(string path, Func<CacheBackingStore> create)
+            private readonly CultDocumentRegistry _registry;
+
+            public StoreFactory(string path, Func<CacheBackingStore> create, CultDocumentRegistry? registry = null)
             {
                 Path = path;
                 _create = create;
+                _registry = registry ?? Registry;
             }
 
             public string Path { get; }
 
             public CultCache Open()
             {
-                var cache = new CultCache(Registry);
+                var cache = new CultCache(_registry);
                 cache.AddBackingStore(_create());
                 return cache;
             }
@@ -920,6 +1040,49 @@ namespace GameCult.Caching.Tests
 
             [Key(1)]
             public int Value;
+        }
+
+        // One schema at three versions of its type: Narrow dropped Wide's Extra, and Reused put Colour in that slot.
+        [CultDocument("tests.conditional_drift", "tests.conditional_drift.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class ConditionalDriftWide
+        {
+            [Key(0)]
+            [CultName]
+            public string Name = string.Empty;
+
+            [Key(1)]
+            public int Value;
+
+            [Key(2)]
+            public string Extra = string.Empty;
+        }
+
+        [CultDocument("tests.conditional_drift", "tests.conditional_drift.v2")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class ConditionalDriftNarrow
+        {
+            [Key(0)]
+            [CultName]
+            public string Name = string.Empty;
+
+            [Key(1)]
+            public int Value;
+        }
+
+        [CultDocument("tests.conditional_drift", "tests.conditional_drift.v3")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class ConditionalDriftReused
+        {
+            [Key(0)]
+            [CultName]
+            public string Name = string.Empty;
+
+            [Key(1)]
+            public int Value;
+
+            [Key(2)]
+            public string Colour = string.Empty;
         }
 
         [CultDocument("tests.conditional_tally", "tests.conditional_tally.v1")]

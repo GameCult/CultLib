@@ -696,6 +696,52 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public void ADriftedVariantSatisfiesExpectUnchanged()
+        {
+            var path = PathOf("drift.cc");
+            WriteWideVariant(path);
+
+            using var narrow = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftNarrow) }));
+            Assert.That(ExpectVariantCommit(narrow), Is.True, "an unchanged drifted variant failed Expect and ExpectUnchanged");
+        }
+
+        [Test]
+        public void AnOwnFlushKeepsADriftedVariantsExpectHolding()
+        {
+            var path = PathOf("drift.cc");
+            WriteWideVariant(path);
+
+            using var narrow = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftNarrow) }));
+            narrow.BackingStores[0].PushAll();
+            Assert.That(ExpectVariantCommit(narrow), Is.True, "Expect on a drifted variant failed after this cache's own flush rewrote it");
+        }
+
+        private static void WriteWideVariant(string path)
+        {
+            using var writer = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftWide) }));
+            writer.Commit(batch =>
+            {
+                batch.Upsert(typeof(DriftWide), new DriftWide { Name = "drift", Power = 1, Wing = "base wing" }, new CultRecordKey("drift-base"));
+                batch.UpsertVariant(new CultRecordKey("drift-variant"), new CultRecordKey("drift-base"), new[]
+                {
+                    writer.Override<DriftWide>(nameof(DriftWide.Name), "drift variant"),
+                    writer.Override<DriftWide>(nameof(DriftWide.Wing), "stale wing")
+                });
+            });
+        }
+
+        private static bool ExpectVariantCommit(CultCache cache)
+        {
+            var variant = new CultRecordKey("drift-variant");
+            return cache.Commit(batch =>
+            {
+                batch.Expect(variant, cache.Get(variant));
+                batch.ExpectUnchanged();
+                batch.Upsert(typeof(DriftNarrow), new DriftNarrow { Name = "other", Power = 2 }, new CultRecordKey("other"));
+            });
+        }
+
+        [Test]
         public void AnOverrideOfASlotTheTypeNeverHadIsReportedOnLoadAndShedOnTheNextFlush()
         {
             var path = WriteStore(PlainGear("hand-base"), OverridingRecord("hand-variant", "hand-base",
