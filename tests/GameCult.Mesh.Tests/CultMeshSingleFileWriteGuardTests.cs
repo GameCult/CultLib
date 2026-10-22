@@ -107,6 +107,7 @@ public sealed class CultMeshSingleFileWriteGuardTests
         Write("item:a", 1);
         var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(_path));
         snapshot.FormatVersion = CultPersistedStoreSnapshot.FormatV2;
+        snapshot.Records[0].Payload = Array.Empty<byte>();
         snapshot.Records[0].Variant = new CultVariantDelta("item:base", Array.Empty<CultVariantOverride>());
         File.WriteAllBytes(_path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
         var before = File.ReadAllBytes(_path);
