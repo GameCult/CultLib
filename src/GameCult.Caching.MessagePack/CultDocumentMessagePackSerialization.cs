@@ -183,11 +183,12 @@ public static class CultDocumentMessagePackSerialization
     }
 
     /// <summary>
-    /// Reads a single-file snapshot. The stamp in slot 0 is checked against the formats this runtime reads (v1, v2) before
-    /// the catalog or any record is parsed, so a store stamped for another reader is refused, never mistaken for damage.
+    /// Parses a store snapshot of any format stamp, as every release has. It judges nothing about readability: a store
+    /// reading its own file checks the stamp against the formats it reads, before the body is parsed.
     /// </summary>
     public static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload) =>
-        DeserializeSnapshot(payload, RequireReadableSingleFileStamp);
+        DeserializeSnapshot(payload, _ => { });
+
 
     // The stamp decides readability and the body never does: requireReadable runs on slot 0 before anything else is parsed.
     internal static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload, Action<string> requireReadable)
@@ -252,7 +253,7 @@ public static class CultDocumentMessagePackSerialization
         }
     }
 
-    private static void RequireReadableSingleFileStamp(string version)
+    internal static void RequireReadableSingleFileStamp(string version)
     {
         if (!string.Equals(version, CultPersistedStoreSnapshot.FormatV1, StringComparison.Ordinal) &&
             !string.Equals(version, CultPersistedStoreSnapshot.FormatV2, StringComparison.Ordinal))
@@ -560,7 +561,7 @@ public class SingleFileMessagePackBackingStore : SingleFileBackingStore
 
     protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data)
     {
-        var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(data);
+        var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(data, CultDocumentMessagePackSerialization.RequireReadableSingleFileStamp);
         CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot);
         return snapshot;
     }

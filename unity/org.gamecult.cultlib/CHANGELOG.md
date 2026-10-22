@@ -103,9 +103,10 @@ All notable changes to this package are documented in this file.
   reader refuses. A read that fails with an I/O or access error also refuses. It used to
   overwrite the file from this cache's older view. A directory store throws the same
   exception, from the manifest parse every write already ran, for a manifest stamped
-  `cultcache.store.v<N>` with N > 4 (it threw `InvalidOperationException`). A file with no
-  readable stamp at all (empty, truncated, or not a snapshot) is not a newer format, and a flush
-  rewrites it.
+  `cultcache.store.v<N>` with N > 4 (it threw `InvalidOperationException`). A flush
+  rewrites any file whose stamp it can read as v1 or v2, or cannot read at all (empty,
+  truncated, not a snapshot), which includes a v1 file whose body is corrupt or truncated.
+  It refuses a recognised newer stamp, and it refuses an I/O failure on the read.
 - `CultMesh.WriteSingleFileDocument` and `WriteSingleFileDocumentPayload` read the
   file they replace, under the store's `<path>.lock`, and refuse (without touching
   it) a file this runtime cannot read, a store stamped with a newer format version,

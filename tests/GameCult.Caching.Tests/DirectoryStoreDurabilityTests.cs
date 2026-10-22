@@ -223,7 +223,7 @@ namespace GameCult.Caching.Tests
         }
 
         private CultPersistedRecord ManifestRecord(CultRecordKey key) =>
-            CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(_manifest), _ => { }).Records.Single(record => record.Key == key.Value);
+            CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(_manifest)).Records.Single(record => record.Key == key.Value);
 
         private string PagePath(byte[] identity) =>
             Path.Combine(_records, BitConverter.ToString(identity).Replace("-", string.Empty).ToLowerInvariant() + ".msgpack");

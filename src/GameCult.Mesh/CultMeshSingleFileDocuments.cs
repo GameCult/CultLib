@@ -288,7 +288,7 @@ namespace GameCult.Mesh
             CultPersistedStoreSnapshot snapshot;
             try
             {
-                snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes);
+                snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes, CultDocumentMessagePackSerialization.RequireReadableSingleFileStamp);
             }
             catch (Exception ex) when (ex is MessagePackSerializationException or InvalidOperationException)
             {

@@ -3541,9 +3541,10 @@ namespace GameCult.Caching
         }
 
         // A plain flush replaces the file without merging it, so under the lock it first reads the disk the way attach and
-        // commit do: a store this runtime does not read (a newer format, or a header the reader refuses) is refused and left
-        // as it is, and so is a file that cannot be read (an I/O or access error). A file that is read but will not parse
-        // (empty, truncated, corrupt) is not a newer store, and the flush proceeds as it always has, so it can still heal.
+        // commit do: a store whose stamp this runtime does not read is refused and left as it is, and so is a file that
+        // cannot be read (an I/O or access error). A file whose stamp reads as v1 or v2, or cannot be read at all (empty,
+        // truncated), is not a newer store, and the flush proceeds as it always has, so it can still heal; that includes a
+        // v1 file whose body is corrupt or truncated.
         private void RefuseToRewriteAStoreItCannotRead()
         {
             var bytes = ReadFileBytes();

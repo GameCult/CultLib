@@ -428,7 +428,7 @@ namespace GameCult.Caching.Tests
                     await seed.FlushAsync();
                 }
 
-                var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath), _ => { });
+                var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
                 Assert.That(manifest.FormatVersion, Is.EqualTo("cultcache.store.v4.directory-content-addressed-pages"));
                 Assert.That(manifest.Records, Has.Length.EqualTo(2));
                 Assert.That(manifest.Records.All(record => record.Payload.Length == 32), Is.True,
@@ -730,7 +730,7 @@ namespace GameCult.Caching.Tests
                 }
 
                 Assert.That(store.IsDirty, Is.False);
-                var compacted = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath), _ => { });
+                var compacted = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
                 Assert.That(compacted.SchemaCatalog, Is.Empty);
                 Assert.That(compacted.Records, Is.Empty);
                 var reader = new CultCache();

@@ -47,7 +47,7 @@ namespace GameCult.Caching.Tests
             try
             {
                 var manifest = Path.Combine(root, "store.cc");
-                Assert.That(CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(manifest), _ => { }).FormatVersion,
+                Assert.That(CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(manifest)).FormatVersion,
                     Is.EqualTo("cultcache.store.v4.directory-content-addressed-pages"));
 
                 using var cache = new CultCache();
@@ -413,6 +413,40 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        // The refusal comes from the read, not from a failed write onto the held file: the store never reaches serialising.
+        private sealed class WriteCountingStore : SingleFileMessagePackBackingStore
+        {
+            public int Serialisations;
+
+            public WriteCountingStore(string path) : base(path) { }
+
+            protected override byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot)
+            {
+                Serialisations++;
+                return base.SerializeSnapshot(snapshot);
+            }
+        }
+
+        // The public parser judges no stamp, as in 1.0.61: a v4 directory manifest and a v3 header both parse.
+        [Test]
+        public void PublicParserReadsAnyStampAsEveryReleaseHas()
+        {
+            var root = CopyFixture("directory-v4");
+            try
+            {
+                var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(Path.Combine(root, "store.cc")));
+                Assert.That(manifest.FormatVersion, Is.EqualTo("cultcache.store.v4.directory-content-addressed-pages"));
+
+                var v3 = new CultPersistedStoreSnapshot { FormatVersion = "cultcache.store.v3", SchemaCatalog = Array.Empty<CultSchemaCatalogEntry>(), Records = Array.Empty<CultPersistedRecord>() };
+                var parsed = CultDocumentMessagePackSerialization.DeserializeSnapshot(CultDocumentMessagePackSerialization.SerializeSnapshot(v3));
+                Assert.That(parsed.FormatVersion, Is.EqualTo("cultcache.store.v3"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
         // A read that fails on I/O is not an unreadable stamp to heal over: the flush refuses and the file is untouched.
         [Test]
         public async Task SingleFileFlushRefusesWhenReadingTheDiskFailsOnIO()
@@ -422,15 +456,18 @@ namespace GameCult.Caching.Tests
             {
                 var file = Path.Combine(root, "store.msgpack");
                 using var cache = new CultCache();
-                cache.AddBackingStore(new SingleFileMessagePackBackingStore(file));
+                var store = new WriteCountingStore(file);
+                cache.AddBackingStore(store);
                 await cache.PullAllBackingStoresAsync();
                 var before = File.ReadAllBytes(file);
 
                 await cache.AddAsync(new PreCut2FixtureNote { Text = "staged" });
+                store.Serialisations = 0;
                 using (new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
                 {
                     Assert.Throws<IOException>(() => cache.FlushAllBackingStores());
                 }
+                Assert.That(store.Serialisations, Is.Zero, "the refusal is the read failing, not the write onto the held file failing");
                 Assert.That(File.ReadAllBytes(file), Is.EqualTo(before));
             }
             finally
@@ -451,7 +488,7 @@ namespace GameCult.Caching.Tests
                 cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
                 await cache.PullAllBackingStoresAsync();
 
-                var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(manifest), _ => { });
+                var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(manifest));
                 snapshot.FormatVersion = newer;
                 File.WriteAllBytes(manifest, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
                 Func<System.Collections.Generic.Dictionary<string, byte[]>> files = () => Directory
