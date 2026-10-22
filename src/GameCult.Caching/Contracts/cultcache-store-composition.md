@@ -347,6 +347,28 @@ type name is the CLR full name, the same rule as `System.Int32`. A reader in
 another runtime needs only the component count and primitive type. CultMath has
 no serialization; a CultMath encoding, if added, uses this shape.
 
+## Cacheless single-file access
+
+A single-file store file can be read and written without a cache, through two public members of `SingleFileBackingStore` (for
+example `SingleFileMessagePackBackingStore`): `ReadStoreSnapshot()` and `WriteRecord(record, catalogEntry, holdsIds, registry)`.
+
+- `ReadStoreSnapshot()` reads the file once, under the store's gate, and returns the durable snapshot (records, schema catalog,
+  format stamp), or null when nothing is at the path. It throws `CultStoreUnreadableException` for a file the reader refuses.
+- `WriteRecord` writes one record under the store's lock: the record replaces the one at its key, every other record and catalog
+  entry is copied forward as stored, and the file is replaced atomically.
+
+They share everything with a cache's store and nothing is re-implemented beside it: one reader (the stamp is judged before the
+body, and a file the reader refuses is refused by a read and by a write alike), the store's lock, the atomic replace, and the
+header rule (`holdsIds` true marks a v3 store; false leaves it as the rule decides; null, for a payload the caller cannot read,
+keeps whatever the file already says). Ownership by declaration binds a cacheless write too: a record at the key under a schema id
+the written catalog entry does not own or list as compatible is refused with `CultSchemaConflictException`, and the file is left as
+it was. A typed writer plans element ids with `CultElementIds.Plan` before it serializes and passes `CultElementIds.Holds` as
+`holdsIds`.
+
+A store attached to a cache refuses `WriteRecord` with `InvalidOperationException`: write through the cache, whose staged writes
+land through the same private write. CultMesh's single-file document helpers (`CultMesh.WriteSingleFileDocument`,
+`ReadSingleFileDocument` and their payload forms) are built on these members and nothing else of the store.
+
 ## Runtime status
 
 | Rule | C# | Rust | TypeScript | Python |

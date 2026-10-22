@@ -61,6 +61,12 @@ either way is refused: a get-only property, a readonly field without
 `AllowPrivate`, or a property whose setter is non-public without
 `AllowPrivate`, when the constructor does not fill it.
 
+Never reuse a dropped slot; retire it. A write set copies a record the writer did not touch forward as stored bytes, so an
+untouched record keeps a dropped member's value in its slot through every write. A type that later puts a new member in that slot
+reads the dropped value as its own. The store does not remember retired slots, and a reuse that changes the slot's shape is refused
+at load, but a reuse of the same shape reads silently. This is the rule protobuf, Thrift and MessagePack-CSharp give for numbered
+fields: leave the slot empty, and take the next unused number for a new member.
+
 ## Which schema a record carries
 
 A record is written under the schema of its runtime type. Writing a derived
