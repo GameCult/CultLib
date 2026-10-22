@@ -2,6 +2,19 @@
 
 All notable changes to this package are documented in this file.
 
+## [2.0.0]
+
+### Breaking
+
+- Requires `org.gamecult.cultlib` 2.0.0. Unity Package Manager resolves one
+  cultlib per project, so taking this release moves the project to cultlib 2.0.0.
+
+### Added
+
+- Studio grouping tree: types a document model groups appear under their group,
+  with create in group.
+- Dragging a source record onto a reference field sets the reference.
+
 ## [1.4.0]
 
 ### Added

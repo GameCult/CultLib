@@ -14,8 +14,8 @@
 // against CultMath.CultPhasor, same field order.
 struct CultPhasor
 {
-    vec4 cos;
-    vec4 sin;
+    vec4 cosine;
+    vec4 sine;
 };
 
 // Johansen's Phacelle noise on 3D cells. See math.phacelle's comment (math.Phacelle.cs) for the stripe wave
@@ -84,13 +84,13 @@ CultPhasor cultmath_phacelle(vec3 p, vec3 side, float offset, float normalizatio
         float outCos = rawCos / rawLength;
         float outSin = rawSin / rawLength;
         vec3 gradLength = (rawCos * gradRawCos + rawSin * gradRawSin) / rawLength;
-        result.cos = vec4((gradRawCos - outCos * gradLength) / rawLength, outCos);
-        result.sin = vec4((gradRawSin - outSin * gradLength) / rawLength, outSin);
+        result.cosine = vec4((gradRawCos - outCos * gradLength) / rawLength, outCos);
+        result.sine = vec4((gradRawSin - outSin * gradLength) / rawLength, outSin);
     }
     else
     {
-        result.cos = vec4(gradRawCos / floorLength, rawCos / floorLength);
-        result.sin = vec4(gradRawSin / floorLength, rawSin / floorLength);
+        result.cosine = vec4(gradRawCos / floorLength, rawCos / floorLength);
+        result.sine = vec4(gradRawSin / floorLength, rawSin / floorLength);
     }
 
     return result;

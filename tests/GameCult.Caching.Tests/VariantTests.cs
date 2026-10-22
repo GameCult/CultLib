@@ -972,6 +972,52 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public void ADriftedVariantSatisfiesExpectUnchanged()
+        {
+            var path = PathOf("drift.cc");
+            WriteWideVariant(path);
+
+            using var narrow = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftNarrow) }));
+            Assert.That(ExpectVariantCommit(narrow), Is.True, "an unchanged drifted variant failed Expect and ExpectUnchanged");
+        }
+
+        [Test]
+        public void AnOwnFlushKeepsADriftedVariantsExpectHolding()
+        {
+            var path = PathOf("drift.cc");
+            WriteWideVariant(path);
+
+            using var narrow = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftNarrow) }));
+            narrow.BackingStores[0].PushAll();
+            Assert.That(ExpectVariantCommit(narrow), Is.True, "Expect on a drifted variant failed after this cache's own flush rewrote it");
+        }
+
+        private static void WriteWideVariant(string path)
+        {
+            using var writer = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftWide) }));
+            writer.Commit(batch =>
+            {
+                batch.Upsert(typeof(DriftWide), new DriftWide { Name = "drift", Power = 1, Wing = "base wing" }, new CultRecordKey("drift-base"));
+                batch.UpsertVariant(new CultRecordKey("drift-variant"), new CultRecordKey("drift-base"), new[]
+                {
+                    writer.Override<DriftWide>(nameof(DriftWide.Name), "drift variant"),
+                    writer.Override<DriftWide>(nameof(DriftWide.Wing), "stale wing")
+                });
+            });
+        }
+
+        private static bool ExpectVariantCommit(CultCache cache)
+        {
+            var variant = new CultRecordKey("drift-variant");
+            return cache.Commit(batch =>
+            {
+                batch.Expect(variant, cache.Get(variant));
+                batch.ExpectUnchanged();
+                batch.Upsert(typeof(DriftNarrow), new DriftNarrow { Name = "other", Power = 2 }, new CultRecordKey("other"));
+            });
+        }
+
+        [Test]
         public void AnOverrideOfASlotTheTypeNeverHadIsReportedOnEveryLoadAndStaysStoredUntilTheVariantIsWritten()
         {
             var path = WriteStore(PlainGear("hand-base"), OverridingRecord("hand-variant", "hand-base",
@@ -1190,6 +1236,40 @@ namespace GameCult.Caching.Tests
             using var reopened = Open(path);
             Assert.That(reopened.Get<VariantGear>(BaseKey), Is.Not.Null);
             Assert.That(reopened.Get<VariantGear>(BigKey)!.Name, Is.EqualTo("laser big"));
+        }
+
+        // The cache holds a copy of the base another writer has since renamed; the merge is judged on the renamed base.
+        [Test]
+        public void AConditionalCommitIsJudgedOnAnotherWritersChangeToARecordThisCacheHolds()
+        {
+            var path = PathOf("gear.cc");
+            var other = new CultRecordKey("other");
+            using (var seed = Open(path))
+                Assert.That(seed.Commit(batch =>
+                {
+                    batch.Upsert(typeof(VariantGear), Laser(), BaseKey);
+                    batch.Upsert(typeof(VariantGear), Named("other", "o1"), other);
+                }), Is.True);
+
+            using (var a = Open(path))
+            {
+                using (var w = Open(path))
+                    Assert.That(w.Commit(batch => batch.Upsert(typeof(VariantGear), Named("x", "l1"), BaseKey)), Is.True);
+
+                var refused = Refused(() => a.Commit(batch =>
+                {
+                    batch.Expect(other, a.Get(other));
+                    batch.UpsertVariant(BigKey, BaseKey, new[]
+                    {
+                        a.Override<VariantGear>(nameof(VariantGear.Name), "x"),
+                        a.Override<VariantGear>(nameof(VariantGear.Code), "big")
+                    });
+                }));
+                Assert.That(refused.Message, Does.Contain(BigKey.Value).And.Contain(BaseKey.Value).And.Contain("x"));
+            }
+
+            using var reopened = Open(path, readOnly: true);
+            Assert.That(reopened.GetStored(BigKey), Is.Null, "nothing landed on the file");
         }
 
         [Test]

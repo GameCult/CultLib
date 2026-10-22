@@ -319,6 +319,63 @@ public sealed class SpanPrimitiveTests
         Assert.True(zeroSlopes > 10_000 && reversed > 40_000 && both > 2_000 && neither > 2_000, $"the sample meets a branch too rarely: {zeroSlopes} flat, {reversed} reversed, {both} both, {neither} neither");
     }
 
+    /// <summary>
+    /// An infinite bound never reached by the line contributes nothing, not infinity times zero: relu
+    /// (hi = +inf) and its mirror (lo = -inf) give the finite integral, whether the line crosses the finite
+    /// bound inside the span or not. Both branches give +0 for a zero-length span.
+    /// </summary>
+    [Fact]
+    public void IntegralClampLinearIsFiniteForInfiniteBounds()
+    {
+        var inf = float.PositiveInfinity;
+        // t over [0, 1] clamped below at 0: all ramp, 1/2.
+        Assert.Equal(0.5f, integral_clamp_linear(0.0f, 1.0f, 0.0f, inf, 0.0f, 1.0f));
+        // t - 1/2 over [0, 1] clamped below at 0: 0 until 1/2, then the ramp's 1/8.
+        Assert.Equal(0.125f, integral_clamp_linear(-0.5f, 1.0f, 0.0f, inf, 0.0f, 1.0f));
+        // The falling line 1/2 - t clamped below at 0 is the mirror: 1/8 over [0, 1].
+        Assert.Equal(0.125f, integral_clamp_linear(0.5f, -1.0f, 0.0f, inf, 0.0f, 1.0f));
+        // lo = -inf: clamp(t, -inf, 1/2) over [0, 1] is t up to 1/2 then 1/2 (1/8 + 1/4), and 1 - t clamped
+        // above at 1/2 is 1/2 until t = 1/2 and then falls (1/4 + 1/8).
+        Assert.Equal(0.375f, integral_clamp_linear(0.0f, 1.0f, -inf, 0.5f, 0.0f, 1.0f));
+        Assert.Equal(0.375f, integral_clamp_linear(1.0f, -1.0f, -inf, 0.5f, 0.0f, 1.0f));
+        // Both infinite: the line itself, the trapezoid, in either direction.
+        Assert.Equal(7.5f, integral_clamp_linear(0.0f, 1.0f, -inf, inf, 1.0f, 4.0f));
+        Assert.Equal(-7.5f, integral_clamp_linear(0.0f, 1.0f, -inf, inf, 4.0f, 1.0f));
+        // A line starting on the finite bound and rising into the infinite one: all ramp, the integral of t over [2, 4].
+        Assert.Equal(6.0f, integral_clamp_linear(0.0f, 1.0f, 2.0f, inf, 2.0f, 4.0f));
+
+        // The flat branch obeys the same zero-length rule: a stretch of zero length contributes +0 however
+        // infinite the bound it would be clamped to, and a nonzero length of an infinite constant is infinite.
+        // The bit patterns are compared because Assert.Equal treats -0 as 0.
+        Assert.Equal(0, BitConverter.SingleToInt32Bits(integral_clamp_linear(-2.3244874f, -0.0f, 0.0f, -inf, 1.429815f, 1.429815f)));
+        Assert.Equal(0, BitConverter.SingleToInt32Bits(integral_clamp_linear(1.5f, 0.0f, inf, inf, 2.0f, 2.0f)));
+        Assert.Equal(0, BitConverter.SingleToInt32Bits(integral_clamp_linear(1.5f, -0.0f, -inf, -inf, 0.0f, 0.0f)));
+        Assert.Equal(inf, integral_clamp_linear(1.5f, 0.0f, inf, inf, 0.0f, 2.0f));
+        Assert.Equal(inf, integral_clamp_linear(1.5f, 0.0f, -inf, -inf, 2.0f, 0.0f));
+
+        // The sloped branch gives +0 for a zero-length span too, not -0: the direction sign never meets a
+        // zero total, whichever way the line leans and whatever the bounds.
+        Assert.Equal(0, BitConverter.SingleToInt32Bits(integral_clamp_linear(1.0f, 2.0f, -inf, inf, 1.0f, 1.0f)));
+        Assert.Equal(0, BitConverter.SingleToInt32Bits(integral_clamp_linear(-3.0f, -2.0f, 0.0f, 5.0f, 1.0f, 1.0f)));
+        Assert.Equal(0, BitConverter.SingleToInt32Bits(integral_clamp_linear(0.5f, 1.0f, 0.0f, inf, 0.0f, 0.0f)));
+    }
+
+    /// <summary>
+    /// lo above hi is normalised before the flat branch reads it: with b = 0 the answer is hi times the
+    /// span (what clamp(a, lo, hi) gives with lo = min(lo, hi)), and with b != 0 the same. The GLSL
+    /// lowering would otherwise call clamp with minVal above maxVal, which is undefined there.
+    /// </summary>
+    [Fact]
+    public void IntegralClampLinearNormalisesBeforeTheFlatBranch()
+    {
+        // b = 0: a above both, below both and between them all give hi.
+        foreach (var a in new[] { 9.0f, -9.0f, 3.5f })
+            Assert.Equal(2.0f * 3.0f, integral_clamp_linear(a, 0.0f, 5.0f, 2.0f, 0.0f, 3.0f));
+        // b != 0: hi everywhere, whichever way the line runs.
+        Assert.Equal(2.0f * 3.0f, integral_clamp_linear(0.0f, 1.0f, 5.0f, 2.0f, 0.0f, 3.0f));
+        Assert.Equal(2.0f * 3.0f, integral_clamp_linear(9.0f, -1.0f, 5.0f, 2.0f, 0.0f, 3.0f));
+    }
+
     [Fact]
     public void IntegralClampLinearHasExactValuesOnTheBinaryFloats()
     {

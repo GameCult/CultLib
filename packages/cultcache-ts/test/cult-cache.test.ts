@@ -2532,3 +2532,105 @@ test("every registration refusal is a SchemaConflictError naming the id and both
     }
   }
 });
+
+// ---------------------------------------------------------------------------------------------
+// Cross-runtime store lock: each runtime's writer excludes the others on `<file>.lock`.
+
+import { spawn } from "node:child_process";
+import { withStoreWriteLock } from "../src/store-file";
+
+type LockHolder = { exited: Promise<number | null>; stderr: () => string };
+
+/** Starts a peer's `hold-lock` mode and resolves once it prints {"held":true}. */
+async function holdLockWith(command: string, args: string[], cwd: string): Promise<LockHolder> {
+  const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+  let errors = "";
+  child.stderr.on("data", (chunk) => {
+    errors += String(chunk);
+  });
+  const exited = new Promise<number | null>((resolveExit) => child.on("exit", (code) => resolveExit(code)));
+  await new Promise<void>((resolveHeld, rejectHeld) => {
+    let seen = "";
+    child.stdout.on("data", (chunk) => {
+      seen += String(chunk);
+      if (seen.includes('"held":true')) {
+        resolveHeld();
+      }
+    });
+    void exited.then((code) => rejectHeld(new Error(`hold-lock exited ${code} before holding: ${errors}`)));
+  });
+  return { exited, stderr: () => errors };
+}
+
+const lockHolders: Record<"csharp" | "rust", (file: string, ms: number) => Promise<LockHolder>> = {
+  csharp: (file, ms) =>
+    holdLockWith(dotnetCommand, [csharpInteropDll, "hold-lock", "--file", file, "--ms", String(ms)], cultLibRoot),
+  rust: (file, ms) =>
+    holdLockWith(rustInteropBinary, ["hold-lock", "--file", file, "--ms", String(ms)], cultcacheRsRoot),
+};
+
+const lockProbeEntry = (key: string): CultCacheEnvelope => ({
+  key,
+  type: "t",
+  payload: documentPayloadFromBytes(Uint8Array.of(0x90)),
+  storedAt: "2026-10-20T00:00:00Z",
+});
+
+for (const holder of ["csharp", "rust"] as const) {
+  test(`a TypeScript write waits while a ${holder === "csharp" ? "C#" : "Rust"} writer holds the store lock`, async () => {
+    await buildInteropPeers();
+    const dir = await mkdtemp(join(tmpdir(), "cultcache-lock-ts-waits-"));
+    const file = join(dir, "store.cc");
+    const held = await lockHolders[holder](file, 1500);
+    let finished = false;
+    const push = new SingleFileMessagePackBackingStore(file).push(lockProbeEntry("ts-record")).then(() => {
+      finished = true;
+    });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+    assert.equal(finished, false, "the push must wait for the foreign lock");
+    assert.equal(existsSync(file), false, "nothing is written while the foreign writer holds the lock");
+    assert.equal(await held.exited, 0, held.stderr());
+    await push;
+    const keys = (await new SingleFileMessagePackBackingStore(file).pullAll()).map((entry) => entry.key);
+    assert.deepEqual(keys, ["ts-record"]);
+  });
+}
+
+for (const writer of ["csharp", "rust"] as const) {
+  test(`a ${writer === "csharp" ? "C#" : "Rust"} writer waits while a TypeScript writer holds the store lock`, async () => {
+    await buildInteropPeers();
+    const dir = await mkdtemp(join(tmpdir(), "cultcache-lock-peer-waits-"));
+    const file = join(dir, "store.cc");
+    const noteKey = `note:${writer}-writer`;
+    let peer: Promise<unknown> | undefined;
+    let peerDone = false;
+    await withStoreWriteLock(file, async () => {
+      peer =
+        writer === "csharp"
+          ? execFileAsync(dotnetCommand, [csharpInteropDll, "write", "--file", file, "--runtime-id", "csharp-writer"], { cwd: cultLibRoot, timeout: 60_000 })
+          : execFileAsync(rustInteropBinary, ["write", "--file", file, "--runtime-id", "rust-writer"], { cwd: cultcacheRsRoot, timeout: 60_000 });
+      void peer.then(
+        () => (peerDone = true),
+        () => (peerDone = true),
+      );
+      await new Promise((resolveWait) => setTimeout(resolveWait, 1500));
+      assert.equal(peerDone, false, "the peer must still be waiting for the lock");
+      assert.equal(existsSync(file), false, `${noteKey} is absent while TypeScript holds the lock`);
+    });
+    await peer;
+    const keys = (await new SingleFileMessagePackBackingStore(file).pullAll()).map((entry) => entry.key);
+    assert.ok(keys.includes(noteKey), `${noteKey} is in the store after release`);
+  });
+}
+
+test("the store lock gives up on a Rust holder after its wait bound and names the lock path", async () => {
+  await buildInteropPeers();
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-lock-timeout-"));
+  const file = join(dir, "store.cc");
+  const held = await lockHolders.rust(file, 2000);
+  await assert.rejects(
+    withStoreWriteLock(file, async () => undefined, { timeoutMs: 200 }),
+    (error: Error) => error.message.includes(`${file}.lock`),
+  );
+  assert.equal(await held.exited, 0, held.stderr());
+});

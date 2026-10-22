@@ -338,6 +338,73 @@ fn a_union_that_is_not_a_key_and_slots_pair_is_refused_naming_the_enum() {
     }
 }
 
+// A plain derive struct: the door names a missing or duplicated field (a static name from the type)
+// and describes a mistyped value by kind, never quoting it.
+#[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
+struct Probe {
+    name: String,
+    flag: bool,
+}
+
+#[test]
+fn a_missing_or_duplicate_field_is_named_and_a_mistyped_value_is_not() {
+    let name = |value: &str| [&[0xa4][..], b"name", &[0xa0 | value.len() as u8][..], value.as_bytes()].concat();
+    let flag_true = [&[0xa4][..], b"flag", &[0xc3][..]].concat();
+
+    let missing = [&[0x81][..], &name("a")].concat();
+    let message = cultcache_rs::decode_payload::<Probe>(&missing).unwrap_err().to_string();
+    assert!(message.contains("missing field `flag`"), "{message}");
+
+    let duplicated = [&[0x83][..], &name("a"), &name("b"), &flag_true].concat();
+    let message = cultcache_rs::decode_payload::<Probe>(&duplicated).unwrap_err().to_string();
+    assert!(message.contains("duplicate field `name`"), "{message}");
+
+    let canary = "CANARY-3d9e";
+    let flag_text = [&[0xa4][..], b"flag", &[0xa0 | canary.len() as u8][..], canary.as_bytes()].concat();
+    let mistyped = [&[0x82][..], &name("a"), &flag_text].concat();
+    let message = cultcache_rs::decode_payload::<Probe>(&mistyped).unwrap_err().to_string();
+    assert!(!message.contains("CANARY"), "{message}");
+    assert!(message.contains("MessagePack type"), "{message}");
+}
+
+// A decoder whose error text is the string it reads, standing for any serde message.
+struct Raises;
+
+impl<'de> serde::Deserialize<'de> for Raises {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let message = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Err(serde::de::Error::custom(message))
+    }
+}
+
+#[test]
+fn a_field_name_is_kept_only_when_it_looks_like_a_field_name() {
+    let refusal = |message: &str| {
+        let bytes = rmp_serde::to_vec(message).unwrap();
+        match cultcache_rs::decode_payload::<Raises>(&bytes) {
+            Ok(_) => panic!("Raises never decodes"),
+            Err(error) => error.to_string(),
+        }
+    };
+    assert_eq!(refusal("missing field `a_1`"), "missing field `a_1`");
+    assert_eq!(refusal("duplicate field `Z9`"), "duplicate field `Z9`");
+    let long = format!("missing field `{}`", "a".repeat(64));
+    assert_eq!(refusal(&long), long);
+    for message in [
+        "missing field `has space CANARY`".to_string(),
+        "missing field `x-CANARY`".to_string(),
+        "missing field ``".to_string(),
+        format!("duplicate field `{}`", "a".repeat(65)),
+        "unknown field `CANARY`, expected `a`".to_string(),
+    ] {
+        let text = refusal(&message);
+        assert_eq!(text, "a value does not fit the store format", "{message}");
+    }
+    assert_eq!(refusal("unknown variant `CANARY`, expected `a`"), "a tag names no variant this type knows");
+    assert!(!refusal("invalid type: string \"CANARY\", expected a bool").contains("CANARY"));
+}
+
 #[test]
 fn the_key_decides_the_arm() {
     // Tool and Part carry different slots under different keys in the two unions.
@@ -826,12 +893,12 @@ fn the_raw_doors_hold_the_bound_for_arms_maps_and_arrays() {
     }
 }
 
-// A debug build on a 2 MiB thread carries 405 containers of this document; the bound keeps every
-// accepted payload below that, and every refusal is an error, not an abort.
+// The bound counts containers, not stack: decode grows its own stack, so the document at the limit
+// decodes on a 1 MiB thread in both profiles, and every refusal is an error, not an abort.
 #[test]
-fn stack_budget_debug_2mib() {
+fn the_union_chain_at_the_limit_decodes_on_a_1mib_thread() {
     std::thread::Builder::new()
-        .stack_size(2 * 1024 * 1024)
+        .stack_size(1024 * 1024)
         .spawn(|| {
             assert_eq!(
                 through_cache(&vector("depth-at-limit.msgpack")).unwrap(),

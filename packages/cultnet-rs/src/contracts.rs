@@ -1,10 +1,11 @@
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use anyhow::bail;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value;
 
 use crate::{Edge, RawDocumentHeader, Selection, SelectionDocumentRecord};
 
@@ -28,23 +29,6 @@ pub enum CultNetSchemaKind {
 #[serde(rename_all = "snake_case")]
 pub enum CultNetRawPayloadEncoding {
     Messagepack,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CultNetDocumentRecord<TPayload = Value> {
-    pub schema_id: String,
-    pub record_key: String,
-    pub stored_at: String,
-    pub payload: TPayload,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_runtime_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_agent_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_role: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,7 +268,7 @@ impl CultNetErrorCode {
             "reference_outside_target" => Ok(Self::ReferenceOutsideTarget),
             "variant_unsupported" => Ok(Self::VariantUnsupported),
             "unowned_schema" => Ok(Self::UnownedSchema),
-            other => Err(anyhow!("ErrorMessage.Code {other:?} is not a recognized cultnet.error.v0 code")),
+            _ => Err(anyhow!("ErrorMessage.Code is not a recognized cultnet.error.v0 code")),
         }
     }
 }
@@ -353,11 +337,11 @@ pub enum CultNetMessage {
     // R-N (docs/cultnet-selection-cut.md, fix batch 3): `code`/`details` mirror the landed C#
     // reference (CultNetSchemaMessages.cs) exactly, including its always-five-key map shape
     // (`schemaVersion`, `error`, `routingHint`, `code`, `details`, every optional key nil rather
-    // than omitted). `Error` is therefore encoded/decoded through the raw
-    // `cultnet.schema.v0` path (parse_raw_cultnet_schema_message/encode_raw_cultnet_schema_message)
-    // like the other messages that need exact wire control, not through this derive - the derive
-    // attributes below exist only so the enum as a whole still compiles and round-trips through the
-    // generic `serde_json::Value` path other tooling may still reach for.
+    // than omitted). `Error` is read and written only by the raw `cultnet.schema.v0` path
+    // (parse_raw_cultnet_schema_message/encode_raw_cultnet_schema_message): `skip_deserializing`
+    // makes the derive unable to decode it, so the raw reader is its one decoder and the derive
+    // attributes describe `Serialize` only.
+    #[serde(skip_deserializing)]
     #[serde(rename = "cultnet.error.v0", rename_all = "camelCase")]
     Error {
         error: String,
@@ -370,17 +354,13 @@ pub enum CultNetMessage {
     SampleChangeName { name: String },
     #[serde(rename = "cultnet.sample.chat.v0", rename_all = "camelCase")]
     SampleChat { text: String },
-    #[serde(rename = "cultnet.document_put.v0", rename_all = "camelCase")]
-    DocumentPut {
-        message_id: String,
-        document: CultNetDocumentRecord<Value>,
-    },
     #[serde(rename = "cultnet.document_delete.v0", rename_all = "camelCase")]
     DocumentDelete {
         message_id: String,
         schema_id: String,
         record_key: String,
     },
+    #[serde(skip_deserializing)]
     #[serde(rename = "cultnet.document_put_raw.v0", rename_all = "camelCase")]
     DocumentPutRaw {
         message_id: String,
@@ -394,11 +374,7 @@ pub enum CultNetMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         record_keys: Option<Vec<String>>,
     },
-    #[serde(rename = "cultnet.snapshot_response.v0", rename_all = "camelCase")]
-    SnapshotResponse {
-        message_id: String,
-        documents: Vec<CultNetDocumentRecord<Value>>,
-    },
+    #[serde(skip_deserializing)]
     #[serde(rename = "cultnet.snapshot_response_raw.v0", rename_all = "camelCase")]
     SnapshotResponseRaw {
         message_id: String,
@@ -430,10 +406,10 @@ pub enum CultNetMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         supported_body_transports: Option<Vec<String>>,
     },
-    /// `cultnet.snapshot_response_raw.v1` (section 2: `SelectionPage`). Binary payload, so this is
-    /// carried through `encode_raw_cultnet_schema_message`/`parse_raw_cultnet_schema_message` like
-    /// `SnapshotResponseRaw` above - a JSON intermediate cannot losslessly carry `documents[].payload`
-    /// or `edges[].payload`. Mirrors `CultNetSnapshotResponseRawV1Message`.
+    /// `cultnet.snapshot_response_raw.v1` (section 2: `SelectionPage`). Decoded by the derive from
+    /// the message bytes in one pass (rows and scalars, a duplicated key refused); encoded by
+    /// `encode_raw_cultnet_schema_message` for the reference's fixed nil-keyed shape. Mirrors
+    /// `CultNetSnapshotResponseRawV1Message`.
     #[serde(rename = "cultnet.snapshot_response_raw.v1", rename_all = "camelCase")]
     SnapshotResponseRawV1 {
         message_id: String,
@@ -515,6 +491,7 @@ pub enum CultNetMessage {
         source_runtime_id: Option<String>,
     },
     /// `cultmesh.content_chunk_request.v1`. Mirrors `CultMeshContentChunkRequestMessage`; raw path.
+    #[serde(skip_deserializing)]
     #[serde(rename = "cultmesh.content_chunk_request.v1", rename_all = "camelCase")]
     ContentChunkRequest {
         message_id: String,
@@ -524,6 +501,7 @@ pub enum CultNetMessage {
     },
     /// `cultmesh.content_chunk_response.v1`. Mirrors `CultMeshContentChunkResponseMessage`. `payload`
     /// is `bin`, so it travels the raw path; the serde attribute never runs on the wire.
+    #[serde(skip_deserializing)]
     #[serde(rename = "cultmesh.content_chunk_response.v1", rename_all = "camelCase")]
     ContentChunkResponse {
         message_id: String,
@@ -544,33 +522,6 @@ fn true_default() -> bool {
     true
 }
 
-pub fn parse_cultnet_message(
-    wire_value: &rmpv::Value,
-    contract: CultNetWireContract,
-) -> Result<CultNetMessage> {
-    match contract {
-        CultNetWireContract::CultNetSchemaV0 => {
-            let message = match schema_version_from_wire_value(wire_value)? {
-                Some(
-                    "cultnet.document_put_raw.v0"
-                    | "cultnet.snapshot_response_raw.v0"
-                    | "cultnet.snapshot_response_raw.v1"
-                    | "cultmesh.content_chunk_request.v1"
-                    | "cultmesh.content_chunk_response.v1"
-                    | "cultnet.error.v0",
-                ) => parse_raw_cultnet_schema_message(wire_value)?,
-                _ => {
-                    let json_value: Value = rmp_serde::from_slice(&rmp_serde::to_vec(wire_value)?)?;
-                    serde_json::from_value(json_value)?
-                }
-            };
-            validate_message(&message)?;
-            Ok(message)
-        }
-        CultNetWireContract::GameCultNetworkingV0 => parse_gamecult_networking_message(wire_value),
-    }
-}
-
 pub fn encode_cultnet_message_for_wire(
     message: &CultNetMessage,
     contract: CultNetWireContract,
@@ -584,7 +535,7 @@ pub fn encode_cultnet_message_for_wire(
             | CultNetMessage::ContentChunkRequest { .. }
             | CultNetMessage::ContentChunkResponse { .. }
             | CultNetMessage::Error { .. } => encode_raw_cultnet_schema_message(message),
-            _ => Ok(rmp_serde::from_slice(&rmp_serde::to_vec(
+            _ => Ok(cultcache_rs::decode_payload(&rmp_serde::to_vec(
                 &serde_json::to_value(message)?,
             )?)?),
         },
@@ -605,7 +556,25 @@ pub fn decode_cultnet_message_from_slice(
     contract: CultNetWireContract,
 ) -> Result<CultNetMessage> {
     let wire_value: rmpv::Value = cultcache_rs::decode_payload(bytes)?;
-    parse_cultnet_message(&wire_value, contract)
+    match contract {
+        CultNetWireContract::CultNetSchemaV0 => {
+            let message = match schema_version_from_wire_value(&wire_value)? {
+                Some(
+                    "cultnet.document_put_raw.v0"
+                    | "cultnet.snapshot_response_raw.v0"
+                    | "cultmesh.content_chunk_request.v1"
+                    | "cultmesh.content_chunk_response.v1"
+                    | "cultnet.error.v0",
+                ) => parse_raw_cultnet_schema_message(&wire_value)
+                    .with_context(|| received_version_label(&wire_value))?,
+                _ => cultcache_rs::decode_payload::<CultNetMessage>(bytes)
+                    .with_context(|| received_version_label(&wire_value))?,
+            };
+            validate_message(&message)?;
+            Ok(message)
+        }
+        CultNetWireContract::GameCultNetworkingV0 => parse_gamecult_networking_message(&wire_value),
+    }
 }
 
 fn validate_message(message: &CultNetMessage) -> Result<()> {
@@ -669,13 +638,6 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
         CultNetMessage::Error { error, code: _, details: _ } => require_non_empty(error, "error")?,
         CultNetMessage::SampleChangeName { name } => require_non_empty(name, "name")?,
         CultNetMessage::SampleChat { text } => require_non_empty(text, "text")?,
-        CultNetMessage::DocumentPut {
-            message_id,
-            document,
-        } => {
-            require_non_empty(message_id, "messageId")?;
-            validate_document_record(document)?;
-        }
         CultNetMessage::DocumentDelete {
             message_id,
             schema_id,
@@ -700,15 +662,6 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
             require_non_empty(message_id, "messageId")?;
             require_optional_string_vec(schema_ids.as_deref(), "schemaIds")?;
             require_optional_string_vec(record_keys.as_deref(), "recordKeys")?;
-        }
-        CultNetMessage::SnapshotResponse {
-            message_id,
-            documents,
-        } => {
-            require_non_empty(message_id, "messageId")?;
-            for document in documents {
-                validate_document_record(document)?;
-            }
         }
         CultNetMessage::SnapshotResponseRaw {
             message_id,
@@ -874,17 +827,6 @@ fn validate_mutation_contract(contract: &CultNetDocumentMutationContract) -> Res
     Ok(())
 }
 
-fn validate_document_record(document: &CultNetDocumentRecord<Value>) -> Result<()> {
-    require_non_empty(&document.schema_id, "schemaId")?;
-    require_non_empty(&document.record_key, "recordKey")?;
-    require_non_empty(&document.stored_at, "storedAt")?;
-    require_optional_non_empty(document.source_runtime_id.as_deref(), "sourceRuntimeId")?;
-    require_optional_non_empty(document.source_agent_id.as_deref(), "sourceAgentId")?;
-    require_optional_non_empty(document.source_role.as_deref(), "sourceRole")?;
-    require_optional_string_vec(document.tags.as_deref(), "tags")?;
-    Ok(())
-}
-
 fn validate_raw_document_record(document: &CultNetRawDocumentRecord) -> Result<()> {
     require_non_empty(&document.schema_id, "schemaId")?;
     require_non_empty(&document.record_key, "recordKey")?;
@@ -976,10 +918,52 @@ fn schema_version_from_wire_value(input: &rmpv::Value) -> Result<Option<&str>> {
     }))
 }
 
+/// True for a name shaped like a schema version (`cultnet.hello.v0`): a received value is named
+/// in a refusal only when it cannot be anything else.
+fn looks_like_schema_name(candidate: &str) -> bool {
+    let mut parts = candidate.split('.');
+    let segment = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    let first_ok = parts.next().is_some_and(|first| {
+        first.bytes().next().is_some_and(|b| b.is_ascii_lowercase()) && segment(first)
+    });
+    let rest: Vec<&str> = parts.collect();
+    first_ok && !rest.is_empty() && rest.iter().all(|part| segment(*part)) && candidate.len() <= 96
+}
+
+/// What a refusal says of the message it refused: its `schemaVersion` when that is shaped like a
+/// schema name, else only the shape of what arrived. Never a received value that could be text.
+fn received_version_label(wire_value: &rmpv::Value) -> String {
+    match schema_version_from_wire_value(wire_value) {
+        Ok(Some(version)) if looks_like_schema_name(version) => {
+            format!("cultnet.schema.v0 message {version} refused")
+        }
+        Ok(Some(version)) => format!(
+            "cultnet.schema.v0 message whose schemaVersion is not a schema name ({} bytes)",
+            version.len()
+        ),
+        _ => "cultnet.schema.v0 message with no schemaVersion".to_string(),
+    }
+}
+
+/// Refuses a map that spells a string key twice, so no reader resolves a duplicate by position.
+/// Names the context, never the key (it is received text).
+fn refuse_duplicate_keys(object: &[(rmpv::Value, rmpv::Value)], context: &str) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for (key, _) in object {
+        if let Some(name) = key.as_str() {
+            if !seen.insert(name) {
+                bail!("{context} spells a key twice");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn parse_raw_cultnet_schema_message(input: &rmpv::Value) -> Result<CultNetMessage> {
     let object = input
         .as_map()
         .ok_or_else(|| anyhow!("cultnet.schema.v0 raw messages must be objects"))?;
+    refuse_duplicate_keys(object, "cultnet.schema.v0 raw message")?;
 
     let get = |name: &str| -> Option<&rmpv::Value> {
         object.iter().find_map(|(key, value)| {
@@ -1009,69 +993,6 @@ fn parse_raw_cultnet_schema_message(input: &rmpv::Value) -> Result<CultNetMessag
             Ok(CultNetMessage::SnapshotResponseRaw {
                 message_id: require_legacy_string(get("messageId"), "messageId")?,
                 documents,
-            })
-        }
-        "cultnet.snapshot_response_raw.v1" => {
-            let headers = get("headers")
-                .filter(|value| !value.is_nil())
-                .map(|value| {
-                    value
-                        .as_array()
-                        .ok_or_else(|| anyhow!("headers must be an array"))?
-                        .iter()
-                        .enumerate()
-                        .map(|(index, value)| {
-                            require_typed::<RawDocumentHeader>(Some(value), &format!("headers[{index}]"))
-                        })
-                        .collect::<Result<Vec<_>>>()
-                })
-                .transpose()?;
-            let documents = get("documents")
-                .filter(|value| !value.is_nil())
-                .map(|value| {
-                    value
-                        .as_array()
-                        .ok_or_else(|| anyhow!("documents must be an array"))?
-                        .iter()
-                        .enumerate()
-                        .map(|(index, value)| {
-                            require_typed::<SelectionDocumentRecord>(
-                                Some(value),
-                                &format!("documents[{index}]"),
-                            )
-                        })
-                        .collect::<Result<Vec<_>>>()
-                })
-                .transpose()?;
-            let edges = get("edges")
-                .filter(|value| !value.is_nil())
-                .map(|value| {
-                    value
-                        .as_array()
-                        .ok_or_else(|| anyhow!("edges must be an array"))?
-                        .iter()
-                        .enumerate()
-                        .map(|(index, value)| {
-                            require_typed::<Edge>(Some(value), &format!("edges[{index}]"))
-                        })
-                        .collect::<Result<Vec<_>>>()
-                })
-                .transpose()?;
-
-            Ok(CultNetMessage::SnapshotResponseRawV1 {
-                message_id: require_legacy_string(get("messageId"), "messageId")?,
-                matched: require_legacy_u32(get("matched"), "matched")?,
-                as_of: require_legacy_u64(get("asOf"), "asOf")?,
-                next: require_legacy_optional_string(get("next"), "next")?,
-                headers,
-                documents,
-                edges,
-                shard_id: require_legacy_optional_string(get("shardId"), "shardId")?,
-                shard_epoch: require_legacy_optional_i64(get("shardEpoch"), "shardEpoch")?,
-                shard_log_sequence: require_legacy_optional_i64(
-                    get("shardLogSequence"),
-                    "shardLogSequence",
-                )?,
             })
         }
         "cultmesh.content_chunk_request.v1" => Ok(CultNetMessage::ContentChunkRequest {
@@ -1109,7 +1030,7 @@ fn parse_raw_cultnet_schema_message(input: &rmpv::Value) -> Result<CultNetMessag
             })
         }
         _ => Err(anyhow!(
-            "Unsupported raw cultnet.schema.v0 schemaVersion {schema_version}"
+            "Unsupported raw cultnet.schema.v0 message"
         )),
     }
 }
@@ -1127,6 +1048,7 @@ fn require_error_details(
     let object = value
         .as_map()
         .ok_or_else(|| anyhow!("{field_name} must be an object"))?;
+    refuse_duplicate_keys(object, field_name)?;
     let get = |name: &str| -> Option<&rmpv::Value> {
         object.iter().find_map(|(key, value)| {
             key.as_str()
@@ -1368,6 +1290,7 @@ fn require_raw_document_record(
     let object = value
         .and_then(rmpv::Value::as_map)
         .ok_or_else(|| anyhow!("{field_name} must be an object"))?;
+    refuse_duplicate_keys(object, field_name)?;
 
     let get = |name: &str| -> Option<&rmpv::Value> {
         object.iter().find_map(|(key, value)| {
@@ -1390,7 +1313,7 @@ fn require_raw_document_record(
             "messagepack" => CultNetRawPayloadEncoding::Messagepack,
             _ => {
                 return Err(anyhow!(
-                    "{field_name}.payloadEncoding has unsupported value {payload_encoding}"
+                    "{field_name}.payloadEncoding names an encoding other than messagepack"
                 ));
             }
         },
@@ -1469,41 +1392,16 @@ fn encode_raw_document_record(document: &CultNetRawDocumentRecord) -> rmpv::Valu
     ])
 }
 
-// R-M: `SelectionDocumentRecord`, `RawDocumentHeader`, `Edge` and `RecordRef` already derive
-// `Serialize`/`Deserialize` (selection.rs) with the same camelCase field names this hand-written
-// codec used to spell out by hand - about 335 lines duplicating what those derives already do.
-//
-// `rmpv::ext::to_value`/`from_value` looked like the natural generic bridge, but they serialize a
-// struct positionally (`serialize_struct` as a MessagePack array, one slot per field in
-// declaration order, breaking as soon as a `skip_serializing_if` field is actually skipped) -
-// wrong for these types twice over: it is not the named-map encoding this wire always uses
-// (section 10's rule; `rmp_serde::to_vec_named` elsewhere in this crate), and it does not
-// round-trip at all once a field is omitted. These two helpers instead go through
-// `rmp_serde::to_vec_named`/`from_slice` (named-map bytes, proven both ways by
-// `tests/selection.rs`'s `snapshot_response_raw_v1_round_trips_*` tests) and hand the bytes to
-// `rmpv::Value`'s own `Serialize`/`Deserialize` (already used throughout this file, e.g. to decode
-// the outer message envelope) to shuttle to/from the `rmpv::Value` tree the rest of this codec
-// builds by hand.
-
-fn require_typed<T: serde::de::DeserializeOwned>(
-    value: Option<&rmpv::Value>,
-    field_name: &str,
-) -> Result<T> {
-    let value = value.ok_or_else(|| anyhow!("{field_name} is required"))?;
-    let bytes = rmp_serde::to_vec(value).map_err(|err| anyhow!("{field_name}: {err}"))?;
-    rmp_serde::from_slice(&bytes).map_err(|err| anyhow!("{field_name}: {err}"))
-}
+// R-M: `SelectionDocumentRecord`, `RawDocumentHeader`, `Edge` and `RecordRef` derive
+// `Serialize`/`Deserialize` (selection.rs) with the camelCase field names this wire uses.
+// `encode_typed` goes through `rmp_serde::to_vec_named` (the named-map encoding this wire always
+// uses; `rmpv::ext::to_value` would write a struct positionally) and reads the bytes back into the
+// `rmpv::Value` tree the rest of this codec builds by hand, through the decode door. Received rows
+// are never re-encoded to become typed: the enum's derive reads them from the original bytes.
 
 fn encode_typed<T: Serialize>(value: &T) -> rmpv::Value {
     let bytes = rmp_serde::to_vec_named(value).expect("selection wire types always encode to MessagePack");
-    rmp_serde::from_slice(&bytes).expect("named-map MessagePack bytes always decode into rmpv::Value")
-}
-
-fn require_legacy_u32(value: Option<&rmpv::Value>, field_name: &str) -> Result<u32> {
-    let number = value
-        .and_then(rmpv::Value::as_u64)
-        .ok_or_else(|| anyhow!("{field_name} must be a non-negative integer"))?;
-    u32::try_from(number).map_err(|_| anyhow!("{field_name} does not fit in u32"))
+    cultcache_rs::decode_payload(&bytes).expect("named-map MessagePack bytes always decode into rmpv::Value")
 }
 
 fn require_legacy_i32(value: Option<&rmpv::Value>, field_name: &str) -> Result<i32> {
@@ -1511,28 +1409,6 @@ fn require_legacy_i32(value: Option<&rmpv::Value>, field_name: &str) -> Result<i
         .and_then(rmpv::Value::as_i64)
         .ok_or_else(|| anyhow!("{field_name} must be an integer"))?;
     i32::try_from(number).map_err(|_| anyhow!("{field_name} does not fit in i32"))
-}
-
-fn require_legacy_u64(value: Option<&rmpv::Value>, field_name: &str) -> Result<u64> {
-    value
-        .and_then(rmpv::Value::as_u64)
-        .ok_or_else(|| anyhow!("{field_name} must be a non-negative integer"))
-}
-
-fn require_legacy_optional_i64(
-    value: Option<&rmpv::Value>,
-    field_name: &str,
-) -> Result<Option<i64>> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    if value.is_nil() {
-        return Ok(None);
-    }
-    value
-        .as_i64()
-        .map(Some)
-        .ok_or_else(|| anyhow!("{field_name} must be an integer"))
 }
 
 fn parse_gamecult_networking_message(input: &rmpv::Value) -> Result<CultNetMessage> {
@@ -1613,7 +1489,7 @@ fn parse_gamecult_networking_message(input: &rmpv::Value) -> Result<CultNetMessa
             )?,
         }),
         _ => Err(anyhow!(
-            "Unsupported gamecult.networking.v0 union tag {tag}"
+            "Unsupported gamecult.networking.v0 union tag"
         )),
     }
 }
@@ -1782,7 +1658,7 @@ fn require_legacy_optional_schema_kind_array(
             "wire_message" => Ok(CultNetSchemaKind::WireMessage),
             "document_payload" => Ok(CultNetSchemaKind::DocumentPayload),
             "shared_contract" => Ok(CultNetSchemaKind::SharedContract),
-            _ => Err(anyhow!("{field_name} has unsupported schema kind {value}")),
+            _ => Err(anyhow!("{field_name} has an unsupported schema kind")),
         })
         .collect::<Result<Vec<_>>>()
         .map(Some)
@@ -1811,6 +1687,7 @@ fn require_legacy_schema_descriptor(
     let object = value
         .as_map()
         .ok_or_else(|| anyhow!("{field_name} must be an object in gamecult.networking.v0"))?;
+    refuse_duplicate_keys(object, field_name)?;
 
     let get = |name: &str| -> Option<&rmpv::Value> {
         object.iter().find_map(|(key, value)| {
@@ -1844,7 +1721,7 @@ fn require_legacy_schema_descriptor(
         "shared_contract" => CultNetSchemaKind::SharedContract,
         _ => {
             return Err(anyhow!(
-                "{field_name}.Kind has unsupported schema kind {kind}"
+                "{field_name}.Kind is not a supported schema kind"
             ));
         }
     };

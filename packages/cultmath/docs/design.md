@@ -95,7 +95,8 @@ and HLSL's one-based `_11`..`_33` element names.
 Roslyn against CultMath. These transformations are the complete list; if a body
 needs anything else, the test fails:
 
-1. Include guards (`#ifndef`/`#define`/`#endif`) are dropped.
+1. Include guards (`#ifndef`/`#define`/`#endif`) are dropped, except the capacity macro (`#ifndef CULTMATH_MAX_SITES`,
+   `#define CULTMATH_MAX_SITES 128`, `#endif`), which becomes `const int CULTMATH_MAX_SITES = 128;`.
 2. Functions taking `Texture2D`/`SamplerState` are dropped; GPU resources have
    no CultMath analog.
 3. File-scope `static const` becomes `const`.
@@ -103,7 +104,8 @@ needs anything else, the test fails:
 5. Struct fields gain `public`. HLSL struct members have no access-modifier
    concept; a C# struct's fields default to `private`, which would hide them
    from the mirror test's reflection-based field comparison.
-6. The file body is wrapped in a class, since C# has no free functions; HLSL
+6. An array parameter `T name[CULTMATH_MAX_SITES]` becomes `T[] name`.
+7. The file body is wrapped in a class, since C# has no free functions; HLSL
    functions become private instance methods.
 
 HLSL constructs that stay outside the target and must not appear in the mirror:
@@ -112,8 +114,10 @@ local) and writes through a swizzle component (`v.xy.x = s`, which C# rejects as
 modifying a temporary).
 
 The HLSL side is checked too: `tools/get-dxc.ps1` fetches Microsoft's
-DirectXShaderCompiler, and
-`dxc -T lib_6_3 -HV 2021 shaders/CultMath.hlsl` must compile cleanly.
+DirectXShaderCompiler (x64), and `tools/compile-hlsl.ps1` compiles both copies of
+`CultMath.hlsl` with it (`dxc -T lib_6_3 -HV 2021 -WX`, so a warning fails like an error and the
+text must compile cleanly); the script throws when a shader file is missing, when dxc cannot
+launch or when it exits non-zero, so a stale exit code never reads as a pass.
 
 The mirror test compares bit patterns (any NaN equals any NaN; -0 differs from
 0). It proves the text of `CultMath.hlsl` computes the same float32 results as
@@ -123,13 +127,21 @@ compiled under `using static CultMath.math;`, so its intrinsics are C# `math`
 itself: the test proves the composition in the text, not the intrinsic rules,
 which only `HlslSemanticsTests` pins.
 
+Every mirror function is compared, internals included: its counterpart is the `math`
+function of the same name, public or private (`snoise_mod289` and `snoise_permute` are
+private), and a function with no counterpart fails by name. A struct parameter maps to the
+CultMath type of the same name, and only if both have the same instance fields by name, type
+and order (`SpanPath`, `SpanStage`); the argument is built from the case's scalars field by
+field and copied to its C# twin by field name.
+
 The comparison also allows exactly one struct return shape: a mirror function
 whose HLSL return type is a plain struct of `float`/`floatN`/`int`/`intN`
 fields is compared to its C# counterpart field by field, recursing into each
 field's own components, down to bit-for-bit scalars, matching each leaf's
 declaration path (field names, not just position) and declared type as well
-as its value. `CultCellular` (`math.cs`, `cellular`) and `CultPhasor`
-(`math.Phacelle.cs`, `phacelle`) are its consumers. A struct return with a mismatched, reordered-by-name, or
+as its value. `CultCellular` (`math.cs`, `cellular`), `CultPhasor`
+(`math.Phacelle.cs`, `phacelle`), `SpanNoise` (`math.Span.cs`, `span_fbm`) and `CultSiteCells`
+(`math.Sites.cs`, `site_cells_insert`) are its consumers. `CultSiteCells` is also a struct parameter (`site_cells_insert`, `site_cells_border`). A struct return with a mismatched, reordered-by-name, or
 retyped field does not get a second comparison path or a shape of its own;
 it fails the same walk that already handles a bare vector return.
 
@@ -145,6 +157,10 @@ hand. Regenerate them, and the golden fixture
 ```powershell
 $env:CULTMATH_WRITE_GLSL = "1"; dotnet test packages/cultmath/tests/CultMath.Tests --filter GlslMirrorTests
 ```
+
+Run it on Yggdrasil's `mcr.microsoft.com/dotnet/sdk:10.0` image (Ubuntu 24.04) only: that image owns the fixture's platform
+families and `device-bounds-lavapipe.txt`, and `CULTMATH_WRITE_GLSL=1` fails on any other OS. Re-record the bounds there in
+the same revision (`WRITE_BOUNDS=1`, `tools/device/run-lavapipe.sh`).
 
 `GlslMirrorTests.CommittedGlslEqualsLowering` fails on any difference between
 either committed file and the lowering of the committed HLSL. These
@@ -204,6 +220,12 @@ test, bit for bit; GLSL against C# by the golden fixture, which records 256
 seeded cases per function family as float32 bit patterns, evaluated by the
 consumer on WebGL2 and read back. The families `pcg3d` and `pcg4d` are marked
 exact; the float families are ulp-bounded, the bound measured on the device.
+A conforming leg runs every fixture family through both routes on a device: `tools/device/run-lavapipe.sh`
+compiles the HLSL with dxc and the committed GLSL with glslang, dispatches each family on Mesa lavapipe, and
+`GlslMirrorTests.DeviceResultsHoldFixture` judges the results. Exact and integer families must match bit for bit,
+families with a check pass their `Verify`, the sampled-form families are checked on the device's own noise values,
+and every other family is held to the worst error recorded for that device in
+`tests/CultMath.Tests/fixtures/device-bounds-lavapipe.txt`.
 
 `iv_frustum_ball` is ulp-bounded, not exact: it calls `sqrt`, which GLSL ES
 3.00 does not require to be correctly rounded, and WebGL2 compilers may
@@ -234,6 +256,13 @@ the main families' reach is at least about 1e-3, where the second-order remainde
 allowance still passes. `GoldenFixtureMatchesCSharp` requires each of the two to hold cases that fail on C#'s own results once
 the allowance is removed.
 
+Four more appended families, the coordinate-band `snoise_grad` and `snoise_hessian` reads (256 cases each, the magnitude of the
+point log-uniform from 1e-4 to 1e2 and from 1e2 to 4e6), carry an allowance `check`: with `S = |x|_1` and the allowances
+`math.span_slack(math.span_rounding(1, x, zero stage, 0, 0, 0))` (the owners of the span stage's allowances in C#, HLSL and GLSL),
+the result must lie within the allowance of the kernel's exact value, gradient or Hessian in double, no tolerance. The two small
+families must also fail it in at least 16 cases once the absolute term is removed. `GoldenFixtureMatchesCSharp` applies the check
+to C#'s own results, and a device capture is judged by the same `Verify`.
+
 `GoldenFixtureMatchesCSharp` evaluates C# on the committed fixture's own
 arguments. Arguments are drawn only when the fixture is regenerated
 (`CULTMATH_WRITE_GLSL=1`), because the draw itself calls `MathF.Pow`, whose
@@ -243,17 +272,19 @@ name the platform that generated them and the test compares them case by case
 against the running platform, printing the largest distance. `iv_exp`
 ("ulp-bounded, platform exp") must agree within one ulp. `phacelle`
 ("ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20
-max(|v|, 1)") must agree within `2^-20 max(|v|, 1)` per component, `v` being
+max(|v|, 1); on a device |diff| <= 2^-18 max(|v|, 1)") must agree across
+platforms within `2^-20 max(|v|, 1)` per component, `v` being
 the fixture's value: its sums of `exp`, `sin` and `cos` cancel near zero, where
 ulps mean nothing, and Windows differs from the Linux fixture by up to
-`3.6e-7 max(|v|, 1)`. Every other family is compared as text. `phacelle` is in
+`3.6e-7 max(|v|, 1)`. The device clause is `2^-18` because the devices measured
+are farther: lavapipe is `2.2e-6 max(|v|, 1)` and the GTX 1070 `3.1e-6`; the conforming
+run judges it. Every other family is compared as text. `phacelle` is in
 `CultMath.Phacelle.glsl`, so the evaluator concatenates
 `CultMath.Phacelle.glsl` after `CultMath.glsl` for that family, with
 normalization 0.5. The site does not vendor the MPL file and skips the family.
-Its evaluator is the cultmath-tapes follow-up `glsl-browser-parity-run`, owned
-by the next CultMath parity cut: a repeatable CultLib WebGL2 run of every
-fixture family, `phacelle` included. Until it lands, the one GLSL evaluation of
-`phacelle` is a single probe (GTX 1070, ANGLE D3D11: within `3.1e-6 max(|v|, 1)`
+Its evaluator is the lavapipe GLSL route of the conforming run above, which covers
+every fixture family, `phacelle` included. The real-device leg (ANGLE D3D11 on the GTX 1070)
+is the later cut `angle-capture`; the one GLSL evaluation of `phacelle` on that device is a single probe (GTX 1070, ANGLE D3D11: within `3.1e-6 max(|v|, 1)`
 of C#). Asura's `gpu-snoise-parity` is a different check, an FXC and Unity
 readback of `snoise`, and evaluates no GLSL.
 
@@ -398,7 +429,7 @@ together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
 - `phacelle(float3 p, float3 side, float offset, float normalization)` is Rune
   Skovbo Johansen's Phacelle noise ("phase + cell": a stripe pattern built by
   blending one cosine/sine wave per jittered cell), generalised to 3D cells. It
-  returns `CultPhasor { cos, sin }`, each `(∇, value)`. `side` is the stripe
+  returns `CultPhasor { cosine, sine }`, each `(∇, value)`. `side` is the stripe
   wave vector, whose length is 2π times the stripe frequency; in 3D the
   perpendicular to the flow is not unique, so the caller chooses it (on a unit
   sphere, `cross(p̂, flow)`). `offset` is the phase in cycles. It visits 4×4×4
@@ -471,6 +502,83 @@ code.
 Known C# friction: under `using static CultMath.math;` the constructor
 functions (`float3(...)`, `float3x3(...)`) hide the type names in member access,
 so static members need a qualified type (`CultMath.float3x3.Euler(...)`).
+
+## Sites
+
+A site is `float4(position.xyz, weight)`; a 2D consumer uses z = 0. `math.Sites.cs` scores a query point
+against a site two ways and keeps the two best:
+
+- `power_score(p, site)`: value `|p - s|^2 - w^2`, gradient `2 (p - s)`. A power cell is the intersection of the
+  half-spaces bounded by the radical planes against every other site, so `power_border` is exact.
+- `multiplicative_score(p, site)`: value `|p - s| / w`, gradient `(p - s) / (|p - s| w)`, zero at `p = s`
+  (cellular's degenerate convention). Its borders are Apollonius circles, and the border distance is first order.
+
+A span function is a C# loop over a per-site step that has a shader twin, because the HLSL mirror cannot take a
+span or a buffer. `site_cells_empty()` starts the fold, `site_cells_insert(cells, score, index)` folds one score
+in (strict `<` against F1, the old F1 moving to second, else strict `<` against F2, so an exact tie keeps the
+earlier index first), and `site_cells_border(cells)` reads `float4(unit normal, distance)`, with `n = grad F2 -
+grad F1` pointing toward the nearest site and `(0, 0, 0, 1.0e30)` when there is no second site. That border is
+the distance to the bisector of the two lowest scores, first order and for either metric; it is not the distance
+to the nearest site's cell boundary (the F2 - F1 edge error: the second-lowest score is not the nearest plane in
+general). The exact power cell border is a second pass: `power_border_step(p, owner, other, border)` takes the
+running `float4(unit normal toward the owner, distance)` and the radical plane of `owner` against `other`, with
+the distance built from the offset `owner - p` and the weight difference `(w1 - w2)(w1 + w2)` so it does not
+cancel for close sites seen from far; the cell boundary distance is the least over every site except the owner
+(the fold's nearest), and a site coincident with the owner has no plane. The step trusts the caller's owner: a
+query outside the owner's cell reports distance 0 with that plane's normal, not an error. `power_border(p, sites)` is that loop;
+the shader's `cultmath_power_border(p, sites, count)` is the same loop over a by-value array (see "Sites in a shader" below).
+Cell spans refuse a non-finite query, site position or weight, and more than 2^24 sites (indices are floats).
+`power_cells` and
+`multiplicative_cells` are that loop over a `ReadOnlySpan<float4>` and nothing else; a shader caller writes the
+same loop over its own array. Every site of an explicit span is visited, so no window and no weight-ratio range
+apply. `CultSiteCells` holds the two score fields and the two site indices (floats, -1 for none).
+
+`gabriel_margin(a, b, other)` is `(|other - (a + b) / 2| - r) / r` with `r = |a - b| / 2`: zero on the diameter
+circle, negative inside it, -1 when `a` and `b` coincide. `soft_gabriel_gate(sites, first, second, softness)`
+is `smoothstep(-softness, softness, least margin over every other site)` on positions alone, 1 when no other site
+exists; it is C# only. `distance_to_segment(point, start, end)` has out-free 2D and 3D forms beside the `out`
+form, all over one public `segment_closest` per dimension, each with its 2D and 3D shader overload.
+
+## Weighted lattice cells
+
+`weighted_lattice_cells(p, time, bodies, cellSize, drift, boost, falloff, smoothing, stretchNormal, stretch)` in
+`math.Lattice.cs` returns `float4(F1, F2, smooth, id)` over a jittered, drifting lattice, in cell units times weight.
+Four public steps compose it, and a shader or a tape composes the same four:
+
+- `lattice_site(cell, time, drift)`: the site `cell + 0.5 + 0.5 sin(drift time + 2 pi u)` per axis (so it stays within
+  one cell of the corner) and the base weight `0.5 + 0.5 u`, in [0.5, 1), from its own hash lane.
+- `lattice_weight(base, border, boost, falloff)`: `base (1 + boost exp(-(border / falloff)^2))`. `border` is
+  `power_border` at the cell centre over the body span (exact, so the weight is continuous as bodies move; the first
+  order `site_cells_border` jumps where the second-nearest body changes and is not used).
+- `lattice_distance(q, site, weight, normal, stretch)`: `weight |(stretch a, c)|`, `a` and `c` the offset along and
+  across the unit normal; isotropic at stretch 1.
+- `lattice_smooth_step(m, d, f1, smoothing)`: the smooth minimum fold, started at `F1 + smoothing` and clamped to it,
+  so a cell with `d >= F1 + 2 smoothing` changes nothing and the result does not depend on the box visited.
+
+The search visits Chebyshev rings around the query's cell and stops before ring `k` once `0.5 (k - 1) >= max(F2,
+F1 + 2 smoothing)`: every cell on ring `k` has `d >= 0.5 (k - 1)` (site within one cell of its corner, weight at
+least 0.5, stretch at least 1). A second pass folds the visited box in absolute row-major order, so ties and the
+smooth minimum do not depend on how far the search went. The proof is the comment above `weighted_lattice_cells`.
+
+The accepted range is boost 0 to `LatticeMaxBoost` (4, a weight ratio of 10:1), stretch 1 to `LatticeMaxStretch` (2)
+and smoothing up to `LatticeMaxSmoothing` (1); outside it the function throws `ArgumentException`. `LatticeMaxRing`
+(37) is the proven greatest ring at the range edge. Measured over 24,000 points on orbiting bodies (six bodies,
+sigma ratio 6:1, the ruled look and the range edge), the greatest ring visited has median 3, 99th percentile 7 and
+maximum 8 (49, 225 and 289 cells); `RingsStayWellInsideTheCap` asserts these.
+
+### Sites in a shader
+
+A shader function cannot take a span, so `cultmath_power_border(p, sites, count)`, `cultmath_lattice_cell_distance(...)`
+and `cultmath_weighted_lattice_cells(p, time, bodies, count, ...)` take `float4 sites[CULTMATH_MAX_SITES]` by value and the
+count in use, with `count` in `[0, CULTMATH_MAX_SITES]`. `CULTMATH_MAX_SITES` is 128 unless the consumer defines it before
+including the library (`#ifndef`): 128 covers every Aetheria zone within GLSL ES 3.00's 224 guaranteed fragment uniform
+vectors, and loops run to `count`, so the capacity costs uniform space, not iterations. A caller whose sites live in a
+buffer copies them into a local array first; the library takes no resource, accessor macro or uniform of its own. The preconditions the C#
+functions throw for are the caller's in a shader (finite arguments, `cellSize > 0`, the stated ranges, `p` within 2^23
+cells). The ring pass is bounded `k <= 37` and exits as C# does; the box pass recomputes each distance instead of caching
+75 x 75 of them, which gives the same values. The C# mirror compiles the array as `T[]`, and
+`HlslSourceCompatibilityTests.SiteArrayMirrorsMatchCSharp` compares the three functions through the span twins in
+`SiteArrays` (reflection cannot pass a `ReadOnlySpan`); `CULTMATH_MAX_SITES` is a shader-only capacity with no C# twin.
 
 ## Intervals
 
@@ -777,11 +885,18 @@ differentiating each corner's gradient `-8 m^3 s x + m^4 p` once more. Each
 off-diagonal entry is computed once and placed twice, so the matrix equals its
 transpose bit for bit, and a clamped corner (`m = 0`) contributes nothing. Built
 from nine scalars, the matrix reads as columns in GLSL (`mat3`) and rows in HLSL,
-which is the same matrix because it is symmetric. `SNOISE_THIRD = 536.9152`
+which is the same matrix because it is symmetric. `SNOISE_THIRD = 535.8009`
 (`math.Span.cs`) is the next order: 1.10 times the maximum, over 1e6 seeded points,
-of the operator norm of the third-derivative tensor of `snoise` (central
-differences of `snoise_hessian` at h = 1e-3, then an ascent over unit vectors),
-refined from the 1e4 largest; measured 488.1047 on the tied kernel.
+of the operator norm of the third-derivative tensor of `snoise`, refined from the
+1e4 largest; measured 487.0917 on the tied kernel. The tensor is closed form, in
+double: `snoise_hessian`'s per-corner entry differentiated once more, on the
+kernel's lattice, tie order and hash, and the test
+`ThirdTensorMatchesDifferencesOfTheHessian` holds it against Richardson-extrapolated
+differences of the double Hessian. The operator norm is a local ascent over unit
+vectors (a dense sweep of 20,000 directions at the witness finds 99.9987% of it) and
+the outer maximum a sampled search refined by ascent, so the constant is empirical
+with a 10% margin, not a proof; an earlier pin from central differences of the
+float Hessian read 488.1047, its roundoff.
 `MeasureThird` takes the measurement and `ThirdConstantPinsSampled` pins it.
 `integral_clamp_linear(a, b, lo, hi, t0, t1)` is the closed-form integral over
 `[t0, t1]` of `clamp(a + b t, lo, hi)`. All three have HLSL and GLSL lowerings and
@@ -798,6 +913,76 @@ constant of 40 misses there). The margin over the function itself: a scan of the
 289^3 hash period found a realised maximum of 50.58, and bounding each corner's gradient
 independently over every hash configuration gives 52.22, so 55.64 sits 7% above the
 configuration bound. A change to the kernels must re-run the measurements.
+
+### Span stages
+
+`span_fbm` and `span_ridged` (`math.Span.cs`; `cultmath_span_fbm` and `cultmath_span_ridged` in HLSL over
+the same struct types, `cultmath_span_stage` behind both, and GLSL derived) are the octave stages
+of a warp chain, `span_fbm(path, stage, octaves, lacunarity, gain)`, each returning
+one `SpanNoise { float4 field; float curvature; float fold; }`. The inputs are two
+structs with named public fields and no positional constructor, so the three floats
+of the span and the six fields of the transform cannot be swapped silently.
+`SpanPath { midpoint, velocity, speed, acceleration, halfLength }` is the path
+`q(t)`, `|t| <= halfLength`, through `midpoint` with `velocity` at `t = 0`,
+`|q'| <= speed` and `|q''| <= acceleration` along it. `SpanStage { frequency,
+stretch, axis, shift, offset, octaveStep }` makes octave `o` sample `snoise_grad`
+at `x_o(q) = f_o (M q + shift) + offset + o octaveStep`, with `f_o =
+lacunarity^o`, amplitude `gain^o`, and `M = frequency (I + (1/stretch - 1) a a^T)`,
+`a = normalize(axis)`; a zero axis or `stretch` 1 means no stretch, and `stretch`
+must be positive and finite (unguarded, like `lacunarity`). `default(SpanStage)`
+has frequency 0; `SpanStage.Identity` is the stage whose field equals `fbm_grad`
+and `ridged_grad` bit for bit. `octaves`, `lacunarity` and `gain` stay positional:
+they are `fbm_grad`'s own trailing triple, and `octaves` is the one int among the
+scalars. `field` is the octave sum and its gradient in `q` (`f_o M grad n_o`).
+`span_ridged` sums `gain^o (1 - |n_o|)`, `ridged_grad`'s convention. The Span
+Lab's stage is `1 - 2|n|` per octave: with `G` the sum of `gain^o` over the
+octaves (signed, so the alternating sum for a negative gain), its value is `2 value
+- G`, and its gradient, curvature and fold are twice `span_ridged`'s.
+
+The shaders have no `SpanStage.Identity`: a shader caller builds every stage field itself (in GLSL,
+`SpanStage(1.0, 1.0, vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0))` is the identity). A constant would
+need a second transformation rule (C# has no const structs, GLSL wants a constructor) and a mirror
+exemption, for one value; the mirror test proves instead that the shader text at a C#-built identity
+returns `cultmath_fbm_grad` and `cultmath_ridged_grad`'s field bit for bit.
+
+Bounds come from the three pins only. With `|M| = |frequency| max(1, 1/stretch)` and
+`nu = f_o |M| speed` the noise-space speed, the Hessian of the noise on the span has
+operator norm at most `Hl = min(SNOISE_HESSIAN, ||snoise_hessian(x_mid)||_F + e_h +
+SNOISE_THIRD nu halfLength)`, so `curvature = sum gain^o f_o^2 |M|^2 Hl` bounds the
+operator norm of the field's Hessian in `q` at every point of the span (the pin takes
+over once the third-derivative term exceeds it, and at `halfLength` 0 the local tier
+alone remains). For `span_ridged`, an octave leaves the branch it is on at the
+midpoint (`1 - s n`, `s` the midpoint's sign of `n`) only where `n` changes sign, and
+there `|n| <= V - |n_mid|`, with `V = (|grad n_mid . w| + e_g |w|) halfLength + (Hl nu |w|
++ Gl f_o |M| acceleration) halfLength^2 / 2 + 2 e_n`, `w = f_o M velocity` and `Gl =
+min(SNOISE_LIPSCHITZ, |grad n_mid| + e_g + Hl nu halfLength)`; `fold = sum 2 gain^o
+max(V - |n_mid|, 0)`, exactly 0 for `span_fbm` and for an octave that cannot reach zero.
+
+The float32 `snoise`, `snoise_grad` and `snoise_hessian` are not the exact functions, so
+the quantities read at the midpoint carry allowances, by the derivation of `af_snoise`'s
+comment. `S_o = |f_o| (|M q|_1 + |shift|_1) + |offset|_1 + |o octaveStep|_1 + sqrt(3) nu
+halfLength` is the sum of the magnitudes the octave coordinate's roundings are relative
+to, and `e_n = 2^-14 + L 2^-20 S_o` (value), `e_g = 2^-12 + H 2^-20 S_o` (gradient
+length) and `e_h = 2^-10 + T 2^-20 S_o` (Frobenius norm of the Hessian), with `L`, `H`,
+`T` the three pins; they add no pin. Measured against a double kernel with the float
+hash (6000 points per band, `|x|` from 2^-2 to 2^23), two samples observed the error's
+maxima as fractions of `e_n`, `e_g` and `e_h`: 0.057, 0.046 and 0.075 in the cut's own
+sample (seed not recorded; the 0.075 is against `T 2^-20 |x|_1` alone, at the smallest
+band, where the absolute Hessian error is 2.3e-5 and the absolute term carries it), and
+0.064, 0.0485 and 0.057 in an audit's (seed 0x501). They are samples, not bounds: a new
+seed moves them. They say the allowances enclose the error with a margin of about 15.
+Errors grow linearly in `|x|`: the value's is 2e-4 at 2^8, 1.5e-2 at 2^14 and 0.94 at 2^20.
+Rounding in the Frobenius-to-operator-norm step needs no allowance: the Frobenius norm
+exceeds the operator norm.
+
+Domain. No coordinate range is checked, clamped or refused. The allowances grow with
+`S_o`, so `curvature` saturates at `SNOISE_HESSIAN` (true everywhere) by `S_o` of about
+1.1e5, and `fold` turns positive for every octave whose `V + 2 e_n` reaches `|n_mid|`:
+the bounds stay sound at every magnitude and stop being informative where float32 noise
+is (see "Precision domain" above). `SpanStageTests` encloses the exact (double) Hessian
+norm and both the float and the exact branch departure at 64 points of seeded spans in
+bands of `S_o` from under 1e2 to over 1e6, and in a fixed span where the local tier
+with its third-derivative term halved fails.
 
 The slice. `af_frustum_ball(centreSlope, z0, z1, footprintPerDepth,
 warpVariation)` returns the centre `(m_c z_m, z_m)` and a radius `z1

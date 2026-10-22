@@ -134,7 +134,7 @@ for (const [entryName, entry] of Object.entries(entries)) {
     }
   }
 }
-assert.equal(typeof documentEntry.checkPayloadDepth, "undefined");
+assert.equal(typeof documentEntry.checkPayloadDepth, "function");
 assert.equal(documentEntry.MAX_PAYLOAD_DEPTH, 256);
 assert.equal(cache.MAX_PAYLOAD_DEPTH, 256);
 assert.equal(documentEntry.CultCachePayloadDepthError, cache.CultCachePayloadDepthError);

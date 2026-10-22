@@ -302,10 +302,10 @@ float3x3 cultmath_snoise_hessian(float3 value)
 // The integral over [t0, t1] of clamp(a + b t, lo, hi); see the C# math.integral_clamp_linear comment.
 float cultmath_integral_clamp_linear(float a, float b, float lo, float hi, float t0, float t1)
 {
-    if (b == 0.0)
-        return clamp(a, lo, hi) * (t1 - t0);
-
     lo = min(lo, hi);
+    if (b == 0.0)
+        return t1 != t0 ? clamp(a, lo, hi) * (t1 - t0) : 0.0;
+
     float direction = t1 < t0 ? -1.0 : 1.0;
     float start = min(t0, t1);
     float stop = max(t0, t1);
@@ -315,7 +315,9 @@ float cultmath_integral_clamp_linear(float a, float b, float lo, float hi, float
     float leave = clamp(max(atLo, atHi), start, stop);
     float before = b > 0.0 ? lo : hi;
     float after = b > 0.0 ? hi : lo;
-    float total = before * (enter - start) + (a + b * (0.5 * (enter + leave))) * (leave - enter) + after * (stop - leave);
+    float held = enter > start ? before * (enter - start) : 0.0;
+    float kept = stop > leave ? after * (stop - leave) : 0.0;
+    float total = held + (a + b * (0.5 * (enter + leave))) * (leave - enter) + kept;
     return direction * total;
 }
 
@@ -598,10 +600,372 @@ CultCellular cultmath_cellular(float3 p)
     return result;
 }
 
+// Sites: a site is float4(position.xyz, weight). A shader function cannot take a span (design.md, "Sites"), so a span is a
+// fixed-capacity array and a count (cultmath_power_border, below), or a loop over a per-site step:
+//   CultSiteCells cells = cultmath_site_cells_empty();
+//   for (int i = 0; i < count; i++)
+//       cells = cultmath_site_cells_insert(cells, cultmath_power_score(p, sites[i]), i);
+// The exact power cell border is cultmath_power_border, the second loop over the sites that skips the owner cells.nearestSite.
+// The step trusts the owner: a p outside the owner's cell reports distance 0 with that plane's normal, not an error.
+// Statement for statement with math.Sites.cs (power_score, multiplicative_score, site_cells_*, gabriel_margin).
+struct CultSiteCells
+{
+    float4 nearest;
+    float4 second;
+    float nearestSite;
+    float secondSite;
+};
+
+float4 cultmath_power_score(float3 p, float4 site)
+{
+    float3 offset = p - site.xyz;
+    return float4(offset * 2.0, dot(offset, offset) - site.w * site.w);
+}
+
+float4 cultmath_multiplicative_score(float3 p, float4 site)
+{
+    float3 offset = p - site.xyz;
+    float r = length(offset);
+    float3 gradient = r > 0.0 ? offset / (r * site.w) : float3(0.0, 0.0, 0.0);
+    return float4(gradient, r / site.w);
+}
+
+CultSiteCells cultmath_site_cells_empty()
+{
+    CultSiteCells result;
+    result.nearest = float4(0.0, 0.0, 0.0, 1.0e30);
+    result.second = float4(0.0, 0.0, 0.0, 1.0e30);
+    result.nearestSite = -1.0;
+    result.secondSite = -1.0;
+    return result;
+}
+
+CultSiteCells cultmath_site_cells_insert(CultSiteCells cells, float4 score, int index)
+{
+    CultSiteCells result = cells;
+    if (score.w < cells.nearest.w)
+    {
+        result.second = cells.nearest;
+        result.secondSite = cells.nearestSite;
+        result.nearest = score;
+        result.nearestSite = (float)index;
+    }
+    else if (score.w < cells.second.w)
+    {
+        result.second = score;
+        result.secondSite = (float)index;
+    }
+
+    return result;
+}
+
+float4 cultmath_site_cells_border(CultSiteCells cells)
+{
+    float3 n = cells.second.xyz - cells.nearest.xyz;
+    float len = length(n);
+    if (cells.secondSite < 0.0 || len <= 0.0)
+        return float4(0.0, 0.0, 0.0, 1.0e30);
+    return float4(n / len, (cells.second.w - cells.nearest.w) / len);
+}
+
+float4 cultmath_power_border_step(float3 p, float4 owner, float4 other, float4 border)
+{
+    float3 d = other.xyz - owner.xyz;
+    float len = length(d);
+    if (len <= 0.0)
+        return border;
+    float plane = max((dot(owner.xyz - p, d) + 0.5 * (dot(d, d) + (owner.w - other.w) * (owner.w + other.w))) / len, 0.0);
+    return plane < border.w ? float4(-d / len, plane) : border;
+}
+
+float cultmath_gabriel_margin(float3 a, float3 b, float3 other)
+{
+    float r = cultmath_distance(a, b) * 0.5;
+    if (r <= 0.0)
+        return -1.0;
+    return (cultmath_distance(other, (a + b) * 0.5) - r) / r;
+}
+
+// Weighted lattice cells: the four per-cell steps of math.Lattice.cs, statement for statement; cultmath_weighted_lattice_cells,
+// after them, is the whole function.
+float3 cultmath_lattice_site(float2 cell, float time, float drift)
+{
+    int3 h = cultmath_pcg3d(int3((int)cell.x, (int)cell.y, 0));
+    float2 phase = float2((float)((uint)h.x >> 8) * (1.0 / 16777216.0), (float)((uint)h.y >> 8) * (1.0 / 16777216.0));
+    float2 site = cell + 0.5 + 0.5 * float2(sin(drift * time + CULTMATH_TAU * phase.x), sin(drift * time + CULTMATH_TAU * phase.y));
+    return float3(site, 0.5 + 0.5 * ((float)((uint)h.z >> 8) * (1.0 / 16777216.0)));
+}
+
+float cultmath_lattice_weight(float base_weight, float border, float boost, float falloff)
+{
+    float t = border / falloff;
+    return base_weight * (1.0 + boost * exp(-(t * t)));
+}
+
+float cultmath_lattice_distance(float2 q, float2 site, float weight, float2 normal, float stretch)
+{
+    float2 v = site - q;
+    float a = dot(v, normal);
+    float c = v.x * normal.y - v.y * normal.x;
+    return weight * length(float2(stretch * a, c));
+}
+
+float cultmath_lattice_smooth_step(float m, float d, float f1, float smoothing)
+{
+    if (d >= f1 + 2.0 * smoothing)
+        return m;
+    float h = cultmath_smoothstep(0.0, 1.0, 0.5 + 0.5 * (m - d) / smoothing);
+    float next = m + (d - m) * h - h * (1.0 - h) * smoothing / (1.0 + 3.0 * smoothing);
+    return min(next, f1 + smoothing);
+}
+
+// Sites by value: a shader function cannot take a span, so these take float4 sites[CULTMATH_MAX_SITES] and the count in use, with
+// count in [0, CULTMATH_MAX_SITES]. A consumer defines CULTMATH_MAX_SITES before including this file to change the capacity; loops
+// run to count, so the capacity costs uniform space, not iterations. A caller whose sites live in a buffer copies them into a local array first.
+// The preconditions the C# functions throw for are the caller's in a shader: finite arguments, cellSize > 0, boost in [0, 4],
+// falloff > 0, smoothing in (0, 1], stretch in [1, 2], p within 2^23 cells. A zero stretchNormal means (1, 0) and needs stretch == 1.
+// cultmath_weighted_lattice_cells is math.weighted_lattice_cells: the ring pass is bounded by k <= 37 and exits as C# does, and the
+// box pass recomputes each distance instead of caching it (a 75 x 75 private array is not a shader option), with the same values.
+#ifndef CULTMATH_MAX_SITES
+#define CULTMATH_MAX_SITES 128
+#endif
+
+float4 cultmath_power_border(float3 p, float4 sites[CULTMATH_MAX_SITES], int count)
+{
+    CultSiteCells cells = cultmath_site_cells_empty();
+    for (int i = 0; i < count; i++)
+        cells = cultmath_site_cells_insert(cells, cultmath_power_score(p, sites[i]), i);
+    float4 border = float4(0.0, 0.0, 0.0, 1.0e30);
+    int owner = (int)cells.nearestSite;
+    if (owner < 0)
+        return border;
+    for (int k = 0; k < count; k++)
+        if (k != owner)
+            border = cultmath_power_border_step(p, sites[owner], sites[k], border);
+    return border;
+}
+
+float cultmath_lattice_cell_distance(float2 q, float2 cell, float time, float drift, float4 bodies[CULTMATH_MAX_SITES], int count,
+    float cellSize, float boost, float falloff, float2 normal, float stretch)
+{
+    float3 site = cultmath_lattice_site(cell, time, drift);
+    float border = cultmath_power_border(float3((cell + 0.5) * cellSize, 0.0), bodies, count).w;
+    return cultmath_lattice_distance(q, site.xy, cultmath_lattice_weight(site.z, border, boost, falloff), normal, stretch);
+}
+
+float4 cultmath_weighted_lattice_cells(float2 p, float time, float4 bodies[CULTMATH_MAX_SITES], int count, float cellSize, float drift,
+    float boost, float falloff, float smoothing, float2 stretchNormal, float stretch)
+{
+    float scale = max(abs(stretchNormal.x), abs(stretchNormal.y));
+    float2 normal = float2(1.0, 0.0);
+    if (scale > 0.0)
+    {
+        normal = stretchNormal / scale;
+        normal = normal / length(normal);
+    }
+    float2 q = p / cellSize;
+    float2 origin = floor(q);
+    int cx0 = (int)origin.x;
+    int cz0 = (int)origin.y;
+    float f1 = 1.0e30;
+    float f2 = 1.0e30;
+    int reach = 0;
+    for (int k = 0; k <= 37; k++)
+    {
+        if (k > 1 && 0.5 * (float)(k - 1) >= max(f2, f1 + 2.0 * smoothing))
+            break;
+        for (int dz = -k; dz <= k; dz++)
+        {
+            int step = dz == -k || dz == k || k == 0 ? 1 : 2 * k;
+            for (int dx = -k; dx <= k; dx += step)
+            {
+                float d = cultmath_lattice_cell_distance(q, float2(cx0 + dx, cz0 + dz), time, drift, bodies, count, cellSize, boost, falloff, normal, stretch);
+                if (d < f1) { f2 = f1; f1 = d; }
+                else if (d < f2) f2 = d;
+            }
+        }
+        reach = k;
+    }
+    float m = f1 + smoothing;
+    float best = 1.0e30;
+    float second = 1.0e30;
+    int winDx = 0;
+    int winDz = 0;
+    for (int dz = -reach; dz <= reach; dz++)
+        for (int dx = -reach; dx <= reach; dx++)
+        {
+            float d = cultmath_lattice_cell_distance(q, float2(cx0 + dx, cz0 + dz), time, drift, bodies, count, cellSize, boost, falloff, normal, stretch);
+            if (d < best) { second = best; best = d; winDx = dx; winDz = dz; }
+            else if (d < second) second = d;
+            m = cultmath_lattice_smooth_step(m, d, f1, smoothing);
+        }
+    int4 id = cultmath_pcg4d(int4(cx0 + winDx, cz0 + winDz, 0, 0));
+    return float4(best, second, m, (float)((uint)id.w >> 8) * (1.0 / 16777216.0));
+}
+
+float2 cultmath_segment_closest(float2 point_value, float2 start, float2 end)
+{
+    float2 segment = end - start;
+    float segmentLengthSq = cultmath_lengthsq(segment);
+    if (segmentLengthSq <= 0.0)
+        return start;
+
+    float t = cultmath_saturate(dot(point_value - start, segment) / segmentLengthSq);
+    return start + segment * t;
+}
+
+float3 cultmath_segment_closest(float3 point_value, float3 start, float3 end)
+{
+    float3 segment = end - start;
+    float segmentLengthSq = cultmath_lengthsq(segment);
+    if (segmentLengthSq <= 0.0)
+        return start;
+
+    float t = cultmath_saturate(dot(point_value - start, segment) / segmentLengthSq);
+    return start + segment * t;
+}
+
+float cultmath_distance_to_segment(float2 point_value, float2 start, float2 end)
+{
+    return cultmath_distance(point_value, cultmath_segment_closest(point_value, start, end));
+}
+
+float cultmath_distance_to_segment(float3 point_value, float3 start, float3 end)
+{
+    return cultmath_distance(point_value, cultmath_segment_closest(point_value, start, end));
+}
+
 #include "CultMath.Phacelle.hlsl"
 #include "CultMath.Interval.hlsl"
 #include "CultMath.Cycles.hlsl"
 #include "CultMath.Affine.hlsl"
+
+// Span stages (invariant 8): the SpanPath, SpanStage and SpanNoise of math.Span.cs, field for field in
+// C#'s order, and cultmath_span_stage, its octave stage, statement for statement so the text is a bit-for-bit
+// mirror. They follow the includes because the bounds read CULTMATH_SNOISE_LIPSCHITZ, _HESSIAN and _THIRD.
+// A shader caller builds a SpanStage itself (SpanStage(1.0, 1.0, vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0))
+// is the identity of math.SpanStage.Identity, which has no shader form); see math.span_stage's comments for
+// the span, the transform, the bounds and the allowances. cultmath_span_rounding and cultmath_span_slack
+// are math.span_rounding and math.span_slack, the owners of S_o and of the three allowances.
+struct SpanPath
+{
+    float3 midpoint;
+    float3 velocity;
+    float speed;
+    float acceleration;
+    float halfLength;
+};
+
+struct SpanStage
+{
+    float frequency;
+    float stretch;
+    float3 axis;
+    float3 shift;
+    float3 offset;
+    float3 octaveStep;
+};
+
+struct SpanNoise
+{
+    float4 field;
+    float curvature;
+    float fold;
+};
+
+float cultmath_span_rounding(float scale, float3 mq, SpanStage stage, float3 octaveShift, float nu, float halfLength)
+{
+    return 9.5367431640625e-7 * (abs(scale) * (cultmath_csum(abs(mq)) + cultmath_csum(abs(stage.shift))) + cultmath_csum(abs(stage.offset)) + cultmath_csum(abs(octaveShift)) + 1.7320508 * nu * halfLength);
+}
+
+float3 cultmath_span_slack(float rounding)
+{
+    return float3(CULTMATH_SNOISE_READ_VALUE + CULTMATH_SNOISE_LIPSCHITZ * rounding,
+        CULTMATH_SNOISE_READ_GRADIENT + CULTMATH_SNOISE_HESSIAN * rounding,
+        9.765625e-4 + CULTMATH_SNOISE_THIRD * rounding);
+}
+
+// The octave stage behind cultmath_span_fbm and cultmath_span_ridged, as math.span_stage is behind span_fbm
+// and span_ridged. The Frobenius norm of the Hessian is written out in C#'s order (GLSL has no _mRC member
+// access); the C# local named step is octaveShift here (it would shadow GLSL's step()).
+SpanNoise cultmath_span_stage(bool ridged, SpanPath path, SpanStage stage, int octaves, float lacunarity, float gain)
+{
+    float3 q = path.midpoint;
+    float halfLength = path.halfLength;
+    octaves = clamp(octaves, 0, 16);
+    bool stretched = dot(stage.axis, stage.axis) > 0.0 && stage.stretch != 1.0;
+    float3 direction = stretched ? normalize(stage.axis) : float3(0.0, 0.0, 0.0);
+    float squeeze = stretched ? 1.0 / stage.stretch - 1.0 : 0.0;
+    float norm = abs(stage.frequency) * (stretched ? max(1.0, 1.0 / stage.stretch) : 1.0);
+    float3 mq = stretched ? stage.frequency * (q + squeeze * dot(direction, q) * direction) : stage.frequency * q;
+    float3 mv = stretched ? stage.frequency * (path.velocity + squeeze * dot(direction, path.velocity) * direction) : stage.frequency * path.velocity;
+    float amplitude = 1.0;
+    float scale = 1.0;
+    float value = 0.0;
+    float3 gradient = float3(0.0, 0.0, 0.0);
+    float curvature = 0.0;
+    float fold = 0.0;
+    for (int i = 0; i < octaves; i++)
+    {
+        float3 octaveShift = (float)i * stage.octaveStep;
+        float3 x = scale * (mq + stage.shift) + (stage.offset + octaveShift);
+        float4 n = cultmath_snoise_grad(x);
+        float3 g = float3(n.x, n.y, n.z);
+        float3 mg = stretched ? stage.frequency * (g + squeeze * dot(direction, g) * direction) : stage.frequency * g;
+        if (ridged)
+        {
+            float s = sign(n.w);
+            value += amplitude * (1.0 - abs(n.w));
+            gradient += -amplitude * scale * s * mg;
+        }
+        else
+        {
+            value += amplitude * n.w;
+            gradient += amplitude * scale * mg;
+        }
+
+        float weight = abs(amplitude);
+        float factor = abs(scale) * norm;
+        float nu = factor * path.speed;
+        float rounding = cultmath_span_rounding(scale, mq, stage, octaveShift, nu, halfLength);
+        float3 slack = cultmath_span_slack(rounding);
+        float valueSlack = slack.x;
+        float gradientSlack = slack.y;
+        float hessianSlack = slack.z;
+        float3x3 hm = cultmath_snoise_hessian(x);
+        float frobenius = sqrt(hm[0][0] * hm[0][0] + hm[0][1] * hm[0][1] + hm[0][2] * hm[0][2] + hm[1][0] * hm[1][0] + hm[1][1] * hm[1][1] + hm[1][2] * hm[1][2]
+            + hm[2][0] * hm[2][0] + hm[2][1] * hm[2][1] + hm[2][2] * hm[2][2]);
+        float hessianBound = min(CULTMATH_SNOISE_HESSIAN, frobenius + hessianSlack + CULTMATH_SNOISE_THIRD * nu * halfLength);
+        curvature += weight * factor * factor * hessianBound;
+        if (ridged)
+        {
+            float3 w = scale * mv;
+            float reach = hessianBound * nu * halfLength;
+            float gl = min(CULTMATH_SNOISE_LIPSCHITZ, length(g) + gradientSlack + reach);
+            float travel = (abs(dot(g, w)) + gradientSlack * length(w)) * halfLength + (hessianBound * nu * length(w) + gl * factor * path.acceleration) * (0.5 * halfLength * halfLength) + 2.0 * valueSlack;
+            fold += 2.0 * weight * max(travel - abs(n.w), 0.0);
+        }
+
+        scale *= lacunarity;
+        amplitude *= gain;
+    }
+
+    SpanNoise result;
+    result.field = float4(gradient, value);
+    result.curvature = curvature;
+    result.fold = fold;
+    return result;
+}
+
+SpanNoise cultmath_span_fbm(SpanPath path, SpanStage stage, int octaves, float lacunarity, float gain)
+{
+    return cultmath_span_stage(false, path, stage, octaves, lacunarity, gain);
+}
+
+SpanNoise cultmath_span_ridged(SpanPath path, SpanStage stage, int octaves, float lacunarity, float gain)
+{
+    return cultmath_span_stage(true, path, stage, octaves, lacunarity, gain);
+}
 
 float cultmath_value_noise(float2 position)
 {

@@ -123,7 +123,7 @@ impl IdunnSignedDaemonHealthRecord {
     pub fn decode_canonical_signed_payload(payload: &[u8]) -> Result<(Self, Vec<u8>)> {
         match messagepack_array_len(payload) {
             Some(18) => {
-                let statement: Self = rmp_serde::from_slice(payload)
+                let statement: Self = cultcache_rs::decode_payload(payload)
                     .context("decoding generic signed daemon health")?;
                 if rmp_serde::to_vec(&statement)? != payload {
                     bail!("signed daemon health payload is not canonical positional MessagePack");
@@ -133,7 +133,7 @@ impl IdunnSignedDaemonHealthRecord {
                 Ok((statement, rmp_serde::to_vec(&unsigned)?))
             }
             Some(17) => {
-                let legacy: LegacyIdunnSignedDaemonHealthWire = rmp_serde::from_slice(payload)
+                let legacy: LegacyIdunnSignedDaemonHealthWire = cultcache_rs::decode_payload(payload)
                     .context("decoding legacy generic signed daemon health")?;
                 if rmp_serde::to_vec(&legacy)? != payload {
                     bail!("signed daemon health payload is not canonical positional MessagePack");
@@ -643,6 +643,11 @@ mod tests {
             rmp_serde::from_slice::<IdunnSignedDaemonHealthRecord>(&encoded)?,
             health
         );
+        let (decoded, unsigned) =
+            IdunnSignedDaemonHealthRecord::decode_canonical_signed_payload(&encoded)?;
+        assert_eq!(decoded, health);
+        assert_eq!(&unsigned[..3], &[0xdc, 0, 18]);
+        assert_ne!(unsigned, encoded, "the signed payload excludes the signature");
         assert_eq!(
             rmp_serde::from_slice::<GameCultServiceTrustAnchorRecord>(&rmp_serde::to_vec(
                 &anchor

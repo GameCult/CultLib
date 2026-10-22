@@ -12,9 +12,15 @@
 // math.Affine.cs (SNOISE_HESSIAN).
 static const float CULTMATH_SNOISE_HESSIAN = 55.642143;
 
+// The absolute rounding of one float32 read of cultmath_snoise_grad, value and gradient; the owner is
+// math.Affine.cs (SNOISE_READ_VALUE, SNOISE_READ_GRADIENT), read here by cultmath_af_snoise and in
+// CultMath.hlsl by cultmath_span_slack.
+static const float CULTMATH_SNOISE_READ_VALUE = 6.103515625e-5;
+static const float CULTMATH_SNOISE_READ_GRADIENT = 2.44140625e-4;
+
 // An upper bound on the operator norm of the third-derivative tensor of cultmath_snoise(float3), the
 // next order after CULTMATH_SNOISE_HESSIAN; provenance in math.Span.cs (SNOISE_THIRD).
-static const float CULTMATH_SNOISE_THIRD = 536.9152;
+static const float CULTMATH_SNOISE_THIRD = 535.8009;
 
 float3 cultmath_af_point(float value) { return float3(value, 0.0, 0.0); }
 float3 cultmath_af_symbol(float x0, float a) { return float3(x0, a, 0.0); }
@@ -87,7 +93,7 @@ float3 cultmath_af_snoise(float3 centre, float3 axis, float radius)
     float lipschitz = CULTMATH_SNOISE_LIPSCHITZ * reach;
     float a = dot(gradient, axis);
     float remainder = length(gradient) * radius + 0.5 * CULTMATH_SNOISE_HESSIAN * reach * reach;
-    float allowance = 6.103515625e-5 + 2.44140625e-4 * reach
+    float allowance = CULTMATH_SNOISE_READ_VALUE + CULTMATH_SNOISE_READ_GRADIENT * reach
         + CULTMATH_SNOISE_LIPSCHITZ * 9.5367431640625e-7 * (abs(centre.x) + abs(centre.y) + abs(centre.z) + reach);
     bool centred = abs(a) + remainder < lipschitz;
     float slope = centred ? a : 0.0;

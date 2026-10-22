@@ -27,6 +27,10 @@ copy of the solver and the warm/cold sweep, `suite` a scratch copy of `packages/
    key tests read C#-written bytes instead of literals.
 7. `decode-stack-safety` (section D): cultcache-rs's one decode door grows its stack at every container level
    (ruling `decode-stack-mechanism-ruled`). Independent of 5 and 6; thing2's contract-rs merge waits on it.
+8. `expect-persisted-schema` (section E): an observed entry keeps the schema id it was persisted under and
+   conditional commit compares that (ruling `aetheria-release:ruling:expect-fix-in-cultcache`). C# only. The
+   release that carries it to Aetheria follows question `cultlib-gaps:question:expect-fix-release-lane`; the
+   Aetheria pin bump is an Aetheria follow-on, not this cut.
 
 ## B. BoundedLeastSquares stopping
 
@@ -683,6 +687,65 @@ door-checked `rmpv::Value`s that way (follow-up `rs-redecode-outside-door-r2`).
 
 Rejected inside the ruling: the derive placement (above), and writing the wrapper by hand (D9: established
 tooling, one owner upstream).
+
+## E. Expect under compatible schema drift (cut `expect-persisted-schema`)
+
+Pinned base: `origin/main` at `b549d731` (2026-10-21). Imagination pass `imagination-expect`, session
+`self-2026-10-19-ag7`. Probe `probe1` (`ProbeExpectDrift.cs`, written into the clone by the job command, never
+committed) ran on Yggdrasil, dotnet sdk 10.0, against `b549d731`. Fixture: a record written under
+`DriftWide` (`tests.variant_drift.v1`) and read by a cache whose registry holds only `DriftNarrow` (v2) loads
+as CompatibleDrift.
+
+### Body facts
+
+- **E1. The defect.** `CultCommitRequest.ConditionsHold` (`CultCache.cs:1677-1696`) compares the durable
+  record's `SchemaId` with the observed entry's `Descriptor.SchemaId` (`Expect` captures it at `:1772`;
+  `ExpectUnchanged` reads it at `:1694`). `ToStoredDocument` (`:3212-3268`) resolves a persisted record to the
+  local descriptor and drops `record.SchemaId`. So the observed side holds the local id and the durable side
+  the persisted id. Probe: unchanged drifted record, `Expect` + `Upsert` commits **False** on the single-file
+  store (P1) and on the directory store (P7). Same code at Aetheria's pin `45c2f40` (`CultCache.cs:1147-1207`).
+- **E2. What must still refuse, at base.** Another cache commits a changed value (new minted `storedAt`):
+  Expect False (P4). Another cache reading under v3 (`DriftReused`) flushes the file, rewriting the record under
+  v3 with the **same** `storedAt`: Expect False (P5).
+- **E3. A whole-file write rewrites every record under its local schema and keeps `storedAt`.**
+  `ToPersistedRecord` (`:3194-3204`) writes `entry.Descriptor.SchemaId` with `entry.StoredAt`, and both the
+  single-file `PushAll` (`:3361-3375`) and an unconditional or dirty `CommitBatchCore` (`:3393-3399`) write the
+  whole view. So the contract sentence "every write to a key mints a later storedAt"
+  (`Contracts/cultcache-store-composition.md:229-231`) is false for a flush: the schema id is the half of the
+  identity that sees it. The directory store writes only staged keys, each freshly stamped
+  (`DirectoryMessagePackBackingStore.cs:240-293`), so it never normalises a clean record.
+- **E4. Lifetime at base.** After the cache's own `PushAll`, Expect commits True (P2): disk and descriptor now
+  agree. After *another* cache's normalising flush to the observer's own local schema, Expect commits True (P3);
+  after a re-pull, True (P6).
+- **E5. Re-reads.** Both pull filters skip a record whose `storedAt` and local descriptor id are unchanged
+  (`CultCache.cs:3323-3327`, `DirectoryMessagePackBackingStore.cs:110-114`). A record normalised P to L by
+  another writer keeps `storedAt` and the local id, so with the persisted id on the entry the filter must
+  compare the persisted id, or a re-read never refreshes it and Expect stays a Mismatch forever.
+- **E6. Other runtimes.** cultcache-rs `SingleFileMessagePackBackingStore::compare_exchange` and the snapshot
+  form (`packages/cultcache-rs/src/lib.rs:1352-1393`, `:1427-1450`) compare whole raw envelopes as read from
+  disk (`schema_id: Some(record.1)`, `:3189`); the expectation *is* the persisted envelope, and the crate has
+  no compatible-drift resolution, so the split cannot occur. Unchanged. cultcache-ts and cultcache-py have no
+  conditional commit (`cultcache-persistence-format.md:67-69`; grep finds none); nor do the cultnet and
+  cultmesh packages or cultmesh-kotlin. Not added here.
+- **E7. Release path.** Aetheria pins `org.gamecult.cultlib#cultlib-unity-v1.0.60` and
+  `org.gamecult.caching.unity#caching-unity-v1.4.0`, both locked at `45c2f400` (2026-09-17). The CultCache
+  runtime ships as DLLs in `unity/org.gamecult.cultlib` (built by `scripts/build-unity-package.ps1`). Main is
+  1363 commits past the pin with a `### Breaking` section under `[Unreleased]`
+  (`unity/org.gamecult.cultlib/CHANGELOG.md`). `release/cultlib-unity-1.0.x` is the pin plus one commit
+  (1.0.61, Win64 QUIC plugins).
+
+### Authority, and why
+
+The backing store that read or wrote a record's durable bytes owns the schema id it is persisted under. It is set
+when the store builds the entry from a persisted record (`ToStoredDocument`), defaults to the descriptor's id
+for an entry this cache stamps (it is about to be written under that id), and is reset to the descriptor's id,
+under the hold, after a whole-file write the store completed. The commit check, `Expect` and the pull filters
+only read it. `Descriptor.SchemaId` stays what the entry decodes as; it is no longer the record's durable identity.
+
+Consequence, recorded rather than ruled: after another writer's whole-file flush rewrites a drifted record
+under a schema id this cache did not read it under, an `Expect` captured before is a Mismatch until the cache
+re-reads (E4's P3 flips). That is the ruling's "compares that persisted id" applied to a rewrite that kept
+`storedAt`; it is fail-closed, the standard retry (re-read, retry) recovers, and it is what refuses E2's P5.
 
 ## Observed, not owned by these cuts
 

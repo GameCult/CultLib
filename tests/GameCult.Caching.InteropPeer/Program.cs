@@ -17,7 +17,7 @@ static async Task<int> ProgramMainAsync(string[] args)
     {
         if (args.Length == 0)
         {
-            throw new InvalidOperationException("Expected mode: write | read | rewrite | write-routed <catalog.cc> <run.cc>");
+            throw new InvalidOperationException("Expected mode: write | read | rewrite | hold-lock | write-routed <catalog.cc> <run.cc>");
         }
 
         var mode = args[0];
@@ -51,6 +51,9 @@ static async Task<int> ProgramMainAsync(string[] args)
             case "edit-in-place":
                 await EditInPlaceAsync(file, RequireArg(options, "kind"));
                 return 0;
+            case "hold-lock":
+                HoldLock(file, int.Parse(RequireArg(options, "ms"), CultureInfo.InvariantCulture));
+                return 0;
             default:
                 throw new InvalidOperationException($"Unknown mode {mode}.");
         }
@@ -60,6 +63,20 @@ static async Task<int> ProgramMainAsync(string[] args)
         Console.Error.WriteLine(error);
         return 1;
     }
+}
+
+// Holds the store lock exactly as CultCache.AcquireLock opens it, for --ms, then releases it.
+static void HoldLock(string file, int milliseconds)
+{
+    using var held = new System.IO.FileStream(
+        file + ".lock",
+        System.IO.FileMode.OpenOrCreate,
+        System.IO.FileAccess.ReadWrite,
+        System.IO.FileShare.None,
+        bufferSize: 1);
+    Console.WriteLine("{\"held\":true}");
+    Console.Out.Flush();
+    System.Threading.Thread.Sleep(milliseconds);
 }
 
 static async Task WriteAsync(string file, string runtimeId)

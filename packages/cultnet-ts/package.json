@@ -1,6 +1,6 @@
 {
   "name": "cultnet-ts",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "CultNet-style typed direct-pipe messaging and state replication for TypeScript runtimes.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -29,6 +29,11 @@
       "types": "./dist/cultmesh-authority.d.ts",
       "require": "./dist/cultmesh-authority.js",
       "default": "./dist/cultmesh-authority.js"
+    },
+    "./content": {
+      "types": "./dist/content.d.ts",
+      "require": "./dist/content.js",
+      "default": "./dist/content.js"
     }
   },
   "files": [
@@ -68,7 +73,7 @@
   "dependencies": {
     "@msgpack/msgpack": "^3.1.3",
     "ajv": "^8.17.1",
-    "@gamecult/cultcache-ts": "^0.14.0"
+    "@gamecult/cultcache-ts": "^0.14.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

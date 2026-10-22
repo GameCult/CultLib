@@ -16,13 +16,17 @@ namespace CultMath.Tests;
 /// CULTMATH_WRITE_GLSL=1 set, the first and last tests write the committed files before comparing, which
 /// is the one regeneration path.
 /// </summary>
-public sealed class GlslMirrorTests
+public sealed partial class GlslMirrorTests
 {
     private readonly ITestOutputHelper output;
 
     public GlslMirrorTests(ITestOutputHelper output) => this.output = output;
 
-    private static bool Write => Environment.GetEnvironmentVariable("CULTMATH_WRITE_GLSL") == "1";
+    // The fixture is written by Yggdrasil's mcr.microsoft.com/dotnet/sdk:10.0 image (Ubuntu 24.04) only: its platform families record
+    // that platform's libm, so a write from another OS would move them.
+    private static bool Write => Environment.GetEnvironmentVariable("CULTMATH_WRITE_GLSL") == "1"
+        ? OperatingSystem.IsLinux() ? true : throw new InvalidOperationException("CULTMATH_WRITE_GLSL=1 writes glsl-parity.json, whose platform families belong to Yggdrasil's Ubuntu image (mcr.microsoft.com/dotnet/sdk:10.0): regenerate it there.")
+        : false;
 
     private static string Root => HlslSourceCompatibilityTests.FindCultMathRoot();
 
@@ -43,6 +47,54 @@ public sealed class GlslMirrorTests
             var committed = File.ReadAllText(path).ReplaceLineEndings("\n");
             Assert.True(committed == expected, $"shaders/{file} is not the lowering of the committed HLSL (regenerate with CULTMATH_WRITE_GLSL=1):\n" + UnifiedDiff(committed, expected));
         }
+    }
+
+    // Counting stand-ins for the mirror's clamp, one per overload, declared in the mirror's class so they
+    // hide math.clamp for every function in it. Each counts a call whose minimum exceeds its maximum in any
+    // component and forwards to math.clamp. (The int vector overloads only forward: no mirror function
+    // clamps integer vectors with swapped bounds, and counting them would be unreachable.)
+    private const string CountingClampShadows = @"
+public static int ClampMinAboveMax;
+static float clamp(float x, float a, float b) { if (a > b) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static float2 clamp(float2 x, float2 a, float2 b) { if (a.x > b.x || a.y > b.y) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static float3 clamp(float3 x, float3 a, float3 b) { if (a.x > b.x || a.y > b.y || a.z > b.z) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static float4 clamp(float4 x, float4 a, float4 b) { if (a.x > b.x || a.y > b.y || a.z > b.z || a.w > b.w) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static int clamp(int x, int a, int b) { if (a > b) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static int2 clamp(int2 x, int2 a, int2 b) { if (a.x > b.x || a.y > b.y) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static int3 clamp(int3 x, int3 a, int3 b) { if (a.x > b.x || a.y > b.y || a.z > b.z) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > b.z || a.w > b.w) ClampMinAboveMax++; return math.clamp(x, a, b); }
+";
+
+    /// <summary>
+    /// The lowering keeps HLSL's statement order (CommittedGlslEqualsLowering pins the GLSL as that
+    /// lowering), and GLSL leaves clamp(x, minVal, maxVal) undefined for minVal above maxVal, so no clamp
+    /// reached by cultmath_integral_clamp_linear may see lo above hi, on any path and for any spelling of the
+    /// normalisation. The mirror is compiled with counting clamps and the function is run over the edge grid
+    /// (lo above hi, infinite bounds, zero-length spans, b = 0 and b != 0): the count of such clamp calls
+    /// stays 0 after every call. The cases are HlslSourceCompatibilityTests.IntegralClampLinearCases: the grid fixes
+    /// a in {-2.5, 0, 1.5}, so a normalisation keyed on a past 1.75 never clamps wrongly there; the committed
+    /// fixture's random cases reach it.
+    /// </summary>
+    [Fact]
+    public void IntegralClampLinearNeverClampsWithMinAboveMax()
+    {
+        var (assembly, errors) = HlslSourceCompatibilityTests.CompileShaderMirror(CountingClampShadows);
+        Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
+        var shaderType = assembly!.GetType("CultMathHlsl.HlslShader")!;
+        var shader = Activator.CreateInstance(shaderType);
+        var count = shaderType.GetField("ClampMinAboveMax")!;
+        var function = shaderType.GetMethod("cultmath_integral_clamp_linear", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        var bad = new List<string>();
+        foreach (var c in HlslSourceCompatibilityTests.IntegralClampLinearCases)
+        {
+            count.SetValue(null, 0);
+            function.Invoke(shader, c.Cast<object>().ToArray());
+            if ((int)count.GetValue(null)! > 0)
+                bad.Add($"({string.Join(", ", c)})");
+        }
+
+        Assert.True(bad.Count == 0, $"{bad.Count} cases clamp with the minimum above the maximum:{Environment.NewLine}{string.Join(Environment.NewLine, bad.Take(12))}");
     }
 
     // Identifier boundaries: cultmath_lerp is a CultMath function, lerp( is HLSL.
@@ -288,7 +340,7 @@ public sealed class GlslMirrorTests
 
     // The float32 allowance of one octave of af_snoise: 2^-14 + 2^-12 R + L 2^-20 (|c|_1 + R).
     private static double SnoiseAllowance(double centre1, double reach) =>
-        Math.ScaleB(1.0, -14) + Math.ScaleB(reach, -12) + math.SNOISE_LIPSCHITZ * Math.ScaleB(centre1 + reach, -20);
+        math.SNOISE_READ_VALUE + math.SNOISE_READ_GRADIENT * reach + math.SNOISE_LIPSCHITZ * Math.ScaleB(centre1 + reach, -20);
 
     // The Lipschitz form's width bound for one octave of the sampled-form check.
     private static double SnoiseWidthBound(double centre1, double reach) => math.SNOISE_LIPSCHITZ * reach + SnoiseAllowance(centre1, reach);
@@ -313,13 +365,17 @@ public sealed class GlslMirrorTests
         return sum;
     }
 
-    private static string AssertSnoiseForm(JsonArray cases, bool allowanceDecides = false) =>
-        AssertSampledForm(cases, "af_snoise", (_, p) => math.snoise(p),
+    private static float SnoiseReference(string[] tokens, float3 p) => math.snoise(p);
+
+    private static float FbmReference(string[] t, float3 p) => math.fbm_grad(p, (int)Convert.ToUInt32(t[7], 16), (float)Floats(t[8])[0], (float)Floats(t[9])[0]).w;
+
+    private static string AssertSnoiseForm(JsonArray cases, bool allowanceDecides = false, Func<string[], float3, float>? reference = null) =>
+        AssertSampledForm(cases, "af_snoise", reference ?? SnoiseReference,
             (_, a) => SnoiseOctave(SnoiseWidthBound, a, 1.0), (_, a) => SnoiseOctave(SnoiseAllowance, a, 1.0), allowanceDecides);
 
-    private static string AssertFbmForm(JsonArray cases, bool allowanceDecides = false) =>
+    private static string AssertFbmForm(JsonArray cases, bool allowanceDecides = false, Func<string[], float3, float>? reference = null) =>
         AssertSampledForm(cases, "af_fbm",
-            (t, p) => math.fbm_grad(p, (int)Convert.ToUInt32(t[7], 16), (float)Floats(t[8])[0], (float)Floats(t[9])[0]).w,
+            reference ?? FbmReference,
             (t, a) => FbmOctaves(t, a, SnoiseWidthBound), (t, a) => FbmOctaves(t, a, SnoiseAllowance), allowanceDecides);
 
     // AffineFrustumBall applied to C#'s own results.
@@ -360,6 +416,74 @@ public sealed class GlslMirrorTests
         return $"least enclosure slack {enclosure:E3} of the radius, least slack above R0 + d {lower:E3} of R0, below its widening {upper:F3} of 2^-19 (R0 + |c0|_1 + spread)";
     }
 
+    private const string SpanAllowanceRead =
+        "Read at the case's point x, with S = |x|_1 and (e_n, e_g, e_h) = math.span_slack(math.span_rounding(1, x, zero stage, 0, 0, 0)), " +
+        "against the kernel's exact values in double: |n - n_exact| <= e_n and |g - g_exact|_2 <= e_g for snoise_grad, " +
+        "||H - H_exact||_F <= e_h for snoise_hessian, no tolerance. " +
+        "Report the largest fraction of each allowance per decade of S and the largest absolute error at S < 1e-2.";
+
+    // SpanAllowanceRead applied to a family's results (C#'s own, or a device's): every read is within the
+    // allowance math.span_slack gives at its point, the owner's own numbers and no restated literal. A small
+    // family (bands 1e-4 to 1e2) must also fail the check once the absolute term is removed in at least 16
+    // cases, and hold at least 48 cases with S <= 1e-2: the allowance's absolute term is what decides there.
+    private static string AssertSpanAllowance(JsonArray cases, bool hessian, bool small)
+    {
+        var absolute = math.span_slack(0.0f);
+        var fractions = new SortedDictionary<int, (double Value, double Gradient)>();
+        double smallestError = 0.0;
+        int absoluteDecides = 0, nearOrigin = 0;
+        foreach (var entry in cases)
+        {
+            var sides = ((string)entry!).Split(" -> ");
+            double[] x = Floats(sides[0]), result = Floats(sides[1]);
+            var s = Math.Abs(x[0]) + Math.Abs(x[1]) + Math.Abs(x[2]);
+            var slack = math.span_slack(math.span_rounding(1.0f, new float3((float)x[0], (float)x[1], (float)x[2]), default, new float3(0.0f, 0.0f, 0.0f), 0.0f, 0.0f));
+            double valueError = 0.0, gradientError, valueFraction = 0.0, gradientFraction;
+            bool needsAbsolute;
+            if (hessian)
+            {
+                var exact = NoiseBoundTests.HessianDouble(x[0], x[1], x[2]);
+                var sum = 0.0;
+                for (var i = 0; i < 9; i++)
+                    sum += (result[i] - exact[i]) * (result[i] - exact[i]);
+                gradientError = Math.Sqrt(sum);
+                Assert.True(gradientError <= slack.z, $"snoise_hessian case {entry}: ||H - H_exact||_F is {gradientError:R}, past the allowance {slack.z:R}");
+                gradientFraction = gradientError / slack.z;
+                needsAbsolute = gradientError > slack.z - absolute.z;
+            }
+            else
+            {
+                var exact = NoiseBoundTests.GradDouble(x[0], x[1], x[2]);
+                valueError = Math.Abs(result[3] - NoiseBoundTests.ValueDouble(x[0], x[1], x[2]));
+                gradientError = Math.Sqrt((result[0] - exact[0]) * (result[0] - exact[0]) + (result[1] - exact[1]) * (result[1] - exact[1]) + (result[2] - exact[2]) * (result[2] - exact[2]));
+                Assert.True(valueError <= slack.x, $"snoise_grad case {entry}: |n - n_exact| is {valueError:R}, past the allowance {slack.x:R}");
+                Assert.True(gradientError <= slack.y, $"snoise_grad case {entry}: |g - g_exact|_2 is {gradientError:R}, past the allowance {slack.y:R}");
+                valueFraction = valueError / slack.x;
+                gradientFraction = gradientError / slack.y;
+                needsAbsolute = valueError > slack.x - absolute.x || gradientError > slack.y - absolute.y;
+            }
+
+            var decade = (int)Math.Floor(Math.Log10(s));
+            fractions.TryGetValue(decade, out var largest);
+            fractions[decade] = (Math.Max(largest.Value, valueFraction), Math.Max(largest.Gradient, gradientFraction));
+            if (needsAbsolute)
+                absoluteDecides++;
+            if (s < 1.0e-2)
+                smallestError = Math.Max(smallestError, Math.Max(valueError, gradientError));
+            if (s <= 1.0e-2)
+                nearOrigin++;
+        }
+
+        if (small)
+        {
+            Assert.True(absoluteDecides >= 16, $"only {absoluteDecides} of {cases.Count} cases fail once the absolute term is removed: the family cannot tell a device that needs it from one that does not");
+            Assert.True(nearOrigin >= 48, $"only {nearOrigin} of {cases.Count} cases have |x|_1 <= 1e-2");
+        }
+
+        var report = string.Join(", ", fractions.Select(f => hessian ? $"1e{f.Key}: {f.Value.Gradient:F3}" : $"1e{f.Key}: {f.Value.Value:F3}/{f.Value.Gradient:F3}"));
+        return $"largest fraction of {(hessian ? "e_h" : "e_n/e_g")} per decade of |x|_1: {report}; largest absolute error at |x|_1 < 1e-2 {smallestError:E3}; {absoluteDecides} of {cases.Count} cases need the absolute term";
+    }
+
     // A committed case's arguments, decoded into the C# method's parameter types in Hex's field order.
     private static object[] Arguments(MethodInfo method, string hex)
     {
@@ -377,6 +501,14 @@ public sealed class GlslMirrorTests
             return (int)scalars.Dequeue();
         if (type == typeof(uint))
             return scalars.Dequeue();
+        if (type.IsArray)
+        {
+            var array = Array.CreateInstance(type.GetElementType()!, SiteArrays.Capacity);
+            for (var i = 0; i < array.Length; i++)
+                array.SetValue(FromScalars(type.GetElementType()!, scalars), i);
+            return array;
+        }
+
         var value = Activator.CreateInstance(type)!;
         foreach (var field in type.GetFields().Where(f => !f.IsStatic))
             field.SetValue(value, FromScalars(field.FieldType, scalars));
@@ -406,6 +538,8 @@ public sealed class GlslMirrorTests
     private sealed record Family(string Glsl, string Tolerance, Func<System.Random, object[]> Arguments, string? Check = null, Platform Platform = Platform.None, Func<JsonArray, string>? Verify = null);
 
     private static float Uniform(System.Random r, float lo, float hi) => lo + (hi - lo) * r.NextSingle();
+    private static float2 Point2(System.Random r) => new(Uniform(r, -50.0f, 50.0f), Uniform(r, -50.0f, 50.0f));
+
     private static float3 Point3(System.Random r) => new(Uniform(r, -50.0f, 50.0f), Uniform(r, -50.0f, 50.0f), Uniform(r, -50.0f, 50.0f));
 
     // A point on the simplex tie set, where snoise's x0 has equal components (NoiseGradTests.SnoiseIsContinuousOnTheSimplexDiagonal):
@@ -527,7 +661,8 @@ public sealed class GlslMirrorTests
     // Every family the site's WebGL2 readback evaluates, in a fixed order. A new family is appended, so the
     // seeded stream and every earlier family's cases stay as they were. pcg3d and pcg4d are "exact"; the
     // float families are ulp-bounded, with the bound measured on the device by the consumer, and
-    // iv_frustum_ball also carries an enclosure check. phacelle is in CultMath.Phacelle.glsl, so its
+    // iv_frustum_ball also carries an enclosure check; the four coordinate-band snoise_grad and snoise_hessian
+    // families carry an allowance check, applied to C#'s own results here and to a device's by the device judge. phacelle is in CultMath.Phacelle.glsl, so its
     // evaluator concatenates that file after CultMath.glsl; the site, which does not vendor it, skips it.
     private static readonly Family[] Families = new Family[]
     {
@@ -563,7 +698,7 @@ public sealed class GlslMirrorTests
             return new object[] { slope, z0, z0 + Uniform(r, 0.01f, 50.0f), Uniform(r, 0.0001f, 0.05f), Uniform(r, 0.0f, 2.0f) };
         }, FrustumBall, Verify: AssertFrustumBall),
         new("vec2 cultmath_iv_exp(vec2)", "ulp-bounded, platform exp", r => new object[] { Interval(r) }, Platform: Platform.Ulp),
-        new("CultPhasor cultmath_phacelle(vec3, vec3, float, float)", "ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20 max(|v|, 1)",
+        new("CultPhasor cultmath_phacelle(vec3, vec3, float, float)", "ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20 max(|v|, 1); on a device |diff| <= 2^-18 max(|v|, 1)",
             r => new object[] { Point3(r), Side(r), Uniform(r, 0.0f, 1.0f), 0.5f }, Platform: Platform.Scaled),
         new("float cultmath_snoise(vec3)", "ulp-bounded, on the simplex tie set", r => new object[] { TiePoint3(r) }),
         new("vec4 cultmath_snoise_grad(vec3)", "ulp-bounded, on the simplex tie set", r => new object[] { TiePoint3(r) }),
@@ -638,7 +773,200 @@ public sealed class GlslMirrorTests
                 var lo = Uniform(r, -2.0f, 0.5f);
                 return new object[] { Uniform(r, -4.0f, 4.0f), r.Next(8) == 0 ? 0.0f : Uniform(r, -4.0f, 4.0f), lo, lo + Uniform(r, 0.0f, 3.0f), Uniform(r, -3.0f, 3.0f), Uniform(r, -3.0f, 3.0f) };
             }),
+        // The edge cases the family above never draws: lo above hi (b = 0 and b != 0; the lowering must
+        // normalise before any clamp sees it) and infinite bounds (hi = +inf, lo = -inf, both).
+        new Family("float cultmath_integral_clamp_linear(float, float, float, float, float, float)", "ulp-bounded, lo above hi and infinite bounds",
+            r =>
+            {
+                var a = Uniform(r, -4.0f, 4.0f);
+                var slope = Uniform(r, -4.0f, 4.0f);
+                var (t0, t1) = (Uniform(r, -3.0f, 3.0f), Uniform(r, -3.0f, 3.0f));
+                return r.Next(5) switch
+                {
+                    0 => new object[] { a, 0.0f, Uniform(r, 0.5f, 2.0f), Uniform(r, -2.0f, 0.4f), t0, t1 },
+                    1 => new object[] { a, slope, Uniform(r, 0.5f, 2.0f), Uniform(r, -2.0f, 0.4f), t0, t1 },
+                    2 => new object[] { a, slope, Uniform(r, -2.0f, 1.0f), float.PositiveInfinity, t0, t1 },
+                    3 => new object[] { a, slope, float.NegativeInfinity, Uniform(r, -1.0f, 2.0f), t0, t1 },
+                    _ => new object[] { a, slope, float.NegativeInfinity, float.PositiveInfinity, t0, t1 },
+                };
+            }),
+        // Zero-length spans (t1 = t0 three times in four) with a flat or sloped line, and infinite clamp bounds
+        // on either side or both: an infinite bound times a zero length must give +0, and a flat line clamped
+        // to an infinite bound over a nonzero span is infinite, never NaN.
+        new Family("float cultmath_integral_clamp_linear(float, float, float, float, float, float)", "ulp-bounded, zero-length spans and flat infinite clamps",
+            r =>
+            {
+                float Line() => r.Next(3) switch { 0 => 0.0f, 1 => -0.0f, _ => Uniform(r, -4.0f, 4.0f) };
+                float Bound() => r.Next(3) switch { 0 => float.NegativeInfinity, 1 => float.PositiveInfinity, _ => Uniform(r, -2.0f, 2.0f) };
+                var (a, b, lo, hi) = (Line(), Line(), Bound(), Bound());
+                var t0 = Uniform(r, -3.0f, 3.0f);
+                var t1 = r.Next(4) != 0 ? t0 : Uniform(r, -3.0f, 3.0f);
+                return new object[] { a, b, lo, hi, t0, t1 };
+            }),
+        // The span stages over their struct arguments: realistic stages and spans (SpanStageTests' own draw), the
+        // midpoint a Point3, one span in four a point.
+        new Family("SpanNoise cultmath_span_fbm(SpanPath, SpanStage, int, float, float)", "ulp-bounded", SpanArguments),
+        new Family("SpanNoise cultmath_span_ridged(SpanPath, SpanStage, int, float, float)", "ulp-bounded", SpanArguments),
+        // The kernel's reads over coordinate bands, the magnitude log-uniform in the band: the allowance of
+        // math.span_slack is checked against the exact kernel at every case (SpanAllowanceRead).
+        new Family("vec4 cultmath_snoise_grad(vec3)", "ulp-bounded, coordinate bands 1e-4 to 1e2", r => new object[] { BandPoint3(r, 1.0e-4, 1.0e2) }, SpanAllowanceRead, Verify: cases => AssertSpanAllowance(cases, hessian: false, small: true)),
+        new Family("vec4 cultmath_snoise_grad(vec3)", "ulp-bounded, coordinate bands 1e2 to 4e6", r => new object[] { BandPoint3(r, 1.0e2, 4.0e6) }, SpanAllowanceRead, Verify: cases => AssertSpanAllowance(cases, hessian: false, small: false)),
+        new Family("mat3 cultmath_snoise_hessian(vec3)", "ulp-bounded, coordinate bands 1e-4 to 1e2", r => new object[] { BandPoint3(r, 1.0e-4, 1.0e2) }, SpanAllowanceRead, Verify: cases => AssertSpanAllowance(cases, hessian: true, small: true)),
+        new Family("mat3 cultmath_snoise_hessian(vec3)", "ulp-bounded, coordinate bands 1e2 to 4e6", r => new object[] { BandPoint3(r, 1.0e2, 4.0e6) }, SpanAllowanceRead, Verify: cases => AssertSpanAllowance(cases, hessian: true, small: false)),
+        // Segment distance in 2D and 3D (one segment in eight degenerate), then the site cells: scores, fold step
+        // over states built by inserting 0-3 random scores (one in four with an exactly tied score), border, margin.
+        new Family("float cultmath_distance_to_segment(vec2, vec2, vec2)", "ulp-bounded", r =>
+        {
+            var start = Point2(r);
+            return new object[] { Point2(r), start, r.Next(8) == 0 ? start : Point2(r) };
+        }),
+        new Family("vec2 cultmath_segment_closest(vec2, vec2, vec2)", "ulp-bounded", r =>
+        {
+            var start = Point2(r);
+            return new object[] { Point2(r), start, r.Next(8) == 0 ? start : Point2(r) };
+        }),
+        new Family("float cultmath_distance_to_segment(vec3, vec3, vec3)", "ulp-bounded", r =>
+        {
+            var start = Point3(r);
+            return new object[] { Point3(r), start, r.Next(8) == 0 ? start : Point3(r) };
+        }),
+        new Family("vec3 cultmath_segment_closest(vec3, vec3, vec3)", "ulp-bounded", r =>
+        {
+            var start = Point3(r);
+            return new object[] { Point3(r), start, r.Next(8) == 0 ? start : Point3(r) };
+        }),
+        // The border step: owner and other random (one in six coincident), a running border either empty or a
+        // random (normal, distance); one in six other is a distinct site within 1e-3 of the owner (inside the 1e-2 guard a
+        // changed length test would trip), one in six coincident.
+        new Family("vec4 cultmath_power_border_step(vec3, vec4, vec4, vec4)", "ulp-bounded", r =>
+        {
+            var owner = Site(r, 0.1f, 20.0f);
+            var border = r.Next(2) == 0 ? new float4(0.0f, 0.0f, 0.0f, 1.0e30f) : new float4(Point3(r), Uniform(r, 0.0f, 50.0f));
+            var pick = r.Next(6);
+            var near = new float4(owner.xyz + new float3(Uniform(r, 1.0e-4f, 1.0e-3f), Uniform(r, -1.0e-3f, 1.0e-3f), Uniform(r, -1.0e-3f, 1.0e-3f)), Uniform(r, 0.1f, 20.0f));
+            return new object[] { Point3(r), owner, pick == 0 ? owner : pick == 1 ? near : Site(r, 0.1f, 20.0f), border };
+        }),
+        new Family("vec4 cultmath_power_score(vec3, vec4)", "ulp-bounded", r => new object[] { Point3(r), Site(r, 0.1f, 20.0f) }),
+        new Family("vec4 cultmath_multiplicative_score(vec3, vec4)", "ulp-bounded", r => new object[] { Point3(r), Site(r, 0.1f, 100.0f, logWeight: true) }),
+        new Family("CultSiteCells cultmath_site_cells_insert(CultSiteCells, vec4, int)", "ulp-bounded", r =>
+        {
+            var (cells, scores) = CellsState(r);
+            var score = r.Next(4) == 0 && scores.Count > 0 ? scores[r.Next(scores.Count)] : PowerOrMultiplicative(r);
+            return new object[] { cells, score, scores.Count };
+        }),
+        new Family("vec4 cultmath_site_cells_border(CultSiteCells)", "ulp-bounded", r =>
+        {
+            var (cells, _) = CellsState(r, minimum: r.Next(8) == 0 ? 0 : 2);
+            return new object[] { cells };
+        }),
+        new Family("float cultmath_gabriel_margin(vec3, vec3, vec3)", "ulp-bounded", r =>
+        {
+            var a = Point3(r);
+            return new object[] { a, r.Next(8) == 0 ? a : Point3(r), Point3(r) };
+        }),
+        // The lattice steps. The cell is an integer-valued vec2 (negative and large included), time and drift span
+        // zero and the accepted range; the weight's border covers 0, near the falloff, and the 1.0e30 of no body.
+        new Family("vec3 cultmath_lattice_site(vec2, float, float)", "ulp-bounded", r =>
+            new object[] { new float2(r.Next(-4000, 4000), r.Next(-4000, 4000)), r.Next(6) == 0 ? 0.0f : Uniform(r, -200.0f, 200.0f), r.Next(6) == 0 ? 0.0f : Uniform(r, -3.0f, 3.0f) }),
+        new Family("float cultmath_lattice_weight(float, float, float, float)", "ulp-bounded", r =>
+        {
+            var falloff = Uniform(r, 0.05f, 40.0f);
+            var border = r.Next(5) switch { 0 => 0.0f, 1 => 1.0e30f, 2 => falloff * Uniform(r, 0.9f, 1.1f), _ => Uniform(r, 0.0f, 3.0f * falloff) };
+            var boost = r.Next(5) switch { 0 => 0.0f, 1 => 4.0f, _ => Uniform(r, 0.0f, 4.0f) };
+            return new object[] { Uniform(r, 0.5f, 1.0f), border, boost, falloff };
+        }),
+        new Family("float cultmath_lattice_distance(vec2, vec2, float, vec2, float)", "ulp-bounded", r =>
+        {
+            var angle = Uniform(r, 0.0f, 6.2831855f);
+            var normal = r.Next(6) == 0 ? new float2(1.0f, 0.0f) : new float2(MathF.Cos(angle), MathF.Sin(angle));
+            var stretch = r.Next(5) switch { 0 => 1.0f, 1 => 2.0f, _ => Uniform(r, 1.0f, 2.0f) };
+            return new object[] { Point2(r), Point2(r), Uniform(r, 0.5f, 5.0f), normal, stretch };
+        }),
+        // The smooth step: d exactly at f1 + 2 smoothing one in four (the equal branch), near it one in four, the
+        // smoothing near 0 and at 1, m anywhere up to f1 + smoothing.
+        // One draw in four is the cap point: m = f1 + smoothing exactly and d = f1 + smoothing (1 + U(0.3, 0.9)) with smoothing in
+        // [0.5, 1], where next exceeds f1 + smoothing and the min clamps; a step that returns next reads another function there.
+        new Family("float cultmath_lattice_smooth_step(float, float, float, float)", "ulp-bounded", r =>
+        {
+            if (r.Next(4) == 0)
+            {
+                var cappedSmoothing = Uniform(r, 0.5f, 1.0f);
+                var cappedF1 = Uniform(r, 0.0f, 10.0f);
+                return new object[] { cappedF1 + cappedSmoothing, cappedF1 + cappedSmoothing * (1.0f + Uniform(r, 0.3f, 0.9f)), cappedF1, cappedSmoothing };
+            }
+
+            var smoothing = r.Next(5) switch { 0 => 1.0f, 1 => Uniform(r, 1.0e-3f, 1.0e-2f), _ => Uniform(r, 0.01f, 1.0f) };
+            var f1 = Uniform(r, 0.0f, 10.0f);
+            var edge = f1 + 2.0f * smoothing;
+            var d = r.Next(4) switch { 0 => edge, 1 => edge * Uniform(r, 0.99f, 1.01f), _ => Uniform(r, f1, edge + 1.0f) };
+            return new object[] { Uniform(r, f1, f1 + smoothing), d, f1, smoothing };
+        }),
+        // The site-array functions: a fixed-capacity array and a count, killed on the device (the lattice at rings up to 17).
+        new Family($"vec4 cultmath_power_border(vec3, vec4[{SiteArrays.Capacity}], int)", "ulp-bounded", SiteArrays.PowerBorderArguments),
+        new Family($"vec4 cultmath_weighted_lattice_cells(vec2, float, vec4[{SiteArrays.Capacity}], int, float, float, float, float, float, vec2, float)", "ulp-bounded", SiteArrays.LatticeArguments),
     }).ToArray();
+
+    // A point of magnitude m, m log-uniform in [lo, hi]: one component at +-m, the other two uniform in [-m, m],
+    // the axis of the large one random.
+    private static float3 BandPoint3(System.Random r, double lo, double hi)
+    {
+        var m = lo * Math.Pow(hi / lo, r.NextDouble());
+        var v = new double[] { (r.NextDouble() * 2.0 - 1.0) * m, (r.NextDouble() * 2.0 - 1.0) * m, (r.NextDouble() * 2.0 - 1.0) * m };
+        v[r.Next(3)] = r.Next(2) == 0 ? m : -m;
+        return new float3((float)v[0], (float)v[1], (float)v[2]);
+    }
+
+
+    // A site float4(position.xyz, weight): the weight uniform in [lo, hi], or log-uniform when logWeight.
+    private static float4 Site(System.Random r, float lo, float hi, bool logWeight = false)
+    {
+        var p = Point3(r);
+        return new float4(p.x, p.y, p.z, logWeight ? lo * MathF.Pow(hi / lo, r.NextSingle()) : Uniform(r, lo, hi));
+    }
+
+    private static float4 PowerOrMultiplicative(System.Random r) =>
+        r.Next(2) == 0 ? math.power_score(Point3(r), Site(r, 0.1f, 20.0f)) : math.multiplicative_score(Point3(r), Site(r, 0.1f, 100.0f, logWeight: true));
+
+    // A fold state made by the production path: site_cells_insert over a few random scores (at least minimum).
+    private static (CultSiteCells Cells, List<float4> Scores) CellsState(System.Random r, int minimum = 0)
+    {
+        var scores = new List<float4>();
+        var cells = math.site_cells_empty();
+        for (var i = minimum + r.Next(4 - minimum); i > 0; i--)
+        {
+            var score = r.Next(4) == 0 && scores.Count > 0 ? scores[^1] : PowerOrMultiplicative(r);
+            cells = math.site_cells_insert(cells, score, scores.Count);
+            scores.Add(score);
+        }
+
+        return (cells, scores);
+    }
+
+    private static object[] SpanArguments(System.Random r)
+    {
+        var stage = SpanStageTests.Stage.Draw(r);
+        var halfLength = r.Next(4) == 0 ? 0.0f : new[] { 0.02f, 0.1f, 0.5f }[r.Next(3)];
+        var span = SpanStageTests.Span.Draw(r, Point3(r), halfLength, Uniform(r, 0.0f, 2.0f));
+        return new object[] { span.Path, stage.S, stage.Octaves, stage.Lacunarity, stage.Gain };
+    }
+
+    /// <summary>
+    /// The committed fixture's cases of the three cultmath_integral_clamp_linear families, decoded into the
+    /// C# arguments (a, b, lo, hi, t0, t1): the random cases the clamp-normalisation tests also run.
+    /// </summary>
+    internal static IReadOnlyList<float[]> IntegralClampLinearFixtureCases
+    {
+        get
+        {
+            const string clamp = "float cultmath_integral_clamp_linear(float, float, float, float, float, float)";
+            var method = Resolve(clamp);
+            return JsonNode.Parse(File.ReadAllText(FixturePath))!["functions"]!.AsArray()
+                .Where(family => (string)family!["glsl"]! == clamp)
+                .SelectMany(family => family!["cases"]!.AsArray())
+                .Select(entry => Arguments(method, ((string)entry!).Split(" -> ")[0]).Select(a => (float)a).ToArray())
+                .ToArray();
+        }
+    }
 
     // The fixture text, each case's arguments given by family and point index.
     private static string GoldenFixture(Func<int, int, object[]> arguments)
@@ -682,6 +1010,9 @@ public sealed class GlslMirrorTests
     {
         ["float"] = typeof(float), ["int"] = typeof(int), ["vec2"] = typeof(float2), ["vec3"] = typeof(float3),
         ["vec4"] = typeof(float4), ["ivec3"] = typeof(int3), ["ivec4"] = typeof(int4),
+        ["SpanPath"] = typeof(SpanPath), ["SpanStage"] = typeof(SpanStage),
+        ["CultSiteCells"] = typeof(CultSiteCells),
+        [$"vec4[{SiteArrays.Capacity}]"] = typeof(float4[]),
     };
 
     // The C# math method a GLSL signature names: cultmath_ dropped, parameter types mapped.
@@ -690,6 +1021,7 @@ public sealed class GlslMirrorTests
         var match = Regex.Match(glsl, @"^\w+ cultmath_(\w+)\(([^)]*)\)$");
         var types = match.Groups[2].Value.Split(", ").Select(t => GlslTypes[t]).ToArray();
         return typeof(math).GetMethod(match.Groups[1].Value, BindingFlags.Public | BindingFlags.Static, null, types, null)
+            ?? typeof(SiteArrays).GetMethod(match.Groups[1].Value, BindingFlags.NonPublic | BindingFlags.Static, null, types, null)
             ?? throw new InvalidOperationException("no C# math counterpart for " + glsl);
     }
 
@@ -705,6 +1037,8 @@ public sealed class GlslMirrorTests
     // the same read as GLSL's columns.
     private static IEnumerable<object> Scalars(object value) => value is float or int or uint
         ? new[] { value }
+        : value is Array array
+        ? array.Cast<object>().SelectMany(Scalars)
         : value is float3x3 matrix
         ? new object[] { matrix._m00, matrix._m01, matrix._m02, matrix._m10, matrix._m11, matrix._m12, matrix._m20, matrix._m21, matrix._m22 }
         : value.GetType().GetFields().Where(f => !f.IsStatic).SelectMany(f => Scalars(f.GetValue(value)!));

@@ -105,7 +105,7 @@ export function documentPayloadBytes(payload: DocumentPayload): Uint8Array {
   return payload as unknown as Uint8Array;
 }
 
-export { CultCachePayloadDepthError, MAX_PAYLOAD_DEPTH } from "./payload-depth";
+export { CultCachePayloadDepthError, MAX_PAYLOAD_DEPTH, checkPayloadDepth } from "./payload-depth";
 
 // The payload nesting bound covers the MessagePack the library itself writes: the plain default formatter and a codec. A
 // user formatter's bytes are opaque and in any format; its format and bounds are its own.

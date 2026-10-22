@@ -15,5 +15,6 @@
     <PackageReference Include="R3" Version="1.3.0" />
     <PackageReference Include="ConcurrentHashSet " Version="1.3.0" />
     <InternalsVisibleTo Include="GameCult.Caching.Tests" />
+    <InternalsVisibleTo Include="GameCult.Caching.MessagePack" />
   </ItemGroup>
 </Project>

@@ -1,11 +1,12 @@
 import { lstatSync, readFileSync } from "node:fs";
-import { mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { decode, encode } from "@msgpack/msgpack";
 import { z } from "zod";
 
 import { documentPayloadBytes, documentPayloadFromBytes } from "./document";
+import { commitStoreFile, withStoreWriteLock } from "./store-file";
 import { STORE_FORMAT_VERSION, SchemaConflictError, type StoreFormat, StoreUnreadableError, isStoreSnapshot, requireStoreSlots, requireV1RecordSlots } from "./store-format";
 import type {
   CacheBackingStore,
@@ -51,7 +52,14 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
     const disk = this.#readDisk();
     this.#format = disk.format;
     if (disk.repairedLegacyPayload) {
-      await this.#writeAll([], disk.envelopes);
+      // The heal decides from its own read, taken under the store lock.
+      await this.#enqueue(async () => {
+        const again = this.#readDisk();
+        this.#format = again.format;
+        if (again.repairedLegacyPayload) {
+          await this.#writeAll([], again.envelopes);
+        }
+      });
     }
 
     return disk.envelopes;
@@ -59,7 +67,9 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
 
   async push(entry: CultCacheEnvelope): Promise<void> {
     await this.#enqueue(async () => {
-      const existing = await this.pullAll();
+      const disk = this.#readDisk();
+      this.#format = disk.format;
+      const existing = disk.envelopes;
       const filtered = existing.filter(
         (candidate) => !(candidate.type === entry.type && candidate.key === entry.key),
       );
@@ -69,7 +79,9 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
 
   async delete(entry: CultCacheEnvelope): Promise<void> {
     await this.#enqueue(async () => {
-      const existing = await this.pullAll();
+      const disk = this.#readDisk();
+      this.#format = disk.format;
+      const existing = disk.envelopes;
       const filtered = existing.filter(
         (candidate) => !(candidate.type === entry.type && candidate.key === entry.key),
       );
@@ -113,9 +125,11 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   async #enqueue<T>(operation: () => Promise<T>): Promise<T> {
     let result!: T;
 
-    const next = this.#writeQueue.then(async () => {
-      result = await operation();
-    });
+    const next = this.#writeQueue.then(() =>
+      withStoreWriteLock(this.filePath, async () => {
+        result = await operation();
+      }),
+    );
 
     this.#writeQueue = next.then(
       () => undefined,
@@ -129,17 +143,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   async #writeAll(supplied: CultCacheEnvelope[], arrived: CultCacheEnvelope[]): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
 
-    const tempPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2)}`;
-
-    try {
-      await writeFile(tempPath, encode(encodeSnapshot(supplied, arrived, this.#format)));
-      await renameWithRetry(tempPath, this.filePath);
-    } catch (error) {
-      await rm(tempPath, { force: true }).catch(() => undefined);
-      throw error;
-    }
+    await commitStoreFile(this.filePath, encode(encodeSnapshot(supplied, arrived, this.#format)));
   }
 }
 
@@ -194,32 +198,6 @@ export function readStoreBytes(path: string, lstat: (path: string) => { isSymbol
 
   const what = entry.isSymbolicLink() ? "is a symbolic link whose target does not exist" : "appeared while it was being read";
   throw Object.assign(new Error(`CultCache store ${path} ${what}.`), { code: "ENOENT" });
-}
-
-async function renameWithRetry(source: string, destination: string): Promise<void> {
-  let delayMs = 10;
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 10; attempt++) {
-    try {
-      await rename(source, destination);
-      return;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") {
-        throw error;
-      }
-
-      lastError = error;
-      await delay(delayMs);
-      delayMs *= 2;
-    }
-  }
-
-  throw lastError;
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 type PersistedRecord = {

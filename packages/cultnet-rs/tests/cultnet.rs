@@ -1780,7 +1780,7 @@ fn document_registry_advertises_mutation_contracts_with_bindings() -> Result<()>
 }
 
 #[test]
-fn a_stored_payload_nested_past_the_bound_is_not_replicated_as_a_document() -> Result<()> {
+fn a_replicated_payload_nested_past_the_bound_is_refused_typed_on_apply() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = temp.path().join("foreign.msgpack");
     let limit = cultcache_rs::MAX_PAYLOAD_DEPTH;
@@ -1803,9 +1803,10 @@ fn a_stored_payload_nested_past_the_bound_is_not_replicated_as_a_document() -> R
     cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store))?;
     cache.pull_all_backing_stores()?;
 
-    let at_limit = registry.create_snapshot_response(&cache, "at", None, None)?;
-    let CultNetMessage::SnapshotResponse { documents, .. } = at_limit else {
-        panic!("expected a snapshot response");
+    // The raw lane copies payload bytes without decoding; the receiver's apply is the door.
+    let at_limit = registry.create_raw_snapshot_response(&cache, "at", None, None)?;
+    let CultNetMessage::SnapshotResponseRaw { documents, .. } = &at_limit else {
+        panic!("expected a raw snapshot response");
     };
     assert_eq!(documents.len(), 1);
 
@@ -1814,7 +1815,12 @@ fn a_stored_payload_nested_past_the_bound_is_not_replicated_as_a_document() -> R
     cache.register_entry_type::<GhostlightAgentStateFixture>()?;
     cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store))?;
     cache.pull_all_backing_stores()?;
-    let error = registry.create_snapshot_response(&cache, "past", None, None).unwrap_err();
+    let past = registry.create_raw_snapshot_response(&cache, "past", None, Some(&["past".to_string()]))?;
+    let mut target = CultCache::new();
+    target.register_entry_type::<GhostlightAgentStateFixture>()?;
+    let error = registry
+        .apply_raw_snapshot_response::<GhostlightAgentStateFixture>(&mut target, &past)
+        .unwrap_err();
     assert_eq!(
         error.downcast_ref::<cultcache_rs::PayloadTooDeep>(),
         Some(&cultcache_rs::PayloadTooDeep { depth: limit + 1, limit })
@@ -1844,15 +1850,15 @@ fn document_registry_replicates_typed_cultcache_state() -> Result<()> {
     origin.pull_all_backing_stores()?;
     origin.put("epiphany.persona", &payload)?;
 
-    let snapshot = registry.create_snapshot_response(&origin, "snapshot-1", None, None)?;
+    let snapshot = registry.create_raw_snapshot_response(&origin, "snapshot-1", None, None)?;
 
     let mut target = CultCache::new();
     target.register_entry_type::<GhostlightAgentStateFixture>()?;
     target.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store))?;
     target.pull_all_backing_stores()?;
     let applied =
-        registry.apply_snapshot_response::<GhostlightAgentStateFixture>(&mut target, &snapshot)?;
-    let synced = registry.sync_document_from_snapshot_response::<GhostlightAgentStateFixture>(
+        registry.apply_raw_snapshot_response::<GhostlightAgentStateFixture>(&mut target, &snapshot)?;
+    let synced = registry.sync_raw_document_from_snapshot_response::<GhostlightAgentStateFixture>(
         &mut target,
         &snapshot,
         "epiphany.persona",
@@ -1864,7 +1870,7 @@ fn document_registry_replicates_typed_cultcache_state() -> Result<()> {
         payload
     );
 
-    let direct_put = registry.create_document_put_message(
+    let direct_put = registry.create_raw_document_put_message(
         "put-1",
         "epiphany.persona",
         &GhostlightAgentStateFixture {
@@ -1874,7 +1880,7 @@ fn document_registry_replicates_typed_cultcache_state() -> Result<()> {
         CultNetDocumentPutOptions::default(),
     )?;
     let updated = registry
-        .apply_document_put_message::<GhostlightAgentStateFixture>(&mut target, &direct_put)?;
+        .apply_raw_document_put_message::<GhostlightAgentStateFixture>(&mut target, &direct_put)?;
     assert_eq!(updated.display_name, "Persona Prime");
     Ok(())
 }
@@ -2314,7 +2320,7 @@ fn reactive_document_tracks_canonical_reconciliation_delta() -> Result<()> {
         note.body = "local-prediction".to_string();
         note.revision = 2;
     })?;
-    let authoritative = registry.create_document_put_message(
+    let authoritative = registry.create_raw_document_put_message(
         "put-authoritative",
         "note:reconcile",
         &GhostlightReactiveNoteFixture {
@@ -2324,7 +2330,7 @@ fn reactive_document_tracks_canonical_reconciliation_delta() -> Result<()> {
         CultNetDocumentPutOptions::default(),
     )?;
 
-    reactive.apply_document_put_message(&authoritative)?;
+    reactive.apply_raw_document_put_message(&authoritative)?;
 
     let current = reactive.current();
     let current = current.lock().expect("reactive current mutex").clone();

@@ -70,8 +70,9 @@ internal static class GlslLowering
         var source = hlsl.ReplaceLineEndings("\n");
 
         // 2. Include guards are dropped, and so are the functions taking Texture2D/SamplerState, exactly
-        //    as the C# mirror drops them; the host shader samples its own textures.
-        source = Regex.Replace(source, @"(?m)^[ \t]*#(ifndef|define|endif)\b.*$", string.Empty);
+        //    as the C# mirror drops them; the host shader samples its own textures. The capacity macro
+        //    (#ifndef CULTMATH_MAX_SITES ... #endif) stays: GLSL has the preprocessor, and a consumer overrides it.
+        source = HlslSourceCompatibilityTests.DropGuards(source, (name, value) => $"#ifndef {name}\n#define {name} {value}\n#endif");
         source = Regex.Replace(source, @"(?ms)^\w+ \w+\([^)]*\b(Texture2D|SamplerState)\b[^)]*\)\s*\{.*?^\}[ \t]*$", string.Empty);
 
         // 3. Type names: floatN, intN, uintN and boolN become vecN, ivecN, uvecN and bvecN, and float3x3

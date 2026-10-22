@@ -11,19 +11,19 @@ and OpenSSL license notices are included under `Third Party Notices`.
 Build it with `scripts/build-unity-package.ps1`. Do not edit generated plugin
 assemblies in the package output.
 
-Install version `1.0.57` through Unity Package Manager with:
+Install version `2.0.0` through Unity Package Manager with:
 
 ```text
-https://github.com/GameCult/CultLib.git?path=/unity/org.gamecult.cultlib#cultlib-unity-v1.0.57
+https://github.com/GameCult/CultLib.git?path=/unity/org.gamecult.cultlib#cultlib-unity-v2.0.0
 ```
 
-The package depends on `org.gamecult.cultmath` (0.3.0 or later) and does not
+The package depends on `org.gamecult.cultmath` (exactly 0.5.0) and does not
 carry its own `CultMath.dll`. Unity Package Manager resolves git packages only
 from the project manifest, so add CultMath beside CultLib in
 `Packages/manifest.json`:
 
 ```text
-"org.gamecult.cultmath": "https://github.com/GameCult/CultLib.git?path=/packages/cultmath/unity/org.gamecult.cultmath#cultmath-unity-v0.3.0"
+"org.gamecult.cultmath": "https://github.com/GameCult/CultLib.git?path=/packages/cultmath/unity/org.gamecult.cultmath#cultmath-unity-v0.5.0"
 ```
 
 CultMesh chooses mapped memory for reachable same-machine bodies and advertised

@@ -390,7 +390,7 @@ impl IdunnExpectedIncarnationRecord {
             bail!("expected incarnation is not the 18-field positional contract");
         }
         let expected: Self =
-            rmp_serde::from_slice(payload).context("decoding expected incarnation")?;
+            cultcache_rs::decode_payload(payload).context("decoding expected incarnation")?;
         if rmp_serde::to_vec(&expected)? != payload {
             bail!("expected incarnation is not canonical positional MessagePack");
         }
@@ -629,7 +629,7 @@ impl OdinRuntimeTopologyCorrelationRecord {
             bail!("topology correlation is not the 21-field positional contract");
         }
         let receipt: Self =
-            rmp_serde::from_slice(payload).context("decoding runtime topology correlation")?;
+            cultcache_rs::decode_payload(payload).context("decoding runtime topology correlation")?;
         if rmp_serde::to_vec(&receipt)? != payload {
             bail!("topology correlation is not canonical positional MessagePack");
         }
@@ -1173,7 +1173,7 @@ pub fn authenticate_runtime_presence_claim(
         bail!("runtime presence payload is not the 24-field positional contract");
     }
     let presence: GameCultRuntimePresenceHealthRecord =
-        rmp_serde::from_slice(canonical_presence).context("decoding runtime presence health")?;
+        cultcache_rs::decode_payload(canonical_presence).context("decoding runtime presence health")?;
     if rmp_serde::to_vec(&presence)? != canonical_presence {
         bail!("runtime presence payload is not canonical positional MessagePack");
     }
@@ -1470,7 +1470,7 @@ impl IdunnRuntimeActivationRecord {
             bail!("runtime activation is not the 10-field positional contract");
         }
         let activation: Self =
-            rmp_serde::from_slice(payload).context("decoding runtime activation")?;
+            cultcache_rs::decode_payload(payload).context("decoding runtime activation")?;
         if rmp_serde::to_vec(&activation)? != payload {
             bail!("runtime activation is not canonical positional MessagePack");
         }
@@ -1604,7 +1604,7 @@ impl IdunnProcessWriteLeaseRecord {
         if messagepack_array_len(payload) != Some(14) {
             bail!("process write lease is not the 14-field positional contract");
         }
-        let lease: Self = rmp_serde::from_slice(payload).context("decoding process write lease")?;
+        let lease: Self = cultcache_rs::decode_payload(payload).context("decoding process write lease")?;
         if rmp_serde::to_vec(&lease)? != payload {
             bail!("process write lease is not canonical positional MessagePack");
         }

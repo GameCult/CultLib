@@ -14,14 +14,14 @@ namespace CultMath;
 public struct CultPhasor
 {
     /// <summary>(&#8711;cos, cos): the normalized cosine wave and its gradient.</summary>
-    public float4 cos;
+    public float4 cosine;
 
     /// <summary>(&#8711;sin, sin): the normalized sine wave and its gradient.</summary>
-    public float4 sin;
+    public float4 sine;
 
-    public CultPhasor(float4 cos, float4 sin)
+    public CultPhasor(float4 cosine, float4 sine)
     {
-        this.cos = cos;
-        this.sin = sin;
+        this.cosine = cosine;
+        this.sine = sine;
     }
 }

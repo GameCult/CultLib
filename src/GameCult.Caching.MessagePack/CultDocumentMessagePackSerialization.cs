@@ -285,6 +285,8 @@ public static class CultDocumentMessagePackSerialization
     // an encoding of the object.
     internal static byte[] SerializeStore(string formatVersion, IReadOnlyList<byte[]> catalogEntries, IReadOnlyList<byte[]> records)
     {
+        if (formatVersion == null)
+            throw new ArgumentException("A store is written under a format version; the snapshot carries none.", nameof(formatVersion));
         var buffer = new global::System.Buffers.ArrayBufferWriter<byte>();
         var writer = new MessagePackWriter(buffer);
         writer.WriteArrayHeader(StoreSnapshotFieldCount);
@@ -317,8 +319,11 @@ public static class CultDocumentMessagePackSerialization
 
     // The reader behind DeserializeSnapshot, and beside the snapshot the exact bytes the file held for each catalog entry and each
     // record (parallel to the snapshot's arrays). The snapshot's objects hold no bytes: a store that carries entries forward keeps
-    // these slices itself.
-    internal static (CultPersistedStoreSnapshot Snapshot, byte[][] CatalogBytes, byte[][] RecordBytes) ReadStore(byte[] payload)
+    // these slices itself. The stamp decides readability and the body never does: requireReadable, when a store passes its rule,
+    // runs on slot 0 before the catalog or any record is parsed; the public parser passes none and reads any stamp.
+    internal static (CultPersistedStoreSnapshot Snapshot, byte[][] CatalogBytes, byte[][] RecordBytes) ReadStore(
+        byte[] payload,
+        Action<string>? requireReadable = null)
     {
         try
         {
@@ -335,8 +340,12 @@ public static class CultDocumentMessagePackSerialization
             if (fieldCount == 0)
                 return (snapshot, Array.Empty<byte[]>(), Array.Empty<byte[]>());
 
+            // A stamp encoded as binary is not one this runtime wrote or reads; it is refused as such, not parsed as damage.
+            if (reader.NextMessagePackType == MessagePackType.Binary)
+                throw new CultStoreUnreadableException("Store snapshot declares its format version as binary; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + ", " + CultPersistedStoreSnapshot.FormatV2 + " and " + CultPersistedStoreSnapshot.FormatV3 + " as strings.");
             snapshot.FormatVersion = reader.ReadString()
                 ?? throw new CultStoreUnreadableException("Store snapshot declares no format version; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + ", " + CultPersistedStoreSnapshot.FormatV2 + " and " + CultPersistedStoreSnapshot.FormatV3 + ".");
+            requireReadable?.Invoke(snapshot.FormatVersion);
 
             var catalogCount = reader.ReadArrayHeader();
             snapshot.SchemaCatalog = new CultSchemaCatalogEntry[catalogCount];
@@ -412,13 +421,7 @@ public static class CultDocumentMessagePackSerialization
     public static void RequireSingleFileFormat(CultPersistedStoreSnapshot snapshot)
     {
         var version = snapshot.FormatVersion;
-        if (!string.Equals(version, CultPersistedStoreSnapshot.FormatV1, StringComparison.Ordinal) &&
-            !string.Equals(version, CultPersistedStoreSnapshot.FormatV2, StringComparison.Ordinal) &&
-            !string.Equals(version, CultPersistedStoreSnapshot.FormatV3, StringComparison.Ordinal))
-        {
-            throw new CultStoreUnreadableException(
-                $"Store format {DescribeHeader(version)} is not readable; this runtime reads {CultPersistedStoreSnapshot.FormatV1}, {CultPersistedStoreSnapshot.FormatV2} and {CultPersistedStoreSnapshot.FormatV3}.");
-        }
+        RequireReadableSingleFileStamp(version);
 
         // Only a v2 or v3 store may hold a variant: a v1 header over a variant record is a store no reader could trust.
         if (string.Equals(version, CultPersistedStoreSnapshot.FormatV1, StringComparison.Ordinal))
@@ -429,6 +432,18 @@ public static class CultDocumentMessagePackSerialization
                 throw new CultStoreUnreadableException(
                     $"Record '{variant.Key}' (schema '{variant.SchemaId}') is a variant but the store declares {version}; variants need {CultPersistedStoreSnapshot.FormatV2} or {CultPersistedStoreSnapshot.FormatV3}.");
             }
+        }
+    }
+
+    // The one verdict on a single-file store's stamp, judged on slot 0 before the body is parsed: this runtime reads v1, v2 and v3.
+    internal static void RequireReadableSingleFileStamp(string version)
+    {
+        if (!string.Equals(version, CultPersistedStoreSnapshot.FormatV1, StringComparison.Ordinal) &&
+            !string.Equals(version, CultPersistedStoreSnapshot.FormatV2, StringComparison.Ordinal) &&
+            !string.Equals(version, CultPersistedStoreSnapshot.FormatV3, StringComparison.Ordinal))
+        {
+            throw new CultStoreUnreadableException(
+                $"Store format {DescribeHeader(version)} is not readable; this runtime reads {CultPersistedStoreSnapshot.FormatV1}, {CultPersistedStoreSnapshot.FormatV2} and {CultPersistedStoreSnapshot.FormatV3}.");
         }
     }
 
@@ -749,7 +764,7 @@ public class SingleFileMessagePackBackingStore : SingleFileBackingStore
 
     protected override (CultPersistedStoreSnapshot Snapshot, byte[][] CatalogBytes, byte[][] RecordBytes) ReadStore(byte[] data)
     {
-        var store = CultDocumentMessagePackSerialization.ReadStore(data);
+        var store = CultDocumentMessagePackSerialization.ReadStore(data, CultDocumentMessagePackSerialization.RequireReadableSingleFileStamp);
         CultDocumentMessagePackSerialization.RequireSingleFileFormat(store.Snapshot);
         return store;
     }

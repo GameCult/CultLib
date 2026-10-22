@@ -530,3 +530,31 @@ negotiation, watch callbacks, and latest-frame cursor contracts for non-C#
 clients. The native C# path owns shared-memory rings and GPU-handle integration
 points. CultCache page append/readback remains the durable recording or
 nonlocal fallback.
+
+## Content Chunks over HTTP(S)
+
+`cultmesh-ts/content` answers the C# HTTPS connector's request, `GET` or `HEAD`
+`<mount>?chunkHash=<hex>&recordKey=<key>`. The mount path is the host's; the
+handler reads only the query. Every chunk is hashed against its name before a
+byte is sent, so a corrupt or swapped file answers 500 and never leaves the
+process, and chunks are never served by path.
+
+The directory store reads a flat `<root>/<hex>` layout. The publisher writes it
+from `packContent`'s chunks (an artifact of one chunk is the file named by its
+content hash). The store never writes, lists or caches. TLS and concurrency
+bounds belong to the host: memory is at most two buffers of `maxChunkBytes` per
+in-flight request (the store's, and the private copy that is hashed and sent, so a
+host store may reuse its buffer). `onServerFault` reports every 500 (`hash-mismatch`, `too-large`,
+`store-error`) for health.
+
+```ts
+import { readFileSync } from "node:fs";
+import { createServer } from "node:https";
+import { createContentChunkHandler, createDirectoryChunkStore, toNodeListener } from "cultmesh-ts/content";
+
+const handler = createContentChunkHandler(createDirectoryChunkStore("/srv/content"), {
+  onServerFault: fault => console.error("chunk fault", fault.kind, fault.chunkHash),
+});
+createServer({ key: readFileSync("key.pem"), cert: readFileSync("cert.pem") }, toNodeListener(handler))
+  .listen(8443, "127.0.0.1");
+```

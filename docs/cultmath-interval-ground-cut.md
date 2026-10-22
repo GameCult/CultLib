@@ -1,6 +1,7 @@
 # CultMath intervals and the gamecult.org ground: cut map
 
-Status, 2026-10-04: interval-ops, glsl-lowering, snoise-tie (48aadda0) and affine-forms with
+Status, 2026-10-14: the target is r2 (section "Target r2"); snoise-hessian, expr-ir and
+cycles-converters are on main. Earlier status, 2026-10-04: interval-ops, glsl-lowering, snoise-tie (48aadda0) and affine-forms with
 affine-shaders (156782da) are on main; the as-built record is the last section. Figures quoted in
 Passes 1-5 at SNOISE_LIPSCHITZ 10.099261 predate the tie fix (now 7.9640074) and are conservative;
 design.md carries the current measurements. Map history: Imagination pass 4, 2026-10-03. Pass 1's Q1–Q3 are answered (below);
@@ -8,7 +9,7 @@ the Self opened the `cultmath-tapes` campaign from pass 2; pass 3 revises the
 two CultLib cuts after their first Hands reports and the operator's challenge
 to the march, and changes the site field to envelope-then-noise; pass 4
 (section "Pass 4") revises `interval-ops` to r3 after its second Hands report
-and Soul's verdict, and names the one shipped void (Q9). Pass 5 (section "Pass 5") maps
+and Soul's verdict, and names the one shipped void (Q9, ruled `operator-shipped-void`). Pass 5 (section "Pass 5") maps
 affine forms against CultLib `main` at `a7966142`. Where a later pass and
 an earlier section disagree, the later pass wins. Where this map and the Body
 disagree, the Body wins and this map is stale.
@@ -86,25 +87,181 @@ pane and read back. CultLib has no GPU harness (follow-up
 
 ### Campaign
 
-`cultmath-tapes` (Q1), repos `GameCult/CultLib` and `GameCult/gamecult-site`,
-target doc `docs/cultmath-tape-target.md` unparked for step 1 only. The site
-cuts cite `site-masthead:ruling:operator-chromeless-column` and depend on
-`wash-home-only` landing first, because they rewrite the same lines.
+`cultmath-tapes`, repos `GameCult/CultLib` and `GameCult/gamecult-site`, in the
+Eureka Self area (ruling `adopted-by-eureka-self-area`). The tape target doc
+`docs/cultmath-tape-target.md` has steps 1 (intervals), 2 (graph and C#
+evaluator) and 4 (HLSL interpreter) unparked, with affine forms beside step 1
+(rulings `affine-forms-unparked`, `material-ir-cultmath-now`,
+`tape-unparked-for-trophic-graphs`). Steps 3 (pruning) and 5 (meshing) stay
+parked. The volumetric line (the culled march's proofs, the integration-native
+noise domain, the site ground) leads the campaign (ruling
+`volumetric-work-prioritized`). Site cuts cite
+`site-masthead:ruling:operator-chromeless-column`.
 
-### Owner, consumers, invariant
+### Target r2: owners, consumers, invariants
 
-- Owner: CultMath owns interval arithmetic and the noise bounds in C# and HLSL,
-  GLSL derived. The site owns its field, flow, march, TAA, stardust, DoF and
-  budget controller. `custom.scss` owns the brand palette the shader reads
-  (four nebula tokens) and the seed values of the ground tokens. `ground.js`
-  owns the sampled ground tokens while it runs.
-- Consumers: the site ground now; Aetheria's nebula raymarch at its CultMath
-  pin bump; the tapes campaign's HLSL interpreter later.
-- Protected invariant, **`intervals-enclose`**: every interval function returns
-  a `[lo, hi]` containing `f(x)` for every `x` in its input region, in C#, HLSL
-  and GLSL alike. A consumer that skips a region because `hi < cutoff` has
-  skipped nothing that was there. The domain warp does not weaken it: a warped
-  point lies in the ball enlarged by the warp bound, and a test says so.
+**Owners.** CultMath owns every function a consumer evaluates and every bound on
+it: the snoise kernel and its derivatives, the noise pins, intervals, affine
+forms, the warp-chain stage functions and their span bounds, the closed-form span
+integral, the Cycles converters, the trophic node primitives, and the expression
+graph with its evaluator and interpreter. C# is the reference; the HLSL mirrors it;
+the GLSL is generated. `GameCult.Caching.MessagePack` owns the wire shape of CultMath
+values and graphs. A consumer owns its composition and nothing below it: the site
+owns its field's brush, ramp, chain order and parameters, its motion, TAA,
+stardust, DoF, budget controller and sampled tokens; Aetheria owns its species
+graphs, their settings and when they are evaluated. `custom.scss` owns the four
+nebula input tokens and the seed values of the ground tokens.
+
+**Consumers.**
+
+- The gamecult.org ground: the Span Lab framework with the void as its brush
+  (ruling `site-ground-field-ruled`), in WebGL2 GLSL, vendoring CultMath's
+  generated GLSL by CultLib commit.
+- Aetheria fauna (`aetheria-fauna:target:r4`): trophic species graphs as
+  `CultMath.Expr` documents, evaluated by the C# evaluator in ServerShared and by
+  the HLSL interpreter in its presenters, over CultMath's node primitives.
+- Aetheria's Cycles-matched bakes (`aetheria-release`): reference bakes compared
+  with CultMath's Cycles converters within the measured tolerance class.
+
+**Not consumers.** Asura (its field is noise-dominated and needs no tape).
+AetheriaEve and AetheriaThing (archived). The material graph line until it returns
+after the demo (`aetheria-release:ruling:demo-material-scope`). The brush-grammar
+station, until pruning and meshing unpark. Aetheria's nebula on the
+span framework is an option to try (ruling `aetheria-nebula-spans-as-option`), not
+yet a consumer; until a cut makes it one, the nebula consumes CultMath noise at its
+pin bump and nothing else from this line.
+
+**Invariants.**
+
+- **`intervals-enclose`**: every interval function returns a `[lo, hi]`, and every
+  affine form's range is an interval, containing `f(x)` for every `x` in its input
+  region, in C#, HLSL and GLSL alike. A domain warp bounded by `D` is enclosed by
+  enlarging the ball radius by `D`. A consumer that skips a region because
+  `hi < cutoff` has skipped nothing that was there.
+- **`affine-beats-interval-on-wells`**: on the deep-well scenario (wells about an
+  order of magnitude larger than the fog gradient), the affine bound's combined cost
+  ratio exceeds the centred interval bound's at warp 0 and at warp `D`, with the
+  cull floor at 0.5 (rulings `wells-scale-order-of-magnitude`,
+  `affine-wells-contract-cheaper-than-interval`).
+- **`noise-pins-measured`**: there is one snoise kernel, and its value, gradient
+  and Hessian come from the same tie order. `SNOISE_LIPSCHITZ`, `SNOISE_HESSIAN`
+  and `SNOISE_THIRD` are each measured on that kernel by a committed test (the
+  refined maximum times 1.10), and every runtime's copy is pinned equal to the C#
+  constant by a value test. A kernel change re-measures every pin in the same
+  merge. Consumers read the pins and the derivative functions from CultMath,
+  never from page-local copies.
+- **`span-bounds-enclose`**: each warp-chain stage (per-component offsets,
+  anisotropic stretch, plain or ridged `1 − 2|n|`, curl if ruled) is a CultMath
+  function in C#, HLSL and GLSL returning value, Jacobian and span bounds (speed,
+  acceleration, curvature, fold deviation) derived only from the noise pins. Each
+  bound holds at every point of its span. The composition helper composes them by
+  the chain rule; a consumer writes its chain and never derives a bound (ruling
+  `span-chain-shape-ruled`).
+- **`span-integration-closed-form`**: along a span, optical depth is integrated in
+  closed form, the clamped linear ramp by `integral_clamp_linear` (split at the
+  exact clamp crossings, finite for infinite clamp bounds) and a proven
+  constant-density body by Beer–Lambert in one step (ruling
+  `operator-analytic-wall-body`). The linearisation error is bounded by the
+  composed stage bounds, and a span proved empty or saturated by them is so at
+  every point.
+- **`glsl-derived`**: `CultMath.glsl`, `CultMath.Phacelle.glsl`,
+  `CultMath.Cycles.glsl` and the golden fixture are generated by one enumerated
+  lowering from the HLSL and C# and pinned by tests; the Unity package's shaders
+  are byte-identical copies. Nobody edits them by hand, and a dialect gap is fixed
+  in the HLSL common subset. The site vendors the GLSL by CultLib commit, SHA in
+  the header, with a drift check.
+- **`three-runtimes-agree`**: HLSL is a bit-for-bit mirror of C#, and the GLSL
+  agrees with C# on the golden fixture within each family's stated tolerance,
+  evaluated on a WebGL2 device.
+- **`cycles-exact-to-unfused`**: CultMath's `cycles_*` functions are Cycles'
+  formulas with one IEEE single rounding per operation, bit-exact to the Blender
+  5.2.2 Linux SSE4.2 oracle fixtures. Every other Cycles build and CultMath's own
+  shader lowerings are held to a per-function tolerance class measured on that
+  build and recorded in the oracle README; cancellation-prone functions (floored
+  modulo, wrap) carry an error bound relative to the operand scale and a divergence
+  note (ruling `cycles-kernel-reference-ruled`).
+- **`one-expression-graph`**: `CultMath.Expr`'s `ExprGraph` is the one IR. One
+  validator admits a graph whole at build and at decode; one op table, append-only,
+  names every op; the graph has no loop construct, and stencils are build-time
+  substitution. Bytecode is derived from the graph, cache-only, and is never stored
+  as truth. The MessagePack resolver is the wire shape; JSON is never load-bearing.
+- **`evaluator-composes-cultmath`**: the C# evaluator's result equals the direct
+  composition of the same CultMath calls bit for bit, one IEEE single per op; an
+  op's meaning is its CultMath function's, and a function's value change is a
+  Breaking release note.
+- **`tape-interpreter-compute`**: the HLSL interpreter is one included source,
+  `CultMath.Tape.hlsl`, never a per-graph generated kernel. Its registers are
+  linear-scan allocated at lowering and live in groupshared memory, a slice per
+  thread, the group size shrinking as the register cap grows (64 registers: 128
+  threads; 128: 64; 255: 32). It and every presenter that uses it run as compute
+  passes writing to a texture (ruling `tape-register-model-ruled`).
+- **`interpreter-matches-evaluator`**: the HLSL interpreter agrees with the C#
+  evaluator on a graph corpus and on each consumer's own graph within tolerances
+  measured per op, compiled by dxc and run on a device.
+- **`lattice-node-reads-bodies`**: the weighted lattice cellular node takes the
+  zone body span and a falloff and weights each candidate cell at its cell centre
+  inside the node. It states a supported weight-ratio range, its search window
+  holds every cell that can win within that range, and graph validation refuses
+  parameters outside it (ruling `lattice-weight-from-bodies-ruled`).
+- **`site-field-span-framework`**: the gamecult.org ground's density is a
+  site-owned composition over CultMath stage functions, integrated span by span:
+  a ramp, a warp chain, and one authored brush, the void, a true 3D spherical
+  cavity of hollow radius 198 and ramp 50 inside a full cloud volume, a sun in its
+  floor and the camera orbiting low (rulings `operator-ground-void-brush`,
+  `operator-void-true-cavity`, `operator-shipped-void`). The site defines no noise,
+  derivative or bound.
+- **`one-motion-owner`**: the ground has one motion law, owned by the site's field.
+  What moves the density is what TAA reprojection and the stardust read; nothing
+  evaluates motion a second way.
+- **`shader-owns-ground`**: the ground is the shader's moving render. The CSS wash
+  tokens are sampled from its output by a non-stalling readback, carried across
+  page loads in `sessionStorage`, and are seed or fallback only. The shader reads
+  the four nebula input tokens, never an output token.
+- **`dof-from-transmittance`**: the stardust's blur is driven by the cloud layer's
+  accumulated opacity at that pixel, so the clouds blur what lies behind them.
+- **`budget-measured`**: quality steps down by measured GPU or frame time only
+  (samples, then resolution, then the CSS wash), never by user agent.
+
+**Not in scope.**
+
+- Pruning (tape step 3) and meshing (step 5). Interval, affine and gradient
+  evaluation over `ExprGraph` belong to pruning and stay parked.
+- Span evaluation over the graph (`tape-span-eval`): the later generalisation of
+  the stage functions once the interpreter exists.
+- A GLSL or WebGL2 tape interpreter: groupshared memory exists only in compute
+  shaders, and WebGL2 has none. The site's field is written in GLSL against the
+  stage functions.
+- The material line (cones, frontiers, a per-graph HLSL emitter), until the
+  material graph returns after the demo.
+- Flow laws, envelopes, brushes and chain order in CultMath: the consumer's. A
+  curl noise primitive waits on the operator's answer to follow-up
+  `curl-warp-primitives`.
+- The kernel cascade, unless the operator's nebula work picks it.
+- Per-depth transmittance for the stardust DoF.
+- A CultMath release for the site; the site consumes a CultLib commit.
+
+**Canonical implementations.** Paths are under `packages/cultmath/` unless named.
+
+- Kernel, pins and span primitives: `src/CultMath/math.cs`, `math.Interval.cs`,
+  `math.Affine.cs`, `math.Span.cs`; `shaders/CultMath.hlsl`,
+  `CultMath.Interval.hlsl`, `CultMath.Affine.hlsl`. The stage functions land
+  beside them.
+- Lowering and parity: `tests/CultMath.Tests/GlslLowering.cs`,
+  `GlslMirrorTests.cs`, `HlslMirrorTests.cs`, `fixtures/glsl-parity.json`;
+  generated `shaders/*.glsl`; Unity copies under
+  `unity/org.gamecult.cultmath/Shaders/`.
+- Cycles: `src/CultMath/math.Cycles.cs`, `shaders/CultMath.Cycles.hlsl`,
+  `tools/cycles-oracle/` (oracle and the tolerance-class table),
+  `tests/CultMath.Tests/fixtures/cycles-oracle/`.
+- Graph: `src/CultMath/Expr/`; wire shape
+  `src/GameCult.Caching.MessagePack/CultMathExprResolver.cs`; interpreter
+  `shaders/CultMath.Tape.hlsl` (cut `tape-interpreter`).
+- Ground: gamecult-site, created by `cut-site-ground.r1` (no ground code on
+  `origin/main` `af6e206`); palette input the four `--gamecult-nebula-*` tokens in
+  `custom.scss`.
+- Research behind the rulings: `docs/research/integration-native-noise-domain.md`,
+  `span-chain-and-site-field.md`, `tape-register-model.md`,
+  `lattice-site-weight.md`.
 
 ## The authority map (all four cuts)
 
@@ -390,7 +547,9 @@ from the mobile preset, the phone's GPU time from the operator's phone.
    tolerance class and device named in the report.
 
 Not proved here, said plainly: tape evaluation, automatic pruning, `min`/`max`
-choice tracking, affine arithmetic. Those unpark with steps 2–4.
+choice tracking, affine arithmetic. Pruning and choice tracking stay parked;
+the graph, its evaluator and interpreter, and affine forms have since unparked
+(Target r2).
 
 ## Cut order
 
@@ -444,8 +603,8 @@ Results against the SSE4.2 fixture:
 
 ## Standing design decisions (means; Self may overrule)
 
-- D1. Intervals are `float2(lo, hi)`. Affine arithmetic is not taken; the
-  tightness number says whether it is ever worth it.
+- D1. Intervals are `float2(lo, hi)`. Affine forms sit beside them (ruling
+  `affine-forms-unparked`); the wells contract says where they pay.
 - D2. No `iv_*` function has a value-only or gradient twin; the bounds take
   the point value only.
 - D3. The site vendors `CultMath.glsl` by CultLib commit, SHA in the header, a
@@ -592,7 +751,7 @@ and `S` from the exponent (`e = 4` gives `S ≈ 1.3 Rh`, `e = 0.25` gives
 `S ≈ 0.12 Rh`), so `(Rh, S)` are the knobs and `(Rc, e)` derived. Shipped:
 `Rh = 198`, `S = 50`, so `Rc = Rh + S = 248` and `e = −ln CARVE / ln(1 −
 (Rh/Rc)²) = 0.40`, `K = 1/30` (pass 4 corrects this line's `e ≈ 0.6, Rc ≈
-220`, which did not satisfy the formula; Q9 holds the look question).
+220`, which did not satisfy the formula; Q9 asked the look question and is ruled `operator-shipped-void`).
 
 Imagination's model (scratchpad `cavity_model.py`; the test confirms or
 refutes), 1080p, `N = 8`, per pixel for a converged frame; "ref" is the
@@ -667,7 +826,7 @@ above. Everything else recovered carries over.
 
 **The site scene** (`site-ground` r3; the brush parameters in this paragraph,
 `Rc = 640`, `e = 4`, are superseded by pass 4's one shipped void, `Rh = 198`,
-`S = 50`, `Rc = 248`, `e = 0.40`, pending Q9): the original's units. Outer volume: an
+`S = 50`, `Rc = 248`, `e = 0.40`, as Q9 ruled): the original's units. Outer volume: an
 unbounded uniform fill (chosen over a shell: every ray then ends in a wall
 and the march terminates by opacity, never by a far plane; `Z1 = 2 Rc` bounds
 the pre-pass range only). The carve: `d = |p − c_v|`, `g(d) = (1 −
@@ -806,7 +965,7 @@ answers the first; the second is content and stays.
 | --- | --- | --- |
 | `frustum-ball-float-crossing` | Medium | the radius is widened by a derived float32 bound (below); seven extreme families join the enclosure test; the strictness sentence leaves the C#, the HLSL and `design.md` |
 | `aetheria-far-plane-miscited` | Low | `far = 2048`, the Main Camera's (`ARPG.unity:31777`, `:31830`); the Tint camera's 1000 was the wrong camera |
-| `shipped-void-two-scenes` | Medium | one shipped void, `(Rh, S) = (198, 50)`, `(Rc, e) = (248, 0.40)` derived; the map, the site-ground spec and the test agree; the look question is Q9 |
+| `shipped-void-two-scenes` | Medium | one shipped void, `(Rh, S) = (198, 50)`, `(Rc, e) = (248, 0.40)` derived; the map, the site-ground spec and the test agree; the look question was Q9, ruled `operator-shipped-void` |
 | `lod-weights-never-exercised` | Low | configuration "LOD far" (`Rh = 4000`, `S = 50`, low camera, `f = 467`) reaches weights in `(0, 1)` and at 0; the `[w(z1), 1]` bound is recorded as a deviation with its soundness argument |
 | `stryker-timeout-survivor` | Low | 2525 named equivalent; ball radii to `1e3` so `L/r` dies to an enclosure test; every timeout hand-run; the report claims only demonstrated kills |
 
@@ -853,7 +1012,7 @@ analytic body the second gains nothing: across a 442-wide ramp the optical
 depth exceeds 4 before the density is provably constant, so rays end inside the
 ramp and the body is never proven. The map's own rule says `(Rh, S)` are the
 knobs, so the honest choice is the first; it changes the look relative to the
-site section, hence Q9 (below). For `CARVE = 1.5` the ramp width is tied to the
+site section, hence Q9 (below; ruled (a), `operator-shipped-void`). For `CARVE = 1.5` the ramp width is tied to the
 exponent (`S/Rh = 1/√(1 − 1.5^(−1/e)) − 1`: `e = 0.4 → 0.25`, `e = 0.7 →
 0.5`, `e = 1 → 0.73`, `e = 4 → 2.2`), so "pseudo-Gaussian" and "narrow" cannot
 both be had without a third knob, and a narrow wall at `e = 4` needs
@@ -947,7 +1106,7 @@ assumption failed: the pre-band's 0-snoise steps, or a body start later than
   one more probe; the main pass reads it and never decides it. The Beer-Lambert
   step is the consumer's integration, not a CultMath function.
 - `(Rc, e)` are no longer authored; they are derived from `(Rh, S)`. The site
-  section's `Rc = 640, e = 4` is no longer an owner of the look (Q9 pending).
+  section's `Rc = 640, e = 4` is no longer an owner of the look (Q9 ruled (a), `operator-shipped-void`).
 - (c)'s contract is derived from its own run (0.90 of the ceiling); no absolute
   target is written for (c).
 - Deletion line: the false strictness sentence, the Tint camera citation, the
@@ -966,6 +1125,10 @@ and `Z1 = |camera − c_v| + Rc + 6/K` (614 at the shipped point, 62 cells of
 mind's copies need re-admission by Self.
 
 ## Questions
+
+Q4-Q9 are all ruled; the options below are kept as the record of what was
+asked. Q9: (a), ruling `operator-shipped-void` (`rh198-s50`). Q4: (a), ruling
+`operator-palette-tokens`. Q5: (a), ruling `operator-wash-carry`.
 
 **Q9. The one shipped void** (pass 4; finding `shipped-void-two-scenes`).
 Authored as `(Rh, S)` with `(Rc, e)` derived; `CARVE = 1.5`, `A = 20`,
@@ -1720,10 +1883,14 @@ Aetheria twin.
 
 ### Questions (admitted in the mind)
 
-- `tape-register-model`: the HLSL interpreter's register model. Gates the
-  interpreter cut only.
+- `tape-register-model`: the HLSL interpreter's register model. Ruled
+  `tape-register-model-ruled` (groupshared registers).
 - `lattice-site-weight-source`: how a weighted lattice node gets a per-site
-  weight (T7c). Gates fauna gap (1) only.
+  weight (T7c). Re-asked as `lattice-weight-from-bodies` and ruled
+  `lattice-weight-from-bodies-ruled` (node-reads-bodies).
+- `lattice-window-sound-or-measured` (from section "lattice-weighted-cellular"):
+  a proven ring search or a fixed measured 7x7 window. Ruled
+  `lattice-ring-exit-sound` (ring by ring until no farther cell can win).
 
 Prior art in hand: `F:\Projects\aetheria-material-path-prior-art.md` section 4
 (GPU interpreters: Fidget's crates, Dolphin ubershaders, Laine et al. on
@@ -1733,17 +1900,18 @@ found) and section 6 (IR placement); Aetheria
 filaments). Neither covers a GPU tape interpreter's register storage (dynamic
 indexing of local arrays and scratch spill, groupshared memory, Fidget-wgpu's
 `tape_interpreter.wgsl`, Keeter's MPR 2020) or per-site weight fields in
-lattice Voronoi. Both questions lack that prior art; Self runs Eyes before
-putting them.
+lattice Voronoi. Both questions have since been ruled.
 
 ### Cut sequence (Pass 7; one line each, mapped when about to run)
 
 Fauna's first cut, `fauna-trophic-habitat`, evaluates the habitat graph in C# at
 candidates. It needs `expr-ir` r2, gaps (2) and (4) with (3) under the strands,
 gap (1), and their ops registered (line 5). It does not need the interpreter or
-gap (5); its presenter does. The critical path is `cycles-converters` merge,
-then line 3 beside the ruling on `lattice-site-weight-source` and line 4, then
-line 5; line 1 runs now, off that path.
+gap (5); its presenter does. Lines 1 and 3 and `cycles-converters` are on
+main (`911fc755`). The critical path is line 4a, after the ruling on
+`lattice-window-sound-or-measured`, then line 5. Line 4b, the shader twins,
+is not on the path to fauna's first cut; it is on the path to fauna's presenter,
+with line 6.
 
 1. `expr-ir` r2 (spec admitted): the graph, builder with substitution, decode
    validation, wire shape, C# evaluator. Touches no file `cycles-converters`
@@ -1756,20 +1924,23 @@ line 5; line 1 runs now, off that path.
    `CultMath.hlsl`). Families append after the previous cut's, so these cuts
    map on the merged head, not beside the branch. Gap (3) folds into line 3,
    whose strand kernel is its only consumer.
-3. `trophic-nodes` (CultLib): gap (3), an `out`-free
-   `distance_to_segment(float2, float2, float2)` in C# with its HLSL twin (T6;
-   `point` is reserved in HLSL, so the parameter is `point_value`); gap (2), a
-   weighted diagram over a site span (F1, F2, first-order border distance;
-   multiplicative and power weights); and gap (4), the soft Gabriel gate
-   (computed per tick on the CPU from a site span; the per-point strand kernel
-   over the gated edge span has the HLSL twin), with the span convention of
-   the model page. Waits on the `cycles-converters` merge and its map pass.
-4. `lattice-weighted-cellular` (CultLib): gap (1), 2D, `pcg3d` cells, zone
-   time, smooth-min blend, a stated weight range sizing its window. Waits on
-   question `lattice-site-weight-source`.
+3. `trophic-nodes` (CultLib): spec `cut-trophic-nodes.r1` admitted; see
+   "trophic-nodes" below for its body facts and decisions.
+4. Gap (1), mapped in section "lattice-weighted-cellular" on 3's merged head
+   (`911fc755`), in two cuts. 4a, `lattice-weighted-cellular`
+   (`cut-lattice-weighted-cellular.r1`), is C#: the node reads the body span
+   and weights each cell at its centre through line 3's exact `power_border`.
+   It waits on question `lattice-window-sound-or-measured`. 4b,
+   `lattice-weighted-shaders` (`cut-lattice-weighted-shaders.r1`), adds the
+   twins of its four steps, the GLSL, the families and the lavapipe bounds.
+   It waits on 4a.
 5. `expr-trophic-ops` (CultLib): the span input kind and ops for 2-4 in the op
-   table; a CultMath Unity tag for fauna. Waits on 1, 3 and 4. Fauna's first cut
-   waits on this.
+   table; the strand reduction over the gated edge span (the graph has no loop,
+   so a span op is a CultMath function: a C# span overload over a step with its
+   shader twin, the convention line 3 sets); follow-up
+   `expr-create-copy-then-validate` (the first cut that touches `ExprGraph`;
+   line 3 does not); a CultMath Unity tag for fauna. Waits on 1, 3 and 4.
+   Fauna's first cut waits on this.
 6. `tape-interpreter` (CultLib): bytecode lowering, `CultMath.Tape.hlsl`, and
    the graph-parity harness (gap 5): C# evaluator against the interpreter on a
    graph corpus and on a consumer's graph, dxc compile plus a device run, held
@@ -1782,6 +1953,110 @@ line 5; line 1 runs now, off that path.
    frontiers and an HLSL emitter over the same graph.
 10. `cultmath-unity-math-parity` (follow-up): square, exp2, exp10, log2, log10.
 11. Pruning (tape step 3) and meshing (step 5): parked as the target says.
+
+### trophic-nodes
+
+Written by Imagination (agent `imagination-ag4-trophic`, session
+`self-2026-10-16-ag4`) against CultLib `origin/main` `f697e03f`, where
+`cycles-converters` (`b136ad9b`), `expr-ir` and `stage-functions`/`stage-shaders`
+(`d7d1bcf3`) are merged. One CultLib cut owns what fauna's map line
+`cultmath-trophic-nodes` and this map's line 3 both name; fauna's consumer cut
+(`fauna-trophic-habitat`) waits on line 5 and the Unity tag, not on this cut
+alone. Spec: `cultmath-tapes:cut_spec:cut-trophic-nodes.r1`.
+
+#### Body facts (trophic-nodes)
+
+| # | Question | Result |
+|---|---|---|
+| TN1 | What does the probe compute, exactly? (Aetheria `docs/research/2026-10-14-trophic-dag-probe/trophic_probe.py:49-71`, `2026-10-14-body-voronoi-probe/body_voronoi_probe.py:36-67`, master `6b6e7c7c`) | Body diagram: every body visited, scores sorted, the two winners' `(F2 - F1) / |grad(F2 - F1)|` and its unit normal (the lattice web reads both). Power score `d^2 - sigma^2`, multiplicative `d / sigma` with `sigma` the well's Gaussian width. Gate: per pair `(i, j)`, margin = min over the other sites `k` of `(|k - mid| - r) / r`, `r = |ab| / 2`, unweighted positions; gate `smoothstep(-.15, .15, margin)`; no other site gives margin 9 (gate 1). Strands: max over gated edges of `gate * exp(-(segdist / width)^2)`, `width = 28 + .03 L`. |
+| TN2 | Is the first-order power border exact? (scratch `border_probe.py`, double, 3,000 spans of 2-8 sites) | Yes: `F2 - F1` is affine in the query for power scores, so the first-order distance is the distance to the power bisector plane; worst relative error against that plane 2.2e-13. A one-pass fold (strict `<`, F1 then F2) gives the sorted order on every draw; an exact tie keeps the lower index first. Gabriel margin: a third site on the diameter circle gives 0, inside at half radius -0.5. |
+| TN3 | Can the shader side take a span? | No resource in the mirror: `HlslSourceCompatibilityTests` compiles the HLSL text as C#, and `CultMath.hlsl` has no `StructuredBuffer` (0 in every `shaders/*.hlsl`). The struct-aware twin rule (`:153-161` at stage-shaders, now `:162-181`) compares struct and `int` arguments and private twins; `compared.Count` is 127 at `:181`. `GlslMirrorTests.FromScalars` (`:488-500`) decodes `int` and structs; `GlslTypes` (`:874-879`) maps names; `Resolve` (`:882-888`) binds public `math` methods only and cannot parse an empty parameter list. |
+| TN4 | Wire coverage of a new public struct (`CultMathSerializationTests`, `CultMathJsonTests`, T5) | Every exported struct needs a `CultMathResolver` shape and a `CultMathJson` converter; JSON `Fields<S>` (`CultMathJson.cs:269`) holds one scalar type per struct, so a struct mixing `float` and `int` fields needs new JSON machinery. Pattern: `52d25740` (SpanPath, SpanStage: resolver, JSON, a `Json`, a `RoundTrip` and a `Hex` pin). |
+| TN5 | Who calls `distance_to_segment(.., out closest)`? | `MathTests.cs` and Aetheria `Assets/Scripts/ServerShared/Galaxy.cs`; it stays, unchanged in value. |
+| TN6 | Is `CultMath` free to take `ReadOnlySpan`? | Yes: `net8.0;netstandard2.1` (`CultMath.csproj:4`); `BatchMath` already takes `ReadOnlySpan<float2>`. |
+
+#### Decisions (defaults, not forks)
+
+- **A span function is a C# loop over a step that has a shader twin.** The
+  shader cannot take a span in the mirror (TN3), and a buffer-taking HLSL
+  function would be a second, untested path. So each span function is one fold:
+  `site_cells_empty()`, then `site_cells_insert(cells, score, index)` per site,
+  read by `site_cells_border(cells)`; the per-site score is `power_score` or
+  `multiplicative_score`. C#'s `power_cells(p, sites)` and
+  `multiplicative_cells(p, sites)` are that loop and nothing else. A shader
+  caller (and later the tape interpreter) writes the same loop over its own
+  buffer. One rule, one path; the per-site functions are mirrored bit for bit.
+- **Sites are `float4(position.xyz, weight)`**, the model page's span element; a
+  2D consumer uses z = 0. For an explicit span every site is visited, so no
+  window and no weight-ratio range apply (the lattice node's range is line 4's).
+- **Indices are `float` fields** (`nearestSite`, `secondSite`, -1 for none), as
+  `CultCellular.id` is: one scalar type keeps the MessagePack and JSON shapes on
+  the existing helpers (TN4), and an index is exact below 2^24, far past any
+  span a per-point O(N) search serves.
+- **The gate is pointwise per pair**: `gabriel_margin(a, b, other)` with a
+  shader twin, and C#'s `soft_gabriel_gate(sites, first, second, softness)`
+  folding it over the span (TN1's unweighted positions; a power-weighted
+  Gabriel graph is not requested by any ruling).
+- **The strand reduction is not in this cut.** Its Gaussian profile and width
+  law are fauna's composition until the graph needs it as an op; line 5 owns
+  that op, with the same step-and-twin convention.
+- **Shader part separable.** The C# functions, struct and wire shapes land
+  first; the HLSL twins, the regenerated GLSL and the fixture families land in
+  the last commits under today's `GlslLowering`. Pass `imagination-ag4-shader-runner`
+  is re-posing the lowering and shader testing (question `device-run-driver`);
+  if that lands first, only the shader commits are re-mapped.
+
+### lattice-weighted-cellular
+
+Written by Imagination (agent `imagination-ag4-lattice-weighted`, session
+`self-2026-10-16-ag4`) against CultLib `origin/main` `911fc755`, where
+`trophic-nodes` is merged (`7e6881af`). Ruling `lattice-weight-from-bodies-ruled`
+(node-reads-bodies). Line 4 splits into two cuts because of Hands' budget:
+`cut-lattice-weighted-cellular.r1` (C#) and then `cut-lattice-weighted-shaders.r1`
+(twins, GLSL, families, lavapipe bounds). One question,
+`lattice-window-sound-or-measured`, gates the first cut's search loop.
+
+#### Body facts (lattice-weighted-cellular)
+
+The probes are numpy float64 scripts in
+`docs/research/lattice-site-weight/weighted-node/` (`probe.py` is the node, and
+each other script is one measure). They use 6 bodies orbiting with period equal to
+distance and a sigma ratio of 5:1, `cellSize 260`, `falloff 120` (the body probe's
+`3 * EW_U`), `KW .35` and boost 1.6, the ruled look.
+
+| # | Question | Result |
+|---|---|---|
+| LW1 | What weight does the ruled look use? (Aetheria `body_voronoi_probe.py` `lattice_web_edges`, master `4e620671`) | `base(.5..1) * (1 + 1.6 * exp(-(border(cell centre) / 120)^2))`. The border is the body diagram's first-order distance under the ruled power metric (`body-diagram-metric-ruled`). Distance is stretched by `1 + near` (up to 2x) across the body border's normal at the query point. Output `max(soft^2, exp(-((F2 - F1)/.1)^2))`, with soft from her smooth-min fold. |
+| LW2 | Window sufficiency (`a.py`, 67,600 points against a 19x19 box) | 7x7 has no F1/F2 misses at ratio 5.2, 10 and 20 with stretch 1 or 2. 5x5 misses .1-.3% of points with stretch 2 (output error up to .92) and .04% at 20:1. A worst-case proof covers 7x7 only for ratio x stretch up to about 1.5. |
+| LW3 | Are the weights continuous in time? (`c.py`, 576 cell centres, 300 s at 1/60 s) | First-order border: max step .68, and 113 steps over .01, where the second-nearest body changes. Exact `power_border`: max .0032, none over .01. |
+| LW4 | Does her fold (from 8, row-major) depend on the window? (`d3.py`, 40,000 straddles of lattice cell boundaries) | Yes. With F1 and F2 exact, soft jumps .114 at 5x5 and .056 at 7x7 with stretch 2. It vanishes at 13x13 on this corpus, but nothing proves that. |
+| LW5 | Which fold start is window-independent and continuous? (`d3.py`, `g.py`) | Start at F1 (F1 cell skipped): no window jump, but at F1 identity swaps m jumps .011 and soft .25, because the polynomial smooth min is not associative. Start at F1 + k and fold every cell: swaps jump 4e-15 and window jumps are 0 once the box holds every `d < F1 + 2k`. Its overshoot above m is at most .017k per step (computed), hence the clamp to F1 + k. |
+| LW6 | Look of start F1 + k against hers (`h.py`, 40,000 points, 13x13) | Mean output difference 0.0000, max .032 (stretch 1) and .030 (stretch 2). |
+| LW7 | Ring-exit cost (`e.py`) | Cells visited: at the ruled look median 25, max 49 (stretch 1) and 81 (stretch 2); at boost 4 with stretch 2, max 121; at boost 9, max 81. The worst-case sound fixed box is 19x19 to 67x67. |
+
+#### Decisions (defaults, not forks)
+
+- **The weight reads the exact power border** (`power_border`, trophic-nodes),
+  not the first-order one the ruled look's probe used: LW3, under
+  `aetheria-fauna:ruling:habitat-no-pop-ruled`. The look moves where the
+  first-order distance was wrong (LW3's jumps are the same places).
+- **Her fold starts at F1 + k and is clamped to F1 + k**, in absolute row-major
+  order (LW4-LW6). The look is unchanged to within .03, and the node is
+  window-independent by construction, which the search's exactness needs.
+- **The alignment stretch is in the node.** It is a query-point anisotropy, and
+  it does change winners (B41). Only the node sees the candidate sites, so a
+  caller cannot apply it. Stretch 1 is isotropic.
+- **float4(F1, F2, smooth, id), no gradients, no struct.** fauna's composition
+  reads values only, and a struct would owe a wire shape (TN4). Gradients can be
+  added later as their own function, if a consumer asks.
+- **The range is public constants**, so line 5's graph validator reads the range
+  from CultMath rather than restating it: boost up to 4 (10:1), stretch up to 2,
+  smoothing up to 1.
+- **The base weight takes its own hash lane** (`pcg3d(cell).z`), not the jitter
+  phase the probe reused.
+- **Steps for shaders, the span function in C# only**, by trophic-nodes'
+  convention: `lattice_site`, `lattice_weight`, `lattice_distance`,
+  `lattice_smooth_step`.
 
 ## Pass 8: volumetric prioritized (ruling `volumetric-work-prioritized`)
 
@@ -1832,10 +2107,11 @@ authoring framework" she will build on. The kernel cascade (the probe and the Ke
 Lab) is the earlier exploration, and it stays a line below.
 
 **Correction to the brief's expectation.** The next cut is not site-ground. The
-site ground's field is open: the Span Lab framework, the kernel cascade, or r3's
-marched void. The r3 machinery (the interval pre-pass, the centred warp, the
-debug-versus-dense readback) is shaped for a marched field. Question
-`site-ground-field` asks this.
+site ground's field was then open between the Span Lab framework, the kernel
+cascade and r3's marched void. The r3 machinery (the interval pre-pass, the
+centred warp, the debug-versus-dense readback) is shaped for a marched field.
+Question `site-ground-field` asked this. It is ruled `site-ground-field-ruled`:
+the Span Lab framework with the void as its brush.
 
 ### `SNOISE_LIPSCHITZ`: 10.099 in the lab, 7.964 in CultMath
 
@@ -1917,8 +2193,8 @@ is traversal, which is unmeasured. Optical depth through it is a sum of per-kern
 segment integrals, so it is order-independent. Additive blending of each kernel's
 screen footprint would give exact transmittance in WebGL2, with no compute and no
 sorting. Emission is not order-independent. This is a hypothesis with no probe
-behind it. The cascade becomes a cut only if `site-ground-field` or the operator's
-nebula work picks it.
+behind it. `site-ground-field-ruled` picked the Span Lab framework, so the cascade
+becomes a cut only if the operator's nebula work picks it.
 
 ### Cut sequence (volumetric line)
 
@@ -1926,9 +2202,324 @@ nebula work picks it.
    on the tied kernel, `integral_clamp_linear`, in C#, HLSL and GLSL with fixture
    families. It touches no `expr-ir` file. Its provenance prose goes in code
    comments and the README, not `design.md`, which `expr-ir` edits.
-2. Question `span-chain-shape`, then the warp-stage and span-bound cut it picks.
+2. Ruled `stage-functions` (`span-chain-shape-ruled`), split in three for size, on one
+   branch `hands/cultmath-stage-functions`:
+   - `stage-functions` (specs `cut-stage-functions.r1`-`r3`) and `stage-shaders` (spec
+     `cut-stage-shaders.r1`): merged to main 2026-10-16 (verdicts cut-stage-functions.s2-s4,
+     cut-stage-shaders.s1). SpanPath/SpanStage inputs, float-rounding allowances, HLSL and GLSL
+     twins with SpanPath/SpanStage/SpanNoise as shader structs, a struct-aware mirror with no
+     `MirrorOnly` list (125 functions compared), `tools/compile-hlsl.ps1` (x64 dxc, `-WX`).
+     SpanStage.Identity has no shader form (decided in the spec: callers build the struct; a
+     mirror test proves the shader at a C#-built identity equals fbm_grad/ridged_grad).
+   - `stage-shaders-device`: a committed WebGL2 runner on Starfire (ANGLE to D3D11, Unity's
+     driver path; also runnable on a phone) from follow-ups `glsl-browser-parity-run` and
+     `affine-device-runner-seed`; fixture families across coordinate bands 1e2..1e6; a C# test
+     reading the device readback against the double kernel; settles follow-up
+     `span-allowance-gpu-margin`'s four CPU survivors (eg-abs, eh-abs, So-reach, two-en-to-one)
+     and the size of the 2^-14 absolute term (en-abs-halved survives every CPU test). `fold`
+     and the ridged sign jump at zero, so their device check is one-sided enclosure, not ulps.
+   - `cultmath-unity` span release: after `stage-shaders-device`; the smoke shader calls both
+     span twins; its own Soul pass; then Aetheria's pin bump and its spans-option lowering
+     (ruling aetheria-nebula-spans-as-option; a moving nebula also waits on
+     `span-bounds-under-flow`).
+   - `span-compose`: the composition helper (`span_compose`) and `span_range` for
+     the empty and saturated proofs, in all three runtimes, with a two-stage chain
+     enclosure test against dense sampling.
+   `trophic-nodes` (spec admitted on main after this branch merged) and then
+   `lattice-weighted-cellular` (waits on it): Pass 7 lines 3-4.
+
+   Body fact (probe on Yggdrasil, scratch `edb3c1c3` over `2fd9431a`; log
+   `F:\Projects\eureka-handoff-aux-2026-10-14\imagination-stage-functions\probe2.log`):
+   the HLSL mirror that `HlslSourceCompatibilityTests` compiles exposes every
+   `static const` as a public static literal field of `CultMathHlsl.HlslShader`
+   (`CULTMATH_PI` through `CULTMATH_SNOISE_THIRD` and `CULTMATH_CYCLES_*`). So one
+   reflection test can pin every shader constant to its C# twin.
 3. The curl primitive, once the operator rules on curl (the Aetheria flow test).
-4. Question `site-ground-field`, then `cut-site-ground.r1` on the field it picks.
-   The marched option carries all three site follow-ups; the other options
-   withdraw the two marched-only ones.
+4. `cut-site-ground.r1` on the Span Lab framework (`site-ground-field-ruled`).
+   Under that option the two marched-only site follow-ups are withdrawn, and
+   only the third carries.
 5. The kernel cascade, if picked.
+
+## Pass 9: the shader pipeline (rulings `glsl-es-via-dxc-spirv-cross`, `conforming-run-lavapipe`, `real-device-native-angle`)
+
+Imagination `imagination-ag4-shader-pipeline`, session self-2026-10-16-ag4, 2026-10-16, on
+`origin/main` f65bde6f. The evidence the operator ruled on is `docs/research/native-shader-testing.md`
+(f697e03f) and `docs/research/native-shader-probes.md` with its scripts (e598c443). This pass adds
+the body facts below, then sequences the three rulings.
+
+### Body facts (Pass 9)
+
+Every probe ran through `ygg-verify.sh` on Yggdrasil at f65bde6f, 2026-10-16 between about 16:30
+and 16:50 UTC (18:30 to 18:50 CEST). Logs are in the Imagination scratchpad
+(`imagination-ag4-shader-pipeline/split-run1.log`, `img-run1.log`, `snap-run1.log`).
+
+- **SPIRV-Cross pin.** The newest SDK tag is `vulkan-sdk-1.4.363.0` (commit f11ba9f0, 2026-09-16).
+  Built from that tag (`-DSPIRV_CROSS_CLI=ON`, Release, 4 cores), it takes 70 s and gives the same
+  result as the HEAD build the earlier probe used. `tools/get-spirv-cross.ps1` clones HEAD unpinned.
+- **dxc pin (Linux).** The asset is
+  `.../v1.9.2607/linux_dxc_2026_07_29.x86_x64.tar.gz`, sha256
+  `55665c87824051ed4774ff3280a79ccbbb7d39243b9736ca5e98222134112d54`, and it reports libdxcompiler 1.9.0.1.
+  `get-dxc.ps1` pins the Windows zip of the same release.
+- **Overloads collapse in dxc, not in SPIRV-Cross.** With `export` on the 173 non-texture definitions,
+  the library has 127 `OpFunction`s and 127 exports: one per name. Today's source has 22 overloaded
+  names, 68 definitions and 46 lost. Trophic-nodes (branch `hands/cultmath-trophic-nodes`, unmerged) adds
+  `cultmath_segment_closest` and `cultmath_distance_to_segment` in 2D and 3D, so 24 names and 72 definitions.
+  The loss comes from exporting overloaded names, and build-only wrappers avoid it (next bullet). The
+  source keeps its overloads (ruling `shader-overloads-stay-native`).
+- **Build-only export wrappers keep every overload (Pass 9b).** Imagination `imagination-ag4-overload-wrappers`,
+  2026-10-16, on 09940e20, ubuntu:24.04 on Yggdrasil, 17:40 to 17:55 UTC (19:40 to 19:55 CEST), log
+  `imagination-ag4-overload-wrappers/wrap-run2.log` in the session scratchpad. The probe generated one
+  wrapper per non-texture definition (173) in a build-only file. Each wrapper looks like
+  `export float3 cmw036_cultmath_lerp(float3 start, float3 end, float3 amount) { return cultmath_lerp(start, end, amount); }`.
+  The source was unchanged, with no `export` keyword anywhere, and it compiled with dxc `-T lib_6_3 -spirv`.
+  - At default optimisation dxc inlines every wrapper. The 173 wrappers hold the bodies, and no
+    overload survives as its own function.
+  - At `-Od` it keeps the call. That gives 346 functions: 173 wrappers, each with exactly one
+    `OpFunctionCall` to its own distinct callee. Each callee's `OpName` is already the plain source
+    name (`cultmath_lerp` four times), so no rename is needed.
+  - An instruction-level edit of the SPIR-V binary then makes the library. It keeps only the Shader
+    and Linkage capabilities, drops every `OpExtension`, deletes the wrapper functions with their
+    names and decorations, and moves each wrapper's `LinkageAttributes ... Export` onto its callee.
+    `spirv-val --target-env spv1.5` accepts the result. Deleting the export instead of moving it gives
+    a module SPIRV-Cross refuses ("no entry point").
+  - SPIRV-Cross `vulkan-sdk-1.4.363.0 --es --version 310` emits 173 `cultmath_` definitions, as many
+    per name as the source has. There are no `_N` suffixes and no wrapper names: its own overload
+    handling renames only on a signature collision. The emitted text is 2621 lines, against 1497 for
+    today's three files, because `-Od` leaves temporaries.
+  - Call sites resolve. glslang compiles as a `#version 300 es` fragment shader that calls
+    `cultmath_lerp(float..)`, `cultmath_lerp(vec3..)`, `cultmath_saturate(vec4)` and
+    `cultmath_saturate(float)`. A call with `ivec2`, which has no overload, is refused ("no matching
+    overloaded function").
+  - Same computation. All 105 families the probe generator covers ran on lavapipe through the
+    restored library, and every one is bit-identical to the committed GLSL route. 85 of the 105 are
+    also bit-identical to the HLSL route, the same 85 where the committed GLSL matches it.
+  - The rest of the pipeline carries over. Partitioned by origin file, the output gives 178 chunks
+    (125 core, 51 Cycles, 2 Phacelle). No origin is unknown and nothing calls across licences.
+    Every overload set lives in one file, and no signature repeats. glslang compiles all four
+    combinations as ES 3.00. The source has 13 `static const` lines, all of the form
+    `static const float CULTMATH_X = <literal>;`. None of them reaches the output, and today's GLSL
+    holds 13.
+- **What `-Od` leaves, and what cleans it (Pass 9c).** Imagination `imagination-ag4-od-temps`,
+  2026-10-17, on e626bf26 (188 wrappers, 140 names, 117 families), ubuntu:24.04 on Yggdrasil, 10:05 to
+  10:35 UTC (12:05 to 12:35 CEST), dxc v1.9.2607, SPIRV-Cross and SPIRV-Tools both built from
+  `vulkan-sdk-1.4.363.0` (spirv-opt v2026.4), log `od-temps/imag-od7.log` in the session scratchpad,
+  probe in `docs/research/native-shader-probes/od-temporaries/`. Pass 9b's route as ruled, with no
+  further step, emits:
+  - 2824 lines, 86129 bytes, 188 `cultmath_` definitions, 140 names, no suffixed names. The
+    committed files are 1663 lines of one-line bodies, so line counts do not compare; SPIRV-Cross
+    prints every body in Allman style.
+  - Named locals survive, so most functions read like the source. Two things do not. First, 472
+    `param_var_*` copies: dxc passes every parameter as a pointer and the caller copies in. Second,
+    11 functions assign to a parameter in their body (`smootherstep`, `integral_clamp_linear`,
+    `fbm_grad`, `ridged_grad`, both Bezier pairs, `span_stage`, `iv_fbm_ball`, `af_fbm`) and come out
+    `inout`. The HLSL has no `out` or `inout` anywhere.
+  - That `inout` is a defect in the route, not a blemish. glslang refuses a consumer call with a
+    value, `cultmath_smootherstep(x + 1.0)` ("l-value required"), and a call with a variable
+    rewrites the caller's variable. Pass 9b's bit-identical result held because the families call
+    through their own copies. Overloads that look native must also take values like native ones.
+  - NaN-safe `min` and `max` expansions (`mix(mix(max(a, b), b, isnan(a)), a, isnan(b))`) from
+    `NMin` and `NMax`.
+  - Six `spirv-opt` pass lists on the edited module alone (`--convert-local-access-chains`,
+    `--ssa-rewrite`, `--eliminate-local-single-block`, `--eliminate-local-single-store`,
+    `--eliminate-local-multi-store`, `--simplify-instructions`, `--eliminate-dead-branches`,
+    `--merge-blocks`, `--vector-dce`, `--redundancy-elimination`, `--scalar-replacement`,
+    `--copy-propagate-arrays`, each with `--eliminate-dead-code-aggressive`) are valid and keep 188
+    functions, but make the text bigger (2870 to 2930 lines) and swap named locals for `_N` ids (218
+    tokens become 2155 to 2517). `param_var_` and `inout` stay. They are not a cleanup.
+  - A by-value lowering of the SPIR-V (`od-temporaries/byvalue.py`, 50 lines) makes each Function
+    pointer parameter a value parameter, with the old id kept as an entry-block local stored from
+    it, and each call loads what it passed. It changed 187 functions and 456 parameters, validates,
+    and leaves `inout` at 0. On lavapipe all 117 families stay bit-identical to the committed GLSL.
+  - Then `spirv-opt --eliminate-local-single-store --eliminate-dead-code-aggressive` removes every
+    `param_var_` copy (472 to 0): 2604 lines, 79782 bytes, 188 functions, 316 distinct `_N` ids, valid.
+    Adding SPIRV-Cross `--relax-nan-checks` drops the `isnan` expansions: 2556 lines, 74263 bytes,
+    268 `_N` ids. glslang accepts both as ES 3.00, `cultmath_smootherstep(p.x + 1.0)` included.
+  - That cleaned module is bit-identical to the lavapipe HLSL result on 117 of 117 families, where
+    the committed GLSL is on 97. It differs from the committed GLSL in 20 families. Against the C#
+    fixture the exact, at most 4 ulp, at most 64 ulp and over 64 buckets are 80, 11, 9, 17, where
+    the committed GLSL is 80, 9, 10, 18. `--relax-nan-checks` changes no lavapipe bit. So the
+    cleaned route is closer to the HLSL than today's GLSL is, and "bit-identical to today's
+    lowering" cannot be its gate. With apt's spirv-tools 2025.1~rc1 the figures for this route are the same.
+- **Why `span_fbm` and `span_ridged` differ by 1 ulp (Pass 9c).** Imagination `imagination-ag4-span-ulp`,
+  2026-10-17, on 23ac4e89, same image and tools as `cut-glsl-build-dxc.h1`, probes in the session
+  scratchpad `logs/ag4-ulp/` (`probe1.sh` to `probe4.sh`). Only the curvature word (word 4 of 6) differs, in
+  41 and 42 of 1536 words. Two causes, both measured:
+  - **dxc's entry-point optimiser reassociates.** `cultmath_snoise_hessian` ends every entry in
+    `105.0 * (...)`. In the `-O3` entry module the 105 is hoisted out: nine squares are summed bare and
+    the sum is multiplied once (`OpFMul %11025 %sum`, then `Sqrt`), where the source squares `105 * a`
+    nine times. That is real arithmetic, not float arithmetic. Neither `NoContraction` nor
+    `--relax-nan-checks` touches it. `dxc -Gis` (IEEE strictness) stops it.
+  - **The driver contracts mul+add by use count.** lavapipe (NIR) fuses an `OpFMul` into the `OpFAdd`
+    that consumes it only when the product has one use. dxc's CSE shares the symmetric Hessian's
+    off-diagonal squares (two uses each), so the entry module fuses some of the nine pairs; the `-Od`
+    library module has nine single-use products and fuses all nine. The `OpFAdd` order is the same in
+    both (left fold, as the C# `span_frobenius`).
+  - Decorating every `OpFMul`, `OpFAdd`, `OpFSub`, `OpVectorTimesScalar` and `OpDot` `NoContraction` in
+    both final modules, f103 and f104: `-Od` HLSL equals the built GLSL (0 words differ); `-O3`
+    HLSL still differs in 31 and 44 (the hoist). `-Gis` (with `-O3`) plus `NoContraction` equals the built GLSL on
+    127 of 127 families, and so does `-Od` plus `NoContraction`. Plain `-Od` HLSL differs from the built GLSL in 664 words
+    (contraction depends on use structure), so `-Od` alone is worse than `-O3`: your suspicion of `-Od`
+    on the HLSL route is not a fix.
+  - **Which is right.** Against the C# fixture, exact cases of 256 for f103 are 3 (HLSL) and 4 (GLSL) plain,
+    and 151 for both under `NoContraction`; for f104, 7 and 10 plain, 141 under it. Of the first 60 families whose
+    count moved, the strict form is nearer the C# in all but one, which moved by 1. Strict IEEE, no contraction, no
+    reassociation is what C# computes, so it is "right"; the plain routes are each one driver's
+    fusion pattern. The built GLSL is source-faithful (nothing in the `-Od` route reassociates).
+  - **What makes them agree.** The equality gate (`GLSL_DIR` mode) compares both routes in the strict
+    form: HLSL entry built with `-Gis`, and a harness pass that adds `NoContraction` to every float op of
+    both modules (about 12 lines of `spirv-dis` and `spirv-as`; `tools/device/nc.py` in the probe). That is
+    127 of 127. The shipped GLSL and the C# bounds judge are unchanged. See question `glsl-gate-strict-form`.
+- **The build at main, with the rename and the strict form (Pass 9d).** Imagination `imagination-ag5-glsl`,
+  2026-10-17, scratch worktree `C:\cl-wt\imag-ag5-probe` (not pushed): `23ac4e89` merged with origin/main
+  `86cd84a3` as `69987d91` (no conflict; README.md and tools/device/gen.py auto-merged), probe commits
+  `575badb6` to `d14bfbbe` (`probe/p1.sh`, `p2.sh`, `spec.py`). Yggdrasil, `mcr.microsoft.com/dotnet/sdk:10.0` and
+  `ubuntu:24.04`; logs in the session scratchpad `imagination-ag5-glsl/p2.log` to `p4.log`.
+  - **Site arrays break the wrappers.** `wrappers.py` passes `sites[CULTMATH_MAX_SITES]` as the argument (its
+    last-token rule), and dxc refuses the three wrappers of `cultmath_power_border`,
+    `cultmath_lattice_cell_distance` and `cultmath_weighted_lattice_cells` ('no known conversion from float4 to
+    float4 [128]'). Stripping the `[..]` suffix from the argument fixes it; then the build is green: core 139
+    functions over 91 names (1554 lines, 54775 bytes), cycles 51/51 (867, 21250), phacelle 1/1 (82, 3199); zero
+    suffixed ids and zero inout.
+  - **The renamed fields survive SPIRV-Cross.** With `float4 cosine; float4 sine;` in the HLSL (HLSL only, in
+    the job), the built phacelle.glsl declares `vec4 cosine; vec4 sine;`.
+  - **The strict-form gate holds at main.** With `-Gis` on the HLSL entry and NoContraction on both modules
+    (the text `nc.py` of Pass 9c, probe only): lavapipe-glsl equals lavapipe-hlsl on 129 of 129 work items.
+    The work list is 125 fixture families (123 at `774bebb0`; the lattice loop added two) plus one
+    reference item for each of the 4 sampled affine families, so h1's 127 was 123 + 4.
+  - **The built GLSL loses the capacity override.** dxc preprocesses `CULTMATH_MAX_SITES`, so built core.glsl
+    has no mention of it and four literal `[128]` arrays. A consumer with `#define CULTMATH_MAX_SITES 4`
+    passing `vec4 s[4]` fails glslang ('no matching overloaded function'); the same consumer compiles
+    against the committed (lowered) GLSL and through dxc against the HLSL.
+  - **dxc has no spec-constant array size.** `[[vk::constant_id(7)]] const int CAP = 128;` as an array
+    parameter's length is refused ('variable length arrays are not supported in HLSL').
+  - **A SPIR-V spec constant carries it.** In the built SPIR-V exactly one constant is an array length
+    equal to 128 (id 1297), used by nothing but OpTypeArray. Made an OpSpecConstant with SpecId 0, it passes
+    spirv-val, and SPIRV-Cross ES emits `#ifndef SPIRV_CROSS_CONSTANT_ID_0` / `#define ... 128u` /
+    `const uint _1297 = SPIRV_CROSS_CONSTANT_ID_0;` with `vec4 sites[_1297]` in every site-array
+    signature. The probe's consumer defined the macro as a plain int and was refused for the uint
+    initializer, so the `uint(CULTMATH_MAX_SITES)` mapping that `cut-glsl-build-dxc.r2` writes is
+    the route, but has not been compiled yet.
+- **Capability strip.** `spirv-opt --trim-capabilities` (spirv-tools 2025.1~rc1) leaves all 14
+  capabilities and both extensions in place, and SPIRV-Cross still refuses ("RayQuery requires Vulkan
+  GLSL 460"). Stripping every capability except Shader and Linkage and every OpExtension in the
+  disassembly, then running `spirv-as`, gives a module that `spirv-val --target-env spv1.5` accepts.
+  SPIRV-Cross `--es --version 310` lowers it in 54 ms, and dxc takes 322 ms.
+- **Named constants vanish.** The SPIR-V has no `OpName` for any `CULTMATH_` constant, so the output
+  has none. Today's GLSL has 13: 9 in CultMath.glsl and 4 in CultMath.Cycles.glsl. The HLSL source of
+  every one of them is a `static const float NAME = <literal>;` line, so a build can emit them
+  from the source lines and should refuse any `static const` line of another form.
+- **Per-file split works.** The SPIRV-Cross output was partitioned by the HLSL file that defines each
+  function and struct (CultMath, Interval and Affine go to core, plus Cycles and Phacelle). That gives
+  132 chunks: 79 core, 51 Cycles and 2 Phacelle. No chunk's origin is unknown, no chunk is duplicated,
+  and no Cycles or Phacelle function calls a function outside core. The output has no `spv*` helper
+  functions. Its prologue is 3 lines: `#ifdef SPIRV_CROSS_LIBRARY_HEADER`, `#version 310 es` and
+  `#endif`. glslang compiles core, core+Cycles, core+Phacelle and core+Cycles+Phacelle as `#version 300 es`
+  fragment shaders. So the licence split survives the switch as a partition step of about 40 lines in the build.
+- **One image runs the whole conforming job.** `mcr.microsoft.com/dotnet/sdk:10.0` is Ubuntu 24.04.5
+  (noble), dotnet 10.0.401. Its apt has mesa-vulkan-drivers 25.2.8-0ubuntu0.24.04.4 (lavapipe, the
+  probe's device), glslang-tools 15.1.0, spirv-tools 2025.1~rc1, libvulkan-dev 1.3.275 and gcc 13.2.
+  `apt-get update --snapshot 20261016T000000Z` (apt 2.8.3) then installs the same versions. That pins
+  the package set to a date and lets the C# judge run in the same container as the device.
+- **Consumer audit.** No public name changes under the wrapper route, so it shows only who reads the
+  committed GLSL and HLSL. It covers `origin` of Aetheria (master a8586d08 and all of its
+  remote branches), Asura (60fbd19), Odin (8e1de66) and gamecult-site (af6e206), and HEAD of every
+  other git repo under F:\Projects except the CultLib worktrees, the archived AetheriaEve and the
+  retired CultMath history repo. The search was for `cultmath_[a-z]` outside docs. Only one shader
+  calls CultMath: `Muninn` (1d0ea0b, and its
+  worktree `Muninn-next`) `crates/muninn-move-tracker/shaders/MoveSphereCandidate.comp.hlsl:88`, one
+  call to `cultmath_saturate(float)`. Aetheria uses CultMath only from C#. The operator's Span Lab
+  artifact (be6a9e31) embeds its own copy of the GLSL (follow-up `span-lab-pre-tie-kernel`) rather
+  than including the file.
+
+### Decisions (defaults, not forks)
+
+- **The fixture owner owns the work list and the verdict.** `GlslMirrorTests` writes what a device
+  must compute: the fixture's families, plus reference families for the four sampled-form checks,
+  whose reference is the device's own `snoise` or fBm at 75 points of each case. It also judges
+  what the device returns. The generator only spells shaders, the host only dispatches, and neither
+  compares anything. The lavapipe job and the later ANGLE tool share this one work list and this one judge.
+- **Each device has a recorded bound.** Under `cycles-kernel-reference-ruled`'s stance, a device's
+  ulp-bounded and platform families are held to a bound measured on that device and committed with
+  the device's identity. lavapipe re-runs bit-identically, so the bound is a regression gate, and an
+  identity change refuses until it is re-recorded. Exact and integer families must match bit for
+  bit, and `check` families must pass their `Verify`.
+- **Unique names for dxc live only inside the build** (ruling `shader-overloads-stay-native`). The
+  build owns three things here.
+  - The wrapper list. It is generated from the source's own definitions, one wrapper per non-texture
+    `cultmath_` definition, and the build refuses a definition it cannot read, just as it refuses a
+    `static const` line of another form. The wrappers are text in the build's temp directory and are
+    never committed. The source gains no `export` keyword and no `CULTMATH_EXPORT` macro.
+  - The compile mode. The library compiles at `-Od`, because the default optimiser's inlining is
+    what erases the overloads. The text it leaves is cleaned by the next two items (Pass 9c), not
+    shipped as is: `-Od` alone emits `inout` parameters, which native overloads must not have.
+  - One SPIR-V edit. A single instruction-level pass over the binary, never a regex over text,
+    strips capabilities and extensions, deletes the wrappers and moves their exports onto the
+    callees. It replaces the disassembly grep that the capability-strip probe used. It refuses a
+    wrapper that is not exactly one call. SPIRV-Cross then emits the overloaded names as they are,
+    so the build has no rename step and no name map.
+  - By-value parameters. The same pass makes every Function-pointer parameter a value parameter
+    (`byvalue.py` in the probe), so no emitted function can be `inout`. The build then runs exactly
+    `spirv-opt --eliminate-local-single-store --eliminate-dead-code-aggressive`, never an inliner
+    and never `--simplify-instructions` or `--ssa-rewrite`, which turn named locals into `_N` ids,
+    and SPIRV-Cross runs with `--relax-nan-checks`, so `min` and `max` are the plain intrinsics.
+  - The gate is the HLSL, not the old text. A cleaned route's lavapipe-glsl result must equal the
+    lavapipe-hlsl result bit for bit in every family (117 of 117 measured), and the C# judge's
+    bounds are re-recorded only where a family moved and equals its HLSL result.
+
+- **CultPhasor's JSON keys (model page row).** Named by `CultMathJson`; written as `cosine`/`sine` from
+  `phasor-field-rename` on, and read as either those or the legacy `cos`/`sin`, forever unless a later
+  Breaking change removes the legacy names. Decided by ruling `phasor-fields-renamed-at-source`. The
+  MessagePack wire is positional and never named the fields, so `.cc` documents are untouched both ways.
+  A reader from before the rename skips the new keys and decodes zeros (its unknown-property rule), which
+  is why the change is Breaking in both changelogs: upgrade readers before writers.
+- **The capacity through the build.** dxc cannot keep a macro and refuses spec-constant array sizes, so
+  the build turns the one array-length constant into a SPIR-V spec constant and `partition.py` maps
+  `CULTMATH_MAX_SITES` onto SPIRV-Cross's `SPIRV_CROSS_CONSTANT_ID_0` with source-copied header lines.
+  Rejected: building the GLSL per capacity (a consumer would run the build to change one number), and
+  rewriting `[128]` in the emitted text (the forbidden text post-pass). Pass 9d.
+
+### Cut sequence (Pass 9; one line each, mapped when about to run)
+
+1. `shader-conforming-run`: spec admitted. The lavapipe job with the C# device judge, run against
+   today's committed HLSL and GLSL, so the next cut is verified against a running check.
+2. `glsl-build-dxc` (spec `cut-glsl-build-dxc.r2` admitted; r1's h1 left the gate red, Pass 9d): the build, not yet the switch. r2 merges main, carries site arrays and their capacity (a spec constant mapped to `CULTMATH_MAX_SITES`), the strict-form gate and the renamed phasor fields, and waits on `phasor-field-rename` (spec admitted: `cosine`/`sine` in C#, HLSL, GLSL and CultMathJson, legacy keys read; CultMath's next release is 0.5.0, a release cut of its own). `packages/cultmath/tools/glsl/`
+   holds `build-glsl.sh`, which pins dxc v1.9.2607 (the sha above), SPIRV-Cross and SPIRV-Tools
+   `vulkan-sdk-1.4.363.0`, plus one SPIR-V tool in Python. The build generates the export wrappers into
+   its temp directory (never committed), compiles source plus wrappers with `-T lib_6_3 -spirv -Od`,
+   and runs the one SPIR-V edit (strip, wrapper delete, export move, by-value parameters; Pass 9c).
+   It runs the pinned `spirv-opt` pair, `spirv-val`, and SPIRV-Cross ES 3.10 with `--relax-nan-checks`,
+   then partitions by origin file and emits the 13 constants. Output goes to a directory the caller
+   names. The committed GLSL, `GlslLowering.cs` and its tests are untouched, and the lavapipe job gains
+   one switch to run a built directory in place of `shaders/*.glsl`. Waits on 1, which is merged.
+   2b. `glsl-switch` (mapped when 2 is verified): commits the build's output with the licence lines and
+   guards, deletes `GlslLowering.cs` and the lowering contract tests, makes the lavapipe job check
+   the committed files against the build, re-records the lavapipe bounds for moved families
+   (Pass 9c's gate), and pins `get-spirv-cross.ps1`. If `trophic-nodes` merges first, the build
+   covers its four new overloads with nothing extra.
+3. `angle-capture` (stage-shaders-device part 2): the Starfire native-ANGLE tool on the shared work
+   list (ES 3.00 fragment flavour, RGBA32UI readback), loading a pinned ANGLE build rather than Docker
+   Desktop's copy. Captures carry the renderer, ANGLE version and revision, the shader sha and per-family
+   argument hashes and bits, and the ordinary test run judges them. A shader-sha change marks them stale.
+   It settles `span-allowance-gpu-margin`'s six CPU survivors, `iv-exp-gpu-widening`'s measurement and
+   `device-p2-pin-notes`, and closes `glsl-browser-parity-run` and `affine-device-runner-seed`. It waits
+   on 2b, because a capture of the old lowering goes stale at the switch.
+
+### shader-lattice-loop (follow-ups `shader-weighted-lattice-loop`, `lattice-shader-pins`)
+
+Written by Imagination (agent `imagination-ag4-shader-loop`, session `self-2026-10-16-ag4`) against `origin/main`
+`e2051c5a` and the build branch at `23ac4e89`. Research and probes: `docs/research/shader-variable-inputs.md`.
+Spec: `cultmath-tapes:cut_spec:cut-shader-lattice-loop.r1`. Question: `shader-site-capacity` (gates the spec).
+
+- **Bodies reach the shader as `float4 sites[CULTMATH_MAX_SITES]` plus `int count`, by value.** A caller accessor
+  macro cannot survive the library build (the built GLSL has no consumer macros), and library-owned uniforms would
+  take a binding the consumer owns. dxc, the SPIR-V edit, SPIRV-Cross and a WebGL2-style uniform-array consumer all
+  accept the array form (probes P1-P3).
+- **The shader owns the whole search.** `cultmath_weighted_lattice_cells` and `cultmath_power_border` replace the two
+  comment recipes; the four steps stay public. The box pass recomputes distances (no shader cache), the ring loop is
+  bounded by 37 with C#'s exit.
+- **The lavapipe run kills the exit and the normaliser** (probe table, research section 3): M1-M6 fail the C# device
+  judge; M7, a late exit, is equivalent by the window-independence proof. M1 needs several far-ring points.
+- **Smooth-step cap point** joins its family (m = f1 + smoothing, d past it, smoothing >= 0.5).
+- **Yggdrasil's sdk:10.0 Ubuntu image owns `glsl-parity.json`'s platform values** with the lavapipe bounds; a write
+  on another OS is refused.
+- Left: `shader-span-functions-array-form` (power_cells, multiplicative_cells, soft_gabriel_gate array forms).

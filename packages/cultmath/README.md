@@ -28,8 +28,19 @@ shader semantics.
   `min`, `max`, `clamp`, `saturate`, `lerp`, `step`, `smoothstep`, `dot`,
   `cross`, `length`, `distance`, `normalize`, `reflect`, `csum`, `erf`,
   `erfinv` (scalar only), exponential
-  `decay`/`damp`, intercept/segment helpers, Catmull-Rom, Bezier curves, and
+  `decay`/`damp`, intercept/segment helpers (`distance_to_segment` in 2D and 3D, with and without `out closest`, and `segment_closest`), Catmull-Rom, Bezier curves, and
   deterministic value-noise primitives
+- Site cells: `power_cells` and `multiplicative_cells` return the two nearest sites of a point as `CultSiteCells`,
+  `soft_gabriel_gate` gates a pair of sites by the empty-disc margin. Each is a loop over the shader steps
+  `cultmath_power_score` / `cultmath_multiplicative_score`, `cultmath_site_cells_empty`, `cultmath_site_cells_insert`,
+  `cultmath_site_cells_border`, `cultmath_power_border_step` (the exact power cell border, `power_border`) and `cultmath_gabriel_margin`; a shader loops over its own buffer.
+- Weighted lattice cells: `weighted_lattice_cells` returns `float4(F1, F2, smooth, id)` over a jittered,
+  drifting lattice whose cell weights come from the exact power border of the body span at each cell centre, with a stretched
+  metric and an exact ring search over the stated range (`LatticeMaxBoost`, `LatticeMaxStretch`, `LatticeMaxSmoothing`). It composes the
+  public steps `lattice_site`, `lattice_weight`, `lattice_distance` and `lattice_smooth_step`. The shaders carry the four steps as
+  `cultmath_lattice_site`, `cultmath_lattice_weight`, `cultmath_lattice_distance` and `cultmath_lattice_smooth_step`, and the whole function as `cultmath_weighted_lattice_cells(p, time, bodies,
+  count, ...)` over a `float4 bodies[CULTMATH_MAX_SITES]` array (128 by default; define the macro before including to change it);
+  `cultmath_power_border(p, sites, count)` is the matching border. The argument checks become the shader caller's preconditions.
 - `shaders/CultMath.hlsl`, a canonical HLSL mirror include for shader-side
   parity. HLSL already owns `float2`, `float3`, and `float4`; the include
   exposes `cultmath_*` functions for shared semantics HLSL does not provide.
@@ -82,7 +93,11 @@ shader semantics.
   the analytic Hessian of `snoise(float3)` on the same lattice, hash and tie order as
   `snoise_grad` (a symmetric `float3x3`; GLSL `mat3`), and `integral_clamp_linear(a,
   b, lo, hi, t0, t1)`, the closed-form integral over `[t0, t1]` of `clamp(a + b t,
-  lo, hi)`. Three measured bounds describe `snoise`: `SNOISE_LIPSCHITZ` (gradient
+  lo, hi)`; and the octave stages `span_fbm(path, stage,
+  octaves, lacunarity, gain)` and `span_ridged` (shader twins `cultmath_span_fbm` and `cultmath_span_ridged`,
+  whose callers build the `SpanStage` themselves), over a `SpanPath` and a `SpanStage` (`SpanStage.Identity`
+  is the plain fbm in C#), which return a `SpanNoise` (`field` as `float4(gradient, value)`,
+  `curvature`, `fold`) for a stretched, offset, shifted octave sum over a span. Three measured bounds describe `snoise`: `SNOISE_LIPSCHITZ` (gradient
   length, `NoiseBoundTests.MeasureLipschitz`), `SNOISE_HESSIAN` (Hessian spectral
   norm, `MeasureHessian`) and `SNOISE_THIRD` (third-derivative operator norm,
   `MeasureThird`); each is 1.10 times a seeded maximum refined by ascent, and a
@@ -164,6 +179,7 @@ CultMath keeps portable DXC outside git under `packages/cultmath/.tools/`:
 
 ```powershell
 .\packages\cultmath\tools\get-dxc.ps1
+.\packages\cultmath\tools\compile-hlsl.ps1
 .\packages\cultmath\tools\get-spirv-cross.ps1
 .\packages\cultmath\tools\compile-hlsl-spirv.ps1 `
   -ShaderPath E:\Projects\Odin\crates\muninn-move-tracker\shaders\MoveSphereCandidate.comp.hlsl `
@@ -174,6 +190,10 @@ CultMath keeps portable DXC outside git under `packages/cultmath/.tools/`:
   -OutputPath E:\Projects\Odin\crates\muninn-move-tracker\artifacts\shader\MoveSphereCandidate.comp.metal
 ```
 
+`tools/glsl/build-glsl.sh <outdir>` (Linux, repository root) builds the library GLSL from the HLSL with dxc, SPIRV-Cross and SPIRV-Tools and writes `core.glsl`, `cycles.glsl` and `phacelle.glsl` bodies into `<outdir>`. It does not yet own the committed GLSL; `GlslLowering` still does. `GLSL_DIR=<outdir> tools/device/run-lavapipe.sh` runs that output on lavapipe and compares it with the HLSL results bit for bit instead of judging the committed files. That comparison is in strict form (dxc `-Gis` and a `NoContraction` decoration on every float result of both modules), and a consumer overrides `CULTMATH_MAX_SITES` in the built GLSL the same way as in HLSL: define it before including `core.glsl`.
+
+`compile-hlsl.ps1` compiles both `CultMath.hlsl` copies as a `lib_6_3` library with the x64 DXC; a warning fails it too (`-WX`).
+
 DXC emits Vulkan SPIR-V with `-spirv`. `-TargetEnv vulkan1.2` is exposed by the
 script, but the current Windows DXC release compiled this shader successfully
 with DXC's default Vulkan target while rejecting the dotted target-env value.
@@ -182,6 +202,12 @@ UAVs, and samplers so cross-compiled Metal buffers do not alias by resource
 class. SPIRV-Cross emits Metal Shading Language from SPIR-V on Windows; building
 an iPad-ready `.metallib` still belongs to Apple's Metal compiler on an Apple
 toolchain.
+
+The lavapipe conforming run executes every fixture family through the HLSL (dxc) and the committed GLSL
+(glslang) on Mesa lavapipe and judges the results in `GlslMirrorTests.DeviceResultsHoldFixture`. It needs a Linux
+container with apt: from the repo root, `tools/stopgap/ygg-verify.sh <repo> <rev> mcr.microsoft.com/dotnet/sdk:10.0
+'bash packages/cultmath/tools/device/run-lavapipe.sh'`. `WRITE_BOUNDS=1` in front of the script re-records the
+device's bounds file and prints it between `BOUNDS-BEGIN` and `BOUNDS-END`.
 
 ## Doctrine
 

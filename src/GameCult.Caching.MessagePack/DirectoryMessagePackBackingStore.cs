@@ -535,10 +535,13 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             }, new Dictionary<CultSchemaCatalogEntry, byte[]>());
         }
 
+        // The stamp is judged before the manifest body is parsed, so a store stamped newer is refused whatever its body. Every
+        // write path parses the manifest under its commit lease before it writes a page or the manifest, so a store another
+        // process has since stamped newer is refused there too, untouched.
         (CultPersistedStoreSnapshot Snapshot, byte[][] CatalogBytes, byte[][] RecordBytes) read;
         try
         {
-            read = CultDocumentMessagePackSerialization.ReadStore(manifestBytes);
+            read = CultDocumentMessagePackSerialization.ReadStore(manifestBytes, RequireReadableStamp);
         }
         catch (CultStoreUnreadableException ex) when (ex.Path == null)
         {
@@ -546,18 +549,22 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         }
 
         var snapshot = read.Snapshot;
-        if (!string.Equals(snapshot.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal) &&
-            !string.Equals(snapshot.FormatVersion, IndexedFormatVersionWithIds, StringComparison.Ordinal))
-        {
-            throw new CultStoreUnreadableException(
-                $"Directory store {_manifestFile.FullName} is {CultDocumentMessagePackSerialization.DescribeHeader(snapshot.FormatVersion)}; only {IndexedFormatVersion} and {IndexedFormatVersionWithIds} are readable.",
-                _manifestFile.FullName);
-        }
-
         var catalogBytes = new Dictionary<CultSchemaCatalogEntry, byte[]>();
         for (var index = 0; index < snapshot.SchemaCatalog.Length; index++)
             catalogBytes[snapshot.SchemaCatalog[index]] = read.CatalogBytes[index];
         return (snapshot, catalogBytes);
+    }
+
+    // The one verdict on a directory manifest's stamp: this runtime reads v4 and v5.
+    private void RequireReadableStamp(string stamp)
+    {
+        if (!string.Equals(stamp, IndexedFormatVersion, StringComparison.Ordinal) &&
+            !string.Equals(stamp, IndexedFormatVersionWithIds, StringComparison.Ordinal))
+        {
+            throw new CultStoreUnreadableException(
+                $"Directory store {_manifestFile.FullName} is {CultDocumentMessagePackSerialization.DescribeHeader(stamp)}; only {IndexedFormatVersion} and {IndexedFormatVersionWithIds} are readable.",
+                _manifestFile.FullName);
+        }
     }
 
     private string ContentAddressedRecordPath(CultPersistedRecord metadata)
