@@ -692,16 +692,25 @@ const DECODE_STACK_SEGMENT: usize = 2 * 1024 * 1024;
 /// ```
 pub const MAX_RECORD_INLINE_BYTES: usize = 16 * 1024;
 
-/// The one grown decoder of stored bytes: the outer stack check, then `serde_stacker` re-checks at
-/// every container serde's impls descend through, skipped values included. No nesting bound is applied here; [`decode_payload`] walks first.
-fn decode_grown<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::result::Result<T, rmp_serde::decode::Error> {
+/// The one grown setup for every decode of stored bytes: the outer stack check, then `serde_stacker`
+/// re-checks at every container serde's impls descend through, skipped values included. `body` runs on the grown stack with the
+/// grown deserializer over `reader`, so a caller that must read `reader`'s position afterwards (the store header) still can.
+fn grown<R, T>(
+    reader: &mut rmp_serde::Deserializer<R>,
+    body: impl FnOnce(serde_stacker::Deserializer<&mut rmp_serde::Deserializer<R>>) -> T,
+) -> T {
     stacker::maybe_grow(DECODE_RED_ZONE, DECODE_STACK_SEGMENT, || {
-        let mut reader = rmp_serde::Deserializer::from_read_ref(bytes);
-        let mut grown = serde_stacker::Deserializer::new(&mut reader);
+        let mut grown = serde_stacker::Deserializer::new(reader);
         grown.red_zone = DECODE_RED_ZONE;
         grown.stack_size = DECODE_STACK_SEGMENT;
-        T::deserialize(grown)
+        body(grown)
     })
+}
+
+/// The one grown decoder of a value from stored bytes. No nesting bound is applied here; [`decode_payload`] walks first.
+fn decode_grown<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::result::Result<T, rmp_serde::decode::Error> {
+    let mut reader = rmp_serde::Deserializer::from_read_ref(bytes);
+    grown(&mut reader, |grown| T::deserialize(grown))
 }
 
 /// The one decode of a document payload: the nesting bound first, then [`decode_grown`], whose
@@ -836,13 +845,10 @@ fn store_header(bytes: &[u8]) -> StoreHeader {
     let mut first = None;
     let mut cursor = std::io::Cursor::new(bytes);
     // Walked on the grown stack, as every other decode of stored bytes is: a store may nest values deeper than the thread allows.
-    let walked = stacker::maybe_grow(DECODE_RED_ZONE, DECODE_STACK_SEGMENT, || {
+    let walked = {
         let mut reader = rmp_serde::Deserializer::new(&mut cursor);
-        let mut grown = serde_stacker::Deserializer::new(&mut reader);
-        grown.red_zone = DECODE_RED_ZONE;
-        grown.stack_size = DECODE_STACK_SEGMENT;
-        serde::Deserializer::deserialize_seq(grown, HeaderVisitor(&mut first))
-    });
+        grown(&mut reader, |grown| serde::Deserializer::deserialize_seq(grown, HeaderVisitor(&mut first)))
+    };
     let after = bytes.len() - cursor.position() as usize;
     let whole = walked
         .map_err(|error| opaque_decode_error(error).context("the store is not one complete MessagePack array"))
