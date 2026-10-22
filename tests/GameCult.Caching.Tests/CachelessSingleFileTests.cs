@@ -60,6 +60,8 @@ namespace GameCult.Caching.Tests
             private int _mostInside;
             public readonly ManualResetEventSlim Entered = new();
             public readonly ManualResetEventSlim Release = new();
+            public CultDocumentRegistry? RegistryBeforeWait;
+            public CultDocumentRegistry? RegistryAfterWait;
 
             public GatedStore(string path) : base(path) { }
 
@@ -83,7 +85,11 @@ namespace GameCult.Caching.Tests
                 try
                 {
                     if (Interlocked.Exchange(ref _held, 1) == 0)
+                    {
+                        RegistryBeforeWait = Registry;
                         Release.Wait(TimeSpan.FromSeconds(30));
+                        RegistryAfterWait = Registry;
+                    }
                     var store = CultDocumentMessagePackSerialization.ReadStore(data);
                     CultDocumentMessagePackSerialization.RequireSingleFileFormat(store.Snapshot);
                     return store;
@@ -119,6 +125,28 @@ namespace GameCult.Caching.Tests
             Assert.That(mostInside, Is.EqualTo(1), "a second read waits at the gate while the first is inside the reader");
             Assert.That(first.Result!.Records, Has.Length.EqualTo(1));
             Assert.That(second.Result!.Records, Has.Length.EqualTo(1));
+        }
+
+        // A call's registry is attached under the store's gate: a second call with another registry waits for the first, so the
+        // first sees its own registry from its start to its end.
+        [Test]
+        public async Task ACallKeepsItsRegistryWhileAnotherCallWaits()
+        {
+            var mine = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            var other = CultDocumentRegistry.ForTypes(new[] { typeof(DeclaredBase) });
+            new SingleFileMessagePackBackingStore(_path).WriteRecord(Record("a", One, 1), One);
+            var store = new GatedStore(_path);
+
+            var first = Task.Run(() => store.WriteDocument(new CultRecordKey("first"), new IdDeck { Name = "first" }, registry: mine));
+            Assert.That(store.Entered.Wait(TimeSpan.FromSeconds(10)), Is.True, "the first call reached the reader");
+            var second = Task.Run(() => store.WriteDocument(new CultRecordKey("second"), new DeclaredBase { Name = "second" }, registry: other));
+            await Task.Delay(500);
+            store.Release.Set();
+            await Task.WhenAll(first, second);
+
+            Assert.That(store.RegistryBeforeWait, Is.SameAs(mine));
+            Assert.That(store.RegistryAfterWait, Is.SameAs(mine), "the second call's registry did not replace the first's mid-call");
+            Assert.That(new SingleFileMessagePackBackingStore(_path).ReadStoreSnapshot()!.Records.Select(record => record.Key), Is.EquivalentTo(new[] { "a", "first", "second" }));
         }
 
         // WriteDocument<T> stores the document as T: the schema id, the id plan, the header and the bytes all come from the one
