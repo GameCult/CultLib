@@ -15,6 +15,7 @@ import { CultCache } from "../src/cult-cache";
 import { inspectCultCacheBytes } from "../src/cult-cache-inspector";
 import { defineDocumentRegistry, defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
+import { refuseUnreadStoreBytes } from "../src/store-format";
 import type { CacheBackingStore, CultCacheEnvelope, CultCacheSchema } from "../src/types";
 
 const execFileAsync = promisify(execFile);
@@ -1479,6 +1480,118 @@ test("SingleFileMessagePackBackingStore refusals say what was found without blam
     () => pullVector("extra-slot-full-payload.msgpack"),
     (error: Error) => error.message.includes("not a valid store") && !error.message.includes("variant"),
   );
+});
+
+test("pushAll refuses a store in a format this runtime does not read and leaves it byte-identical", async () => {
+  const vector = await readFile(resolve(cultLibRoot, "tests", "vectors", "document-variants-c2a", "v3-base.msgpack"));
+  const envelope = { key: "probe", type: "probe", payload: documentPayloadFromBytes(new Uint8Array([0x80])), storedAt: "2026-10-22T00:00:00Z" };
+  for (const bytes of [vector, vector.subarray(0, Math.floor(vector.length / 2))]) {
+    const file = join(await mkdtemp(join(tmpdir(), "cultcache-pushall-v3-")), "store.msgpack");
+    await writeFile(file, bytes);
+    await assert.rejects(() => new SingleFileMessagePackBackingStore(file).pushAll([envelope]), /cultcache\.store\.v3/u);
+    assert.equal(Buffer.compare(await readFile(file), bytes), 0);
+  }
+  const healed = join(await mkdtemp(join(tmpdir(), "cultcache-pushall-heal-")), "store.msgpack");
+  await writeFile(healed, new Uint8Array([0x93, 0xa0]));
+  const store = new SingleFileMessagePackBackingStore(healed);
+  await store.pushAll([envelope]);
+  assert.equal((await store.pullAll()).length, 1);
+});
+
+function headerRefused(bytes: Uint8Array): boolean {
+  try {
+    refuseUnreadStoreBytes(bytes);
+    return false;
+  } catch (error) {
+    assert.match((error as Error).message, /not one this runtime reads/u);
+    return true;
+  }
+}
+
+function storeStart(arrayLead: number[], text: string, strForm: "fix" | "8" | "16" | "32"): Uint8Array {
+  const body = Buffer.from(text, "utf8");
+  const n = body.length;
+  const tag =
+    strForm === "fix" ? [0xa0 | n]
+    : strForm === "8" ? [0xd9, n]
+    : strForm === "16" ? [0xda, n >> 8, n & 0xff]
+    : [0xdb, 0, 0, n >> 8, n & 0xff];
+  return new Uint8Array([...arrayLead, ...tag, ...body]);
+}
+
+test("a store's header is judged from its first bytes, in every MessagePack array and string form", () => {
+  const leads = [[0x91], [0x9f], [0xdc, 0x00, 0x01], [0xdc, 0x01, 0x00], [0xdd, 0x00, 0x00, 0x00, 0x01], [0xdd, 0x00, 0x01, 0x00, 0x00]];
+  for (const lead of leads) {
+    for (const form of ["fix", "8", "16", "32"] as const) {
+      const v3 = storeStart(lead, "cultcache.store.v3", form);
+      assert.equal(headerRefused(v3), true, `${lead} ${form} v3`);
+      assert.equal(headerRefused(v3.subarray(0, v3.length - 1)), false, `${lead} ${form} v3 one byte short`);
+      assert.equal(headerRefused(storeStart(lead, "cultcache.store.v1", form)), false, `${lead} ${form} v1`);
+      assert.equal(headerRefused(storeStart(lead, "other.store.v3", form)), false, `${lead} ${form} other`);
+      assert.equal(headerRefused(storeStart(lead, "", form)), false, `${lead} ${form} empty`);
+    }
+  }
+  // The longest fixstr, and a string long enough to need str16.
+  assert.equal(headerRefused(storeStart([0x91], `cultcache.store.v3${"x".repeat(13)}`, "fix")), true);
+  assert.equal(headerRefused(storeStart([0x91], `cultcache.store.v3${"x".repeat(300)}`, "16")), true);
+  assert.equal(headerRefused(storeStart([0x91], `cultcache.store.v3${"x".repeat(300)}`, "32")), true);
+  // A view into a larger buffer is read from its own start.
+  const padded = new Uint8Array([9, 9, ...storeStart([0x91], "cultcache.store.v3", "fix")]);
+  assert.equal(headerRefused(padded.subarray(2)), true);
+});
+
+test("a stamp followed by bytes that are not UTF-8 gets the verdict a read gives", async () => {
+  const stamp = [...Buffer.from("cultcache.store.v3", "utf8")];
+  const forms = { fixstr: [0x91, 0xb3, ...stamp, 0xff], str8: [0x91, 0xd9, 19, ...stamp, 0xff] };
+  const envelope = { key: "probe", type: "probe", payload: documentPayloadFromBytes(new Uint8Array([0x80])), storedAt: "2026-10-22T00:00:00Z" };
+  for (const [name, bytes] of Object.entries(forms)) {
+    const file = join(await mkdtemp(join(tmpdir(), "cultcache-stamp-")), "store.msgpack");
+    await writeFile(file, new Uint8Array(bytes));
+    const store = new SingleFileMessagePackBackingStore(file);
+    await assert.rejects(() => store.pullAll(), /not one this runtime reads/u, `${name} read`);
+    await assert.rejects(() => store.pushAll([envelope]), /not one this runtime reads/u, `${name} pushAll`);
+    assert.deepEqual([...(await readFile(file))], bytes, `${name} left as it was`);
+  }
+});
+
+test("bytes with no readable store stamp are not refused", () => {
+  const stamp = [...Buffer.from("cultcache.store.v3", "utf8")];
+  const cases: Record<string, number[]> = {
+    empty: [],
+    "empty array": [0x90],
+    "empty array16": [0xdc, 0x00, 0x00, 0xb2, ...stamp],
+    "empty array32": [0xdd, 0x00, 0x00, 0x00, 0x00, 0xb2, ...stamp],
+    "array16 cut before its count": [0xdc, 0x00],
+    "array32 cut before its count": [0xdd, 0x00, 0x00, 0x00],
+    "array with no element": [0x91],
+    "first element is not a string": [0x92, 0x01, 0xb2, ...stamp],
+    "a bare string": [0xb2, ...stamp],
+    "a map": [0x81, 0xb2, ...stamp],
+    "a map whose bytes read as an array32 count": [0x81, 0x00, 0x00, 0x00, 0x01, 0xb2, ...stamp],
+    "a small integer before a stamp-looking body": [0x91, 0x12, ...stamp],
+    "a uint32 before a stamp-looking body": [0x91, 0xce, 0x00, 0x00, 0x00, 0x12, ...stamp],
+    "str8 cut before its length": [0x91, 0xd9],
+    "str16 cut before its length": [0x91, 0xda, 0x00],
+    "str32 cut before its length": [0x91, 0xdb, 0x00, 0x00, 0x00],
+  };
+  for (const [name, bytes] of Object.entries(cases)) {
+    assert.equal(headerRefused(new Uint8Array(bytes)), false, name);
+  }
+});
+
+test("pushAll leaves a store in a newer format alone when soft, and replaces a store it reads", async () => {
+  const vector = await readFile(resolve(cultLibRoot, "tests", "vectors", "document-variants-c2a", "v3-base.msgpack"));
+  const envelope = { key: "probe", type: "probe", payload: documentPayloadFromBytes(new Uint8Array([0x80])), storedAt: "2026-10-22T00:00:00Z" };
+  const newer = join(await mkdtemp(join(tmpdir(), "cultcache-pushall-soft-")), "store.msgpack");
+  await writeFile(newer, vector);
+  await new SingleFileMessagePackBackingStore(newer).pushAll([envelope], { soft: true });
+  assert.equal(Buffer.compare(await readFile(newer), vector), 0);
+
+  const own = join(await mkdtemp(join(tmpdir(), "cultcache-pushall-own-")), "store.msgpack");
+  const store = new SingleFileMessagePackBackingStore(own);
+  await store.pushAll([envelope]);
+  await store.pushAll([{ ...envelope, key: "second" }]);
+  assert.deepEqual((await store.pullAll()).map((entry) => entry.key), ["second"]);
 });
 
 test("SingleFileMessagePackBackingStore reads only a missing store as empty", async () => {

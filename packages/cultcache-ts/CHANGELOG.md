@@ -23,6 +23,13 @@ All notable changes to `@gamecult/cultcache-ts` are recorded here, following
 - Opening a legacy store that needs healing rewrites it under the lock, from a read taken
   under the lock.
 
+### Fixed
+- A full `pushAll` reads the store's header under the lock first and refuses a store format
+  this runtime does not read (the same error a read gives), leaving the file as it was. A
+  file with no readable stamp is still replaced, so a whole write heals it. Soft `pushAll`
+  is unchanged. The stamp is decoded by the decoder a read uses, so a stamp followed by bytes
+  that are not UTF-8 is refused by a whole write as a read refuses it.
+
 ### Dependencies
 - `koffi` 3.3.0, loaded only on the first write.
 
