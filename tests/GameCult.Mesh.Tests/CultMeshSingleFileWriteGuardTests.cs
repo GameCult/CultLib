@@ -45,7 +45,7 @@ public sealed class CultMeshSingleFileWriteGuardTests
         File.WriteAllBytes(_path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
         var before = File.ReadAllBytes(_path);
 
-        var error = Assert.Throws<NotSupportedException>(() => Write("item:a", 2))!;
+        var error = Assert.Throws<CultStoreUnreadableException>(() => Write("item:a", 2))!;
 
         error.Message.Should().Contain(newer);
         File.ReadAllBytes(_path).Should().Equal(before);
@@ -115,7 +115,7 @@ public sealed class CultMeshSingleFileWriteGuardTests
         File.WriteAllBytes(_path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
         var before = File.ReadAllBytes(_path);
 
-        Assert.Throws<InvalidOperationException>(() => Write("item:a", 2));
+        Assert.Throws<CultWriteConflictException>(() => Write("item:a", 2));
 
         File.ReadAllBytes(_path).Should().Equal(before);
     }

@@ -835,7 +835,14 @@ fn store_header(bytes: &[u8]) -> StoreHeader {
 
     let mut first = None;
     let mut cursor = std::io::Cursor::new(bytes);
-    let walked = serde::Deserializer::deserialize_seq(&mut rmp_serde::Deserializer::new(&mut cursor), HeaderVisitor(&mut first));
+    // Walked on the grown stack, as every other decode of stored bytes is: a store may nest values deeper than the thread allows.
+    let walked = stacker::maybe_grow(DECODE_RED_ZONE, DECODE_STACK_SEGMENT, || {
+        let mut reader = rmp_serde::Deserializer::new(&mut cursor);
+        let mut grown = serde_stacker::Deserializer::new(&mut reader);
+        grown.red_zone = DECODE_RED_ZONE;
+        grown.stack_size = DECODE_STACK_SEGMENT;
+        serde::Deserializer::deserialize_seq(grown, HeaderVisitor(&mut first))
+    });
     let after = bytes.len() - cursor.position() as usize;
     let whole = walked
         .map_err(|error| opaque_decode_error(error).context("the store is not one complete MessagePack array"))

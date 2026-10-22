@@ -1008,6 +1008,10 @@ namespace GameCult.Caching.Tests
         private static StoreFactory DirectoryStore(string path, CultDocumentRegistry? registry = null) =>
             new(path, () => new DirectoryMessagePackBackingStore(path), registry);
 
+        // The id Wide is stored under, which the later versions declare compatible: a cache reads and writes a record under another
+        // id only when its type declares it. SeedDrift checks that the constant is Wide's id.
+        private const string WideDriftSchemaId = "sha256:6033aeca8a784899aff1f8c43eb9df6bf3364e4fb6014e423c65afd51a9b8f18";
+
         private static readonly CultRecordKey DriftKey = new("drift");
         private static readonly CultDocumentRegistry WideDrift = CultDocumentRegistry.ForTypes(new[] { typeof(ConditionalDriftWide) });
         private static readonly CultDocumentRegistry NarrowDrift = CultDocumentRegistry.ForTypes(new[] { typeof(ConditionalDriftNarrow) });
@@ -1019,6 +1023,7 @@ namespace GameCult.Caching.Tests
         // The record at DriftKey, written under v1.
         private void SeedDrift(bool directory)
         {
+            Assert.That(WideDrift.GetRequired(typeof(ConditionalDriftWide)).SchemaId, Is.EqualTo(WideDriftSchemaId));
             using var cache = Drift(directory, WideDrift).Open();
             Assert.That(cache.Commit(batch => batch.Upsert(
                 new ConditionalDriftWide { Name = "drift", Value = 1, Extra = "extra" },
@@ -1116,7 +1121,7 @@ namespace GameCult.Caching.Tests
             public string Extra = string.Empty;
         }
 
-        [CultDocument("tests.conditional_drift", "tests.conditional_drift.v2")]
+        [CultDocument("tests.conditional_drift", "tests.conditional_drift.v2", CompatibleSchemaIds = new[] { WideDriftSchemaId })]
         [MessagePackObject(AllowPrivate = true)]
         internal sealed class ConditionalDriftNarrow
         {
@@ -1128,7 +1133,7 @@ namespace GameCult.Caching.Tests
             public int Value;
         }
 
-        [CultDocument("tests.conditional_drift", "tests.conditional_drift.v3")]
+        [CultDocument("tests.conditional_drift", "tests.conditional_drift.v3", CompatibleSchemaIds = new[] { WideDriftSchemaId })]
         [MessagePackObject(AllowPrivate = true)]
         internal sealed class ConditionalDriftReused
         {

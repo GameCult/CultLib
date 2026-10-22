@@ -327,6 +327,9 @@ public static class CultDocumentMessagePackSerialization
     {
         try
         {
+            // The stamp is judged from the leading bytes alone, so a body that will not parse can never make a newer store look
+            // like damage.
+            JudgeStamp(payload, requireReadable);
             RequireOneArray(payload);
             var reader = new MessagePackReader(payload);
             var fieldCount = reader.ReadArrayHeader();
@@ -340,12 +343,7 @@ public static class CultDocumentMessagePackSerialization
             if (fieldCount == 0)
                 return (snapshot, Array.Empty<byte[]>(), Array.Empty<byte[]>());
 
-            // A stamp encoded as binary is not one this runtime wrote or reads; it is refused as such, not parsed as damage.
-            if (reader.NextMessagePackType == MessagePackType.Binary)
-                throw new CultStoreUnreadableException("Store snapshot declares its format version as binary; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + ", " + CultPersistedStoreSnapshot.FormatV2 + " and " + CultPersistedStoreSnapshot.FormatV3 + " as strings.");
-            snapshot.FormatVersion = reader.ReadString()
-                ?? throw new CultStoreUnreadableException("Store snapshot declares no format version; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + ", " + CultPersistedStoreSnapshot.FormatV2 + " and " + CultPersistedStoreSnapshot.FormatV3 + ".");
-            requireReadable?.Invoke(snapshot.FormatVersion);
+            snapshot.FormatVersion = reader.ReadString()!;
 
             var catalogCount = reader.ReadArrayHeader();
             snapshot.SchemaCatalog = new CultSchemaCatalogEntry[catalogCount];
@@ -397,6 +395,31 @@ public static class CultDocumentMessagePackSerialization
             throw new CultStoreUnreadableException(
                 $"Record '{unpublished.Key}' names schema '{unpublished.SchemaId}', which the store's schema catalog does not publish.");
         }
+    }
+
+    // Slot 0 of a non-empty store, read before anything after it: a binary or nil stamp is refused as such, and a string stamp is
+    // judged by the caller's rule when it passes one. Bytes that do not open with an array and a string are left to the full read.
+    private static void JudgeStamp(byte[] payload, Action<string>? requireReadable)
+    {
+        string? stamp;
+        try
+        {
+            var reader = new MessagePackReader(payload);
+            if (reader.NextMessagePackType != MessagePackType.Array || reader.ReadArrayHeader() == 0)
+                return;
+            if (reader.NextMessagePackType == MessagePackType.Binary)
+                throw new CultStoreUnreadableException("Store snapshot declares its format version as binary; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + ", " + CultPersistedStoreSnapshot.FormatV2 + " and " + CultPersistedStoreSnapshot.FormatV3 + " as strings.");
+            if (reader.TryReadNil())
+                throw new CultStoreUnreadableException("Store snapshot declares no format version; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + ", " + CultPersistedStoreSnapshot.FormatV2 + " and " + CultPersistedStoreSnapshot.FormatV3 + ".");
+            stamp = reader.NextMessagePackType == MessagePackType.String ? reader.ReadString() : null;
+        }
+        catch (Exception ex) when (ex is EndOfStreamException or MessagePackSerializationException or InvalidOperationException)
+        {
+            return;
+        }
+
+        if (stamp != null)
+            requireReadable?.Invoke(stamp);
     }
 
     private static void RequireOneArray(byte[] bytes)
@@ -452,10 +475,20 @@ public static class CultDocumentMessagePackSerialization
     internal static string DescribeHeader(string header)
     {
         const string prefix = "cultcache.store.v";
-        var version = header.StartsWith(prefix, StringComparison.Ordinal) ? header.Substring(prefix.Length) : "";
-        return version.Length > 0 && version.All(character => character >= '0' && character <= '9')
-            ? header
-            : $"an unrecognised cultcache.store.* header of {System.Text.Encoding.UTF8.GetByteCount(header)} bytes";
+        if (header.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            var end = prefix.Length;
+            while (end < header.Length && header[end] >= '0' && header[end] <= '9')
+                end++;
+            var digits = end - prefix.Length;
+            if (digits is > 0 and <= 6 && (end == header.Length || header[end] == '.'))
+            {
+                var named = header.Substring(0, end);
+                return end == header.Length ? named : $"{named} with a suffix of {System.Text.Encoding.UTF8.GetByteCount(header) - end} bytes";
+            }
+        }
+
+        return $"an unrecognised cultcache.store.* header of {System.Text.Encoding.UTF8.GetByteCount(header)} bytes";
     }
 
     private static void WritePersistedRecord(ref MessagePackWriter writer, CultPersistedRecord record)

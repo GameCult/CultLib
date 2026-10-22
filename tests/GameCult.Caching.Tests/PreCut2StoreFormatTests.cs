@@ -151,7 +151,7 @@ namespace GameCult.Caching.Tests
                 var before = File.ReadAllBytes(file);
 
                 using var cache = new CultCache();
-                var error = Assert.Throws<NotSupportedException>(() =>
+                var error = Assert.Throws<CultStoreUnreadableException>(() =>
                     cache.AddBackingStore(new SingleFileMessagePackBackingStore(file)))!;
                 Assert.That(error.Message, Does.Contain(newerFormat));
                 Assert.That(cache.BackingStores, Is.Empty);
@@ -186,11 +186,11 @@ namespace GameCult.Caching.Tests
                 var before = File.ReadAllBytes(file);
 
                 await cache.AddAsync(new PreCut2FixtureNote { Text = "staged after the other process wrote v4" });
-                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAllBackingStores());
                 Assert.That(File.ReadAllBytes(file), Is.EqualTo(before));
 
                 cache.Remove(new CultRecordKey("item:anvil"));
-                Assert.Throws<NotSupportedException>(() => cache.BackingStores.Single().PushAll());
+                Assert.Throws<CultStoreUnreadableException>(() => cache.BackingStores.Single().PushAll());
                 Assert.That(File.ReadAllBytes(file), Is.EqualTo(before));
             }
             finally
@@ -270,9 +270,9 @@ namespace GameCult.Caching.Tests
                 File.WriteAllBytes(file, swapped);
 
                 await cache.AddAsync(new PreCut2FixtureNote { Text = "must not overwrite" });
-                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAllBackingStores());
                 Assert.That(File.ReadAllBytes(file), Is.EqualTo(swapped));
-                Assert.Throws<NotSupportedException>(() => new SingleFileMessagePackBackingStore(file).PullAll());
+                Assert.Throws<CultStoreUnreadableException>(() => new SingleFileMessagePackBackingStore(file).PullAll());
             }
             finally
             {
@@ -294,7 +294,7 @@ namespace GameCult.Caching.Tests
                 File.WriteAllBytes(manifest, swapped);
 
                 await cache.AddAsync(new PreCut2FixtureNote { Text = "must not overwrite" });
-                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAllBackingStores());
                 Assert.That(File.ReadAllBytes(manifest), Is.EqualTo(swapped));
             }
             finally
@@ -382,7 +382,7 @@ namespace GameCult.Caching.Tests
                 var before = File.ReadAllBytes(file);
 
                 await cache.AddAsync(new PreCut2FixtureNote { Text = "staged" });
-                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAllBackingStores());
                 Assert.That(File.ReadAllBytes(file), Is.EqualTo(before));
             }
             finally
@@ -517,12 +517,12 @@ namespace GameCult.Caching.Tests
                 var before = files();
 
                 await cache.AddAsync(new PreCut2FixtureNote { Text = "staged after the other process wrote the newer format" });
-                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAllBackingStores());
                 Assert.That(files().Keys, Is.EquivalentTo(before.Keys));
                 foreach (var pair in before) Assert.That(File.ReadAllBytes(pair.Key), Is.EqualTo(pair.Value), pair.Key);
 
                 cache.Remove(new CultRecordKey("item:anvil"));
-                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAllBackingStores());
                 Assert.That(files().Keys, Is.EquivalentTo(before.Keys));
                 foreach (var pair in before) Assert.That(File.ReadAllBytes(pair.Key), Is.EqualTo(pair.Value), pair.Key);
             }
