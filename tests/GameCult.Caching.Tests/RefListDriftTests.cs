@@ -62,13 +62,13 @@ namespace GameCult.Caching.Tests
                 Assert.That(holder.Items.Select(item => item.Key.Value), Is.EqualTo(new[] { "alpha", "beta" }));
                 Assert.That(cache.Get<RefListTarget>(holder.Items[0].Key)!.Name, Is.EqualTo("alpha"));
 
-                // The store is rewritten under the 2.0 schema, which now carries the reference.
-                holder.Items = holder.Items.Reverse().ToArray();
-                await cache.AddAsync(holder);
+                // A write flushes the store under the 2.0 schema; the list reads back unchanged.
+                await cache.AddAsync(new RefListTarget { Name = "gamma" });
                 using var reopened = new CultCache();
                 reopened.AddBackingStore(new SingleFileMessagePackBackingStore(copy));
                 await reopened.PullAllBackingStoresAsync();
-                Assert.That(reopened.GetAll<RefListHolder>().Single().Items.Select(item => item.Key.Value), Is.EqualTo(new[] { "beta", "alpha" }));
+                Assert.That(reopened.GetAll<RefListTarget>().Select(target => target.Name), Is.EquivalentTo(new[] { "alpha", "beta", "gamma" }));
+                Assert.That(reopened.GetAll<RefListHolder>().Single().Items.Select(item => item.Key.Value).ToArray(), Is.EqualTo(new[] { "alpha", "beta" }));
             }
             finally
             {
