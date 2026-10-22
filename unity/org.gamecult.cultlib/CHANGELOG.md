@@ -2,7 +2,7 @@
 
 All notable changes to this package are documented in this file.
 
-## [Unreleased]
+## [2.0.0] - 2026-10-22
 
 ### Breaking
 
@@ -24,6 +24,58 @@ All notable changes to this package are documented in this file.
   open or pull must catch `InvalidDataException`. An arm key outside Int32 or not
   an integer is refused with the same union-naming refusal, and a variant
   override holding an unknown arm names the schema id.
+- Removed or retyped public API, each with its replacement (measured against 1.0.61):
+  - `GameCult.Caching`: the `CultCache(CultDocumentRegistry?)` constructor is now
+    `CultCache(CultDocumentRegistry? registry = null, CultCodec? codec = null)`; code
+    that bound the old signature by reflection or a method group must rebind.
+    `CacheBackingStore.ToStoredDocument(CultPersistedRecord, IReadOnlyCollection<..>, ..)`
+    gains an `out` report of the schema drift it shed. The
+    `CultInspectorModel(registry, Func serialize, Func deserialize)` constructor is
+    now `CultInspectorModel(registry, CultCodec codec)`.
+  - `GameCult.Mesh`: `CultMeshPeerSnapshotDocumentOptions.SchemaIds`,
+    `CultMeshSnapshotRequestOptions.SchemaIds` and `.RecordKeys` are removed; set
+    `Selection` (a `CultNetSelection`) instead. `CultMeshHotBodySubscription.SchemaIds`
+    and `.RecordKeys` are removed; read `Selection`.
+  - `GameCult.Networking`: `CultNetDatabaseSubscriptionServer` no longer takes the
+    `projectRecord` constructor argument; a subscription is narrowed by its
+    selection and `authorizeRecord`.
+  - `InitialSequence` is `uint?` instead of `uint` on `CultMeshRudpSocketOptions`,
+    `RudpCultNetSchemaServerOptions`, `CultNetRudpSessionOptions`,
+    `CultNetRudpSocketTransportOptions` and `CultNetRudpSocketTransportServerOptions`.
+    Unset, a session draws a random initial sequence in [1, 2^31) (the old defaults
+    were 1 and 100); set a value to keep a fixed one.
+- A data member aliased the same name as a reference member in one document type
+  (for example a member aliased `Owner` beside a reference member named `Owner`)
+  used to register and is now refused at registration, naming the clash.
+- A store header other than one this runtime knows, and a record with more slots
+  than its header allows, are refused by name on read instead of being skipped or
+  read as `cultcache.store.v1`. A reader from before this change silently dropped
+  the extra slot (for example a variant) and the next save wrote the loss back.
+  `cultcache.store.v1` and `cultcache.store.v2` are the formats this release reads;
+  a store stamped with a newer one is refused, so this release never rewrites it.
+- `CultNetDatabase.PutAsync` and `DeleteAsync` for a schema no shard owns throw
+  `CultNetUnownedSchemaException` (an `InvalidOperationException` naming the schema)
+  before the cache is touched. They used to cache the write and never log it. The
+  fallback shard is gone: a database with shards that do not cover a schema serves
+  and writes only what its shards own.
+- RUDP: `CultMeshRudpSocketOptions.BindHost` is nullable and unset by default. A
+  client now binds loopback for a loopback endpoint and the unspecified address of
+  the endpoint's family otherwise (it used to bind `0.0.0.0` for every client, so an
+  IPv6 endpoint could not be reached); a server still binds `0.0.0.0`. An explicit
+  `BindHost` wins for both.
+- RUDP wire behaviour changed in step across the C#, Rust, TypeScript and Python
+  runtimes: one received-through watermark per session owns ordered delivery; a
+  Connect repeats only when it carries the sequence that opened the generation, and
+  reliable data before the handshake is neither acknowledged nor delivered; the
+  sender admits a packet only within 1,023 sequences and 4 MiB above the lowest
+  unacknowledged one. A peer on 1.0.x interoperates only for traffic that stays
+  inside those bounds.
+- Variants (record-level wire and store format): a store holding at least one
+  variant declares `cultcache.store.v2` and its variant records carry a fifth slot.
+  A reader from before this change refuses the store (unknown header) rather than
+  reading it. A store with no variant stays `cultcache.store.v1`, byte-identical to
+  1.0.x. CultMesh single-file reads, the directory store and CultNet refuse a variant
+  record by name; only the C# CultCache resolves variants.
 
 ### Added
 
@@ -38,8 +90,29 @@ All notable changes to this package are documented in this file.
   in its own `Entries`. The single-file and directory stores mark every record
   they rewrite; a custom store calls it for each record its own write rewrote.
 
+- Variants: a record that stores only its difference from a base record, resolved in
+  memory when the cache admits it (`cultcache.store.v2`; see the persistence-format
+  contract). A plain write at a variant's key is refused, and `Flatten` replaces a
+  variant with a plain record.
+- CultNet selection v1: one `CultNetSelection` shape and evaluator (schemas, keys,
+  field predicates, cites, cursors) used by CultMesh snapshot requests, the database
+  server and subscriptions, with typed refusals and row identity of
+  `(schemaId, recordKey)`. v0 filters are lowered onto it with their pre-existing
+  answers.
+- Record grouping: a document type declares its inspector group, and the inspector
+  model exposes the group tree, create-in-group and reference labels.
+- `CultMath` value types have canonical MessagePack formatters and `System.Text.Json`
+  converters, including `CultPhasor`, `CultSiteCells`, `SpanNoise`, `SpanPath`,
+  `SpanStage` and the `ExprGraph` expression graph resolver.
+- CultNet publishes every committed cache change once, in `Sequence` order, from the
+  cache journal; `CultNetDatabase.Dispose` publishes what a writer logged and had
+  not yet published.
+- `CultCache` takes an optional `CultCodec`, and isolates every observer so a
+  throwing one cannot stop the others.
+
 ### Changed
 
+- Requires `org.gamecult.cultmath` exactly 0.5.0.
 - After another writer's whole-file flush or unconditional commit rewrites a
   drifted record under a schema id this cache did not read it under, keeping its
   `storedAt`, an `Expect` captured before fails until this cache re-reads the
@@ -47,6 +120,8 @@ All notable changes to this package are documented in this file.
 
 ### Fixed
 
+- The native QUIC plugins' import settings enable `Standalone: Win64` and disable the
+  32-bit target (the 1.0.61 fix, now on main).
 - `Expect` and `ExpectUnchanged` hold on an unchanged record loaded under
   compatible schema drift (written under one version of its type, read by a
   cache that knows another). Before, they always failed: conditional commit
