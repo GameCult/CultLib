@@ -416,7 +416,7 @@ test("a chunk reference's id is slot 4: nil reads null and writes nil, an absent
   assert.equal(absent.chunks[0]!.id, "");
   assert.deepEqual(decodeManifest(encodeManifest(absent)).chunks[0], { chunkHash: HASH, offset: 0, sizeBytes: 4, recordKey: "k", id: "" });
   assert.equal(read(["7"]).id, "7");
-  assert.throws(() => read([0]), /./);
+  assert.throws(() => read([0]), /chunks.id/);
   const packed = await packContent("x", new Uint8Array(9), { chunkSizeBytes: 4 });
   assert.deepEqual(packed.manifest.chunks.map(c => c.id), ["0", "4", "8"]);
   assert.deepEqual((await packContent("x", new Uint8Array(0))).manifest.chunks.map(c => c.id), ["0"]);
