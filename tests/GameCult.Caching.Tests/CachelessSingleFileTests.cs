@@ -86,9 +86,9 @@ namespace GameCult.Caching.Tests
                 {
                     if (Interlocked.Exchange(ref _held, 1) == 0)
                     {
-                        RegistryBeforeWait = Registry;
+                        RegistryBeforeWait = AttachedRegistry;
                         Release.Wait(TimeSpan.FromSeconds(30));
-                        RegistryAfterWait = Registry;
+                        RegistryAfterWait = AttachedRegistry;
                     }
                     var store = CultDocumentMessagePackSerialization.ReadStore(data);
                     CultDocumentMessagePackSerialization.RequireSingleFileFormat(store.Snapshot);
