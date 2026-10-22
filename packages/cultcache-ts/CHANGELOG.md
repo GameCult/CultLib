@@ -3,6 +3,14 @@
 All notable changes to `@gamecult/cultcache-ts` are recorded here, following
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.14.3]
+
+### Fixed
+- A full `pushAll` reads the store's header under the lock first and refuses a store format
+  this runtime does not read (the same error a read gives), leaving the file as it was. A
+  file with no readable stamp is still replaced, so a whole write heals it. Soft `pushAll`
+  is unchanged.
+
 ## [0.14.2]
 
 ### Added

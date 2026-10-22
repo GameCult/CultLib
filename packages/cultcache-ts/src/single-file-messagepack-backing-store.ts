@@ -7,7 +7,7 @@ import { z } from "zod";
 import { documentPayloadBytes, documentPayloadFromBytes } from "./document";
 import { checkPayloadDepth } from "./payload-depth";
 import { commitStoreFile, withStoreWriteLock } from "./store-file";
-import { STORE_FORMAT_VERSION, isV1Snapshot, requireV1RecordSlots } from "./store-format";
+import { STORE_FORMAT_VERSION, isV1Snapshot, refuseUnreadStoreBytes, requireV1RecordSlots } from "./store-format";
 import type {
   CacheBackingStore,
   CultCacheEnvelope,
@@ -135,8 +135,14 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
 
   async pushAll(entries: CultCacheEnvelope[], options: PushAllOptions = {}): Promise<void> {
     await this.#enqueue(async () => {
-      if (options.soft && (await readStore(this.filePath)) !== undefined) {
-        return;
+      // A whole write of a file it cannot read proceeds as before (a dangling link is
+      // replaced, R3); only a stamp it can read is judged.
+      const data = options.soft ? await readStore(this.filePath) : await readStore(this.filePath).catch(() => undefined);
+      if (data !== undefined) {
+        if (options.soft) {
+          return;
+        }
+        refuseUnreadStoreBytes(data);
       }
 
       await this.#writeAll(entries);
