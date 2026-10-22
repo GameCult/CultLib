@@ -198,6 +198,9 @@ public static class CultDocumentMessagePackSerialization
 
         if (fieldCount > 0)
         {
+            // A stamp encoded as binary is not one this runtime wrote or reads; it is refused here, not parsed as damage.
+            if (reader.NextMessagePackType == MessagePackType.Binary)
+                throw new NotSupportedException("Store snapshot declares its format version as binary; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + " and " + CultPersistedStoreSnapshot.FormatV2 + " as strings.");
             snapshot.FormatVersion = reader.ReadString()
                 ?? throw new NotSupportedException("Store snapshot declares no format version; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + " and " + CultPersistedStoreSnapshot.FormatV2 + ".");
             requireReadable(snapshot.FormatVersion);

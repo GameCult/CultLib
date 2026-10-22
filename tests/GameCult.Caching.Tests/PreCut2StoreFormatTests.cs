@@ -47,7 +47,7 @@ namespace GameCult.Caching.Tests
             try
             {
                 var manifest = Path.Combine(root, "store.cc");
-                Assert.That(CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(manifest)).FormatVersion,
+                Assert.That(CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(manifest), _ => { }).FormatVersion,
                     Is.EqualTo("cultcache.store.v4.directory-content-addressed-pages"));
 
                 using var cache = new CultCache();
@@ -342,16 +342,6 @@ namespace GameCult.Caching.Tests
                 CultDocumentMessagePackSerialization.DeserializeUntyped(documentType, payload, Registry);
         }
 
-        private sealed class FlakyReadStore : SingleFileMessagePackBackingStore
-        {
-            public Exception? FailReadWith;
-
-            public FlakyReadStore(string path) : base(path) { }
-
-            protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data) =>
-                FailReadWith != null ? throw FailReadWith : base.DeserializeSnapshot(data);
-        }
-
         private static void StampHeader(string file, string header)
         {
             var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(file));
@@ -431,15 +421,16 @@ namespace GameCult.Caching.Tests
             try
             {
                 var file = Path.Combine(root, "store.msgpack");
-                var store = new FlakyReadStore(file);
                 using var cache = new CultCache();
-                cache.AddBackingStore(store);
+                cache.AddBackingStore(new SingleFileMessagePackBackingStore(file));
                 await cache.PullAllBackingStoresAsync();
                 var before = File.ReadAllBytes(file);
 
                 await cache.AddAsync(new PreCut2FixtureNote { Text = "staged" });
-                store.FailReadWith = new IOException("transient");
-                Assert.Throws<IOException>(() => cache.FlushAllBackingStores());
+                using (new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                {
+                    Assert.Throws<IOException>(() => cache.FlushAllBackingStores());
+                }
                 Assert.That(File.ReadAllBytes(file), Is.EqualTo(before));
             }
             finally
@@ -460,7 +451,7 @@ namespace GameCult.Caching.Tests
                 cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
                 await cache.PullAllBackingStoresAsync();
 
-                var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(manifest));
+                var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(manifest), _ => { });
                 snapshot.FormatVersion = newer;
                 File.WriteAllBytes(manifest, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
                 Func<System.Collections.Generic.Dictionary<string, byte[]>> files = () => Directory
