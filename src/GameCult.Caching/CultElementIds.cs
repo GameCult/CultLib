@@ -53,13 +53,12 @@ namespace GameCult.Caching
     // non-empty. Either need only be unique within one list. A write mints a random id; a load of a store written before ids
     // existed mints from SHA-256(record key, element path), so every reader of the same store mints the same id and a reload is
     // identical to what was read. A write and a load refuse the same things.
-    internal static class CultElementIds
+    public static class CultElementIds
     {
         private const int IdBytes = 6;
 
-        // The ids a pass would fill, decided before anything is written: nothing changes until Apply, and Undo restores what
-        // Apply replaced.
-        internal sealed class IdPlan
+        /// <summary>The element ids a pass would fill, decided before anything changes. <see cref="Apply"/> sets them; <see cref="Undo"/> gives back what Apply replaced.</summary>
+        public sealed class IdPlan
         {
             private readonly List<(object Item, Shape Shape, string? Before, string Id)> _fills = new();
 
@@ -303,7 +302,10 @@ namespace GameCult.Caching
         // True when some element under root holds a non-empty id: the one fact a store marks its header by. It reads the value
         // as it is now, refuses nothing and changes nothing, so a writer asks it of exactly what it is about to write. The walk
         // follows declared types, as registration does; a value's own type picks only a union arm.
-        internal static bool Holds(Type declared, object? root)
+        /// <summary>True when some element under <paramref name="root"/> holds a non-empty id: the one fact a single-file store marks its header by. Reads the value as it is, refuses nothing and changes nothing.</summary>
+        /// <param name="declared">The declared type of the root; the walk follows declared types, as registration does.</param>
+        /// <param name="root">The document about to be written.</param>
+        public static bool Holds(Type declared, object? root)
         {
             if (root == null)
                 return false;
@@ -340,7 +342,12 @@ namespace GameCult.Caching
         // that is not 12 lowercase hex characters, a duplicate id in one list, a derived id whose source is null or empty.
         // rootPath (the record key) seeds deterministic minting and names the record in a refusal. An element object that sits
         // twice in one list is refused too: planning would give it two ids and it would then be a duplicate on load.
-        internal static IdPlan Plan(Type declared, object? root, string rootPath, bool deterministic)
+        /// <summary>Decides every unset element id under <paramref name="root"/> and refuses what a cache write refuses (a malformed or duplicate id, an unusable derived source), without changing anything until <see cref="IdPlan.Apply"/>. A cacheless single-file writer plans before it serializes, so the ids are in the bytes.</summary>
+        /// <param name="declared">The declared type of the root.</param>
+        /// <param name="root">The document being written or loaded.</param>
+        /// <param name="rootPath">The record key: it seeds deterministic minting and names the record in a refusal.</param>
+        /// <param name="deterministic">True on a load, which mints from the key and path so every reader of one store mints the same ids; false on a write, which mints random ones.</param>
+        public static IdPlan Plan(Type declared, object? root, string rootPath, bool deterministic)
         {
             var plan = new IdPlan();
             Visit(declared, root, rootPath);
