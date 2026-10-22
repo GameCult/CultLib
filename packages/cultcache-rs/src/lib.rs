@@ -1261,26 +1261,38 @@ impl SingleFileMessagePackBackingStore {
                     .context(format!("failed to read {}", self.path.display())));
             }
         };
-        let unreadable = |kind, detail: anyhow::Error| {
-            // The detail is rebuilt as text that names no value read from the bytes. The
-            // decoder reports a short read as an io::Error, and dropping it keeps an
-            // io::Error in the chain meaning only that the file itself could not be read.
-            anyhow!(describe_undecodable(&detail)).context(CultCacheStoreUnreadable {
-                path: self.path.clone(),
-                kind,
-            })
-        };
-        match store_header(&bytes) {
-            Some(header) if header == STORE_FORMAT_V1 => decode_store_snapshot(&bytes)
-                .map_err(|error| unreadable(CultCacheStoreUnreadableKind::Undecodable, error)),
-            Some(header) if header.starts_with("cultcache.store.") => Err(unreadable(
+        self.refuse_unread_format(&bytes)?;
+        if store_header(&bytes).as_deref() == Some(STORE_FORMAT_V1) {
+            decode_store_snapshot(&bytes)
+                .map_err(|error| self.unreadable(CultCacheStoreUnreadableKind::Undecodable, error))
+        } else {
+            decode_grown(&bytes)
+                .context("failed to decode legacy CultCache envelope array")
+                .map_err(|error| self.unreadable(CultCacheStoreUnreadableKind::Undecodable, error))
+        }
+    }
+
+    // The stamp rule, owned once for the reader and the whole-store writer: a
+    // cultcache.store.* header other than v1 is a format this runtime does not read. Only
+    // the header is judged, so a newer store cut short is still a newer store.
+    fn refuse_unread_format(&self, bytes: &[u8]) -> Result<()> {
+        match store_header(bytes) {
+            Some(header) if header != STORE_FORMAT_V1 && header.starts_with("cultcache.store.") => Err(self.unreadable(
                 CultCacheStoreUnreadableKind::UnsupportedFormat,
                 anyhow!("its header is {}; this runtime reads {STORE_FORMAT_V1:?} only", describe_header(&header)),
             )),
-            _ => decode_grown(&bytes)
-                .context("failed to decode legacy CultCache envelope array")
-                .map_err(|error| unreadable(CultCacheStoreUnreadableKind::Undecodable, error)),
+            _ => Ok(()),
         }
+    }
+
+    fn unreadable(&self, kind: CultCacheStoreUnreadableKind, detail: anyhow::Error) -> anyhow::Error {
+        // The detail is rebuilt as text that names no value read from the bytes. The
+        // decoder reports a short read as an io::Error, and dropping it keeps an
+        // io::Error in the chain meaning only that the file itself could not be read.
+        anyhow!(describe_undecodable(&detail)).context(CultCacheStoreUnreadable {
+            path: self.path.clone(),
+            kind,
+        })
     }
 
     /// Reads one filesystem snapshot without creating or opening the sibling
@@ -1571,6 +1583,11 @@ impl CacheBackingStore for SingleFileMessagePackBackingStore {
 
     fn push_all(&mut self, entries: &[CultCacheEnvelope], _options: PushAllOptions) -> Result<()> {
         self.with_exclusive_lock(|| {
+            // A file it cannot read is written as before (a dangling link is replaced, R3; a
+            // directory is a typed write failure); only a stamp it can read is judged.
+            if let Ok(bytes) = fs::read(&self.path) {
+                self.refuse_unread_format(&bytes)?;
+            }
             let mut entries = entries.to_vec();
             entries.sort_by_key(entry_id);
             self.write_all_unlocked(&entries)
