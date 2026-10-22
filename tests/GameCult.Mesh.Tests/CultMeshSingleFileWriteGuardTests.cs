@@ -81,4 +81,38 @@ public sealed class CultMeshSingleFileWriteGuardTests
 
         CultMesh.ReadSingleFileDocumentPayload(_path, new CultRecordKey("item:a"), Schema.SchemaId).Should().Equal(2);
     }
+
+    // The write takes the same <path>.lock a CultCache single-file store takes: while another holder has it, the write waits.
+    [Test]
+    public void WriteWaitsForTheStoreLockAnotherWriterHolds()
+    {
+        Write("item:a", 1);
+        var write = default(System.Threading.Tasks.Task);
+        using (new FileStream(_path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+        {
+            write = System.Threading.Tasks.Task.Run(() => Write("item:a", 2));
+
+            write.Wait(TimeSpan.FromMilliseconds(750)).Should().BeFalse("the lock is held, so the write must wait");
+            CultMesh.ReadSingleFileDocumentPayload(_path, new CultRecordKey("item:a"), Schema.SchemaId).Should().Equal(1);
+        }
+
+        write.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+        CultMesh.ReadSingleFileDocumentPayload(_path, new CultRecordKey("item:a"), Schema.SchemaId).Should().Equal(2);
+    }
+
+    // A variant at the very key being written is still not this write's to replace: a plain record would flatten it.
+    [Test]
+    public void WriteRefusesToReplaceAVariantAtTheSameKey()
+    {
+        Write("item:a", 1);
+        var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(_path));
+        snapshot.FormatVersion = CultPersistedStoreSnapshot.FormatV2;
+        snapshot.Records[0].Variant = new CultVariantDelta("item:base", Array.Empty<CultVariantOverride>());
+        File.WriteAllBytes(_path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+        var before = File.ReadAllBytes(_path);
+
+        Assert.Throws<InvalidOperationException>(() => Write("item:a", 2));
+
+        File.ReadAllBytes(_path).Should().Equal(before);
+    }
 }
