@@ -67,7 +67,7 @@ namespace GameCult.Caching.Tests
                 using var reopened = new CultCache();
                 reopened.AddBackingStore(new SingleFileMessagePackBackingStore(copy));
                 await reopened.PullAllBackingStoresAsync();
-                Assert.That(reopened.GetAll<RefListTarget>().Select(target => target.Name), Is.EquivalentTo(new[] { "alpha", "beta", "gamma" }));
+                Assert.That(string.Join(",", reopened.GetAll<RefListTarget>().Select(target => target.Name).OrderBy(name => name)), Is.EqualTo("alpha,beta,gamma"));
                 Assert.That(reopened.GetAll<RefListHolder>().Single().Items.Select(item => item.Key.Value).ToArray(), Is.EqualTo(new[] { "alpha", "beta" }));
             }
             finally
