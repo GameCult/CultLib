@@ -7,7 +7,7 @@ import { z } from "zod";
 
 import { documentPayloadBytes, documentPayloadFromBytes } from "./document";
 import { commitStoreFile, withStoreWriteLock } from "./store-file";
-import { STORE_FORMAT_VERSION, SchemaConflictError, type StoreFormat, StoreUnreadableError, isStoreSnapshot, requireStoreSlots, requireV1RecordSlots } from "./store-format";
+import { STORE_FORMAT_VERSION, SchemaConflictError, type StoreFormat, StoreUnreadableError, isStoreSnapshot, refuseUnreadStoreBytes, requireStoreSlots, requireV1RecordSlots } from "./store-format";
 import type {
   CacheBackingStore,
   CultCacheEnvelope,
@@ -400,6 +400,8 @@ export type SingleFileStoreRead = {
 };
 
 function decodeStoreFile(data: Uint8Array): Omit<SingleFileStoreRead, "absent"> {
+  // The stamp is judged before the body is decoded, as Rust's store_header does: a newer store is refused by name.
+  refuseUnreadStoreBytes(data);
   const decoded = decode(data);
   const snapshot = decodeSnapshot(decoded);
   if (snapshot) {

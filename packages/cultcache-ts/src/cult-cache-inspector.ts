@@ -1,7 +1,7 @@
 import { decode } from "@msgpack/msgpack";
 
 import { checkPayloadDepth } from "./payload-depth";
-import { type StoreFormat, isStoreSnapshot, requireStoreSlots, requireV1RecordSlots } from "./store-format";
+import { type StoreFormat, isStoreSnapshot, refuseUnreadStoreBytes, requireStoreSlots, requireV1RecordSlots } from "./store-format";
 
 export interface CultCacheInspection {
   filePath: string;
@@ -47,6 +47,7 @@ export function inspectCultCacheBytes(
   bytes: Uint8Array,
   fileSizeBytes = bytes.length,
 ): CultCacheInspection {
+  refuseUnreadStoreBytes(bytes);
   const decoded = decode(bytes);
 
   if (isStoreSnapshot(decoded)) {

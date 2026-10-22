@@ -1,3 +1,5 @@
+import { decode } from "@msgpack/msgpack";
+
 export const STORE_FORMAT_VERSION = "cultcache.store.v1";
 
 /**
@@ -24,6 +26,44 @@ export function isStoreSnapshot(decoded: unknown): decoded is [StoreFormat, ...u
 
   refuseUnreadFormat(decoded[0]);
   return true;
+}
+
+/**
+ * Refuses a store whose header names a format this runtime does not read, judging the header alone: the leading array's first
+ * element, when it is a complete string. The reader calls it before it decodes the body, so a newer store is refused by name
+ * whether or not its body is whole. Bytes with no such header (a legacy array, an empty, truncated or garbled file) are not
+ * refused here.
+ */
+export function refuseUnreadStoreBytes(bytes: Uint8Array): void {
+  const header = peekHeader(bytes);
+  if (header !== undefined && header.startsWith(STORE_FORMAT_PREFIX)) {
+    refuseUnreadFormat(header);
+  }
+}
+
+// The first element of a leading non-empty MessagePack array when it is a complete string; anything else is undefined. The
+// string is decoded by the decoder a read uses, so a stamp gets one verdict from the peek and from the whole decode.
+function peekHeader(bytes: Uint8Array): string | undefined {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const lead = bytes[0];
+  let offset: number;
+  if (lead === undefined) return undefined;
+  if (lead >= 0x91 && lead <= 0x9f) offset = 1;
+  else if (lead === 0xdc && bytes.length >= 3 && view.getUint16(1) > 0) offset = 3;
+  else if (lead === 0xdd && bytes.length >= 5 && view.getUint32(1) > 0) offset = 5;
+  else return undefined;
+  const start = offset;
+  const tag = bytes[offset];
+  let length: number;
+  if (tag === undefined) return undefined;
+  if (tag >= 0xa0 && tag <= 0xbf) { length = tag & 0x1f; offset += 1; }
+  else if (tag === 0xd9 && bytes.length >= offset + 2) { length = bytes[offset + 1]!; offset += 2; }
+  else if (tag === 0xda && bytes.length >= offset + 3) { length = view.getUint16(offset + 1); offset += 3; }
+  else if (tag === 0xdb && bytes.length >= offset + 5) { length = view.getUint32(offset + 1); offset += 5; }
+  else return undefined;
+  if (bytes.length < offset + length) return undefined;
+  const header = decode(bytes.subarray(start, offset + length));
+  return typeof header === "string" ? header : undefined;
 }
 
 /** The one verdict on a stamp: this runtime reads v1 and v3, and any other `cultcache.store.*` header is refused by name. */

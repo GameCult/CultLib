@@ -15,7 +15,7 @@ import { CultCache } from "../src/cult-cache";
 import { inspectCultCacheBytes } from "../src/cult-cache-inspector";
 import { defineDocumentRegistry, defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "../src/document";
 import { SingleFileMessagePackBackingStore, readStoreBytes } from "../src/single-file-messagepack-backing-store";
-import { SchemaConflictError, StoreUnreadableError } from "../src/store-format";
+import { SchemaConflictError, StoreUnreadableError, refuseUnreadStoreBytes } from "../src/store-format";
 import type { AnyCultCacheDocumentDefinition, CacheBackingStore, CultCacheEnvelope, CultCacheSchema } from "../src/types";
 
 const execFileAsync = promisify(execFile);
@@ -2080,6 +2080,93 @@ test("SingleFileMessagePackBackingStore refusal says what was found and names ev
       (error: Error) => error.message.includes(`CultCache store format ${found} is not one this runtime reads; ${reads}`),
       header,
     );
+  }
+});
+
+function headerRefused(bytes: Uint8Array): boolean {
+  try {
+    refuseUnreadStoreBytes(bytes);
+    return false;
+  } catch (error) {
+    assert.match((error as Error).message, /not one this runtime reads/u);
+    return true;
+  }
+}
+
+function storeStart(arrayLead: number[], text: string, strForm: "fix" | "8" | "16" | "32"): Uint8Array {
+  const body = Buffer.from(text, "utf8");
+  const n = body.length;
+  const tag =
+    strForm === "fix" ? [0xa0 | n]
+    : strForm === "8" ? [0xd9, n]
+    : strForm === "16" ? [0xda, n >> 8, n & 0xff]
+    : [0xdb, 0, 0, n >> 8, n & 0xff];
+  return new Uint8Array([...arrayLead, ...tag, ...body]);
+}
+
+test("a store's header is judged from its first bytes, in every MessagePack array and string form", () => {
+  const leads = [[0x91], [0x9f], [0xdc, 0x00, 0x01], [0xdc, 0x01, 0x00], [0xdd, 0x00, 0x00, 0x00, 0x01], [0xdd, 0x00, 0x01, 0x00, 0x00]];
+  for (const lead of leads) {
+    for (const form of ["fix", "8", "16", "32"] as const) {
+      const v4 = storeStart(lead, "cultcache.store.v4", form);
+      assert.equal(headerRefused(v4), true, `${lead} ${form} v4`);
+      assert.equal(headerRefused(v4.subarray(0, v4.length - 1)), false, `${lead} ${form} v4 one byte short`);
+      assert.equal(headerRefused(storeStart(lead, "cultcache.store.v1", form)), false, `${lead} ${form} v1`);
+      assert.equal(headerRefused(storeStart(lead, "cultcache.store.v3", form)), false, `${lead} ${form} v3`);
+      assert.equal(headerRefused(storeStart(lead, "other.store.v4", form)), false, `${lead} ${form} other`);
+      assert.equal(headerRefused(storeStart(lead, "", form)), false, `${lead} ${form} empty`);
+    }
+  }
+  // The longest fixstr, and a string long enough to need str16.
+  assert.equal(headerRefused(storeStart([0x91], `cultcache.store.v4${"x".repeat(13)}`, "fix")), true);
+  assert.equal(headerRefused(storeStart([0x91], `cultcache.store.v4${"x".repeat(300)}`, "16")), true);
+  assert.equal(headerRefused(storeStart([0x91], `cultcache.store.v4${"x".repeat(300)}`, "32")), true);
+  // A view into a larger buffer is read from its own start.
+  const padded = new Uint8Array([9, 9, ...storeStart([0x91], "cultcache.store.v4", "fix")]);
+  assert.equal(headerRefused(padded.subarray(2)), true);
+});
+
+test("bytes with no readable store stamp are not refused", () => {
+  const stamp = [...Buffer.from("cultcache.store.v4", "utf8")];
+  const cases: Record<string, number[]> = {
+    empty: [],
+    "empty array": [0x90],
+    "empty array16": [0xdc, 0x00, 0x00, 0xb2, ...stamp],
+    "empty array32": [0xdd, 0x00, 0x00, 0x00, 0x00, 0xb2, ...stamp],
+    "array16 cut before its count": [0xdc, 0x00],
+    "array32 cut before its count": [0xdd, 0x00, 0x00, 0x00],
+    "array with no element": [0x91],
+    "first element is not a string": [0x92, 0x01, 0xb2, ...stamp],
+    "a bare string": [0xb2, ...stamp],
+    "a map": [0x81, 0xb2, ...stamp],
+    "str8 cut before its length": [0x91, 0xd9],
+    "str16 cut before its length": [0x91, 0xda, 0x00],
+    "str32 cut before its length": [0x91, 0xdb, 0x00, 0x00, 0x00],
+  };
+  for (const [name, bytes] of Object.entries(cases)) {
+    assert.equal(headerRefused(new Uint8Array(bytes)), false, name);
+  }
+});
+
+test("a newer store is refused by name whatever its body: truncated, undecodable or trailing, by a read, a whole write and the inspector", async () => {
+  const envelope = { key: "probe", type: "probe", payload: documentPayloadFromBytes(new Uint8Array([0x80])), storedAt: "2026-10-22T00:00:00Z" };
+  const whole = encode(["cultcache.store.v4", [], [["k", "s", "t", new Uint8Array([0x90])]]]);
+  const bodies: Record<string, Uint8Array> = {
+    truncated: whole.subarray(0, whole.length - 3),
+    "header only": whole.subarray(0, 20),
+    undecodable: Uint8Array.of(...whole.subarray(0, 20), 0xc1),
+    trailing: Uint8Array.of(...whole, 0xff),
+    whole,
+  };
+  for (const [name, bytes] of Object.entries(bodies)) {
+    const file = join(await mkdtemp(join(tmpdir(), "cultcache-newer-")), "store.msgpack");
+    await writeFile(file, bytes);
+    const store = new SingleFileMessagePackBackingStore(file);
+    await assert.rejects(() => store.pullAll(), /not one this runtime reads/u, `${name} read`);
+    await assert.rejects(() => store.pushAll([envelope]), /not one this runtime reads/u, `${name} pushAll`);
+    await assert.rejects(() => store.pushAll([envelope], { soft: true }), /not one this runtime reads/u, `${name} soft pushAll`);
+    assert.throws(() => inspectCultCacheBytes(file, bytes), /not one this runtime reads/u, `${name} inspect`);
+    assert.deepEqual([...(await readFile(file))], [...bytes], `${name} left as it was`);
   }
 });
 
