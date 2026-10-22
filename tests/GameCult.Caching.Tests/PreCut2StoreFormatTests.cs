@@ -213,6 +213,134 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        // A store subclass that overrides nothing beyond its four abstract members is guarded by the base, not by an opt-in.
+        private sealed class PlainCustomStore : SingleFileBackingStore
+        {
+            public PlainCustomStore(string path) : base(path) { }
+
+            protected override byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot) =>
+                CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot);
+
+            protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data)
+            {
+                var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(data);
+                CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot);
+                return snapshot;
+            }
+
+            protected override byte[] SerializePayload(object document) =>
+                CultDocumentMessagePackSerialization.SerializeUntyped(document, document.GetType(), Registry);
+
+            protected override object DeserializePayload(Type documentType, byte[] payload) =>
+                CultDocumentMessagePackSerialization.DeserializeUntyped(documentType, payload, Registry);
+        }
+
+        private sealed class FlakyReadStore : SingleFileMessagePackBackingStore
+        {
+            public Exception? FailReadWith;
+
+            public FlakyReadStore(string path) : base(path) { }
+
+            protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data) =>
+                FailReadWith != null ? throw FailReadWith : base.DeserializeSnapshot(data);
+        }
+
+        private static void StampHeader(string file, string header)
+        {
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(file));
+            snapshot.FormatVersion = header;
+            File.WriteAllBytes(file, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+        }
+
+        [Test]
+        public async Task CustomSingleFileStoreThatOverridesNothingIsRefusedAtFlushOfANewerStore()
+        {
+            var root = CopyFixture("single-file-v1");
+            try
+            {
+                var file = Path.Combine(root, "store.msgpack");
+                using var cache = new CultCache();
+                cache.AddBackingStore(new PlainCustomStore(file));
+                await cache.PullAllBackingStoresAsync();
+                StampHeader(file, "cultcache.store.v3");
+                var before = File.ReadAllBytes(file);
+
+                await cache.AddAsync(new PreCut2FixtureNote { Text = "staged" });
+                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                Assert.That(File.ReadAllBytes(file), Is.EqualTo(before));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        // Attach, commit and flush share one rule for which formats are readable: a header the reader refuses at attach is
+        // refused at flush, whatever its spelling.
+        [TestCase("cultcache.store.v3-ids")]
+        [TestCase("cultcache.store.v1000000")]
+        [TestCase("cultcache.v3")]
+        [TestCase("cultcache.store.v3")]
+        [TestCase("cultcache.store.v2")]
+        [TestCase("cultcache.store.v1")]
+        public async Task FlushRefusesExactlyTheHeadersAttachRefuses(string header)
+        {
+            var root = CopyFixture("single-file-v1");
+            try
+            {
+                var file = Path.Combine(root, "store.msgpack");
+                using var cache = new CultCache();
+                cache.AddBackingStore(new SingleFileMessagePackBackingStore(file));
+                await cache.PullAllBackingStoresAsync();
+                StampHeader(file, header);
+                var before = File.ReadAllBytes(file);
+
+                bool attachRefuses;
+                using (var fresh = new CultCache())
+                {
+                    try { fresh.AddBackingStore(new SingleFileMessagePackBackingStore(file)); attachRefuses = false; }
+                    catch (NotSupportedException) { attachRefuses = true; }
+                }
+
+                await cache.AddAsync(new PreCut2FixtureNote { Text = "staged" });
+                var flushRefuses = false;
+                try { cache.FlushAllBackingStores(); }
+                catch (NotSupportedException) { flushRefuses = true; }
+
+                Assert.That(flushRefuses, Is.EqualTo(attachRefuses), header);
+                if (attachRefuses) Assert.That(File.ReadAllBytes(file), Is.EqualTo(before), header);
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        // A read that fails on I/O is not an unreadable stamp to heal over: the flush refuses and the file is untouched.
+        [Test]
+        public async Task SingleFileFlushRefusesWhenReadingTheDiskFailsOnIO()
+        {
+            var root = CopyFixture("single-file-v1");
+            try
+            {
+                var file = Path.Combine(root, "store.msgpack");
+                var store = new FlakyReadStore(file);
+                using var cache = new CultCache();
+                cache.AddBackingStore(store);
+                await cache.PullAllBackingStoresAsync();
+                var before = File.ReadAllBytes(file);
+
+                await cache.AddAsync(new PreCut2FixtureNote { Text = "staged" });
+                store.FailReadWith = new IOException("transient");
+                Assert.Throws<IOException>(() => cache.FlushAllBackingStores());
+                Assert.That(File.ReadAllBytes(file), Is.EqualTo(before));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
         [TestCase("cultcache.store.v5.directory-content-addressed-pages")]
         [TestCase("cultcache.store.v9")]
         public async Task DirectoryWritesRefuseAStoreAnotherProcessStampedNewerSinceAttach(string newer)

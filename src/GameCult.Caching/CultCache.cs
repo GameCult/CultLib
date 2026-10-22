@@ -3373,13 +3373,6 @@ namespace GameCult.Caching
         protected abstract byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot);
         protected abstract CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data);
 
-        /// <summary>
-        /// Reads only the format header of a stored file, or null when this store cannot tell. A plain flush rewrites the
-        /// whole file from this cache's view, so it first reads this header and refuses a file stamped with a newer
-        /// format than the store reads; a store that returns null here is not guarded.
-        /// </summary>
-        protected virtual string? ReadFormatVersion(byte[] data) => null;
-
         protected abstract byte[] SerializePayload(object document);
         protected abstract object DeserializePayload(Type documentType, byte[] payload);
 
@@ -3455,7 +3448,7 @@ namespace GameCult.Caching
             {
                 using (AcquireLock(wait: true))
                 {
-                    RefuseToRewriteANewerFormat();
+                    RefuseToRewriteAStoreItCannotRead();
                     WriteSnapshot(
                         Entries.Values.Select(entry => ToPersistedRecord(entry, SerializePayload)),
                         Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()));
@@ -3547,28 +3540,31 @@ namespace GameCult.Caching
             Judging!(arriving, departing);
         }
 
-        // A plain flush replaces the file without merging it, so under the lock it first reads the stamp: a file another
-        // process has since written in a newer format is refused and left as it is. An unreadable stamp (missing, empty,
-        // corrupt) is not newer, and the flush proceeds as it always has, so it can still heal a damaged store.
-        private void RefuseToRewriteANewerFormat()
+        // A plain flush replaces the file without merging it, so under the lock it first reads the disk the way attach and
+        // commit do: a store this runtime does not read (a newer format, or a header the reader refuses) is refused and left
+        // as it is, and so is a read that fails on I/O. A file that merely will not parse (empty, corrupt) is not a newer
+        // store, and the flush proceeds as it always has, so it can still heal a damaged store.
+        private void RefuseToRewriteAStoreItCannotRead()
         {
-            FileInfo.Refresh();
-            if (!FileInfo.Exists)
-                return;
-            string? header;
             try
             {
-                header = ReadFormatVersion(ReadAllBytesShared(FileInfo.FullName));
+                ReadSnapshot();
+            }
+            catch (NotSupportedException)
+            {
+                throw;
+            }
+            catch (IOException)
+            {
+                throw;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                throw;
             }
             catch (Exception)
             {
-                return;
             }
-
-            if (CultPersistedStoreSnapshot.FormatNumber(header) is int number && number > 2)
-                throw new NotSupportedException(
-                    $"Store {FileInfo.FullName} is {header}, a newer format than this runtime reads " +
-                    $"({CultPersistedStoreSnapshot.FormatV1} and {CultPersistedStoreSnapshot.FormatV2}); a flush would downgrade it, so none was written.");
         }
 
         private CultPersistedStoreSnapshot? ReadSnapshot()

@@ -548,12 +548,6 @@ public class SingleFileMessagePackBackingStore : SingleFileBackingStore
         return snapshot;
     }
 
-    protected override string? ReadFormatVersion(byte[] data)
-    {
-        var reader = new MessagePackReader(data);
-        return reader.ReadArrayHeader() > 0 ? reader.ReadString() : null;
-    }
-
     protected override byte[] SerializePayload(object document)
     {
         return CultDocumentMessagePackSerialization.SerializeUntyped(document, document.GetType(), Registry);
