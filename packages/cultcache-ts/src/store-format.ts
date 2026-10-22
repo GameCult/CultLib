@@ -22,13 +22,17 @@ export function isStoreSnapshot(decoded: unknown): decoded is [StoreFormat, ...u
     return false;
   }
 
-  if (decoded[0] !== STORE_FORMAT_VERSION && decoded[0] !== STORE_FORMAT_ELEMENT_IDS) {
+  refuseUnreadFormat(decoded[0]);
+  return true;
+}
+
+/** The one verdict on a stamp: this runtime reads v1 and v3, and any other `cultcache.store.*` header is refused by name. */
+function refuseUnreadFormat(header: string): void {
+  if (header !== STORE_FORMAT_VERSION && header !== STORE_FORMAT_ELEMENT_IDS) {
     throw new Error(
-      `CultCache store format ${describeHeader(decoded[0])} is not one this runtime reads; it reads "${STORE_FORMAT_VERSION}" and "${STORE_FORMAT_ELEMENT_IDS}" only.`,
+      `CultCache store format ${describeHeader(header)} is not one this runtime reads; it reads "${STORE_FORMAT_VERSION}" and "${STORE_FORMAT_ELEMENT_IDS}" only.`,
     );
   }
-
-  return true;
 }
 
 /**

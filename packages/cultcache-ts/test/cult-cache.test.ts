@@ -2083,6 +2083,37 @@ test("SingleFileMessagePackBackingStore refusal says what was found and names ev
   }
 });
 
+test("a stamp this runtime reads, followed by bytes that are not UTF-8, gets the same refusal from a read and from a whole write", async () => {
+  const envelope = { key: "probe", type: "probe", payload: documentPayloadFromBytes(new Uint8Array([0x80])), storedAt: "2026-10-22T00:00:00Z" };
+  for (const header of ["cultcache.store.v1", "cultcache.store.v3"]) {
+    const stamp = [...Buffer.from(header, "utf8")];
+    const forms = { fixstr: [0x91, 0xa0 | (stamp.length + 1), ...stamp, 0xff], str8: [0x91, 0xd9, stamp.length + 1, ...stamp, 0xff] };
+    for (const [name, bytes] of Object.entries(forms)) {
+      const file = join(await mkdtemp(join(tmpdir(), "cultcache-stamp-")), "store.msgpack");
+      await writeFile(file, new Uint8Array(bytes));
+      const store = new SingleFileMessagePackBackingStore(file);
+      await assert.rejects(() => store.pullAll(), /not one this runtime reads/u, `${header} ${name} read`);
+      await assert.rejects(() => store.pushAll([envelope]), /not one this runtime reads/u, `${header} ${name} pushAll`);
+      assert.deepEqual([...(await readFile(file))], bytes, `${header} ${name} left as it was`);
+    }
+  }
+});
+
+test("pushAll leaves a store it reads alone when soft, and replaces one it reads otherwise", async () => {
+  const vector = await readFile(resolve(cultLibRoot, "tests", "vectors", "document-variants-c2a", "v3-base.msgpack"));
+  const envelope = { key: "probe", type: "probe", payload: documentPayloadFromBytes(new Uint8Array([0x80])), storedAt: "2026-10-22T00:00:00Z" };
+  const existing = join(await mkdtemp(join(tmpdir(), "cultcache-pushall-soft-")), "store.msgpack");
+  await writeFile(existing, vector);
+  await new SingleFileMessagePackBackingStore(existing).pushAll([envelope], { soft: true });
+  assert.equal(Buffer.compare(await readFile(existing), vector), 0);
+
+  const own = join(await mkdtemp(join(tmpdir(), "cultcache-pushall-own-")), "store.msgpack");
+  const store = new SingleFileMessagePackBackingStore(own);
+  await store.pushAll([envelope]);
+  await store.pushAll([{ ...envelope, key: "second" }]);
+  assert.deepEqual((await store.pullAll()).map((entry) => entry.key), ["second"]);
+});
+
 test("SingleFileMessagePackBackingStore reads only a missing store as empty", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-absent-"));
   assert.deepEqual(await new SingleFileMessagePackBackingStore(join(dir, "store.cc")).pullAll(), []);

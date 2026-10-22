@@ -1361,29 +1361,37 @@ impl SingleFileMessagePackBackingStore {
                     .context(format!("failed to read {}", self.path.display())));
             }
         };
-        let unreadable = |kind, detail: anyhow::Error| {
-            // The detail is rebuilt as text that names no value read from the bytes. The
-            // decoder reports a short read as an io::Error, and dropping it keeps an
-            // io::Error in the chain meaning only that the file itself could not be read.
-            anyhow!(describe_undecodable(&detail)).context(CultCacheStoreUnreadable {
-                path: self.path.clone(),
-                kind,
-            })
-        };
         let head = store_header(&bytes);
-        match head.first {
-            Some(header) if header.starts_with("cultcache.store.") && readable_store_format(&header).is_none() => Err(unreadable(
+        self.refuse_unread_format(head.first.as_deref())?;
+        head.whole
+            .and_then(|()| decode_store_file(&bytes, head.first.as_deref()))
+            .map_err(|error| self.unreadable(CultCacheStoreUnreadableKind::Undecodable, error))
+    }
+
+    // The one owner of the stamp rule, asked only by the one reader: a cultcache.store.* header this runtime does not read
+    // (it reads v1 and v3) is refused by name, judged from the header alone, so a newer store cut short is still a newer
+    // store. Every write over a file asks that reader first, so a whole-store write judges a stamp as a read does.
+    fn refuse_unread_format(&self, header: Option<&str>) -> Result<()> {
+        match header {
+            Some(header) if header.starts_with("cultcache.store.") && readable_store_format(header).is_none() => Err(self.unreadable(
                 CultCacheStoreUnreadableKind::UnsupportedFormat,
                 anyhow!(
                     "its header is {}; this runtime reads {STORE_FORMAT_V1:?} and {STORE_FORMAT_ELEMENT_IDS:?} only",
-                    describe_header(&header)
+                    describe_header(header)
                 ),
             )),
-            first => head
-                .whole
-                .and_then(|()| decode_store_file(&bytes, first.as_deref()))
-                .map_err(|error| unreadable(CultCacheStoreUnreadableKind::Undecodable, error)),
+            _ => Ok(()),
         }
+    }
+
+    fn unreadable(&self, kind: CultCacheStoreUnreadableKind, detail: anyhow::Error) -> anyhow::Error {
+        // The detail is rebuilt as text that names no value read from the bytes. The
+        // decoder reports a short read as an io::Error, and dropping it keeps an
+        // io::Error in the chain meaning only that the file itself could not be read.
+        anyhow!(describe_undecodable(&detail)).context(CultCacheStoreUnreadable {
+            path: self.path.clone(),
+            kind,
+        })
     }
 
     /// Reads one filesystem snapshot without creating or opening the sibling
