@@ -90,7 +90,10 @@ namespace GameCult.Caching.Tests
             var observed = cache.Get(DriftKey)!;
             var storedAt = cache.GetStored(DriftKey)!.StoredAt;
             using (var other = Drift(false, ReusedDrift).Open())
+            {
+                other.BackingStores[0].Push(other.GetStored(DriftKey)!);
                 other.BackingStores[0].PushAll();
+            }
             using (var reader = Drift(false, ReusedDrift).Open())
                 Assert.That(reader.GetStored(DriftKey)!.StoredAt, Is.EqualTo(storedAt), "the rewrite kept storedAt");
 

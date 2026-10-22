@@ -341,6 +341,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             var pagePayload = CultDocumentMessagePackSerialization.SerializePersistedRecord(record);
             var indexRecord = ToContentAddressedIndexRecord(record, pagePayload);
             stored.StoredVersion = VersionOf(indexRecord.Payload);
+            stored.StoredSchemaId = stored.Descriptor.SchemaId;
             currentIndex[key] = indexRecord;
             WriteFileAtomically(
                 ContentAddressedRecordPath(indexRecord),

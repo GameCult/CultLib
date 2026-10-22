@@ -1256,7 +1256,7 @@ namespace GameCult.Caching.Tests
                 using (var w = Open(path))
                     Assert.That(w.Commit(batch => batch.Upsert(typeof(VariantGear), Named("x", "l1"), BaseKey)), Is.True);
 
-                var refused = Refused(() => a.Commit(batch =>
+                var refused = Assert.Throws<CultWriteConflictException>(() => a.Commit(batch =>
                 {
                     batch.Expect(other, a.Get(other));
                     batch.UpsertVariant(BigKey, BaseKey, new[]
@@ -1264,7 +1264,7 @@ namespace GameCult.Caching.Tests
                         a.Override<VariantGear>(nameof(VariantGear.Name), "x"),
                         a.Override<VariantGear>(nameof(VariantGear.Code), "big")
                     });
-                }));
+                }))!;
                 Assert.That(refused.Message, Does.Contain(BigKey.Value).And.Contain(BaseKey.Value).And.Contain("x"));
             }
 
