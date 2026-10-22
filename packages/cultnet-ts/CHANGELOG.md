@@ -5,6 +5,10 @@ All notable changes to `cultnet-ts` are recorded here, following
 
 ## Unreleased
 
+### Breaking
+
+- `CultMeshCdnChunkRef` carries `id` (slot 4), the reference's element id. `encodeManifest` writes five-slot chunk references and `packContent` sets the decimal offset as the id, as the reference does; a manifest written before ids reads `""` and is rewritten with the slot. Content vectors regenerated from the reference.
+
 - Needs the cultcache-ts release that ships with this change (its manifest range moves with that release): the Idunn runtime authority reader calls `readSingleFileStore`, which 0.14.x does not export. An absent authority file is now a plain `Error` without a code.
 
 ## [0.3.0]

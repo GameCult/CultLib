@@ -26,6 +26,8 @@ export interface CultMeshCdnChunkRef {
   readonly offset: number;
   readonly sizeBytes: number;
   readonly recordKey: string | null;
+  // Element id, slot 4: the reference derives it from the offset when packing; "" when a manifest written before ids omits it.
+  readonly id: string | null;
 }
 
 // Metadata is ordered entries, never an object: a JS object reorders integer-like keys, and the entry order is wire bytes.
@@ -142,13 +144,13 @@ const mapHeader = (count: number): Uint8Array =>
 /** A string slot is written as C# writes it: a lone surrogate has no UTF-8 encoding and becomes U+FFFD at every length. */
 const text = <T>(field: T): T => (typeof field === "string" ? wellFormed(field) : field) as T;
 
-/** The positional ten-array of the C# `[MessagePackObject]`: chunk references are four-arrays, metadata a map in entry order. */
+/** The positional ten-array of the C# `[MessagePackObject]`: chunk references are five-arrays, metadata a map in entry order. */
 export function encodeManifest(manifest: CultMeshCdnArtifactManifest): Uint8Array {
   const { artifactId, kind, version, contentHash, sizeBytes, mimeType, createdAtUtc, chunks, tags, metadata } = manifest;
   return concat([
     Uint8Array.of(0x9a),
     ...[artifactId, kind, version, contentHash, sizeBytes, mimeType, createdAtUtc].map(field => encode(text(field))),
-    encode(chunks.map(c => [text(c.chunkHash), c.offset, c.sizeBytes, text(c.recordKey)])),
+    encode(chunks.map(c => [text(c.chunkHash), c.offset, c.sizeBytes, text(c.recordKey), text(c.id)])),
     encode(tags === null ? null : tags.map(text)),
     ...(metadata === null ? [encode(null)] : [mapHeader(metadata.length), ...metadata.flatMap(([key, value]) => [encode(text(key)), encode(text(value))])]),
   ]);
@@ -279,6 +281,7 @@ function readChunkRef(reader: Reader): CultMeshCdnChunkRef {
     // The reference's `int`.
     sizeBytes: slot(() => { const size = reader.integer("chunks.sizeBytes"); return size >= -(2 ** 31) && size < 2 ** 31 ? size : wrongType("chunks.sizeBytes"); }, 0),
     recordKey: slot(() => reader.string("chunks.recordKey"), ""),
+    id: slot(() => reader.string("chunks.id"), ""),
   };
   for (; index < count; index += 1) reader.skip();
   return chunk;
@@ -308,7 +311,7 @@ export async function packContent(
     sizeBytes: bytes.length,
     mimeType: isNullOrWhiteSpaceCSharp(options.mimeType) ? "application/octet-stream" : options.mimeType!,
     createdAtUtc: options.createdAtUtc ?? `${new Date().toISOString().slice(0, 23)}0000+00:00`,
-    chunks: chunks.map(({ chunkHash, payload }, index) => ({ chunkHash, offset: offsets[index]!, sizeBytes: payload.length, recordKey: chunkRecordKey(chunkHash) })),
+    chunks: chunks.map(({ chunkHash, payload }, index) => ({ chunkHash, offset: offsets[index]!, sizeBytes: payload.length, recordKey: chunkRecordKey(chunkHash), id: String(offsets[index]) })),
     tags: options.tags ?? [],
     metadata: options.metadata ?? [],
   };
