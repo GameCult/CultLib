@@ -30,6 +30,30 @@ bespoke JSON bridge at every boundary. A frontend is just another CultMesh
 client: the daemon publishes a typed Eve/CultUI surface, and any compatible
 runtime can lower that surface where it needs to live.
 
+## Entry Points
+
+- C# reference runtime: `src/` (`GameCult.Caching`, `GameCult.Networking`,
+  `GameCult.Mesh`, `GameCult.Geometry`, `GameCult.Unity`). Build and test with
+  `dotnet build CultLib.sln` and `dotnet test CultLib.sln`.
+- Other runtimes, wire-compatible with the C# CultCache: `packages/cultcache-ts`,
+  `cultcache-py`, `cultcache-rs`, and the CultNet and CultMesh packages beside
+  them under `packages/`; portable math in `packages/cultmath`.
+- Smallest working path: `src/GameCult.Mesh/docs/durable-node-quickstart.md`.
+  Application path: `src/GameCult.Mesh/docs/getting-started/README.md` and
+  `samples/eve-two-runtime`.
+
+## Live And Planned
+
+Live: typed CultCache persistence, CultNet schema-v0 transports and native RUDP,
+CultMesh nodes with Verse discovery, shard replication and authority leases,
+the geometry documents, and CultUI for Unity. The browser client boundary
+(`packages/cultmesh-browser`, `GameCult.Networking.WebSockets`) is proven on
+loopback under an explicit `local-development` trust policy by
+`samples/eve-browser-network`.
+
+Planned: a complete public Verse proof over deployed infrastructure; the
+remaining gates are listed in `src/GameCult.Mesh/docs/browser-verse-transport.md`.
+
 ## Which Package Do I Want?
 
 If the job is shared game state, start here before inventing a fourth drawer
@@ -97,7 +121,6 @@ The solution includes:
 - `GameCult.Logging`: common logging abstraction plus console and file implementations
 - `GameCult.Caching`: `DatabaseEntry`-based cache, indexes, global entries, and backing-store abstractions
 - `GameCult.Caching.MessagePack`: MessagePack-backed persistence for the cache
-- `GameCult.Caching.NewtonsoftJson`: Newtonsoft.Json-backed persistence for the cache
 - `GameCult.Math` / CultMath: portable numeric primitives, deterministic random, noise, and shader-parity helpers
 - `GameCult.Geometry` / CultGeometry: engine-neutral geometry algorithms plus CultCache-native domain, selected-cut, and mesh artifact documents
 - `GameCult.Networking`: encrypted login/register/verify flows, schema-v0 contracts, transport adapters, and native RUDP sessions
@@ -125,7 +148,6 @@ src/
   GameCult.Logging/
   GameCult.Caching/
   GameCult.Caching.MessagePack/
-  GameCult.Caching.NewtonsoftJson/
   GameCult.Geometry/
   GameCult.Networking/
   GameCult.Networking.WebSockets/
@@ -344,7 +366,6 @@ Each subproject has a local README with package-specific detail:
 - [GameCult.Logging](src/GameCult.Logging/README.md)
 - [GameCult.Caching](src/GameCult.Caching/README.md)
 - [GameCult.Caching.MessagePack](src/GameCult.Caching.MessagePack/README.md)
-- [GameCult.Caching.NewtonsoftJson](src/GameCult.Caching.NewtonsoftJson/README.md)
 - [GameCult.Geometry](src/GameCult.Geometry/README.md)
 - [GameCult.Networking](src/GameCult.Networking/README.md)
 - [GameCult.Mesh](src/GameCult.Mesh/README.md)
