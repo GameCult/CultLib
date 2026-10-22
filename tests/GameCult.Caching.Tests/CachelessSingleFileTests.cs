@@ -106,6 +106,64 @@ namespace GameCult.Caching.Tests
             Assert.That(File.Exists(_path), Is.False);
         }
 
+        [Test]
+        public void ARefusedWriteDocumentOnAnAttachedStoreNeverReachesTheRegistryItWasGiven()
+        {
+            var store = new SingleFileMessagePackBackingStore(_path);
+            using var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) }));
+            cache.AddBackingStore(store);
+            var elsewhere = CultDocumentRegistry.ForTypes(new[] { typeof(IdReel) });
+
+            var error = Assert.Throws<InvalidOperationException>(() => store.WriteDocument(new CultRecordKey("deck"), new IdDeck { Name = "d" }, registry: elsewhere))!;
+
+            Assert.That(error.Message, Does.Contain("write through the cache"));
+        }
+
+        [Test]
+        public void WriteDocumentRefusesANullDocumentAndDecodeDocumentANullPayload()
+        {
+            var store = new SingleFileMessagePackBackingStore(_path);
+            Assert.Throws<ArgumentNullException>(() => store.WriteDocument<IdDeck>(new CultRecordKey("deck"), null!));
+            Assert.Throws<ArgumentNullException>(() => store.DecodeDocument<IdDeck>(new CultRecordKey("deck"), null!));
+        }
+
+        [Test]
+        public void WriteDocumentStoresTheGivenStoredAtAndOtherwiseNow()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            var store = new SingleFileMessagePackBackingStore(_path);
+            store.WriteDocument(new CultRecordKey("fixed"), new IdDeck { Name = "a" }, "2026-01-02T03:04:05.0000000+00:00", registry);
+            store.WriteDocument(new CultRecordKey("now"), new IdDeck { Name = "b" }, null, registry);
+            store.WriteDocument(new CultRecordKey("blank"), new IdDeck { Name = "c" }, "  ", registry);
+
+            var records = new SingleFileMessagePackBackingStore(_path).ReadStoreSnapshot()!.Records.ToDictionary(record => record.Key);
+
+            Assert.That(records["fixed"].StoredAt, Is.EqualTo("2026-01-02T03:04:05.0000000+00:00"));
+            Assert.That(DateTimeOffset.Parse(records["now"].StoredAt), Is.EqualTo(DateTimeOffset.UtcNow).Within(TimeSpan.FromMinutes(5)));
+            Assert.That(DateTimeOffset.Parse(records["blank"].StoredAt), Is.EqualTo(DateTimeOffset.UtcNow).Within(TimeSpan.FromMinutes(5)));
+        }
+
+        [Test]
+        public void WriteDocumentMintsRandomIdsAndDecodeDocumentMintsTheSameIdsEveryTime()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            string Written(string name)
+            {
+                var path = Path.Combine(_directory, name);
+                var deck = new IdDeck { Name = "deck", Reels = { new IdReel { Label = "reel" } } };
+                new SingleFileMessagePackBackingStore(path).WriteDocument(new CultRecordKey("deck"), deck, registry: registry);
+                return deck.Reels[0].Id;
+            }
+            Assert.That(Written("one.cc"), Is.Not.EqualTo(Written("two.cc")), "a write mints random ids");
+
+            var unset = CultDocumentMessagePackSerialization.SerializeUntyped(new IdDeck { Name = "deck", Reels = { new IdReel { Label = "reel" } } }, typeof(IdDeck), registry);
+            var store = new SingleFileMessagePackBackingStore(_path);
+            var first = store.DecodeDocument<IdDeck>(new CultRecordKey("deck"), unset, registry).Reels[0].Id;
+            var second = new SingleFileMessagePackBackingStore(_path).DecodeDocument<IdDeck>(new CultRecordKey("deck"), unset, registry).Reels[0].Id;
+            Assert.That(first, Does.Match("^[0-9a-f]{12}$"));
+            Assert.That(second, Is.EqualTo(first), "a load mints from the key and path, so every reader mints the same id");
+        }
+
         // The write is under the store's lock and waits for it: a write that finds the lock held lands after it is released, and
         // never without it.
         [Test]
