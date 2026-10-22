@@ -183,8 +183,9 @@ public static class CultDocumentMessagePackSerialization
     }
 
     /// <summary>
-    /// Parses a store snapshot of any format stamp, as every release has. It judges nothing about readability: a store
-    /// reading its own file checks the stamp against the formats it reads, before the body is parsed.
+    /// Parses a store snapshot whose format stamp is a string, of any version. It refuses a nil or binary stamp
+    /// (1.0.61 read a nil stamp as v1). A store reading its own file checks the stamp against the formats it reads,
+    /// before the body is parsed.
     /// </summary>
     public static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload) =>
         DeserializeSnapshot(payload, _ => { });

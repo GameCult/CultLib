@@ -106,7 +106,9 @@ All notable changes to this package are documented in this file.
   `cultcache.store.v<N>` with N > 4 (it threw `InvalidOperationException`). A flush
   rewrites any file whose stamp it can read as v1 or v2, or cannot read at all (empty,
   truncated, not a snapshot), which includes a v1 file whose body is corrupt or truncated.
-  It refuses a recognised newer stamp, and it refuses an I/O failure on the read.
+  It refuses any other string stamp, a nil or binary stamp, and an I/O failure on the read.
+  The public `DeserializeSnapshot(byte[])` still parses any string stamp, but refuses a nil
+  or binary stamp (1.0.61 read a nil stamp as v1).
 - `CultMesh.WriteSingleFileDocument` and `WriteSingleFileDocumentPayload` read the
   file they replace, under the store's `<path>.lock`, and refuse (without touching
   it) a file this runtime cannot read, a store stamped with a newer format version,
