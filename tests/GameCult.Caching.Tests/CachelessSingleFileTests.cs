@@ -112,7 +112,7 @@ namespace GameCult.Caching.Tests
             var store = new SingleFileMessagePackBackingStore(_path);
             using var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) }));
             cache.AddBackingStore(store);
-            var elsewhere = CultDocumentRegistry.ForTypes(new[] { typeof(IdReel) });
+            var elsewhere = CultDocumentRegistry.ForTypes(new[] { typeof(StoreRoutingTests.RoutingNote) });
 
             var error = Assert.Throws<InvalidOperationException>(() => store.WriteDocument(new CultRecordKey("deck"), new IdDeck { Name = "d" }, registry: elsewhere))!;
 
@@ -139,6 +139,7 @@ namespace GameCult.Caching.Tests
             var records = new SingleFileMessagePackBackingStore(_path).ReadStoreSnapshot()!.Records.ToDictionary(record => record.Key);
 
             Assert.That(records["fixed"].StoredAt, Is.EqualTo("2026-01-02T03:04:05.0000000+00:00"));
+            Assert.That(records["now"].StoredAt, Does.Match(@"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{7}\+00:00$"), "round-trip format");
             Assert.That(DateTimeOffset.Parse(records["now"].StoredAt), Is.EqualTo(DateTimeOffset.UtcNow).Within(TimeSpan.FromMinutes(5)));
             Assert.That(DateTimeOffset.Parse(records["blank"].StoredAt), Is.EqualTo(DateTimeOffset.UtcNow).Within(TimeSpan.FromMinutes(5)));
         }
