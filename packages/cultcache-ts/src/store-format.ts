@@ -1,3 +1,5 @@
+import { decode } from "@msgpack/msgpack";
+
 export const STORE_FORMAT_VERSION = "cultcache.store.v1";
 
 const STORE_FORMAT_PREFIX = "cultcache.store.";
@@ -36,8 +38,9 @@ function refuseUnreadFormat(header: string): void {
   }
 }
 
-// The first element of a leading non-empty MessagePack array when it is a complete UTF-8
-// string; anything else is undefined.
+// The first element of a leading non-empty MessagePack array when it is a complete string;
+// anything else is undefined. The string is decoded by the decoder a read uses, so a stamp
+// gets one verdict from a read and from a whole write.
 function peekHeader(bytes: Uint8Array): string | undefined {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const lead = bytes[0];
@@ -47,6 +50,7 @@ function peekHeader(bytes: Uint8Array): string | undefined {
   else if (lead === 0xdc && bytes.length >= 3 && view.getUint16(1) > 0) offset = 3;
   else if (lead === 0xdd && bytes.length >= 5 && view.getUint32(1) > 0) offset = 5;
   else return undefined;
+  const start = offset;
   const tag = bytes[offset];
   let length: number;
   if (tag === undefined) return undefined;
@@ -56,11 +60,8 @@ function peekHeader(bytes: Uint8Array): string | undefined {
   else if (tag === 0xdb && bytes.length >= offset + 5) { length = view.getUint32(offset + 1); offset += 5; }
   else return undefined;
   if (bytes.length < offset + length) return undefined;
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(offset, offset + length));
-  } catch {
-    return undefined;
-  }
+  const header = decode(bytes.subarray(start, offset + length));
+  return typeof header === "string" ? header : undefined;
 }
 
 /**

@@ -1540,6 +1540,20 @@ test("a store's header is judged from its first bytes, in every MessagePack arra
   assert.equal(headerRefused(padded.subarray(2)), true);
 });
 
+test("a stamp followed by bytes that are not UTF-8 gets the verdict a read gives", async () => {
+  const stamp = [...Buffer.from("cultcache.store.v3", "utf8")];
+  const forms = { fixstr: [0x91, 0xb3, ...stamp, 0xff], str8: [0x91, 0xd9, 19, ...stamp, 0xff] };
+  const envelope = { key: "probe", type: "probe", payload: documentPayloadFromBytes(new Uint8Array([0x80])), storedAt: "2026-10-22T00:00:00Z" };
+  for (const [name, bytes] of Object.entries(forms)) {
+    const file = join(await mkdtemp(join(tmpdir(), "cultcache-stamp-")), "store.msgpack");
+    await writeFile(file, new Uint8Array(bytes));
+    const store = new SingleFileMessagePackBackingStore(file);
+    await assert.rejects(() => store.pullAll(), /not one this runtime reads/u, `${name} read`);
+    await assert.rejects(() => store.pushAll([envelope]), /not one this runtime reads/u, `${name} pushAll`);
+    assert.deepEqual([...(await readFile(file))], bytes, `${name} left as it was`);
+  }
+});
+
 test("bytes with no readable store stamp are not refused", () => {
   const stamp = [...Buffer.from("cultcache.store.v3", "utf8")];
   const cases: Record<string, number[]> = {
