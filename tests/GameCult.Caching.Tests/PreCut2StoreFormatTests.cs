@@ -213,6 +213,113 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        private static byte[] Raw(params object[] parts)
+        {
+            var bytes = new System.Collections.Generic.List<byte>();
+            foreach (var part in parts)
+            {
+                switch (part)
+                {
+                    case byte single: bytes.Add(single); break;
+                    case string text:
+                        var encoded = System.Text.Encoding.UTF8.GetBytes(text);
+                        bytes.Add(0xd9); bytes.Add((byte)encoded.Length); bytes.AddRange(encoded); break;
+                    case byte[] binary:
+                        bytes.Add(0xc4); bytes.Add((byte)binary.Length); bytes.AddRange(binary); break;
+                    default: throw new ArgumentException(part.GetType().Name);
+                }
+            }
+            return bytes.ToArray();
+        }
+
+        // The format decision comes from the header alone. A stamp this runtime does not read refuses whatever follows it,
+        // so a body that will not parse can never make a newer store look like damage a flush may heal.
+        private static System.Collections.Generic.IEnumerable<TestCaseData> NewerStampOverUnreadableBody()
+        {
+            byte garbage = 0xc1;
+            yield return new TestCaseData(Raw((byte)0x93, "cultcache.store.v3", garbage, garbage)).SetName("v3 header over a bad body");
+            yield return new TestCaseData(Raw((byte)0x93, System.Text.Encoding.UTF8.GetBytes("cultcache.store.v3"), garbage, garbage)).SetName("bin header v3 over a bad body");
+            yield return new TestCaseData(Raw((byte)0x93, System.Text.Encoding.UTF8.GetBytes("cultcache.store.v9"), garbage, garbage)).SetName("bin header v9 over a bad body");
+            yield return new TestCaseData(Raw((byte)0x93, "cultcache.store.v3", (byte)0x91, garbage, (byte)0x90)).SetName("v3 header over a bad catalog");
+            yield return new TestCaseData(Raw((byte)0x92, "cultcache.store.v4", garbage)).SetName("v4 header over garbage");
+        }
+
+        [TestCaseSource(nameof(NewerStampOverUnreadableBody))]
+        public async Task SingleFileFlushRefusesANewerStampWhateverItsBodyHolds(byte[] swapped)
+        {
+            var root = CopyFixture("single-file-v1");
+            try
+            {
+                var file = Path.Combine(root, "store.msgpack");
+                using var cache = new CultCache();
+                cache.AddBackingStore(new SingleFileMessagePackBackingStore(file));
+                await cache.PullAllBackingStoresAsync();
+                File.WriteAllBytes(file, swapped);
+
+                await cache.AddAsync(new PreCut2FixtureNote { Text = "must not overwrite" });
+                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                Assert.That(File.ReadAllBytes(file), Is.EqualTo(swapped));
+                Assert.Throws<NotSupportedException>(() => new SingleFileMessagePackBackingStore(file).PullAll());
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task DirectoryWritesRefuseANewerStampWhateverTheManifestBodyHolds()
+        {
+            var root = CopyFixture("directory-v4");
+            try
+            {
+                var manifest = Path.Combine(root, "store.cc");
+                using var cache = new CultCache();
+                cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                await cache.PullAllBackingStoresAsync();
+                var swapped = Raw((byte)0x93, "cultcache.store.v5.directory-content-addressed-pages", (byte)0xc1, (byte)0xc1);
+                File.WriteAllBytes(manifest, swapped);
+
+                await cache.AddAsync(new PreCut2FixtureNote { Text = "must not overwrite" });
+                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                Assert.That(File.ReadAllBytes(manifest), Is.EqualTo(swapped));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        // A file that is read but carries no readable stamp (empty, or cut off) is damage, not a newer store: a flush heals it.
+        [TestCase(0)]
+        [TestCase(1)]
+        [TestCase(10)]
+        [TestCase(-1)]
+        public async Task SingleFileFlushHealsAnEmptyOrTruncatedFile(int keep)
+        {
+            var root = CopyFixture("single-file-v1");
+            try
+            {
+                var file = Path.Combine(root, "store.msgpack");
+                using var cache = new CultCache();
+                cache.AddBackingStore(new SingleFileMessagePackBackingStore(file));
+                await cache.PullAllBackingStoresAsync();
+                var whole = File.ReadAllBytes(file);
+                File.WriteAllBytes(file, whole.Take(keep < 0 ? whole.Length / 2 : keep).ToArray());
+
+                await cache.AddAsync(new PreCut2FixtureNote { Text = "heals" });
+                cache.FlushAllBackingStores();
+
+                var healed = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(file));
+                Assert.That(healed.FormatVersion, Is.EqualTo("cultcache.store.v1"));
+                Assert.That(healed.Records.Length, Is.GreaterThan(0));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
         // A store subclass that overrides nothing beyond its four abstract members is guarded by the base, not by an opt-in.
         private sealed class PlainCustomStore : SingleFileBackingStore
         {

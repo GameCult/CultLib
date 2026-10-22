@@ -3542,23 +3542,18 @@ namespace GameCult.Caching
 
         // A plain flush replaces the file without merging it, so under the lock it first reads the disk the way attach and
         // commit do: a store this runtime does not read (a newer format, or a header the reader refuses) is refused and left
-        // as it is, and so is a read that fails on I/O. A file that merely will not parse (empty, corrupt) is not a newer
-        // store, and the flush proceeds as it always has, so it can still heal a damaged store.
+        // as it is, and so is a file that cannot be read (an I/O or access error). A file that is read but will not parse
+        // (empty, truncated, corrupt) is not a newer store, and the flush proceeds as it always has, so it can still heal.
         private void RefuseToRewriteAStoreItCannotRead()
         {
+            var bytes = ReadFileBytes();
+            if (bytes == null)
+                return;
             try
             {
-                ReadSnapshot();
+                DeserializeSnapshot(bytes);
             }
             catch (NotSupportedException)
-            {
-                throw;
-            }
-            catch (IOException)
-            {
-                throw;
-            }
-            catch (UnauthorizedAccessException)
             {
                 throw;
             }
@@ -3567,19 +3562,25 @@ namespace GameCult.Caching
             }
         }
 
-        private CultPersistedStoreSnapshot? ReadSnapshot()
+        private byte[]? ReadFileBytes()
         {
             FileInfo.Refresh();
             if (!FileInfo.Exists)
                 return null;
             try
             {
-                return DeserializeSnapshot(ReadAllBytesShared(FileInfo.FullName));
+                return ReadAllBytesShared(FileInfo.FullName);
             }
             catch (FileNotFoundException)
             {
                 return null;
             }
+        }
+
+        private CultPersistedStoreSnapshot? ReadSnapshot()
+        {
+            var bytes = ReadFileBytes();
+            return bytes == null ? null : DeserializeSnapshot(bytes);
         }
 
         private void WriteSnapshot(IEnumerable<CultPersistedRecord> records, IEnumerable<CultSchemaCatalogEntry> catalog)

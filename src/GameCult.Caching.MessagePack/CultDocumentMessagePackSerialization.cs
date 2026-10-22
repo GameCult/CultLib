@@ -182,7 +182,15 @@ public static class CultDocumentMessagePackSerialization
         return buffer.WrittenSpan.ToArray();
     }
 
-    public static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload)
+    /// <summary>
+    /// Reads a single-file snapshot. The stamp in slot 0 is checked against the formats this runtime reads (v1, v2) before
+    /// the catalog or any record is parsed, so a store stamped for another reader is refused, never mistaken for damage.
+    /// </summary>
+    public static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload) =>
+        DeserializeSnapshot(payload, RequireReadableSingleFileStamp);
+
+    // The stamp decides readability and the body never does: requireReadable runs on slot 0 before anything else is parsed.
+    internal static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload, Action<string> requireReadable)
     {
         var reader = new MessagePackReader(payload);
         var fieldCount = reader.ReadArrayHeader();
@@ -192,6 +200,7 @@ public static class CultDocumentMessagePackSerialization
         {
             snapshot.FormatVersion = reader.ReadString()
                 ?? throw new NotSupportedException("Store snapshot declares no format version; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + " and " + CultPersistedStoreSnapshot.FormatV2 + ".");
+            requireReadable(snapshot.FormatVersion);
         }
 
         if (fieldCount > 1)
@@ -226,12 +235,7 @@ public static class CultDocumentMessagePackSerialization
     public static void RequireSingleFileFormat(CultPersistedStoreSnapshot snapshot)
     {
         var version = snapshot.FormatVersion;
-        if (!string.Equals(version, CultPersistedStoreSnapshot.FormatV1, StringComparison.Ordinal) &&
-            !string.Equals(version, CultPersistedStoreSnapshot.FormatV2, StringComparison.Ordinal))
-        {
-            throw new NotSupportedException(
-                $"Store format {DescribeHeader(version)} is not readable; this runtime reads {CultPersistedStoreSnapshot.FormatV1} and {CultPersistedStoreSnapshot.FormatV2}.");
-        }
+        RequireReadableSingleFileStamp(version);
 
         // Only a v2 store may hold a variant: a v1 header over a variant record is a store no reader could trust.
         if (string.Equals(version, CultPersistedStoreSnapshot.FormatV1, StringComparison.Ordinal))
@@ -242,6 +246,16 @@ public static class CultDocumentMessagePackSerialization
                 throw new NotSupportedException(
                     $"Record '{variant.Key}' (schema '{variant.SchemaId}') is a variant but the store declares {version}; variants need {CultPersistedStoreSnapshot.FormatV2}.");
             }
+        }
+    }
+
+    private static void RequireReadableSingleFileStamp(string version)
+    {
+        if (!string.Equals(version, CultPersistedStoreSnapshot.FormatV1, StringComparison.Ordinal) &&
+            !string.Equals(version, CultPersistedStoreSnapshot.FormatV2, StringComparison.Ordinal))
+        {
+            throw new NotSupportedException(
+                $"Store format {DescribeHeader(version)} is not readable; this runtime reads {CultPersistedStoreSnapshot.FormatV1} and {CultPersistedStoreSnapshot.FormatV2}.");
         }
     }
 
