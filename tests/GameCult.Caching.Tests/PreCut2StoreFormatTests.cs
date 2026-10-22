@@ -763,8 +763,8 @@ namespace GameCult.Caching.Tests
 
                 var refusal = Assert.Throws<CultStoreUnreadableException>(() => new DirectoryMessagePackBackingStore(manifest).PullAll())!;
 
-                Assert.That(refusal.Message, Does.Contain("cultcache.store.v6 with a suffix of"));
-                Assert.That(refusal.Message, Does.Not.Contain("directory-content-addressed-pages"));
+                var suffixBytes = System.Text.Encoding.UTF8.GetByteCount(".directory-content-addressed-pages");
+                Assert.That(refusal.Message, Does.Contain($" is cultcache.store.v6 with a suffix of {suffixBytes} bytes;"));
             }
             finally
             {
