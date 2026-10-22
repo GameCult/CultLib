@@ -19,12 +19,12 @@ Releases as 3.0.0 (major).
 - `GameCult.Mesh`: `AsSchemaAlias<TAlias>()` is removed from `CultMeshDocumentHandle` and `CultMeshCollectionHandle`. Read the handle by the schema you mean.
 - The element types of owned lists in `GameCult.Mesh` (`CultMeshBodies`, `CultMeshCdn`, `CultMeshDiscoveryService` and `CultMeshEntityPrefabs`) and `GameCult.Networking` (`CultWitnessArtifactBundle`) gain a public string `Id` member with `[CultElementId]`, so their lists merge by identity. Code that matched those elements positionally by shape must set or read `Id`.
 - `CultNetDocumentRegistry.Register` refuses a binding that claims a document type or a schema id another binding already holds, with `CultSchemaConflictException`; binding a type to the schema id it already holds still replaces that binding.
-- `InternalsVisibleTo GameCult.Mesh` is removed from `GameCult.Caching`: CultMesh's single-file document helpers use the public `ReadStoreSnapshot`, `WriteRecord` and `CultElementIds` below.
+- `InternalsVisibleTo GameCult.Mesh` is removed from `GameCult.Caching`: CultMesh's single-file document helpers use the public `ReadStoreSnapshot`, `WriteDocument`, `DecodeDocument` and `WriteRecord` below.
 
 ### Added
 
 - `SingleFileBackingStore.ReadStoreSnapshot()` reads a store file once, under the store's lock, with the reader a cache's store opens with, and returns the durable snapshot or null when nothing is at the path. `SingleFileBackingStore.WriteRecord(record, catalogEntry, holdsIds, registry)` writes one record without a cache: every other record and catalog entry is copied as stored, the file is replaced atomically, and the header is decided as a flush decides it. It refuses on a store attached to a cache.
-- `CultElementIds.Plan`, `CultElementIds.Holds` and `CultElementIds.IdPlan` are public: a cacheless typed writer plans element ids before it serializes and passes `Holds` as `holdsIds`.
+- `SingleFileBackingStore.WriteDocument<T>(key, document, storedAt, registry)` writes one typed document without a cache, as a cache write does: it plans element ids, encodes the document and marks the store when it holds an id; a failed write gives the minted ids back. `SingleFileBackingStore.DecodeDocument<T>(key, payload, registry)` decodes a stored payload as a cache load does. Both refuse on a store attached to a cache. `CultElementIds` stays internal.
 - A store written by 1.0.x with a record-reference list in a slot still opens (from 2.0.1).
 
 ## [2.0.1] - 2026-10-22
