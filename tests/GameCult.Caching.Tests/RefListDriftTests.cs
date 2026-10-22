@@ -36,10 +36,22 @@ namespace GameCult.Caching.Tests
             public CultRecordRef<RefListTarget>[] Items = Array.Empty<CultRecordRef<RefListTarget>>();
         }
 
-        // The same slot declared as a plain value, as a later version might: the reverse of the 1.0.x drift.
-        [CultDocument("tests.reflist_holder", "tests.reflist_holder.v2")]
+        // The reverse of the 1.0.x drift: a slot persisted as a reference list, declared by a later version as a plain value.
+        [CultDocument("tests.reflist_loss", "tests.reflist_loss.v1")]
         [MessagePackObject(AllowPrivate = true)]
-        internal sealed class RefListValueHolder
+        internal sealed class RefListLossBefore
+        {
+            [Key(0)]
+            [CultName]
+            public string Name = string.Empty;
+
+            [Key(1)]
+            public CultRecordRef<RefListTarget>[] Items = Array.Empty<CultRecordRef<RefListTarget>>();
+        }
+
+        [CultDocument("tests.reflist_loss", "tests.reflist_loss.v2")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class RefListLossAfter
         {
             [Key(0)]
             [CultName]
@@ -133,10 +145,10 @@ namespace GameCult.Caching.Tests
         public void A_Lost_Reference_Still_Refuses()
         {
             var registry = CultDocumentRegistry.Shared;
-            var catalog = registry.GetRequired<RefListHolder>().ToCatalogEntry();
-            catalog.SchemaId = "persisted.tests.reflist_holder.v1";
+            var catalog = registry.GetRequired<RefListLossBefore>().ToCatalogEntry();
+            catalog.SchemaId = "persisted.tests.reflist_loss.v1";
             catalog.ContentHash = "sha256:persisted-by-2.0";
-            catalog.CompatibleSchemaIds = new[] { registry.GetRequired<RefListValueHolder>().SchemaId };
+            catalog.CompatibleSchemaIds = new[] { registry.GetRequired<RefListLossAfter>().SchemaId };
             catalog.Members.Single(member => member.Slot == 1).TypeName = "System.String[]";
             Assert.That(
                 () => registry.ResolvePersistedSchemaReport(catalog.SchemaId, new[] { catalog }),
