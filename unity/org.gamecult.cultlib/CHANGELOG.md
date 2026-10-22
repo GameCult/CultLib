@@ -9,6 +9,16 @@ All notable changes to this package are documented in this file.
 - A single-file store flush refuses a file it cannot read (empty, truncated, an unreadable stamp or body) with `CultStoreUnreadableException` and leaves the file as it is. A flush used to replace such a file. A write set cannot merge with a disk it cannot read, so the file is repaired or removed by its owner before the store writes again.
 - A single-file store reads v1, v2 and v3 stamps and refuses v4 and later by name; a directory store reads v4 and v5 and refuses v6 and later by name. Each judges the stamp before the body, so an unreadable body never makes a newer store look like damage.
 
+## [2.0.1] - 2026-10-22
+
+### Fixed
+
+- A store written by 1.0.x with a list of record references (`CultRecordRef<T>[]` or any `IEnumerable<CultRecordRef<T>>` slot)
+  opens again. 2.0.0 classified such a slot as a reference to `T`, 1.0.x had persisted it as a plain value, and the schema
+  comparison refused the store with "changed reference semantics" and "changed target schema". The payload is the same array
+  of keys, so gaining the reference classification on an otherwise identical slot is now compatible drift (migration warning
+  `gained_reference_semantics`). A reference that is lost or retargeted, and any change of type or cardinality, still refuses.
+
 ## [2.0.0] - 2026-10-22
 
 ### Breaking

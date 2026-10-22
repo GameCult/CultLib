@@ -1087,7 +1087,22 @@ namespace GameCult.Caching
                     errors.Add($"slot {localMember.Slot} changed type '{persistedMember.TypeName}' -> '{localMember.TypeName}'");
                 }
 
-                if (localMember.IsReference != persistedMember.IsReference)
+                // 1.0.x persisted a CultRecordRef<T> collection as a plain value slot (not a reference, no target); the
+                // payload is the same array of keys. Gaining the reference classification on an otherwise identical slot
+                // is compatible drift. Losing it, or any other change of reference or target, is not.
+                var gainedReference = !persistedMember.IsReference
+                    && persistedMember.TargetSchemaName == null
+                    && localMember.IsReference
+                    && localMember.TargetSchemaName != null;
+                if (gainedReference)
+                {
+                    warnings.Add(new CultSchemaMigrationWarning
+                    {
+                        Code = "gained_reference_semantics",
+                        Message = $"Local slot {localMember.Slot} ('{localMember.Name}') is a reference to '{localMember.TargetSchemaName}'; the persisted schema stored it as a plain value with the same payload."
+                    });
+                }
+                else if (localMember.IsReference != persistedMember.IsReference)
                 {
                     errors.Add($"slot {localMember.Slot} changed reference semantics");
                 }
@@ -1097,7 +1112,7 @@ namespace GameCult.Caching
                     errors.Add($"slot {localMember.Slot} changed cardinality");
                 }
 
-                if (!string.Equals(localMember.TargetSchemaName, persistedMember.TargetSchemaName, StringComparison.Ordinal))
+                if (!gainedReference && !string.Equals(localMember.TargetSchemaName, persistedMember.TargetSchemaName, StringComparison.Ordinal))
                 {
                     errors.Add($"slot {localMember.Slot} changed target schema '{persistedMember.TargetSchemaName ?? "<none>"}' -> '{localMember.TargetSchemaName ?? "<none>"}'");
                 }
