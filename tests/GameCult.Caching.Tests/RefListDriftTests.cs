@@ -55,8 +55,12 @@ namespace GameCult.Caching.Tests
             try
             {
                 using var cache = new CultCache();
-                cache.AddBackingStore(new SingleFileMessagePackBackingStore(copy));
+                var store = new SingleFileMessagePackBackingStore(copy);
+                cache.AddBackingStore(store);
                 await cache.PullAllBackingStoresAsync();
+                Assert.That(
+                    store.LastSchemaMigrationReports.Single(report => report.PersistedSchemaName == "tests.reflist_holder").Kind,
+                    Is.EqualTo(CultSchemaMigrationKind.CompatibleDrift));
 
                 var holder = cache.GetAll<RefListHolder>().Single();
                 Assert.That(holder.Items.Select(item => item.Key.Value), Is.EqualTo(new[] { "alpha", "beta" }));
@@ -64,6 +68,7 @@ namespace GameCult.Caching.Tests
 
                 // A write flushes the store under the 2.0 schema; the list reads back unchanged.
                 await cache.AddAsync(new RefListTarget { Name = "gamma" });
+                store.PushAll();
                 using var reopened = new CultCache();
                 reopened.AddBackingStore(new SingleFileMessagePackBackingStore(copy));
                 await reopened.PullAllBackingStoresAsync();
