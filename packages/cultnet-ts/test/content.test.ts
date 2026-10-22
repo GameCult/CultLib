@@ -450,7 +450,7 @@ test("a lone surrogate is written as U+FFFD at every string length, short and lo
       const withText = (value: string): CultMeshCdnArtifactManifest => ({
         ...base,
         artifactId: value, kind: value, version: value, mimeType: value, createdAtUtc: value,
-        chunks: [{ ...base.chunks[0]!, recordKey: value }],
+        chunks: [{ ...base.chunks[0]!, chunkHash: value, recordKey: value, id: value }],
         tags: [value],
         metadata: [[value, value]],
       });
