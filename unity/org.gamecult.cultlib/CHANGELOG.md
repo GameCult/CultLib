@@ -76,6 +76,14 @@ All notable changes to this package are documented in this file.
   reading it. A store with no variant stays `cultcache.store.v1`, byte-identical to
   1.0.x. CultMesh single-file reads, the directory store and CultNet refuse a variant
   record by name; only the C# CultCache resolves variants.
+- A plain flush (`SingleFileBackingStore.PushAll`) reads the file's format stamp under
+  the lock before it rewrites the file, and throws `NotSupportedException` instead of
+  writing when another process has since stamped it `cultcache.store.v<N>` with N > 2.
+  It used to overwrite it from this cache's older view. A directory store throws the
+  same exception, from the manifest parse every write already ran, for a manifest
+  stamped `cultcache.store.v<N>` with N > 4 (it threw `InvalidOperationException`).
+  A stamp that cannot be read at all (empty, corrupt) is not a newer format, and a
+  flush still rewrites it.
 - `CultMesh.WriteSingleFileDocument` and `WriteSingleFileDocumentPayload` read the
   file they replace, under the store's `<path>.lock`, and refuse (without touching
   it) a file this runtime cannot read, a store stamped with a newer format version,
