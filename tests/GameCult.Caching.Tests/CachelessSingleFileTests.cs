@@ -2,14 +2,16 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Caching.MessagePack;
+using MessagePack;
 using NUnit.Framework;
 using static GameCult.Caching.Tests.ElementIdTests;
 
 namespace GameCult.Caching.Tests
 {
-    // A single-file store file is read and written without a cache through ReadStoreSnapshot, WriteRecord, WriteDocument and DecodeDocument: the same reader, lock,
+    // A single-file store file is read and written without a cache through ReadStoreSnapshot, WriteRecord and WriteDocument: the same reader, lock,
     // atomic replace and header rule a cache's store uses. CultMesh's single-file document helpers are built on these members.
     public class CachelessSingleFileTests
     {
@@ -31,6 +33,136 @@ namespace GameCult.Caching.Tests
         {
             if (Directory.Exists(_directory))
                 Directory.Delete(_directory, true);
+        }
+
+        private static CultCodec Codec(CultDocumentRegistry? registry = null) =>
+            CultCacheMessagePack.CreateCodec(registry ?? CultDocumentRegistry.Shared);
+
+        [CultDocument("tests.cacheless.base", "tests.cacheless.base.v1")]
+        [MessagePackObject]
+        public class DeclaredBase
+        {
+            [Key(0)] [CultName] public string Name { get; set; } = "";
+        }
+
+        [MessagePackObject]
+        public sealed class UndeclaredDerived : DeclaredBase
+        {
+            [Key(1)] public string Extra { get; set; } = "";
+        }
+
+        // Reads the store file as a SingleFileMessagePackBackingStore does, and holds the first reader inside ReadStore so a test can
+        // see whether a second one gets in beside it.
+        private sealed class GatedStore : SingleFileBackingStore
+        {
+            private int _held;
+            private int _inside;
+            private int _mostInside;
+            public readonly ManualResetEventSlim Entered = new();
+            public readonly ManualResetEventSlim Release = new();
+
+            public GatedStore(string path) : base(path) { }
+
+            public int MostInside => Volatile.Read(ref _mostInside);
+
+            protected override byte[] SerializeStore(string formatVersion, System.Collections.Generic.IReadOnlyList<byte[]> catalogEntries, System.Collections.Generic.IReadOnlyList<byte[]> records) =>
+                CultDocumentMessagePackSerialization.SerializeStore(formatVersion, catalogEntries, records);
+
+            protected override byte[] SerializeRecord(CultPersistedRecord record) =>
+                CultDocumentMessagePackSerialization.SerializePersistedRecord(record);
+
+            protected override byte[] SerializeCatalogEntry(CultSchemaCatalogEntry entry) =>
+                CultDocumentMessagePackSerialization.SerializeCatalogEntry(entry);
+
+            protected override (CultPersistedStoreSnapshot Snapshot, byte[][] CatalogBytes, byte[][] RecordBytes) ReadStore(byte[] data)
+            {
+                var inside = Interlocked.Increment(ref _inside);
+                int seen;
+                while ((seen = MostInside) < inside && Interlocked.CompareExchange(ref _mostInside, inside, seen) != seen) { }
+                Entered.Set();
+                try
+                {
+                    if (Interlocked.Exchange(ref _held, 1) == 0)
+                        Release.Wait(TimeSpan.FromSeconds(30));
+                    var store = CultDocumentMessagePackSerialization.ReadStore(data);
+                    CultDocumentMessagePackSerialization.RequireSingleFileFormat(store.Snapshot);
+                    return store;
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref _inside);
+                }
+            }
+
+            protected override byte[] SerializePayload(object document, Type documentType) =>
+                CultDocumentMessagePackSerialization.SerializeUntyped(document, documentType, Registry);
+
+            protected override object DeserializePayload(Type documentType, byte[] payload) =>
+                CultDocumentMessagePackSerialization.DeserializeUntyped(documentType, payload, Registry);
+        }
+
+        // ReadStoreSnapshot takes the store's gate: while one read is inside the reader, a second does not enter beside it.
+        [Test]
+        public async Task ReadStoreSnapshotTakesTheStoresGate()
+        {
+            new SingleFileMessagePackBackingStore(_path).WriteRecord(Record("a", One, 1), One);
+            var store = new GatedStore(_path);
+
+            var first = Task.Run(() => store.ReadStoreSnapshot());
+            Assert.That(store.Entered.Wait(TimeSpan.FromSeconds(10)), Is.True, "the first read reached the reader");
+            var second = Task.Run(() => store.ReadStoreSnapshot());
+            await Task.Delay(500);
+            var mostInside = store.MostInside;
+            store.Release.Set();
+            await Task.WhenAll(first, second);
+
+            Assert.That(mostInside, Is.EqualTo(1), "a second read waits at the gate while the first is inside the reader");
+            Assert.That(first.Result!.Records, Has.Length.EqualTo(1));
+            Assert.That(second.Result!.Records, Has.Length.EqualTo(1));
+        }
+
+        // WriteDocument<T> stores the document as T: the schema id, the id plan, the header and the bytes all come from the one
+        // declared type, as they did when CultMesh encoded typeof(T).
+        [Test]
+        public void WriteDocumentEncodesTheDeclaredTypeNotTheRuntimeType()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(DeclaredBase) });
+
+            new SingleFileMessagePackBackingStore(_path).WriteDocument<DeclaredBase>(new CultRecordKey("d"), new UndeclaredDerived { Name = "n", Extra = "x" }, registry: registry);
+
+            var record = new SingleFileMessagePackBackingStore(_path).ReadStoreSnapshot()!.Records.Single();
+            var asBase = CultDocumentMessagePackSerialization.SerializeUntyped(new DeclaredBase { Name = "n" }, typeof(DeclaredBase), registry);
+            Assert.That(record.SchemaId, Is.EqualTo(registry.GetRequired<DeclaredBase>().SchemaId));
+            Assert.That(record.Payload, Is.EqualTo(asBase), "base bytes under the base schema: one slot, not the derived type's two");
+        }
+
+        // The registry is the call's argument. A typed call on a store instance leaves nothing behind, so a later WriteRecord that
+        // gives none decides the header as a fresh instance does.
+        [Test]
+        public async Task ATypedCallLeavesNoRegistryOnTheStore()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            using (var cache = new CultCache(registry))
+            {
+                cache.AddBackingStore(new SingleFileMessagePackBackingStore(_path));
+                await cache.AddAsync(new IdDeck { Name = "deck", Reels = { new IdReel { Label = "reel" } } });
+                cache.FlushAllBackingStores();
+            }
+            void Unmark()
+            {
+                var written = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(_path));
+                written.FormatVersion = CultPersistedStoreSnapshot.FormatV1;
+                File.WriteAllBytes(_path, CultDocumentMessagePackSerialization.SerializeSnapshot(written));
+            }
+            Unmark();
+            var store = new SingleFileMessagePackBackingStore(_path);
+
+            store.WriteDocument(new CultRecordKey("again"), new IdDeck { Name = "again" }, registry: registry);
+            Assert.That(store.ReadStoreSnapshot()!.FormatVersion, Is.EqualTo(CultPersistedStoreSnapshot.FormatV3), "the typed call, given a registry, read the copied ids");
+            Unmark();
+            store.WriteRecord(Record("other", One, 1), One, holdsIds: false, registry: null);
+
+            Assert.That(store.ReadStoreSnapshot()!.FormatVersion, Is.EqualTo(CultPersistedStoreSnapshot.FormatV1), "a write given no registry decides nothing for copied records");
         }
 
         private static CultPersistedRecord Record(string key, CultSchemaCatalogEntry entry, params byte[] payload) =>
@@ -124,7 +256,7 @@ namespace GameCult.Caching.Tests
         {
             var store = new SingleFileMessagePackBackingStore(_path);
             Assert.Throws<ArgumentNullException>(() => store.WriteDocument<IdDeck>(new CultRecordKey("deck"), null!));
-            Assert.Throws<ArgumentNullException>(() => store.DecodeDocument<IdDeck>(new CultRecordKey("deck"), null!));
+            Assert.Throws<ArgumentNullException>(() => Codec().DecodeDocument<IdDeck>(new CultRecordKey("deck"), null!));
         }
 
         [Test]
@@ -158,9 +290,8 @@ namespace GameCult.Caching.Tests
             Assert.That(Written("one.cc"), Is.Not.EqualTo(Written("two.cc")), "a write mints random ids");
 
             var unset = CultDocumentMessagePackSerialization.SerializeUntyped(new IdDeck { Name = "deck", Reels = { new IdReel { Label = "reel" } } }, typeof(IdDeck), registry);
-            var store = new SingleFileMessagePackBackingStore(_path);
-            var first = store.DecodeDocument<IdDeck>(new CultRecordKey("deck"), unset, registry).Reels[0].Id;
-            var second = new SingleFileMessagePackBackingStore(_path).DecodeDocument<IdDeck>(new CultRecordKey("deck"), unset, registry).Reels[0].Id;
+            var first = Codec(registry).DecodeDocument<IdDeck>(new CultRecordKey("deck"), unset).Reels[0].Id;
+            var second = Codec(registry).DecodeDocument<IdDeck>(new CultRecordKey("deck"), unset).Reels[0].Id;
             Assert.That(first, Does.Match("^[0-9a-f]{12}$"));
             Assert.That(second, Is.EqualTo(first), "a load mints from the key and path, so every reader mints the same id");
         }
@@ -222,7 +353,7 @@ namespace GameCult.Caching.Tests
             Assert.That(snapshot.FormatVersion, Is.EqualTo(CultPersistedStoreSnapshot.FormatV3));
             Assert.That(snapshot.Records.Select(record => record.Key), Is.EquivalentTo(new[] { "other", "deck" }));
             Assert.That(deck.Reels[0].Id, Does.Match("^[0-9a-f]{12}$"), "the id the file holds was minted on the document");
-            var read = new SingleFileMessagePackBackingStore(_path).DecodeDocument<IdDeck>(new CultRecordKey("deck"), snapshot.Records.Single(record => record.Key == "deck").Payload, registry);
+            var read = Codec(registry).DecodeDocument<IdDeck>(new CultRecordKey("deck"), snapshot.Records.Single(record => record.Key == "deck").Payload);
             Assert.That(read.Reels[0].Id, Is.EqualTo(deck.Reels[0].Id));
         }
 
@@ -240,7 +371,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void WriteDocumentAndDecodeDocumentRefuseOnAStoreAttachedToACache()
+        public void WriteDocumentRefusesOnAStoreAttachedToACache()
         {
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
             var store = new SingleFileMessagePackBackingStore(_path);
@@ -248,7 +379,6 @@ namespace GameCult.Caching.Tests
             cache.AddBackingStore(store);
 
             Assert.That(Assert.Throws<InvalidOperationException>(() => store.WriteDocument(new CultRecordKey("deck"), new IdDeck { Name = "d" }))!.Message, Does.Contain("write through the cache"));
-            Assert.That(Assert.Throws<InvalidOperationException>(() => store.DecodeDocument<IdDeck>(new CultRecordKey("deck"), new byte[] { 0x90 }))!.Message, Does.Contain("read through the cache"));
             Assert.That(File.Exists(_path), Is.False);
         }
     }

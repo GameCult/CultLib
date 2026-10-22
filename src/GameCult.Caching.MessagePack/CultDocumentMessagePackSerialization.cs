@@ -802,9 +802,9 @@ public class SingleFileMessagePackBackingStore : SingleFileBackingStore
         return store;
     }
 
-    protected override byte[] SerializePayload(object document)
+    protected override byte[] SerializePayload(object document, Type documentType)
     {
-        return CultDocumentMessagePackSerialization.SerializeUntyped(document, document.GetType(), Registry);
+        return CultDocumentMessagePackSerialization.SerializeUntyped(document, documentType, Registry);
     }
 
     protected override object DeserializePayload(Type documentType, byte[] payload)

@@ -3591,6 +3591,13 @@ namespace GameCult.Caching
 
         protected void Held(Action body) => Held(() => { body(); return true; });
 
+        private protected CultDocumentRegistry? SwapRegistry(CultDocumentRegistry? registry)
+        {
+            var previous = _registry;
+            _registry = registry;
+            return previous;
+        }
+
         internal void AttachRegistry(CultDocumentRegistry registry)
         {
             _registry = registry ?? throw new ArgumentNullException(nameof(registry));
@@ -4041,7 +4048,7 @@ namespace GameCult.Caching
                 _catalog.TryGetValue(entry, out var bytes) ? bytes : _owner.SerializeCatalogEntry(entry);
         }
 
-        protected abstract byte[] SerializePayload(object document);
+        protected abstract byte[] SerializePayload(object document, Type documentType);
         protected abstract object DeserializePayload(Type documentType, byte[] payload);
 
         public override string ToString() => FileInfo.FullName;
@@ -4212,7 +4219,7 @@ namespace GameCult.Caching
             {
                 if (!catalogEntries.TryGetValue(document.Descriptor, out var catalogEntry))
                     catalogEntries[document.Descriptor] = catalogEntry = document.Descriptor.ToCatalogEntry();
-                return new CultStagedRecord(ToPersistedRecord(document, SerializePayload), catalogEntry, document.HoldsIds);
+                return new CultStagedRecord(ToPersistedRecord(document, payload => SerializePayload(payload, payload.GetType())), catalogEntry, document.HoldsIds);
             }).ToList();
             return (upserts, removals.ToList());
         }
@@ -4228,7 +4235,7 @@ namespace GameCult.Caching
         /// <param name="record">The record to store.</param>
         /// <param name="catalogEntry">The schema catalog entry for the record's schema id.</param>
         /// <param name="holdsIds">Whether the record's payload holds element ids, or null when the caller cannot tell.</param>
-        /// <param name="registry">The registry the payload was encoded with. Given, the write decides the header for copied records that registry can read; omitted, it decides nothing for them.</param>
+        /// <param name="registry">The registry the payload was encoded with. Given, the write decides the header for copied records that registry can read; omitted, it decides nothing for them. It serves this call only: the store keeps no registry.</param>
         /// <exception cref="InvalidOperationException">The store is attached to a cache; write through the cache.</exception>
         /// <exception cref="CultStoreUnreadableException">The file at the path is not a store this runtime can read.</exception>
         public void WriteRecord(CultPersistedRecord record, CultSchemaCatalogEntry catalogEntry, bool? holdsIds = null, CultDocumentRegistry? registry = null)
@@ -4236,27 +4243,22 @@ namespace GameCult.Caching
             if (record == null) throw new ArgumentNullException(nameof(record));
             if (catalogEntry == null) throw new ArgumentNullException(nameof(catalogEntry));
             RefuseWhenAttached();
-            if (registry != null)
-                AttachRegistry(registry);
-            Held(() =>
-            {
-                using (AcquireLock(wait: true))
-                    _ = ApplyWriteSet(ReadSnapshot(), new[] { new CultStagedRecord(record, catalogEntry, holdsIds) }, Array.Empty<string>(), Array.Empty<string>());
-            });
+            ForTheCall(registry, () => WriteOne(record, catalogEntry, holdsIds));
         }
 
         /// <summary>
         /// Writes one typed document to the store file without a cache, as a cache write would. Element ids are decided before anything
         /// is written: an unset id is minted, a list a cache write refuses refuses the write, and the file is marked as holding element
-        /// ids when the document holds one. A write that fails gives the minted ids back. Then the document is encoded with
-        /// <paramref name="registry"/> and stored as <see cref="WriteRecord"/> stores a record: every other record and catalog entry
-        /// is copied forward as stored, under the store's lock, and the file is replaced atomically.
+        /// ids when the document holds one. A write that fails gives the minted ids back. Then the document is encoded as
+        /// <typeparamref name="TDocument"/>, the type its schema id and ids are taken from, with <paramref name="registry"/>, and stored as
+        /// <see cref="WriteRecord"/> stores a record: every other record and catalog entry is copied forward as stored, under the store's
+        /// lock, and the file is replaced atomically.
         /// </summary>
-        /// <typeparam name="TDocument">The registered document type.</typeparam>
+        /// <typeparam name="TDocument">The registered document type. A derived instance is stored as this type.</typeparam>
         /// <param name="key">The record key the document is stored under.</param>
         /// <param name="document">The document to store.</param>
         /// <param name="storedAt">The stored-at stamp, or null for now.</param>
-        /// <param name="registry">The registry that describes and encodes the document, or null for <see cref="CultDocumentRegistry.Shared"/>.</param>
+        /// <param name="registry">The registry that describes and encodes the document, or null for <see cref="CultDocumentRegistry.Shared"/>. It serves this call only: the store keeps no registry.</param>
         /// <exception cref="InvalidOperationException">The store is attached to a cache; write through the cache.</exception>
         /// <exception cref="CultStoreUnreadableException">The file at the path is not a store this runtime can read.</exception>
         /// <exception cref="CultElementIdException">The document holds an element id or list a cache write refuses.</exception>
@@ -4267,49 +4269,51 @@ namespace GameCult.Caching
             RefuseWhenAttached();
             var resolvedRegistry = registry ?? CultDocumentRegistry.Shared;
             var catalogEntry = resolvedRegistry.GetRequired<TDocument>().ToCatalogEntry();
-            AttachRegistry(resolvedRegistry);
-            var ids = CultElementIds.Plan(typeof(TDocument), document, key.Value, deterministic: false);
-            ids.Apply();
-            try
+            ForTheCall(resolvedRegistry, () =>
             {
-                WriteRecord(
-                    new CultPersistedRecord
-                    {
-                        Key = key.Value,
-                        SchemaId = catalogEntry.SchemaId,
-                        StoredAt = string.IsNullOrWhiteSpace(storedAt) ? DateTimeOffset.UtcNow.ToString("O") : storedAt!,
-                        Payload = SerializePayload(document)
-                    },
-                    catalogEntry,
-                    CultElementIds.Holds(typeof(TDocument), document));
-            }
-            catch
-            {
-                ids.Undo();
-                throw;
-            }
+                var ids = CultElementIds.Plan(typeof(TDocument), document, key.Value, deterministic: false);
+                ids.Apply();
+                try
+                {
+                    WriteOne(
+                        new CultPersistedRecord
+                        {
+                            Key = key.Value,
+                            SchemaId = catalogEntry.SchemaId,
+                            StoredAt = string.IsNullOrWhiteSpace(storedAt) ? DateTimeOffset.UtcNow.ToString("O") : storedAt!,
+                            Payload = SerializePayload(document, typeof(TDocument))
+                        },
+                        catalogEntry,
+                        CultElementIds.Holds(typeof(TDocument), document));
+                }
+                catch
+                {
+                    ids.Undo();
+                    throw;
+                }
+            });
         }
 
-        /// <summary>
-        /// Decodes a document payload read from this store file, as a cache load decodes it: the ids a load mints are minted from the key
-        /// and their path, so every reader of one store mints the same ids, and a payload a cache write would refuse is refused here too.
-        /// </summary>
-        /// <typeparam name="TDocument">The registered document type.</typeparam>
-        /// <param name="key">The record key the payload was stored under.</param>
-        /// <param name="payload">The record's payload.</param>
-        /// <param name="registry">The registry that describes and decodes the document, or null for <see cref="CultDocumentRegistry.Shared"/>.</param>
-        /// <exception cref="InvalidOperationException">The store is attached to a cache; read through the cache.</exception>
-        /// <exception cref="CultElementIdException">The payload holds an element id or list a cache load refuses.</exception>
-        public TDocument DecodeDocument<TDocument>(CultRecordKey key, byte[] payload, CultDocumentRegistry? registry = null)
-            where TDocument : class
+        // The registry is the call's argument, not store state: it is attached for the call under the store's gate and the store's
+        // previous registry (none, for a store no cache ever attached) comes back whatever the call does.
+        private void ForTheCall(CultDocumentRegistry? registry, Action body) =>
+            Held(() =>
+            {
+                var previous = SwapRegistry(registry);
+                try
+                {
+                    body();
+                }
+                finally
+                {
+                    SwapRegistry(previous);
+                }
+            });
+
+        private void WriteOne(CultPersistedRecord record, CultSchemaCatalogEntry catalogEntry, bool? holdsIds)
         {
-            if (payload == null) throw new ArgumentNullException(nameof(payload));
-            if (Cache != null)
-                throw new InvalidOperationException("The store is attached to a cache, read through the cache.");
-            AttachRegistry(registry ?? CultDocumentRegistry.Shared);
-            var document = (TDocument)DeserializePayload(typeof(TDocument), payload);
-            CultElementIds.Plan(typeof(TDocument), document, key.Value, deterministic: true).Apply();
-            return document;
+            using (AcquireLock(wait: true))
+                _ = ApplyWriteSet(ReadSnapshot(), new[] { new CultStagedRecord(record, catalogEntry, holdsIds) }, Array.Empty<string>(), Array.Empty<string>());
         }
 
         private void RefuseWhenAttached()

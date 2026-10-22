@@ -19,7 +19,7 @@ if (!committed)
     return 1;
 
 // A store file is written and read without a cache through the public members: this project has no InternalsVisibleTo, so
-// building it pins that ReadStoreSnapshot, WriteRecord, WriteDocument and DecodeDocument are public API.
+// building it pins that ReadStoreSnapshot, WriteRecord and WriteDocument, and CultCodec.DecodeDocument, are public API.
 var storePath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "consumer-build-" + System.Guid.NewGuid().ToString("N") + ".cc");
 try
 {
@@ -32,7 +32,7 @@ try
     var typedRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(ConsumerFaction) });
     store.WriteDocument(new CultRecordKey("f"), new ConsumerFaction { Name = "typed" }, registry: typedRegistry);
     var typed = store.ReadStoreSnapshot()!.Records.Single(record => record.Key == "f");
-    if (store.DecodeDocument<ConsumerFaction>(new CultRecordKey("f"), typed.Payload, typedRegistry).Name != "typed")
+    if (GameCult.Caching.MessagePack.CultCacheMessagePack.CreateCodec(typedRegistry).DecodeDocument<ConsumerFaction>(new CultRecordKey("f"), typed.Payload).Name != "typed")
         return 1;
 }
 finally

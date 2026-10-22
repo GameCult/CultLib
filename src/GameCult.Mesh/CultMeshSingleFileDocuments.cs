@@ -112,7 +112,7 @@ namespace GameCult.Mesh
             var descriptor = resolvedRegistry.GetRequired<TDocument>();
             var payload = ReadSingleFileDocumentPayload(path, key, descriptor.SchemaId);
             // A load refuses what a write refuses, and mints the ids a cache load of the same file would mint.
-            return StoreAt(path).DecodeDocument<TDocument>(key, payload, resolvedRegistry);
+            return CultCacheMessagePack.CreateCodec(resolvedRegistry).DecodeDocument<TDocument>(key, payload);
         }
 
         /// <summary>

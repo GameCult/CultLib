@@ -372,8 +372,8 @@ namespace GameCult.Caching.Tests
                 return store;
             }
 
-            protected override byte[] SerializePayload(object document) =>
-                CultDocumentMessagePackSerialization.SerializeUntyped(document, document.GetType(), Registry);
+            protected override byte[] SerializePayload(object document, Type documentType) =>
+                CultDocumentMessagePackSerialization.SerializeUntyped(document, documentType, Registry);
 
             protected override object DeserializePayload(Type documentType, byte[] payload) =>
                 CultDocumentMessagePackSerialization.DeserializeUntyped(documentType, payload, Registry);
