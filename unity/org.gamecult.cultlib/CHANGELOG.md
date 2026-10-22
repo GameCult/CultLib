@@ -2,6 +2,16 @@
 
 All notable changes to this package are documented in this file.
 
+## [2.0.1] - 2026-10-22
+
+### Fixed
+
+- A store written by 1.0.x with a list of record references (`CultRecordRef<T>[]` or any `IEnumerable<CultRecordRef<T>>` slot)
+  opens again. 2.0.0 classified such a slot as a reference to `T`, 1.0.x had persisted it as a plain value, and the schema
+  comparison refused the store with "changed reference semantics" and "changed target schema". The payload is the same array
+  of keys, so gaining the reference classification on an otherwise identical slot is now compatible drift (migration warning
+  `gained_reference_semantics`). A reference that is lost or retargeted, and any change of type or cardinality, still refuses.
+
 ## [2.0.0] - 2026-10-22
 
 ### Breaking
