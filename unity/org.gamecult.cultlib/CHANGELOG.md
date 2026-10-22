@@ -53,6 +53,25 @@ All notable changes to this package are documented in this file.
   the extra slot (for example a variant) and the next save wrote the loss back.
   `cultcache.store.v1` and `cultcache.store.v2` are the formats this release reads;
   a store stamped with a newer one is refused, so this release never rewrites it.
+- CultCache payload nesting is bounded at 256 on read and on write (it was 500), and a
+  union arm slot `[k, nil]` is refused. A store holding a record nested 257 to 500
+  deep, which 1.0.61 read and wrote, no longer opens, and a value nested that deep
+  can no longer be saved; flatten such a record before upgrading.
+- RUDP: `SendSchema` throws the `SocketException` for a send that can never
+  succeed as built (`MessageSize`, `InvalidArgument`, `AddressFamilyNotSupported`),
+  queues nothing, and a permanent failure after an earlier fragment left ends the
+  session. It used to count every send failure as a lost datagram and return. Inside
+  a poll such a failure ends only that peer's session (`PeerDisconnected` carries a
+  reason naming the error) and the poll is not failed.
+- RUDP sessions end where they used to carry on: a peer whose message cannot be
+  decoded or handled has its session ended with a goodbye, instead of throwing out
+  of `PollAvailableAsync`/`PollOnceAsync`; a session that refuses a packet ends;
+  `FlushReliable` throws for writes an ended session forgot; the listener replaces a
+  peer on a Connect only when its connect payload differs (reporting
+  `PeerDisconnected` for the old one) where it used to replace it on every Connect;
+  server mode is claimed only by a Connect; an `InitialSequence` of `uint.MaxValue`
+  is rejected; malformed, foreign-connection and refused packets are dropped and
+  counted in `Stats.PacketsDropped` instead of throwing out of `TryReceiveOnce`.
 - `CultNetDatabase.PutAsync` and `DeleteAsync` for a schema no shard owns throw
   `CultNetUnownedSchemaException` (an `InvalidOperationException` naming the schema)
   before the cache is touched. They used to cache the write and never log it. The
@@ -76,14 +95,16 @@ All notable changes to this package are documented in this file.
   reading it. A store with no variant stays `cultcache.store.v1`, byte-identical to
   1.0.x. CultMesh single-file reads, the directory store and CultNet refuse a variant
   record by name; only the C# CultCache resolves variants.
-- A plain flush (`SingleFileBackingStore.PushAll`) reads the file's format stamp under
-  the lock before it rewrites the file, and throws `NotSupportedException` instead of
-  writing when another process has since stamped it `cultcache.store.v<N>` with N > 2.
-  It used to overwrite it from this cache's older view. A directory store throws the
-  same exception, from the manifest parse every write already ran, for a manifest
-  stamped `cultcache.store.v<N>` with N > 4 (it threw `InvalidOperationException`).
-  A stamp that cannot be read at all (empty, corrupt) is not a newer format, and a
-  flush still rewrites it.
+- A plain flush (`SingleFileBackingStore.PushAll`) reads the file under the lock before it
+  rewrites it, by the same rule attach and conditional commit use, and throws
+  `NotSupportedException` instead of writing when the store is one this runtime
+  refuses to read: stamped by another process with a newer format, or with a header the
+  reader refuses. A read that fails with an I/O or access error also refuses. It used to
+  overwrite the file from this cache's older view. A directory store throws the same
+  exception, from the manifest parse every write already ran, for a manifest stamped
+  `cultcache.store.v<N>` with N > 4 (it threw `InvalidOperationException`). A file that
+  merely cannot be parsed (empty, corrupt) is not a newer format, and a flush still
+  rewrites it.
 - `CultMesh.WriteSingleFileDocument` and `WriteSingleFileDocumentPayload` read the
   file they replace, under the store's `<path>.lock`, and refuse (without touching
   it) a file this runtime cannot read, a store stamped with a newer format version,
