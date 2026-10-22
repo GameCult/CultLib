@@ -16,6 +16,23 @@ var committed = outside.Commit(batch =>
 });
 if (!committed)
     return 1;
+
+// A store file is written and read without a cache through the two public members: this project has no InternalsVisibleTo, so
+// building it pins that ReadStoreSnapshot and WriteRecord are public API.
+var storePath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "consumer-build-" + System.Guid.NewGuid().ToString("N") + ".cc");
+try
+{
+    var entry = new CultSchemaCatalogEntry { SchemaId = "outside.written", SchemaName = "outside.written" };
+    var store = new GameCult.Caching.MessagePack.SingleFileMessagePackBackingStore(storePath);
+    store.WriteRecord(new CultPersistedRecord { Key = "r", SchemaId = entry.SchemaId, StoredAt = "t", Payload = new byte[] { 0x90 } }, entry);
+    var snapshot = store.ReadStoreSnapshot();
+    if (snapshot == null || snapshot.Records.Length != 1 || snapshot.Records[0].Key != "r")
+        return 1;
+}
+finally
+{
+    System.IO.File.Delete(storePath);
+}
 return 0;
 
 // Lists one record under an id no type claims, at version "v1", and commits only when the conditions hold over it.

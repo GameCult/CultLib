@@ -4218,15 +4218,33 @@ namespace GameCult.Caching
         }
 
         /// <summary>
-        /// The one write of this store: under its lock, the durable store read there with the upserts written and the removals
-        /// and the upserts' keys taken out of what is copied, every other record copied forward as stored. CultMesh's
-        /// single-file document writes call this, with no cache attached.
+        /// Writes one record to the store file without a cache. Under the store's lock the file is read by the same reader a cache's
+        /// store uses, <paramref name="record"/> replaces the record at its key, and every other record and catalog entry is copied
+        /// forward as stored. The file is replaced atomically, and its format header is decided as a flush decides it:
+        /// <paramref name="holdsIds"/> true marks the store as holding element ids, false leaves it unmarked, and null (a payload
+        /// the caller cannot read) keeps whatever the file already says. A write that finds the file unreadable, or a record at
+        /// the key under a schema id <paramref name="catalogEntry"/> does not declare, is refused and leaves the file as it was.
         /// </summary>
-        internal void ApplyWriteSet(IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals) => Held(() =>
+        /// <param name="record">The record to store.</param>
+        /// <param name="catalogEntry">The schema catalog entry for the record's schema id.</param>
+        /// <param name="holdsIds">Whether the record's payload holds element ids, or null when the caller cannot tell.</param>
+        /// <param name="registry">The registry the payload was encoded with. Given, the write decides the header for copied records that registry can read; omitted, it decides nothing for them.</param>
+        /// <exception cref="InvalidOperationException">The store is attached to a cache; write through the cache.</exception>
+        /// <exception cref="CultStoreUnreadableException">The file at the path is not a store this runtime can read.</exception>
+        public void WriteRecord(CultPersistedRecord record, CultSchemaCatalogEntry catalogEntry, bool? holdsIds = null, CultDocumentRegistry? registry = null)
         {
-            using (AcquireLock(wait: true))
-                _ = ApplyWriteSet(ReadSnapshot(), upserts, removals, Array.Empty<string>());
-        });
+            if (record == null) throw new ArgumentNullException(nameof(record));
+            if (catalogEntry == null) throw new ArgumentNullException(nameof(catalogEntry));
+            if (Cache != null)
+                throw new InvalidOperationException("The store is attached to a cache, write through the cache.");
+            if (registry != null)
+                AttachRegistry(registry);
+            Held(() =>
+            {
+                using (AcquireLock(wait: true))
+                    _ = ApplyWriteSet(ReadSnapshot(), new[] { new CultStagedRecord(record, catalogEntry, holdsIds) }, Array.Empty<string>(), Array.Empty<string>());
+            });
+        }
 
         // Flush, commit and Mesh's write all end here, with the durable store they read under the lock they hold. First, a key the write
         // names or checks whose durable record is under an id the writer does not declare refuses the write (RefuseUndeclaredOnDisk); a
@@ -4506,9 +4524,13 @@ namespace GameCult.Caching
             }
         }
 
-        // CultMesh's single-file document helpers reach this store file only through this read and ApplyWriteSet, so they share
-        // its one reader, its lock and its atomic replace.
-        internal CultPersistedStoreSnapshot? ReadDurable() => Held(() => ReadSnapshot()?.Snapshot);
+        /// <summary>
+        /// Reads the store file once, under the store's gate, with the reader a cache's store opens with, and returns what is
+        /// durable at the path: the records, the schema catalog and the format stamp. Returns null when nothing is at the path.
+        /// CultMesh's single-file document reads are built on this, so they share the store's one reader and its stamp rule.
+        /// </summary>
+        /// <exception cref="CultStoreUnreadableException">The file is empty, truncated, or stamped with a format this runtime does not read.</exception>
+        public CultPersistedStoreSnapshot? ReadStoreSnapshot() => Held(() => ReadSnapshot()?.Snapshot);
 
         private byte[]? ReadDisk()
         {

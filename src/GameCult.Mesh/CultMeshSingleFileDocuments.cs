@@ -161,7 +161,7 @@ namespace GameCult.Mesh
             if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value must be non-empty.", nameof(path));
             if (string.IsNullOrWhiteSpace(expectedSchemaId)) throw new ArgumentException("Value must be non-empty.", nameof(expectedSchemaId));
 
-            var snapshot = StoreAt(path).ReadDurable() ?? throw new FileNotFoundException($"CultCache document '{path}' does not exist.", path);
+            var snapshot = StoreAt(path).ReadStoreSnapshot() ?? throw new FileNotFoundException($"CultCache document '{path}' does not exist.", path);
             var record = snapshot.Records.SingleOrDefault(candidate => string.Equals(candidate.Key, key.Value, StringComparison.Ordinal))
                 ?? throw new InvalidDataException($"CultCache document '{path}' does not contain record '{key.Value}'.");
 
@@ -192,7 +192,7 @@ namespace GameCult.Mesh
             if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value must be non-empty.", nameof(path));
             if (string.IsNullOrWhiteSpace(expectedSchemaId)) throw new ArgumentException("Value must be non-empty.", nameof(expectedSchemaId));
 
-            var snapshot = StoreAt(path).ReadDurable() ?? throw new FileNotFoundException($"CultCache document '{path}' does not exist.", path);
+            var snapshot = StoreAt(path).ReadStoreSnapshot() ?? throw new FileNotFoundException($"CultCache document '{path}' does not exist.", path);
             if (snapshot.Records.Length != 1)
             {
                 throw new InvalidDataException(
@@ -244,24 +244,17 @@ namespace GameCult.Mesh
             // so a file already marked stays marked. A typed write attaches the registry its payload was encoded with, so the write
             // decides for copied records that registry can read; a raw payload attaches none and decides nothing. A store this runtime
             // cannot read refuses the write instead of being overwritten.
-            var store = StoreAt(path);
-            if (registry != null)
-                store.AttachRegistry(registry);
-            store.ApplyWriteSet(
-                new[]
+            StoreAt(path).WriteRecord(
+                new CultPersistedRecord
                 {
-                    new CultStagedRecord(
-                        new CultPersistedRecord
-                        {
-                            Key = key.Value,
-                            SchemaId = catalogEntry.SchemaId,
-                            StoredAt = string.IsNullOrWhiteSpace(storedAt) ? DateTimeOffset.UtcNow.ToString("O") : storedAt!,
-                            Payload = payload
-                        },
-                        catalogEntry,
-                        holdsIds)
+                    Key = key.Value,
+                    SchemaId = catalogEntry.SchemaId,
+                    StoredAt = string.IsNullOrWhiteSpace(storedAt) ? DateTimeOffset.UtcNow.ToString("O") : storedAt!,
+                    Payload = payload
                 },
-                Array.Empty<string>());
+                catalogEntry,
+                holdsIds,
+                registry);
         }
 
         private static SingleFileMessagePackBackingStore StoreAt(string path) => new SingleFileMessagePackBackingStore(path);
