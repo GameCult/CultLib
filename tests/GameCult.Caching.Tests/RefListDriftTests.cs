@@ -60,7 +60,7 @@ namespace GameCult.Caching.Tests
 
                 var holder = cache.GetAll<RefListHolder>().Single();
                 Assert.That(holder.Items.Select(item => item.Key.Value), Is.EqualTo(new[] { "alpha", "beta" }));
-                Assert.That(cache.Get(holder.Items[0])!.Name, Is.EqualTo("alpha"));
+                Assert.That(cache.Get<RefListTarget>(holder.Items[0].Key)!.Name, Is.EqualTo("alpha"));
 
                 // The store is rewritten under the 2.0 schema, which now carries the reference.
                 holder.Items = holder.Items.Reverse().ToArray();
