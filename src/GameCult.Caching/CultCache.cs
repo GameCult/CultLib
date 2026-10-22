@@ -3565,7 +3565,7 @@ namespace GameCult.Caching
                 return;
             }
 
-            if (FormatNumber(header) is int number && number > 2)
+            if (CultPersistedStoreSnapshot.FormatNumber(header) is int number && number > 2)
                 throw new NotSupportedException(
                     $"Store {FileInfo.FullName} is {header}, a newer format than this runtime reads " +
                     $"({CultPersistedStoreSnapshot.FormatV1} and {CultPersistedStoreSnapshot.FormatV2}); a flush would downgrade it, so none was written.");
