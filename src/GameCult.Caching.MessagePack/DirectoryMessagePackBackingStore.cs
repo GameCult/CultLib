@@ -550,6 +550,8 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         }
 
         var snapshot = read.Snapshot;
+        // An array with no stamp claims no directory format: it parses to the default v1 without the callback above ever seeing a stamp.
+        RequireReadableStamp(snapshot.FormatVersion);
         var catalogBytes = new Dictionary<CultSchemaCatalogEntry, byte[]>();
         for (var index = 0; index < snapshot.SchemaCatalog.Length; index++)
             catalogBytes[snapshot.SchemaCatalog[index]] = read.CatalogBytes[index];

@@ -249,16 +249,32 @@ namespace GameCult.Caching.Tests
         private static System.Collections.Generic.IEnumerable<TestCaseData> NewerStampOverUnreadableBody()
         {
             byte garbage = 0xc1;
-            yield return new TestCaseData(Raw((byte)0x93, "cultcache.store.v4", garbage, garbage)).SetName("v4 header over a bad body");
-            yield return new TestCaseData(Raw((byte)0x93, System.Text.Encoding.UTF8.GetBytes("cultcache.store.v3"), garbage, garbage)).SetName("bin header v3 over a bad body");
-            yield return new TestCaseData(Raw((byte)0x93, System.Text.Encoding.UTF8.GetBytes("cultcache.store.v9"), garbage, garbage)).SetName("bin header v9 over a bad body");
-            yield return new TestCaseData(Raw((byte)0x93, "cultcache.store.v4", (byte)0x91, garbage, (byte)0x90)).SetName("v4 header over a bad catalog");
-            yield return new TestCaseData(Raw((byte)0x92, "cultcache.store.v4", garbage)).SetName("v4 header over garbage");
-            yield return new TestCaseData(Raw((byte)0x93, "cultcache.store.v5", garbage, garbage)).SetName("v5 header over a bad body");
+            yield return new TestCaseData(Raw((byte)0x93, "cultcache.store.v4", garbage, garbage), "cultcache.store.v4").SetName("v4 header over a bad body");
+            yield return new TestCaseData(Raw((byte)0x93, System.Text.Encoding.UTF8.GetBytes("cultcache.store.v3"), garbage, garbage), "binary").SetName("bin header v3 over a bad body");
+            yield return new TestCaseData(Raw((byte)0x93, System.Text.Encoding.UTF8.GetBytes("cultcache.store.v9"), garbage, garbage), "binary").SetName("bin header v9 over a bad body");
+            yield return new TestCaseData(Raw((byte)0x93, "cultcache.store.v4", (byte)0x91, garbage, (byte)0x90), "cultcache.store.v4").SetName("v4 header over a bad catalog");
+            yield return new TestCaseData(Raw((byte)0x92, "cultcache.store.v4", garbage), "cultcache.store.v4").SetName("v4 header over garbage");
+            yield return new TestCaseData(Raw((byte)0x93, "cultcache.store.v5", garbage, garbage), "cultcache.store.v5").SetName("v5 header over a bad body");
+            yield return new TestCaseData(BinaryStampOverAValidBody(), "binary").SetName("bin header v1 over a valid body");
+        }
+
+        // The single-file-v1 fixture's own bytes with the stamp re-encoded from a string to bin8: nothing else differs, so only the
+        // stamp's encoding can refuse it.
+        private static byte[] BinaryStampOverAValidBody()
+        {
+            var bytes = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "pre-cut2", "single-file-v1", "store.msgpack"));
+            var stamp = System.Text.Encoding.UTF8.GetBytes("cultcache.store.v1");
+            var at = 1;
+            Assert.That(bytes[0], Is.EqualTo(0x93), "the fixture opens with a three-slot array");
+            Assert.That(bytes[at], Is.EqualTo((byte)(0xa0 | stamp.Length)), "the stamp is a fixstr");
+            var rebuilt = new System.Collections.Generic.List<byte> { bytes[0], 0xc4, (byte)stamp.Length };
+            rebuilt.AddRange(stamp);
+            rebuilt.AddRange(bytes.Skip(at + 1 + stamp.Length));
+            return rebuilt.ToArray();
         }
 
         [TestCaseSource(nameof(NewerStampOverUnreadableBody))]
-        public async Task SingleFileFlushRefusesANewerStampWhateverItsBodyHolds(byte[] swapped)
+        public async Task SingleFileFlushRefusesANewerStampWhateverItsBodyHolds(byte[] swapped, string named)
         {
             var root = CopyFixture("single-file-v1");
             try
@@ -270,9 +286,11 @@ namespace GameCult.Caching.Tests
                 File.WriteAllBytes(file, swapped);
 
                 await cache.AddAsync(new PreCut2FixtureNote { Text = "must not overwrite" });
-                Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAllBackingStores());
+                var flush = Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAllBackingStores())!;
+                Assert.That(flush.Message, Does.Contain(named));
                 Assert.That(File.ReadAllBytes(file), Is.EqualTo(swapped));
-                Assert.Throws<CultStoreUnreadableException>(() => new SingleFileMessagePackBackingStore(file).PullAll());
+                var pull = Assert.Throws<CultStoreUnreadableException>(() => new SingleFileMessagePackBackingStore(file).PullAll())!;
+                Assert.That(pull.Message, Does.Contain(named));
             }
             finally
             {
@@ -696,6 +714,87 @@ namespace GameCult.Caching.Tests
                 Assert.That(refusal.Message.Contains(" is " + formatVersion + ";", StringComparison.Ordinal), Is.EqualTo(shown), refusal.Message);
                 Assert.That(cache.BackingStores, Is.Empty);
                 Assert.That(File.ReadAllBytes(manifest), Is.EqualTo(bytes));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        // A header is named whole only in the shape cultcache.store.v<1-6 digits>, with a suffix counted and never echoed, and
+        // described by its length otherwise.
+        [TestCase("cultcache.store.v3", "cultcache.store.v3")]
+        [TestCase("cultcache.store.v10", "cultcache.store.v10")]
+        [TestCase("cultcache.store.v40", "cultcache.store.v40")]
+        [TestCase("cultcache.store.v123456", "cultcache.store.v123456")]
+        [TestCase("cultcache.store.v1234567", "an unrecognised cultcache.store.* header of 24 bytes")]
+        [TestCase("cultcache.store.v", "an unrecognised cultcache.store.* header of 17 bytes")]
+        [TestCase("cultcache.store.vx", "an unrecognised cultcache.store.* header of 18 bytes")]
+        [TestCase("cultcache.store.v3.extra", "cultcache.store.v3 with a suffix of 6 bytes")]
+        public void DescribeHeaderNamesOnlyTheKnownShape(string header, string described)
+        {
+            Assert.That(CultDocumentMessagePackSerialization.DescribeHeader(header), Is.EqualTo(described));
+        }
+
+        [Test]
+        public void DescribeHeaderCountsASuffixInBytes()
+        {
+            const string suffix = ".directory-content-addressed-pages";
+            var header = "cultcache.store.v6" + suffix;
+
+            Assert.That(CultDocumentMessagePackSerialization.DescribeHeader(header),
+                Is.EqualTo($"cultcache.store.v6 with a suffix of {System.Text.Encoding.UTF8.GetByteCount(suffix)} bytes"));
+        }
+
+        [Test]
+        public void DirectoryStoreNamesASuffixedNewerStampByItsLength()
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"cultlib-suffix-{Guid.NewGuid():N}");
+            var manifest = Path.Combine(root, "store.cc");
+            Directory.CreateDirectory(root);
+            try
+            {
+                File.WriteAllBytes(manifest, CultDocumentMessagePackSerialization.SerializeSnapshot(new CultPersistedStoreSnapshot
+                {
+                    FormatVersion = "cultcache.store.v6.directory-content-addressed-pages",
+                    SchemaCatalog = Array.Empty<CultSchemaCatalogEntry>(),
+                    Records = Array.Empty<CultPersistedRecord>()
+                }));
+
+                var refusal = Assert.Throws<CultStoreUnreadableException>(() => new DirectoryMessagePackBackingStore(manifest).PullAll())!;
+
+                Assert.That(refusal.Message, Does.Contain("cultcache.store.v6 with a suffix of"));
+                Assert.That(refusal.Message, Does.Not.Contain("directory-content-addressed-pages"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        // An array with no stamp parses to the default v1, which no directory reads: the manifest is refused, and the pages that
+        // belong to the store beside it are neither rewritten nor deleted.
+        [Test]
+        public void DirectoryManifestThatIsAnEmptyArrayIsRefused()
+        {
+            var root = CopyFixture("directory-v4");
+            try
+            {
+                var manifest = Path.Combine(root, "store.cc");
+                var emptyArray = new byte[] { 0x90 };
+                File.WriteAllBytes(manifest, emptyArray);
+                var pages = Directory.GetFiles(root, "*", SearchOption.AllDirectories)
+                    .Where(file => file != manifest)
+                    .ToDictionary(file => file, File.ReadAllBytes);
+                Assert.That(pages, Is.Not.Empty, "the fixture's pages exist");
+
+                var refusal = Assert.Throws<CultStoreUnreadableException>(() => new DirectoryMessagePackBackingStore(manifest).PullAll())!;
+
+                Assert.That(refusal.Path, Is.EqualTo(manifest));
+                Assert.That(File.ReadAllBytes(manifest), Is.EqualTo(emptyArray));
+                Assert.That(Directory.GetFiles(root, "*", SearchOption.AllDirectories).Where(file => file != manifest), Is.EquivalentTo(pages.Keys));
+                foreach (var page in pages)
+                    Assert.That(File.ReadAllBytes(page.Key), Is.EqualTo(page.Value), page.Key);
             }
             finally
             {
