@@ -66,6 +66,24 @@ namespace GameCult.Caching
         public const string FormatV2 = "cultcache.store.v2";
 
         public string FormatVersion { get; set; } = FormatV1;
+
+        /// <summary>
+        /// The N of a header shaped exactly <c>cultcache.store.v&lt;N&gt;</c> or <c>cultcache.store.v&lt;N&gt;.&lt;suffix&gt;</c>;
+        /// null for any other header. A header whose N exceeds what a runtime reads is a newer format, which that runtime
+        /// refuses and must never rewrite.
+        /// </summary>
+        internal static int? FormatNumber(string? header)
+        {
+            const string prefix = "cultcache.store.v";
+            if (header == null || !header.StartsWith(prefix, StringComparison.Ordinal))
+                return null;
+            var end = prefix.Length;
+            while (end < header.Length && header[end] >= '0' && header[end] <= '9')
+                end++;
+            if (end == prefix.Length || end - prefix.Length > 6 || (end < header.Length && header[end] != '.'))
+                return null;
+            return int.Parse(header.Substring(prefix.Length, end - prefix.Length), System.Globalization.CultureInfo.InvariantCulture);
+        }
         public CultSchemaCatalogEntry[] SchemaCatalog { get; set; } = Array.Empty<CultSchemaCatalogEntry>();
         public CultPersistedRecord[] Records { get; set; } = Array.Empty<CultPersistedRecord>();
     }
@@ -3354,6 +3372,14 @@ namespace GameCult.Caching
         protected FileInfo FileInfo { get; }
         protected abstract byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot);
         protected abstract CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data);
+
+        /// <summary>
+        /// Reads only the format header of a stored file, or null when this store cannot tell. A plain flush rewrites the
+        /// whole file from this cache's view, so it first reads this header and refuses a file stamped with a newer
+        /// format than the store reads; a store that returns null here is not guarded.
+        /// </summary>
+        protected virtual string? ReadFormatVersion(byte[] data) => null;
+
         protected abstract byte[] SerializePayload(object document);
         protected abstract object DeserializePayload(Type documentType, byte[] payload);
 
@@ -3429,6 +3455,7 @@ namespace GameCult.Caching
             {
                 using (AcquireLock(wait: true))
                 {
+                    RefuseToRewriteANewerFormat();
                     WriteSnapshot(
                         Entries.Values.Select(entry => ToPersistedRecord(entry, SerializePayload)),
                         Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()));
@@ -3518,6 +3545,30 @@ namespace GameCult.Caching
             departing.AddRange(Entries.Values.Where(known =>
                 !onDisk.Contains(known.Key.Value) && !landing.Contains(known.Key.Value) && !removing.Contains(known.Key.Value)));
             Judging!(arriving, departing);
+        }
+
+        // A plain flush replaces the file without merging it, so under the lock it first reads the stamp: a file another
+        // process has since written in a newer format is refused and left as it is. An unreadable stamp (missing, empty,
+        // corrupt) is not newer, and the flush proceeds as it always has, so it can still heal a damaged store.
+        private void RefuseToRewriteANewerFormat()
+        {
+            FileInfo.Refresh();
+            if (!FileInfo.Exists)
+                return;
+            string? header;
+            try
+            {
+                header = ReadFormatVersion(ReadAllBytesShared(FileInfo.FullName));
+            }
+            catch (Exception)
+            {
+                return;
+            }
+
+            if (FormatNumber(header) is int number && number > 2)
+                throw new NotSupportedException(
+                    $"Store {FileInfo.FullName} is {header}, a newer format than this runtime reads " +
+                    $"({CultPersistedStoreSnapshot.FormatV1} and {CultPersistedStoreSnapshot.FormatV2}); a flush would downgrade it, so none was written.");
         }
 
         private CultPersistedStoreSnapshot? ReadSnapshot()

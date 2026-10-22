@@ -156,6 +156,100 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        // Two processes: this one attached a v1 store, then a later build rewrote it as v3. A plain flush, a staged write
+        // and a staged delete must each refuse to downgrade it, leaving the file as the other process wrote it.
+        [Test]
+        public async Task SingleFileFlushRefusesAStoreAnotherProcessStampedNewerSinceAttach()
+        {
+            var root = CopyFixture("single-file-v1");
+            try
+            {
+                var file = Path.Combine(root, "store.msgpack");
+                using var cache = new CultCache();
+                cache.AddBackingStore(new SingleFileMessagePackBackingStore(file));
+                await cache.PullAllBackingStoresAsync();
+
+                var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(file));
+                snapshot.FormatVersion = "cultcache.store.v3";
+                File.WriteAllBytes(file, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+                var before = File.ReadAllBytes(file);
+
+                await cache.AddAsync(new PreCut2FixtureNote { Text = "staged after the other process wrote v3" });
+                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                Assert.That(File.ReadAllBytes(file), Is.EqualTo(before));
+
+                cache.Remove(new CultRecordKey("item:anvil"));
+                Assert.Throws<NotSupportedException>(() => cache.BackingStores.Single().PushAll());
+                Assert.That(File.ReadAllBytes(file), Is.EqualTo(before));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        // An unreadable stamp is not a newer format: a flush still heals a damaged store.
+        [Test]
+        public async Task SingleFileFlushStillHealsAStoreWhoseStampIsUnreadable()
+        {
+            var root = CopyFixture("single-file-v1");
+            try
+            {
+                var file = Path.Combine(root, "store.msgpack");
+                using var cache = new CultCache();
+                cache.AddBackingStore(new SingleFileMessagePackBackingStore(file));
+                await cache.PullAllBackingStoresAsync();
+                File.WriteAllBytes(file, new byte[] { 0xc1, 0xc1 });
+
+                await cache.AddAsync(new PreCut2FixtureNote { Text = "heals" });
+                cache.FlushAllBackingStores();
+
+                Assert.That(CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(file)).FormatVersion,
+                    Is.EqualTo("cultcache.store.v1"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [TestCase("cultcache.store.v5.directory-content-addressed-pages")]
+        [TestCase("cultcache.store.v9")]
+        public async Task DirectoryWritesRefuseAStoreAnotherProcessStampedNewerSinceAttach(string newer)
+        {
+            var root = CopyFixture("directory-v4");
+            try
+            {
+                var manifest = Path.Combine(root, "store.cc");
+                using var cache = new CultCache();
+                cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                await cache.PullAllBackingStoresAsync();
+
+                var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(manifest));
+                snapshot.FormatVersion = newer;
+                File.WriteAllBytes(manifest, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+                Func<System.Collections.Generic.Dictionary<string, byte[]>> files = () => Directory
+                    .GetFiles(root, "*", SearchOption.AllDirectories)
+                    .Where(path => !path.EndsWith(".lock", StringComparison.Ordinal))
+                    .ToDictionary(path => path, File.ReadAllBytes);
+                var before = files();
+
+                await cache.AddAsync(new PreCut2FixtureNote { Text = "staged after the other process wrote the newer format" });
+                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                Assert.That(files().Keys, Is.EquivalentTo(before.Keys));
+                foreach (var pair in before) Assert.That(File.ReadAllBytes(pair.Key), Is.EqualTo(pair.Value), pair.Key);
+
+                cache.Remove(new CultRecordKey("item:anvil"));
+                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                Assert.That(files().Keys, Is.EquivalentTo(before.Keys));
+                foreach (var pair in before) Assert.That(File.ReadAllBytes(pair.Key), Is.EqualTo(pair.Value), pair.Key);
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
         [Test]
         public void SingleFileRefusesExtraRecordSlotNamingTheRecord()
         {

@@ -449,6 +449,14 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         }
 
         var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(manifestBytes);
+        if (CultPersistedStoreSnapshot.FormatNumber(snapshot.FormatVersion) is int number && number > 4)
+        {
+            // Every write path parses the manifest under its commit lease before it writes a page or the manifest, so a
+            // store another process has since stamped newer is refused here, untouched.
+            throw new NotSupportedException(
+                $"Directory store {_manifestFile.FullName} is {snapshot.FormatVersion}, a newer format than this runtime reads ({IndexedFormatVersion}).");
+        }
+
         if (!string.Equals(snapshot.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
