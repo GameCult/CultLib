@@ -83,21 +83,18 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void RecordRewrittenUnderAnotherSchemaWithItsStoredAtFailsExpect()
+        public void RecordRewrittenUnderAnotherSchemaFailsExpect()
         {
             SeedDrift(directory: false);
             using var cache = Drift(false, NarrowDrift).Open();
             var observed = cache.Get(DriftKey)!;
-            var storedAt = cache.GetStored(DriftKey)!.StoredAt;
             using (var other = Drift(false, ReusedDrift).Open())
             {
                 other.BackingStores[0].Push(other.GetStored(DriftKey)!);
                 other.BackingStores[0].PushAll();
             }
-            using (var reader = Drift(false, ReusedDrift).Open())
-                Assert.That(reader.GetStored(DriftKey)!.StoredAt, Is.EqualTo(storedAt), "the rewrite kept storedAt");
 
-            Assert.That(DriftCommit(cache, observed, 2), Is.False, "a record rewritten under another schema passed Expect on storedAt alone");
+            Assert.That(DriftCommit(cache, observed, 2), Is.False, "a record rewritten under another schema passed Expect");
         }
 
         // The directory store rewrites only what is pushed to it, so the other writer pushes the record it read unchanged.

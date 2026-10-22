@@ -1265,7 +1265,8 @@ namespace GameCult.Caching.Tests
                         a.Override<VariantGear>(nameof(VariantGear.Code), "big")
                     });
                 }))!;
-                Assert.That(refused.Message, Does.Contain(BigKey.Value).And.Contain(BaseKey.Value).And.Contain("x"));
+                Assert.That(refused.Message, Does.Contain(BigKey.Value));
+                Assert.That(refused.ChangedKeys, Is.EqualTo(new[] { BaseKey.Value }), "the refusal names the base another writer renamed");
             }
 
             using var reopened = Open(path, readOnly: true);
