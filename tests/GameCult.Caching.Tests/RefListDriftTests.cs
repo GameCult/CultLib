@@ -36,6 +36,19 @@ namespace GameCult.Caching.Tests
             public CultRecordRef<RefListTarget>[] Items = Array.Empty<CultRecordRef<RefListTarget>>();
         }
 
+        // The same slot declared as a plain value, as a later version might: the reverse of the 1.0.x drift.
+        [CultDocument("tests.reflist_holder", "tests.reflist_holder.v2")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class RefListValueHolder
+        {
+            [Key(0)]
+            [CultName]
+            public string Name = string.Empty;
+
+            [Key(1)]
+            public string[] Items = Array.Empty<string>();
+        }
+
         private static string VectorPath(string name)
         {
             for (var dir = new DirectoryInfo(TestContext.CurrentContext.TestDirectory); dir != null; dir = dir.Parent)
@@ -114,6 +127,20 @@ namespace GameCult.Caching.Tests
             Assert.That(
                 () => Resolve(member => { member.IsReference = false; member.TargetSchemaName = "tests.other_target"; }),
                 Throws.TypeOf<InvalidOperationException>());
+        }
+
+        [Test]
+        public void A_Lost_Reference_Still_Refuses()
+        {
+            var registry = CultDocumentRegistry.Shared;
+            var catalog = registry.GetRequired<RefListHolder>().ToCatalogEntry();
+            catalog.SchemaId = "persisted.tests.reflist_holder.v1";
+            catalog.ContentHash = "sha256:persisted-by-2.0";
+            catalog.CompatibleSchemaIds = new[] { registry.GetRequired<RefListValueHolder>().SchemaId };
+            catalog.Members.Single(member => member.Slot == 1).TypeName = "System.String[]";
+            Assert.That(
+                () => registry.ResolvePersistedSchemaReport(catalog.SchemaId, new[] { catalog }),
+                Throws.TypeOf<InvalidOperationException>().With.Message.Contains("changed reference semantics"));
         }
 
         [Test]
