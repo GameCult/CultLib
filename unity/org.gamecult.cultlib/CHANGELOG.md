@@ -76,19 +76,13 @@ All notable changes to this package are documented in this file.
   reading it. A store with no variant stays `cultcache.store.v1`, byte-identical to
   1.0.x. CultMesh single-file reads, the directory store and CultNet refuse a variant
   record by name; only the C# CultCache resolves variants.
+- `CultMesh.WriteSingleFileDocument` and `WriteSingleFileDocumentPayload` read the
+  file they replace, under the store's `<path>.lock`, and refuse (without touching
+  it) a file this runtime cannot read, a store stamped with a newer format version,
+  or one holding any record besides the key being written. They used to replace the
+  file whole. Write to a store that holds several records through a `CultCache`.
 
 ### Added
-
-- `CultStoredDocument.PersistedSchemaId`: the schema id a record is durably
-  stored under, as its backing store last read or wrote it. It differs from
-  `Descriptor.SchemaId` only for a record loaded under compatible schema drift
-  that its store has not rewritten since.
-- `CacheBackingStore.MarkWritten(CultStoredDocument)` (protected instance
-  method): a backing store records that its completed durable write stored a
-  record under its descriptor, so `PersistedSchemaId` follows the rewrite. It
-  throws `ArgumentException` for an entry that is not the one the store holds
-  in its own `Entries`. The single-file and directory stores mark every record
-  they rewrite; a custom store calls it for each record its own write rewrote.
 
 - Variants: a record that stores only its difference from a base record, resolved in
   memory when the cache admits it (`cultcache.store.v2`; see the persistence-format

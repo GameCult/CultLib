@@ -394,9 +394,9 @@ namespace GameCult.Caching
         /// The schema id this record is durably stored under, as its backing store last read or wrote it. It differs from
         /// <see cref="CultDocumentDescriptor.SchemaId"/> only for a record loaded under compatible schema drift that its
         /// store has not rewritten since; a store records its rewrite of an entry it holds with <see cref="CacheBackingStore.MarkWritten"/>.
-        /// Conditional commit compares this id and <see cref="StoredAt"/> with the disk.
+        /// Conditional commit compares this id and <see cref="StoredAt"/> with the disk. Internal to the shipped stores.
         /// </summary>
-        public string PersistedSchemaId => _persisted.SchemaId;
+        internal string PersistedSchemaId => _persisted.SchemaId;
 
         // The complete document. For a variant, the resolved view: derived, never written back.
         public object Document => _document ??
@@ -3333,7 +3333,7 @@ namespace GameCult.Caching
         /// </summary>
         /// <exception cref="ArgumentException"><paramref name="entry"/> is not the entry this store holds in
         /// <see cref="Entries"/> at its key: a store marks only its own rewrite.</exception>
-        protected void MarkWritten(CultStoredDocument entry)
+        internal void MarkWritten(CultStoredDocument entry)
         {
             if (entry == null)
                 throw new ArgumentNullException(nameof(entry));
