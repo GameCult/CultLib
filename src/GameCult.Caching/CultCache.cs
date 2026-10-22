@@ -66,6 +66,24 @@ namespace GameCult.Caching
         public const string FormatV2 = "cultcache.store.v2";
 
         public string FormatVersion { get; set; } = FormatV1;
+
+        /// <summary>
+        /// The N of a header shaped exactly <c>cultcache.store.v&lt;N&gt;</c> or <c>cultcache.store.v&lt;N&gt;.&lt;suffix&gt;</c>;
+        /// null for any other header. A header whose N exceeds what a runtime reads is a newer format, which that runtime
+        /// refuses and must never rewrite.
+        /// </summary>
+        internal static int? FormatNumber(string? header)
+        {
+            const string prefix = "cultcache.store.v";
+            if (header == null || !header.StartsWith(prefix, StringComparison.Ordinal))
+                return null;
+            var end = prefix.Length;
+            while (end < header.Length && header[end] >= '0' && header[end] <= '9')
+                end++;
+            if (end == prefix.Length || end - prefix.Length > 6 || (end < header.Length && header[end] != '.'))
+                return null;
+            return int.Parse(header.Substring(prefix.Length, end - prefix.Length), System.Globalization.CultureInfo.InvariantCulture);
+        }
         public CultSchemaCatalogEntry[] SchemaCatalog { get; set; } = Array.Empty<CultSchemaCatalogEntry>();
         public CultPersistedRecord[] Records { get; set; } = Array.Empty<CultPersistedRecord>();
     }
@@ -394,9 +412,9 @@ namespace GameCult.Caching
         /// The schema id this record is durably stored under, as its backing store last read or wrote it. It differs from
         /// <see cref="CultDocumentDescriptor.SchemaId"/> only for a record loaded under compatible schema drift that its
         /// store has not rewritten since; a store records its rewrite of an entry it holds with <see cref="CacheBackingStore.MarkWritten"/>.
-        /// Conditional commit compares this id and <see cref="StoredAt"/> with the disk.
+        /// Conditional commit compares this id and <see cref="StoredAt"/> with the disk. Internal to the shipped stores.
         /// </summary>
-        public string PersistedSchemaId => _persisted.SchemaId;
+        internal string PersistedSchemaId => _persisted.SchemaId;
 
         // The complete document. For a variant, the resolved view: derived, never written back.
         public object Document => _document ??
@@ -3333,7 +3351,7 @@ namespace GameCult.Caching
         /// </summary>
         /// <exception cref="ArgumentException"><paramref name="entry"/> is not the entry this store holds in
         /// <see cref="Entries"/> at its key: a store marks only its own rewrite.</exception>
-        protected void MarkWritten(CultStoredDocument entry)
+        internal void MarkWritten(CultStoredDocument entry)
         {
             if (entry == null)
                 throw new ArgumentNullException(nameof(entry));
@@ -3354,6 +3372,7 @@ namespace GameCult.Caching
         protected FileInfo FileInfo { get; }
         protected abstract byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot);
         protected abstract CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data);
+
         protected abstract byte[] SerializePayload(object document);
         protected abstract object DeserializePayload(Type documentType, byte[] payload);
 
@@ -3429,6 +3448,7 @@ namespace GameCult.Caching
             {
                 using (AcquireLock(wait: true))
                 {
+                    RefuseToRewriteAStoreItCannotRead();
                     WriteSnapshot(
                         Entries.Values.Select(entry => ToPersistedRecord(entry, SerializePayload)),
                         Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()));
@@ -3520,19 +3540,48 @@ namespace GameCult.Caching
             Judging!(arriving, departing);
         }
 
-        private CultPersistedStoreSnapshot? ReadSnapshot()
+        // A plain flush replaces the file without merging it, so under the lock it first reads the disk the way attach and
+        // commit do: a store whose stamp this runtime does not read is refused and left as it is, and so is a file that
+        // cannot be read (an I/O or access error). A file whose stamp reads as v1 or v2, or cannot be read at all (empty,
+        // truncated), is not a newer store, and the flush proceeds as it always has, so it can still heal; that includes a
+        // v1 file whose body is corrupt or truncated.
+        private void RefuseToRewriteAStoreItCannotRead()
+        {
+            var bytes = ReadFileBytes();
+            if (bytes == null)
+                return;
+            try
+            {
+                DeserializeSnapshot(bytes);
+            }
+            catch (NotSupportedException)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        private byte[]? ReadFileBytes()
         {
             FileInfo.Refresh();
             if (!FileInfo.Exists)
                 return null;
             try
             {
-                return DeserializeSnapshot(ReadAllBytesShared(FileInfo.FullName));
+                return ReadAllBytesShared(FileInfo.FullName);
             }
             catch (FileNotFoundException)
             {
                 return null;
             }
+        }
+
+        private CultPersistedStoreSnapshot? ReadSnapshot()
+        {
+            var bytes = ReadFileBytes();
+            return bytes == null ? null : DeserializeSnapshot(bytes);
         }
 
         private void WriteSnapshot(IEnumerable<CultPersistedRecord> records, IEnumerable<CultSchemaCatalogEntry> catalog)

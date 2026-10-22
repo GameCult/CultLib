@@ -227,13 +227,14 @@ against what is durably on disk at that moment:
   `(key, schemaId, storedAt)`. Any insert, delete or replace fails it.
 
 Record identity for conditions is `(schemaId, storedAt)`, where `schemaId` is
-the id the record is persisted under (`CultStoredDocument.PersistedSchemaId`),
+the id the record is persisted under (the internal `CultStoredDocument.PersistedSchemaId`),
 not the one this cache decodes it as. A value change mints a `storedAt`
 strictly later than the record it replaces; writers bump a minted timestamp by
 one tick when it is not later. An entry loaded under compatible schema drift
 keeps its persisted id until its store rewrites it; a store records each
-record its completed write rewrote with the protected instance method
-`CacheBackingStore.MarkWritten`, which refuses an entry that is not the one
+record its completed write rewrote with the internal instance method
+`CacheBackingStore.MarkWritten` (the shipped stores call it; it is not part of
+the public API), which refuses an entry that is not the one
 the store holds in its own `Entries` at that key. That guards against a store
 marking by mistake an entry it never held; a store that writes another copy
 into its own `Entries` and then marks it is trusted to have rewritten that

@@ -1,7 +1,7 @@
 {
     "name": "org.gamecult.caching.unity",
     "displayName": "GameCult CultCache Unity Tools",
-    "version": "1.4.0",
+    "version": "2.0.0",
     "unity": "2021.3",
     "description": "Unity editor tooling for inspecting and editing CultCache .cc stores.",
     "keywords": [
@@ -10,7 +10,7 @@
         "Data"
     ],
     "dependencies": {
-        "org.gamecult.cultlib": "1.0.60"
+        "org.gamecult.cultlib": "2.0.0"
     },
     "license": "MIT",
     "category": "Scripting"

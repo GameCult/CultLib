@@ -241,7 +241,45 @@ namespace GameCult.Mesh
             if (!string.IsNullOrWhiteSpace(directory))
                 Directory.CreateDirectory(directory);
 
-            WriteFileAtomically(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            // The write replaces the file, so it first reads what it would replace, under the lock a CultCache single-file
+            // store takes (<path>.lock): a store this runtime cannot read (a newer format, or damage) or one holding any
+            // record but this key is refused, never overwritten.
+            using (AcquireStoreLock(path))
+            {
+                RefuseToReplaceAStoreHoldingMore(path, key);
+                WriteFileAtomically(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            }
+        }
+
+        private static void RefuseToReplaceAStoreHoldingMore(string path, CultRecordKey key)
+        {
+            if (!File.Exists(path) || new FileInfo(path).Length == 0)
+                return;
+
+            var existing = ReadSingleFileSnapshot(path);
+            var other = existing.Records.FirstOrDefault(record =>
+                record.Variant != null || !string.Equals(record.Key, key.Value, StringComparison.Ordinal));
+            if (other != null)
+                throw new InvalidOperationException(
+                    $"CultCache document '{path}' holds record '{other.Key}' besides '{key.Value}'; a CultMesh single-file write " +
+                    "replaces the whole file and would drop it. Write through a CultCache store instead.");
+        }
+
+        private static FileStream AcquireStoreLock(string path)
+        {
+            var lockPath = path + ".lock";
+            var started = System.Diagnostics.Stopwatch.StartNew();
+            while (true)
+            {
+                try
+                {
+                    return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, bufferSize: 1);
+                }
+                catch (IOException) when (started.Elapsed < TimeSpan.FromSeconds(30))
+                {
+                    System.Threading.Thread.Sleep(10);
+                }
+            }
         }
 
         private static CultPersistedStoreSnapshot ReadSingleFileSnapshot(string path)
@@ -250,7 +288,7 @@ namespace GameCult.Mesh
             CultPersistedStoreSnapshot snapshot;
             try
             {
-                snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes);
+                snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes, CultDocumentMessagePackSerialization.RequireReadableSingleFileStamp);
             }
             catch (Exception ex) when (ex is MessagePackSerializationException or InvalidOperationException)
             {

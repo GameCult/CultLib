@@ -182,7 +182,17 @@ public static class CultDocumentMessagePackSerialization
         return buffer.WrittenSpan.ToArray();
     }
 
-    public static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload)
+    /// <summary>
+    /// Parses a store snapshot whose format stamp is a string, of any version. It refuses a nil or binary stamp
+    /// (1.0.61 read a nil stamp as v1). A store reading its own file checks the stamp against the formats it reads,
+    /// before the body is parsed.
+    /// </summary>
+    public static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload) =>
+        DeserializeSnapshot(payload, _ => { });
+
+
+    // The stamp decides readability and the body never does: requireReadable runs on slot 0 before anything else is parsed.
+    internal static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload, Action<string> requireReadable)
     {
         var reader = new MessagePackReader(payload);
         var fieldCount = reader.ReadArrayHeader();
@@ -190,8 +200,12 @@ public static class CultDocumentMessagePackSerialization
 
         if (fieldCount > 0)
         {
+            // A stamp encoded as binary is not one this runtime wrote or reads; it is refused here, not parsed as damage.
+            if (reader.NextMessagePackType == MessagePackType.Binary)
+                throw new NotSupportedException("Store snapshot declares its format version as binary; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + " and " + CultPersistedStoreSnapshot.FormatV2 + " as strings.");
             snapshot.FormatVersion = reader.ReadString()
                 ?? throw new NotSupportedException("Store snapshot declares no format version; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + " and " + CultPersistedStoreSnapshot.FormatV2 + ".");
+            requireReadable(snapshot.FormatVersion);
         }
 
         if (fieldCount > 1)
@@ -226,12 +240,7 @@ public static class CultDocumentMessagePackSerialization
     public static void RequireSingleFileFormat(CultPersistedStoreSnapshot snapshot)
     {
         var version = snapshot.FormatVersion;
-        if (!string.Equals(version, CultPersistedStoreSnapshot.FormatV1, StringComparison.Ordinal) &&
-            !string.Equals(version, CultPersistedStoreSnapshot.FormatV2, StringComparison.Ordinal))
-        {
-            throw new NotSupportedException(
-                $"Store format {DescribeHeader(version)} is not readable; this runtime reads {CultPersistedStoreSnapshot.FormatV1} and {CultPersistedStoreSnapshot.FormatV2}.");
-        }
+        RequireReadableSingleFileStamp(version);
 
         // Only a v2 store may hold a variant: a v1 header over a variant record is a store no reader could trust.
         if (string.Equals(version, CultPersistedStoreSnapshot.FormatV1, StringComparison.Ordinal))
@@ -242,6 +251,16 @@ public static class CultDocumentMessagePackSerialization
                 throw new NotSupportedException(
                     $"Record '{variant.Key}' (schema '{variant.SchemaId}') is a variant but the store declares {version}; variants need {CultPersistedStoreSnapshot.FormatV2}.");
             }
+        }
+    }
+
+    internal static void RequireReadableSingleFileStamp(string version)
+    {
+        if (!string.Equals(version, CultPersistedStoreSnapshot.FormatV1, StringComparison.Ordinal) &&
+            !string.Equals(version, CultPersistedStoreSnapshot.FormatV2, StringComparison.Ordinal))
+        {
+            throw new NotSupportedException(
+                $"Store format {DescribeHeader(version)} is not readable; this runtime reads {CultPersistedStoreSnapshot.FormatV1} and {CultPersistedStoreSnapshot.FormatV2}.");
         }
     }
 
@@ -543,7 +562,7 @@ public class SingleFileMessagePackBackingStore : SingleFileBackingStore
 
     protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data)
     {
-        var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(data);
+        var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(data, CultDocumentMessagePackSerialization.RequireReadableSingleFileStamp);
         CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot);
         return snapshot;
     }

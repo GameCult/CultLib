@@ -448,14 +448,25 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             };
         }
 
-        var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(manifestBytes);
-        if (!string.Equals(snapshot.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal))
+        // The stamp is judged before the manifest body is parsed, so a store stamped newer is refused whatever its body.
+        return CultDocumentMessagePackSerialization.DeserializeSnapshot(manifestBytes, RequireReadableStamp);
+    }
+
+    private void RequireReadableStamp(string stamp)
+    {
+        if (CultPersistedStoreSnapshot.FormatNumber(stamp) is int number && number > 4)
         {
-            throw new InvalidOperationException(
-                $"Directory store {_manifestFile.FullName} is {snapshot.FormatVersion}; only {IndexedFormatVersion} is readable.");
+            // Every write path parses the manifest under its commit lease before it writes a page or the manifest, so a
+            // store another process has since stamped newer is refused here, untouched.
+            throw new NotSupportedException(
+                $"Directory store {_manifestFile.FullName} is {stamp}, a newer format than this runtime reads ({IndexedFormatVersion}).");
         }
 
-        return snapshot;
+        if (!string.Equals(stamp, IndexedFormatVersion, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Directory store {_manifestFile.FullName} is {stamp}; only {IndexedFormatVersion} is readable.");
+        }
     }
 
     private string ContentAddressedRecordPath(CultPersistedRecord metadata)
