@@ -5438,6 +5438,41 @@ mod tests {
     }
 
     #[test]
+    fn push_all_refuses_a_store_in_a_format_this_runtime_does_not_read_and_leaves_it() -> Result<()> {
+        let vector = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/vectors/document-variants-c2a/v3-base.msgpack"),
+        )?;
+        let entry = CultCacheEnvelope {
+            key: "probe".into(),
+            r#type: "probe".into(),
+            payload: vec![0x80],
+            stored_at: "2026-10-22T00:00:00Z".into(),
+            schema_id: None,
+        };
+        // A newer store whole, and cut short after its header: the header alone is judged.
+        for bytes in [&vector[..], &vector[..vector.len() / 2]] {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.msgpack");
+            fs::write(&path, bytes)?;
+            let error = SingleFileMessagePackBackingStore::new(&path)
+                .push_all(std::slice::from_ref(&entry), PushAllOptions::default())
+                .unwrap_err();
+            assert_eq!(unreadable_kind(&error), Some(CultCacheStoreUnreadableKind::UnsupportedFormat), "{error:#}");
+            assert!(format!("{error:#}").contains("cultcache.store.v3"), "{error:#}");
+            assert_eq!(fs::read(&path)?, bytes);
+        }
+        // A file with no readable stamp is not a newer store: a whole write still heals it.
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.msgpack");
+        fs::write(&path, [0x93u8, 0xa0])?;
+        let mut store = SingleFileMessagePackBackingStore::new(&path);
+        store.push_all(std::slice::from_ref(&entry), PushAllOptions::default())?;
+        assert_eq!(store.pull_all()?.len(), 1);
+        Ok(())
+    }
+
+
+    #[test]
     fn a_store_that_cannot_be_read_is_an_io_error_and_never_unreadable() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("store.cc");

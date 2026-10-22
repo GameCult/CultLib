@@ -1481,6 +1481,22 @@ test("SingleFileMessagePackBackingStore refusals say what was found without blam
   );
 });
 
+test("pushAll refuses a store in a format this runtime does not read and leaves it byte-identical", async () => {
+  const vector = await readFile(resolve(cultLibRoot, "tests", "vectors", "document-variants-c2a", "v3-base.msgpack"));
+  const envelope = { key: "probe", type: "probe", payload: documentPayloadFromBytes(new Uint8Array([0x80])), storedAt: "2026-10-22T00:00:00Z" };
+  for (const bytes of [vector, vector.subarray(0, Math.floor(vector.length / 2))]) {
+    const file = join(await mkdtemp(join(tmpdir(), "cultcache-pushall-v3-")), "store.msgpack");
+    await writeFile(file, bytes);
+    await assert.rejects(() => new SingleFileMessagePackBackingStore(file).pushAll([envelope]), /cultcache\.store\.v3/u);
+    assert.equal(Buffer.compare(await readFile(file), bytes), 0);
+  }
+  const healed = join(await mkdtemp(join(tmpdir(), "cultcache-pushall-heal-")), "store.msgpack");
+  await writeFile(healed, new Uint8Array([0x93, 0xa0]));
+  const store = new SingleFileMessagePackBackingStore(healed);
+  await store.pushAll([envelope]);
+  assert.equal((await store.pullAll()).length, 1);
+});
+
 test("SingleFileMessagePackBackingStore reads only a missing store as empty", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-absent-"));
   assert.deepEqual(await new SingleFileMessagePackBackingStore(join(dir, "store.cc")).pullAll(), []);
