@@ -4,10 +4,28 @@ All notable changes to this package are documented in this file.
 
 ## [Unreleased]
 
+Releases as 3.0.0 (major).
+
 ### Breaking (major)
 
 - A single-file store flush refuses a file it cannot read (empty, truncated, an unreadable stamp or body) with `CultStoreUnreadableException` and leaves the file as it is. A flush used to replace such a file. A write set cannot merge with a disk it cannot read, so the file is repaired or removed by its owner before the store writes again.
 - A single-file store reads v1, v2 and v3 stamps and refuses v4 and later by name; a directory store reads v4 and v5 and refuses v6 and later by name. Each judges the stamp before the body, so an unreadable body never makes a newer store look like damage.
+- A store is written in the format its content needs, and CultLib 2.0 refuses the newer ones by name. A single-file store holding a document variant is written as `cultcache.store.v2`, one holding an element id as `cultcache.store.v3`; a directory store holding an element id is written as `cultcache.store.v5` (`v4` otherwise). A store is marked only when a record actually holds an id or a variant. Upgrade readers before writers: a 2.0 reader that opens such a store is refused, not misread.
+- Writes are write sets. A flush or commit replaces the records it staged and copies every other record forward as stored, under the store's lock, instead of rewriting the whole store from the cache's memory. A record the cache does not know is kept, and an untouched record keeps a dropped member's slot through every write (never reuse a dropped slot; see the schema-compatibility contract).
+- A write or removal at a key whose stored record is under a schema id the writer does not declare is refused with `CultSchemaConflictException`, and the file is left as it was. A cache declares through its registry; a cacheless CultMesh write declares through the catalog entry it writes.
+- Registration refuses an owned object-list element type that has no `[CultElementId]` member (a public string with `[Key]`), naming the type and the list. Element ids let a write set merge a list by identity; a list of record references or plain values is a whole value and is not affected.
+- `SingleFileBackingStore`'s abstract and protected surface changed for store kinds outside this library: `SerializeSnapshot` and `DeserializeSnapshot` are replaced by `SerializeStore`, `SerializeRecord`, `SerializeCatalogEntry` and `ReadStore`, and `HeaderFor`, `HeaderForWrite`, `Foreign`, `SetForeignRecords`, `RefuseUndeclared`, `RefuseUndeclaredOnDisk`, `StagedChecks`, `StageChecks`, `JudgeChecks` and `RefuseRemovalOfUndeclared` are new protected members a store kind implements or calls. `MarkFlushSucceeded` and the `Judging` hook are removed.
+- `CultCommitRequest.Expected` is now `IReadOnlyList<(CultRecordKey Key, string? Version)>` (it was a key with a schema id and a stored-at), `CultCommitRequest.Checks` is new, and `ConditionsHold` takes `(IReadOnlyDictionary<string, string> durable, IEnumerable<CultStoredDocument> observed, IEnumerable<CultForeignRecord> foreign)` in place of `(IReadOnlyCollection<CultPersistedRecord>, IEnumerable<CultStoredDocument>)`. A store kind outside the library lists the record versions it holds and passes its foreign records.
+- `GameCult.Mesh`: `AsSchemaAlias<TAlias>()` is removed from `CultMeshDocumentHandle` and `CultMeshCollectionHandle`. Read the handle by the schema you mean.
+- The element types of owned lists in `GameCult.Mesh` (`CultMeshBodies`, `CultMeshCdn`, `CultMeshDiscoveryService` and `CultMeshEntityPrefabs`) and `GameCult.Networking` (`CultWitnessArtifactBundle`) gain a public string `Id` member with `[CultElementId]`, so their lists merge by identity. Code that matched those elements positionally by shape must set or read `Id`.
+- `CultNetDocumentRegistry.Register` refuses a binding that claims a document type or a schema id another binding already holds, with `CultSchemaConflictException`; binding a type to the schema id it already holds still replaces that binding.
+- `InternalsVisibleTo GameCult.Mesh` is removed from `GameCult.Caching`: CultMesh's single-file document helpers use the public `ReadStoreSnapshot`, `WriteRecord` and `CultElementIds` below.
+
+### Added
+
+- `SingleFileBackingStore.ReadStoreSnapshot()` reads a store file once, under the store's lock, with the reader a cache's store opens with, and returns the durable snapshot or null when nothing is at the path. `SingleFileBackingStore.WriteRecord(record, catalogEntry, holdsIds, registry)` writes one record without a cache: every other record and catalog entry is copied as stored, the file is replaced atomically, and the header is decided as a flush decides it. It refuses on a store attached to a cache.
+- `CultElementIds.Plan`, `CultElementIds.Holds` and `CultElementIds.IdPlan` are public: a cacheless typed writer plans element ids before it serializes and passes `Holds` as `holdsIds`.
+- A store written by 1.0.x with a record-reference list in a slot still opens (from 2.0.1).
 
 ## [2.0.1] - 2026-10-22
 
