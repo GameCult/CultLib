@@ -1,6 +1,7 @@
 #nullable enable
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using GameCult.Caching.MessagePack;
 using NUnit.Framework;
@@ -8,8 +9,8 @@ using static GameCult.Caching.Tests.ElementIdTests;
 
 namespace GameCult.Caching.Tests
 {
-    // A single-file store file is read and written without a cache through ReadStoreSnapshot and WriteRecord: the same reader, lock,
-    // atomic replace and header rule a cache's store uses. CultMesh's single-file document helpers are built on these two members.
+    // A single-file store file is read and written without a cache through ReadStoreSnapshot, WriteRecord, WriteDocument and DecodeDocument: the same reader, lock,
+    // atomic replace and header rule a cache's store uses. CultMesh's single-file document helpers are built on these members.
     public class CachelessSingleFileTests
     {
         private static readonly CultSchemaCatalogEntry One = new() { SchemaId = "tests.cacheless.one", SchemaName = "tests.cacheless.one" };
@@ -147,6 +148,49 @@ namespace GameCult.Caching.Tests
             new SingleFileMessagePackBackingStore(_path).WriteRecord(Record("other", One, 1), One, holdsIds: false, registry: withRegistry ? registry : null);
 
             Assert.That(new SingleFileMessagePackBackingStore(_path).ReadStoreSnapshot()!.FormatVersion, Is.EqualTo(expected));
+        }
+
+        [Test]
+        public void WriteDocumentMintsIdsMarksV3AndKeepsTheOtherRecord()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            new SingleFileMessagePackBackingStore(_path).WriteRecord(Record("other", One, 1), One);
+            var deck = new IdDeck { Name = "deck", Reels = { new IdReel { Label = "reel" } } };
+
+            new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("deck"), deck, registry: registry);
+
+            var snapshot = new SingleFileMessagePackBackingStore(_path).ReadStoreSnapshot()!;
+            Assert.That(snapshot.FormatVersion, Is.EqualTo(CultPersistedStoreSnapshot.FormatV3));
+            Assert.That(snapshot.Records.Select(record => record.Key), Is.EquivalentTo(new[] { "other", "deck" }));
+            Assert.That(deck.Reels[0].Id, Does.Match("^[0-9a-f]{12}$"), "the id the file holds was minted on the document");
+            var read = new SingleFileMessagePackBackingStore(_path).DecodeDocument<IdDeck>(new CultRecordKey("deck"), snapshot.Records.Single(record => record.Key == "deck").Payload, registry);
+            Assert.That(read.Reels[0].Id, Is.EqualTo(deck.Reels[0].Id));
+        }
+
+        [Test]
+        public void WriteDocumentGivesMintedIdsBackWhenTheWriteIsRefused()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            File.WriteAllBytes(_path, new byte[] { 0xC1 });
+            var deck = new IdDeck { Name = "deck", Reels = { new IdReel { Label = "reel" } } };
+
+            Assert.Throws<CultStoreUnreadableException>(() =>
+                new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("deck"), deck, registry: registry));
+
+            Assert.That(deck.Reels[0].Id, Is.Null.Or.Empty, "a refused write leaves the document as it was");
+        }
+
+        [Test]
+        public void WriteDocumentAndDecodeDocumentRefuseOnAStoreAttachedToACache()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            var store = new SingleFileMessagePackBackingStore(_path);
+            using var cache = new CultCache(registry);
+            cache.AddBackingStore(store);
+
+            Assert.That(Assert.Throws<InvalidOperationException>(() => store.WriteDocument(new CultRecordKey("deck"), new IdDeck { Name = "d" }))!.Message, Does.Contain("write through the cache"));
+            Assert.That(Assert.Throws<InvalidOperationException>(() => store.DecodeDocument<IdDeck>(new CultRecordKey("deck"), new byte[] { 0x90 }))!.Message, Does.Contain("read through the cache"));
+            Assert.That(File.Exists(_path), Is.False);
         }
     }
 }

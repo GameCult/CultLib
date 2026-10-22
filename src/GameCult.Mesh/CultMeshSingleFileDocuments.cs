@@ -94,28 +94,9 @@ namespace GameCult.Mesh
         {
             if (document == null) throw new ArgumentNullException(nameof(document));
 
-            var resolvedRegistry = registry ?? CultDocumentRegistry.Shared;
-            var descriptor = resolvedRegistry.GetRequired<TDocument>();
-            // Element ids are decided as a cache write decides them, before anything is written: an unset id is minted, a
-            // refused list refuses the write, and the file is marked when it holds an id. A failed write gives the ids back.
-            var ids = CultElementIds.Plan(typeof(TDocument), document, key.Value, deterministic: false);
-            ids.Apply();
-            try
-            {
-                WriteSingleFileDocumentPayload(
-                    path,
-                    key,
-                    descriptor.ToCatalogEntry(),
-                    storedAt,
-                    CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TDocument)),
-                    CultElementIds.Holds(typeof(TDocument), document),
-                    resolvedRegistry);
-            }
-            catch
-            {
-                ids.Undo();
-                throw;
-            }
+            if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value must be non-empty.", nameof(path));
+            // The store decides element ids, the header and the copy of every other record, as a cache write does.
+            StoreAt(path).WriteDocument(key, document, storedAt, registry);
         }
 
         /// <summary>
@@ -130,10 +111,8 @@ namespace GameCult.Mesh
             var resolvedRegistry = registry ?? CultDocumentRegistry.Shared;
             var descriptor = resolvedRegistry.GetRequired<TDocument>();
             var payload = ReadSingleFileDocumentPayload(path, key, descriptor.SchemaId);
-            var document = (TDocument)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(TDocument), payload);
             // A load refuses what a write refuses, and mints the ids a cache load of the same file would mint.
-            CultElementIds.Plan(typeof(TDocument), document, key.Value, deterministic: true).Apply();
-            return document;
+            return StoreAt(path).DecodeDocument<TDocument>(key, payload, resolvedRegistry);
         }
 
         /// <summary>

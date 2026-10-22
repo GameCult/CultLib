@@ -53,12 +53,12 @@ namespace GameCult.Caching
     // non-empty. Either need only be unique within one list. A write mints a random id; a load of a store written before ids
     // existed mints from SHA-256(record key, element path), so every reader of the same store mints the same id and a reload is
     // identical to what was read. A write and a load refuse the same things.
-    public static class CultElementIds
+    internal static class CultElementIds
     {
         private const int IdBytes = 6;
 
         /// <summary>The element ids a pass would fill, decided before anything changes. <see cref="Apply"/> sets them; <see cref="Undo"/> gives back what Apply replaced.</summary>
-        public sealed class IdPlan
+        internal sealed class IdPlan
         {
             private readonly List<(object Item, Shape Shape, string? Before, string Id)> _fills = new();
 

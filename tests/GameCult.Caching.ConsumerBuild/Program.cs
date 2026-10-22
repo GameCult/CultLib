@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using GameCult.Caching;
 using MessagePack;
 
@@ -17,8 +18,8 @@ var committed = outside.Commit(batch =>
 if (!committed)
     return 1;
 
-// A store file is written and read without a cache through the two public members: this project has no InternalsVisibleTo, so
-// building it pins that ReadStoreSnapshot and WriteRecord are public API.
+// A store file is written and read without a cache through the public members: this project has no InternalsVisibleTo, so
+// building it pins that ReadStoreSnapshot, WriteRecord, WriteDocument and DecodeDocument are public API.
 var storePath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "consumer-build-" + System.Guid.NewGuid().ToString("N") + ".cc");
 try
 {
@@ -27,6 +28,11 @@ try
     store.WriteRecord(new CultPersistedRecord { Key = "r", SchemaId = entry.SchemaId, StoredAt = "t", Payload = new byte[] { 0x90 } }, entry);
     var snapshot = store.ReadStoreSnapshot();
     if (snapshot == null || snapshot.Records.Length != 1 || snapshot.Records[0].Key != "r")
+        return 1;
+    var typedRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(ConsumerFaction) });
+    store.WriteDocument(new CultRecordKey("f"), new ConsumerFaction { Name = "typed" }, registry: typedRegistry);
+    var typed = store.ReadStoreSnapshot()!.Records.Single(record => record.Key == "f");
+    if (store.DecodeDocument<ConsumerFaction>(new CultRecordKey("f"), typed.Payload, typedRegistry).Name != "typed")
         return 1;
 }
 finally
