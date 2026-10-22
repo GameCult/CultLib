@@ -123,6 +123,39 @@ namespace GameCult.Caching.Tests
             Assert.That(Refusal("unknown-header.msgpack"), Does.Contain("cultcache.store.v9"));
         }
 
+        // The release-now-c2a-bumps-format ruling rests on this: a store stamped with a newer format version is refused at
+        // open, so this runtime cannot rewrite it. The file stays byte-identical through the refusal and through later
+        // writes to the cache, whose refused store was never attached.
+        [TestCase("cultcache.store.v3")]
+        [TestCase("cultcache.store.v9")]
+        public async Task SingleFileStampedWithANewerFormatIsRefusedAndNeverRewritten(string newerFormat)
+        {
+            var root = CopyFixture("single-file-v1");
+            try
+            {
+                var file = Path.Combine(root, "store.msgpack");
+                var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(file));
+                snapshot.FormatVersion = newerFormat;
+                File.WriteAllBytes(file, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+                var before = File.ReadAllBytes(file);
+
+                using var cache = new CultCache();
+                var error = Assert.Throws<NotSupportedException>(() =>
+                    cache.AddBackingStore(new SingleFileMessagePackBackingStore(file)))!;
+                Assert.That(error.Message, Does.Contain(newerFormat));
+                Assert.That(cache.BackingStores, Is.Empty);
+
+                await cache.AddAsync(new PreCut2FixtureNote { Text = "written after the refusal" });
+                await cache.FlushAsync();
+
+                Assert.That(File.ReadAllBytes(file), Is.EqualTo(before));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
         [Test]
         public void SingleFileRefusesExtraRecordSlotNamingTheRecord()
         {
