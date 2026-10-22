@@ -80,6 +80,7 @@ namespace GameCult.Caching.Tests
         {
             var catalog = CultDocumentRegistry.Shared.GetRequired<RefListHolder>().ToCatalogEntry();
             catalog.SchemaId = "persisted.tests.reflist_holder.v1";
+            catalog.ContentHash = "sha256:persisted-by-1.0.x";
             catalog.CompatibleSchemaIds = new[] { CultDocumentRegistry.Shared.GetRequired<RefListHolder>().SchemaId };
             persistedItems(catalog.Members.Single(member => member.Slot == 1));
             return CultDocumentRegistry.Shared.ResolvePersistedSchemaReport(catalog.SchemaId, new[] { catalog });
