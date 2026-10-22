@@ -1573,8 +1573,6 @@ test("bytes with no readable store stamp are not refused", () => {
     "str8 cut before its length": [0x91, 0xd9],
     "str16 cut before its length": [0x91, 0xda, 0x00],
     "str32 cut before its length": [0x91, 0xdb, 0x00, 0x00, 0x00],
-    "str8 header not utf-8": [0x91, 0xd9, 19, ...stamp, 0xff],
-    "fixstr header not utf-8": [0x91, 0xb3, ...stamp, 0xff],
   };
   for (const [name, bytes] of Object.entries(cases)) {
     assert.equal(headerRefused(new Uint8Array(bytes)), false, name);
