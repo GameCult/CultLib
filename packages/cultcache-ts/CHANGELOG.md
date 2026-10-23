@@ -16,7 +16,9 @@ All notable changes to `@gamecult/cultcache-ts` are recorded here, following
 ### Added
 
 - `readSingleFileStore(path)`, the one synchronous reader of a single-file store, for consumers that must read a store file rather than decode it themselves. `pullAll`, `push`, `delete` and `pushAll` ask the same reader.
-- `StoreUnreadableError` for a store file this runtime cannot read, `SchemaConflictError` for a write the catalog cannot describe, and `schemaIdentityOf`.
+- `StoreUnreadableError` for a store file this runtime cannot read, `SchemaConflictError` for a write the catalog cannot describe, and `schemaIdentityOf` with its result type `CultCacheSchemaIdentity` (`schemaId`, `schemaName`, `schemaVersion`, `compatibleSchemaIds`), the one derivation of a definition's identity.
+- `SingleFileStoreRead`, exported: the result type of `readSingleFileStore` (`absent`, `format`, `envelopes`, `repairedLegacyPayload`).
+- `CultCacheInspection.format` is `StoreFormat | "legacy.envelope-array"`: it reports `cultcache.store.v3` for a v3 store.
 - A soft `pushAll` writes only where nothing is at the path, leaves a store it can read byte for byte, and refuses what the reader refuses.
 
 ## [0.14.2]
