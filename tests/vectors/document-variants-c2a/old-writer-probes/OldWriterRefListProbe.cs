@@ -10,9 +10,10 @@ using NUnit.Framework;
 namespace GameCult.Caching.Tests
 {
     // Copied into a checkout of cultlib-unity-v1.0.60 (45c2f400) by old-reader-refusal.sh. Not part of this tree's suite.
-    // It writes the store the 1.0.x writer produces for a list of record references (the shapes are RefListDriftTests'), and
-    // is the only author of tests/vectors/ref-list-drift/v1-0-60-written.cc.
-    public class OldWriterRefListProbe
+    // OldWriterRefListProbe writes the store the 1.0.x writer produces for a list of record references, and is the only author of
+    // tests/vectors/ref-list-drift/v1-0-60-written.cc. The persisted catalog names each slot's CLR type, so the shapes below live
+    // where the 2.0 reader's own do: as the nested types of GameCult.Caching.Tests.RefListDriftTests, with its schema names.
+    internal static class RefListDriftTests
     {
         [CultDocument("tests.reflist_target", "tests.reflist_target.v1")]
         [MessagePackObject(AllowPrivate = true)]
@@ -34,7 +35,10 @@ namespace GameCult.Caching.Tests
             [Key(1)]
             public CultRecordRef<RefListTarget>[] Items = Array.Empty<CultRecordRef<RefListTarget>>();
         }
+    }
 
+    public class OldWriterRefListProbe
+    {
         [Test]
         public async Task WritesAStoreWhoseRefListSlotIsAPlainValue()
         {
@@ -46,12 +50,12 @@ namespace GameCult.Caching.Tests
             using var cache = new CultCache();
             var store = new SingleFileMessagePackBackingStore(file);
             cache.AddBackingStore(store);
-            await cache.AddAsync(new RefListTarget { Name = "alpha" });
-            await cache.AddAsync(new RefListTarget { Name = "beta" });
-            await cache.AddAsync(new RefListHolder
+            await cache.AddAsync(new RefListDriftTests.RefListTarget { Name = "alpha" });
+            await cache.AddAsync(new RefListDriftTests.RefListTarget { Name = "beta" });
+            await cache.AddAsync(new RefListDriftTests.RefListHolder
             {
                 Name = "list",
-                Items = new[] { new CultRecordRef<RefListTarget>(new CultRecordKey("alpha")), new CultRecordRef<RefListTarget>(new CultRecordKey("beta")) }
+                Items = new[] { new CultRecordRef<RefListDriftTests.RefListTarget>(new CultRecordKey("alpha")), new CultRecordRef<RefListDriftTests.RefListTarget>(new CultRecordKey("beta")) }
             });
             store.PushAll();
 
