@@ -2257,7 +2257,9 @@ namespace GameCult.Caching
         {
             if (store == null) throw new ArgumentNullException(nameof(store));
             homes ??= Array.Empty<Type>();
-            // The store's own gate too: a cacheless call on it is either finished or waiting, and a waiting one finds the cache and refuses.
+            // The cache's gate, then the store's, held across the whole body, the failure path that resets Cache included: a cacheless call
+            // is either finished before the attach starts, or waits on the store's gate and, once the attach is over, finds the cache (and
+            // refuses) or finds the store free again (and runs).
             Held(() => store.WhileDetached(() =>
             {
                 if (store.Loaded != null)
@@ -3581,7 +3583,8 @@ namespace GameCult.Caching
 
         // Once attached, a hold on the cache's gate: the store and its cache share one lock, so a load calling back into
         // the cache can never take the gate after the store lock, and a direct call publishes what it loaded when it
-        // returns. File locks are always taken inside it.
+        // returns. File locks are always taken inside it. A cacheless write does not come through here: this picks
+        // its gate from a read of Cache, and ForTheCall decides under the store's own gate instead.
         protected T Held<T>(Func<T> body)
         {
             if (Cache is { } cache)
@@ -4295,10 +4298,15 @@ namespace GameCult.Caching
             });
         }
 
-        // The registry is the call's argument, not store state: it is attached for the call under the store's gate and detached when
-        // the call ends, whatever it does. A cacheless store holds none between calls.
-        private void ForTheCall(CultDocumentRegistry? registry, Action body) =>
-            Held(() =>
+        // The one place a cacheless call decides whether it may run. The call takes the store's own gate, never the gate Held would
+        // pick from a read of Cache, and decides attachment under it. The attach sets Cache only while it holds this same gate (and
+        // clears it, on failure, before releasing it), so Cache cannot change from the refusal to the end of the call. The registry is
+        // the call's argument, not store state: it is attached for the call and detached when the call ends, whatever it does. A
+        // cacheless store holds none between calls. Lock order: an attach takes the cache's gate, then the store's. This takes only the
+        // store's, and nothing takes the store's gate and then a cache's.
+        private void ForTheCall(CultDocumentRegistry? registry, Action body)
+        {
+            lock (_detachedGate)
             {
                 RefuseWhenAttached();
                 UseRegistry(registry);
@@ -4310,7 +4318,8 @@ namespace GameCult.Caching
                 {
                     UseRegistry(null);
                 }
-            });
+            }
+        }
 
         private void WriteOne(CultPersistedRecord record, CultSchemaCatalogEntry catalogEntry, bool? holdsIds)
         {
