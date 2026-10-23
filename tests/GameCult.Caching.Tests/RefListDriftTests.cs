@@ -108,7 +108,8 @@ namespace GameCult.Caching.Tests
 
         // The store the 1.0.60 writer wrote (tests/vectors/ref-list-drift/v1-0-60-written.cc, made by OldWriterRefListProbe), or the one
         // old-reader-refusal.sh gate csharp names in CULTLIB_GATE_OLD_STORE. The line it prints is the one OldReaderRefListProbe prints
-        // at 2.0.1; the gate diffs them.
+        // at 2.0.1; the gate diffs them. A record is named by its schema name, not its id: a flush of an untouched record carries its
+        // persisted id forward at this tree and restamps it at 2.0.1, so the id after PushAll is not what "opens alike" is about.
         [Test]
         public async Task A_1_0_60_Written_Store_Opens_Like_2_0_1()
         {
@@ -129,7 +130,7 @@ namespace GameCult.Caching.Tests
 
                 store.PushAll();
                 var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(copy));
-                var records = snapshot.Records.OrderBy(record => record.Key, StringComparer.Ordinal).Select(record => record.Key + "=" + record.SchemaId).ToArray();
+                var records = snapshot.Records.OrderBy(record => record.Key, StringComparer.Ordinal).Select(record => record.Key + "=" + snapshot.SchemaCatalog.Where(entry => entry.SchemaId == record.SchemaId).Select(entry => entry.SchemaName).SingleOrDefault()).ToArray();
                 TestContext.Out.WriteLine("REFLIST-SUMMARY " + System.Text.Json.JsonSerializer.Serialize(new { records, items, warnings, header = snapshot.FormatVersion }));
             }
             finally

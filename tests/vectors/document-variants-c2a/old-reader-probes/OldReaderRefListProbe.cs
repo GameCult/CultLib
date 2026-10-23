@@ -34,7 +34,7 @@ namespace GameCult.Caching.Tests
 
                 store.PushAll();
                 var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(copy));
-                var records = snapshot.Records.OrderBy(record => record.Key, StringComparer.Ordinal).Select(record => record.Key + "=" + record.SchemaId).ToArray();
+                var records = snapshot.Records.OrderBy(record => record.Key, StringComparer.Ordinal).Select(record => record.Key + "=" + snapshot.SchemaCatalog.Where(entry => entry.SchemaId == record.SchemaId).Select(entry => entry.SchemaName).SingleOrDefault()).ToArray();
                 TestContext.Out.WriteLine("REFLIST-SUMMARY " + JsonSerializer.Serialize(new { records, items, warnings, header = snapshot.FormatVersion }));
             }
             finally
