@@ -127,14 +127,19 @@ which route wrote it.
 ## Locking
 
 - One lock order: the cache's gate, then the store's gate, then the file lock. A
-  thread holds at most one cache's gate and at most one store's gate. A store's
-  gate may be taken inside a cache's gate (the attach; a journal writing a
-  cacheless file), never the reverse: while a thread holds a store's gate it
-  enters no cache gate it does not already hold, reads included, and no other
-  store's gate. Breaking the order throws `InvalidOperationException`. This is
-  checked at run time, not by comment: user code a cacheless call or an attach
-  runs under the store's gate (a document's getter, a constructor while a copied
-  record is read) is the way in.
+  store's gate may be taken inside a cache's gate (the attach; a journal writing
+  a cacheless file), never the reverse. What the code enforces, at run time and
+  by `InvalidOperationException`: a thread holds at most one store's gate;
+  while it holds a store's gate it enters no cache gate it does not already
+  hold, reads included; and a cache's hold (a write, a flush, an attach) entered
+  inside another cache's hold is refused. What it does not enforce: a cache
+  read made inside another cache's hold takes that cache's gate without a
+  check, so two threads each holding one cache and reading the other can
+  deadlock. That is open as `variants:follow_up:cross-cache-read-lock-order`;
+  until it lands, a journal or a getter must not read a second cache. User code
+  a cacheless call or an attach runs under the store's gate (a document's
+  getter, a constructor while a copied record is read) is the way into the
+  refused cases.
 - One owner picks the gate a store call holds. A store attached to a cache takes
   that cache's gate as its own lock, so a store's load callback into the cache
   cannot take the two out of order; a cacheless store takes its own gate. The
@@ -155,8 +160,6 @@ which route wrote it.
   CultNet journal, under the cache's gate: it must not call the cache or wait
   for a thread that does. A store that writes its own cache throws through the
   journal's reentry guard, and the admission stands.
-- A thread holds one cache's gate at a time: entering a cache's hold inside
-  another cache's hold throws.
 - A store doing I/O on behalf of its cache (pull, flush, commit) holds the gate,
   so that cache's readers wait for the I/O. The file lock (`<path>.lock` or the
   directory commit lease) is always taken inside the gate and released before a
