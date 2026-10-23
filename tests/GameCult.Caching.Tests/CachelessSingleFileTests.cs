@@ -213,6 +213,13 @@ namespace GameCult.Caching.Tests
             public readonly ManualResetEventSlim ReleaseAttach = new();
             public readonly ManualResetEventSlim CallInside = new();
             public readonly ManualResetEventSlim ReleaseCall = new();
+            public readonly ManualResetEventSlim ReaderInside = new();
+            public readonly ManualResetEventSlim ReleaseReader = new();
+            // How many threads are inside ReadStore at once, and the most there ever were.
+            private int _inside, _mostInside;
+            public int MostInside => Volatile.Read(ref _mostInside);
+            // Run by the thread whose role is "hook", inside ReadStore: user code that runs under the store's gate.
+            [ThreadStatic] public static Action? RoleHook;
             public CultDocumentRegistry? Attached => AttachedRegistry;
 
             public RoleStore(string path) : base(path) { }
@@ -228,21 +235,40 @@ namespace GameCult.Caching.Tests
 
             protected override (CultPersistedStoreSnapshot Snapshot, byte[][] CatalogBytes, byte[][] RecordBytes) ReadStore(byte[] data)
             {
-                if (Role == "attach")
+                var now = Interlocked.Increment(ref _inside);
+                int seen;
+                while ((seen = Volatile.Read(ref _mostInside)) < now && Interlocked.CompareExchange(ref _mostInside, now, seen) != seen) { }
+                try
                 {
-                    AttachInside.Set();
-                    ReleaseAttach.Wait(TimeSpan.FromSeconds(30));
-                    if (FailAttachPull)
-                        throw new InvalidOperationException("the attach's pull fails");
+                    if (Role == "attach")
+                    {
+                        AttachInside.Set();
+                        ReleaseAttach.Wait(TimeSpan.FromSeconds(30));
+                        if (FailAttachPull)
+                            throw new InvalidOperationException("the attach's pull fails");
+                    }
+                    else if (Role == "call-in-read")
+                    {
+                        CallInside.Set();
+                        ReleaseCall.Wait(TimeSpan.FromSeconds(30));
+                    }
+                    else if (Role == "reader")
+                    {
+                        ReaderInside.Set();
+                        ReleaseReader.Wait(TimeSpan.FromSeconds(30));
+                    }
+                    else if (Role == "hook")
+                    {
+                        RoleHook?.Invoke();
+                    }
+                    var store = CultDocumentMessagePackSerialization.ReadStore(data);
+                    CultDocumentMessagePackSerialization.RequireSingleFileFormat(store.Snapshot);
+                    return store;
                 }
-                else if (Role == "call-in-read")
+                finally
                 {
-                    CallInside.Set();
-                    ReleaseCall.Wait(TimeSpan.FromSeconds(30));
+                    Interlocked.Decrement(ref _inside);
                 }
-                var store = CultDocumentMessagePackSerialization.ReadStore(data);
-                CultDocumentMessagePackSerialization.RequireSingleFileFormat(store.Snapshot);
-                return store;
             }
 
             protected override byte[] SerializePayload(object document, Type documentType)
@@ -269,7 +295,7 @@ namespace GameCult.Caching.Tests
                 try { body(); }
                 catch (Exception e) { error = e; }
                 finally { RoleStore.Role = null; }
-            });
+            }) { IsBackground = true };
             thread.Start();
             return (thread, () => error);
         }
@@ -675,6 +701,180 @@ namespace GameCult.Caching.Tests
 
             Assert.That(Assert.Throws<InvalidOperationException>(() => store.WriteDocument(new CultRecordKey("deck"), new IdDeck { Name = "d" }))!.Message, Does.Contain("write through the cache"));
             Assert.That(File.Exists(_path), Is.False);
+        }
+
+        // A document whose getter runs user code while MessagePack encodes it, under the store's gate.
+        [CultDocument("tests.cacheless.tap", "tests.cacheless.tap.v1")]
+        [MessagePackObject]
+        public class TapDoc
+        {
+            [ThreadStatic] public static Action? Hook;
+            [Key(0)] [CultName] public string Name { get; set; } = "";
+            [Key(1)] public string Tap { get { var hook = Hook; Hook = null; hook?.Invoke(); return "t"; } set { } }
+            [Key(2)] public System.Collections.Generic.List<IdReel> Reels { get; set; } = new();
+        }
+
+        private static void Finishes(Thread thread, string what) =>
+            Assert.That(thread.Join(TimeSpan.FromSeconds(10)), Is.True, what + " finished (a deadlock fails here, it does not hang)");
+
+        private static bool Refused(Exception? error)
+        {
+            for (var inner = error; inner != null; inner = inner.InnerException)
+                if (inner is InvalidOperationException)
+                    return true;
+            return false;
+        }
+
+        // While a thread holds a store's gate (a cacheless call, an attach's pull) it enters no cache it does not already hold, reads
+        // included, and no second store. The call is refused where the getter ran, the file is not written, and minted ids are given back.
+        [Test]
+        public void AGetterThatEntersACacheDuringACachelessWriteIsRefused()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(TapDoc) });
+            using var unrelated = new CultCache(registry);
+            var doc = new TapDoc { Name = "d", Reels = { new IdReel() } };
+            TapDoc.Hook = () => unrelated.Get(new CultRecordKey("x"));
+
+            var error = Assert.Catch(() => new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("d"), doc, registry: registry));
+
+            Assert.That(Refused(error), Is.True, "the getter's read of a cache was refused");
+            Assert.That(File.Exists(_path), Is.False);
+            Assert.That(doc.Reels[0].Id, Is.Null.Or.Empty, "the minted id was given back");
+        }
+
+        [Test]
+        public void AGetterThatWritesACacheDuringACachelessWriteIsRefused()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(TapDoc) });
+            using var unrelated = new CultCache(registry);
+            TapDoc.Hook = () => unrelated.Upsert(new TapDoc { Name = "other" });
+
+            var error = Assert.Catch(() => new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("d"), new TapDoc { Name = "d" }, registry: registry));
+
+            Assert.That(Refused(error), Is.True, "the getter's write to a cache was refused");
+            Assert.That(File.Exists(_path), Is.False);
+            Assert.That(unrelated.AllEntries, Is.Empty, "the refused write reached nothing");
+        }
+
+        // Soul P4: the writer holds the store's gate and its getter reads the cache that another thread is attaching the same store to.
+        // The attach holds the cache's gate and waits for the store's. The getter is refused instead of waiting on the cache's gate.
+        [Test]
+        public async Task AGetterThatEntersTheAttachingCacheIsRefusedNotDeadlocked()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(TapDoc) });
+            var store = new RoleStore(_path);
+            using var cache = new CultCache(registry);
+            var inside = new ManualResetEventSlim();
+            var attachWaits = new ManualResetEventSlim();
+            var write = OnThread("writer", () =>
+            {
+                TapDoc.Hook = () =>
+                {
+                    inside.Set();
+                    attachWaits.Wait(TimeSpan.FromSeconds(30));
+                    _ = cache.Get(new CultRecordKey("anything"));
+                };
+                store.WriteDocument(new CultRecordKey("d"), new TapDoc { Name = "d" }, registry: registry);
+            });
+            Assert.That(inside.Wait(TimeSpan.FromSeconds(10)), Is.True, "the getter ran under the store's gate");
+            var attach = OnThread("attach-after", () => cache.AddBackingStore(store));
+            WaitUntilBlocked(attach.Thread);
+            attachWaits.Set();
+
+            Finishes(write.Thread, "the writer");
+            Finishes(attach.Thread, "the attach");
+            Assert.That(Refused(write.Error()), Is.True, "the write was refused");
+            Assert.That(attach.Error(), Is.Null);
+            await cache.AddAsync(new TapDoc { Name = "after" });
+            Assert.DoesNotThrow(() => cache.FlushAllBackingStores());
+        }
+
+        // The attach holds the store's gate while it pulls; user code in the pull may not enter a second store.
+        [Test]
+        public void AnAttachPullThatEntersAnotherStoreIsRefused()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
+            var store = new RoleStore(_path);
+            var second = new SingleFileMessagePackBackingStore(Path.Combine(_directory, "second.cc"));
+            using var cache = new CultCache(registry);
+            var attach = OnThread("hook", () =>
+            {
+                RoleStore.RoleHook = () => second.WriteDocument(new CultRecordKey("b"), new IdDeck { Name = "b" }, registry: registry);
+                try { cache.AddBackingStore(store); }
+                finally { RoleStore.RoleHook = null; }
+            });
+            Finishes(attach.Thread, "the attach");
+
+            Assert.That(Refused(attach.Error()), Is.True, "the pull's write to a second store was refused");
+            Assert.That(File.Exists(Path.Combine(_directory, "second.cc")), Is.False);
+            Assert.That(cache.BackingStores, Is.Empty, "the failed attach left nothing behind");
+            Assert.DoesNotThrow(() => store.WriteDocument(new CultRecordKey("c"), new IdDeck { Name = "c" }, registry: registry), "the store is cacheless after");
+        }
+
+        // Soul P4's window: a reader queued on a failed attach's cache gate must retry under the store's gate. Whichever of the reader and
+        // the cacheless writer queued behind the attach gets the store first is alone inside it, and a second cache's attach waits for it.
+        [TestCase("snapshot")]
+        [TestCase("pullall")]
+        public async Task AReaderQueuedOnAFailedAttachRunsUnderTheStoresGate(string how)
+        {
+            var callRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            var registry1 = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            var registry2 = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: callRegistry);
+            var store = new RoleStore(_path) { FailAttachPull = true };
+            using var cache1 = new CultCache(registry1);
+            using var cache2 = new CultCache(registry2);
+            var attach1 = OnThread("attach", () => cache1.AddBackingStore(store));
+            Assert.That(store.AttachInside.Wait(TimeSpan.FromSeconds(10)), Is.True);
+            var reader = OnThread("reader", () => { if (how == "snapshot") store.ReadStoreSnapshot(); else store.PullAll(); });
+            WaitUntilBlocked(reader.Thread);
+            var writer = OnThread("call-in-read", () => store.WriteDocument(new CultRecordKey("first"), new IdDeck { Name = "first" }, registry: callRegistry));
+            WaitUntilBlocked(writer.Thread);
+
+            store.ReleaseAttach.Set();
+            Finishes(attach1.Thread, "the failed attach");
+            Assert.That(SpinWait.SpinUntil(() => store.ReaderInside.IsSet || store.CallInside.IsSet, TimeSpan.FromSeconds(10)), Is.True, "one of them is inside the store");
+            var attach2 = OnThread("attach2", () => cache2.AddBackingStore(store));
+            WaitUntilBlocked(attach2.Thread);
+            Assert.That(attach2.Thread.IsAlive, Is.True, "the second cache's attach waits while a reader or a call is inside the store");
+
+            store.ReleaseReader.Set();
+            store.ReleaseCall.Set();
+            Finishes(reader.Thread, "the reader");
+            Finishes(writer.Thread, "the writer");
+            Finishes(attach2.Thread, "the second attach");
+            Assert.That(store.MostInside, Is.EqualTo(1), "never two threads inside the store's read at once");
+            Assert.That(reader.Error(), Is.Null, "the reader was not refused");
+            Assert.That(attach2.Error(), Is.Null);
+            await cache2.AddAsync(new IdDeck { Name = "b" });
+            Assert.DoesNotThrow(() => cache2.FlushAllBackingStores());
+        }
+
+        // A PullAll queued behind a failed attach runs under whichever gate owns the store when it gets its turn, and the cache that
+        // attached next sees the file's records, not an error about another cache's hold.
+        [Test]
+        public void AFailedAttachThenPullAllLoadsIntoTheSecondCache()
+        {
+            var callRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            var registry2 = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: callRegistry);
+            var store = new RoleStore(_path) { FailAttachPull = true };
+            using var cache1 = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) }));
+            using var cache2 = new CultCache(registry2);
+            var attach1 = OnThread("attach", () => cache1.AddBackingStore(store));
+            Assert.That(store.AttachInside.Wait(TimeSpan.FromSeconds(10)), Is.True);
+            var pull = OnThread("pull", () => store.PullAll());
+            WaitUntilBlocked(pull.Thread);
+
+            store.ReleaseAttach.Set();
+            Finishes(attach1.Thread, "the failed attach");
+            store.FailAttachPull = false;
+            cache2.AddBackingStore(store);
+            Finishes(pull.Thread, "the queued PullAll");
+
+            Assert.That(pull.Error(), Is.Null, "the queued PullAll was not refused");
+            Assert.That(cache2.Get<IdDeck>(new CultRecordKey("a")), Is.Not.Null, "the second cache holds the file's records");
         }
     }
 }
