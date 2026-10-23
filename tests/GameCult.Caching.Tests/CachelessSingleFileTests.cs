@@ -747,7 +747,7 @@ namespace GameCult.Caching.Tests
         {
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(TapDoc) });
             using var unrelated = new CultCache(registry);
-            TapDoc.Hook = () => unrelated.Upsert(new TapDoc { Name = "other" });
+            TapDoc.Hook = () => _ = unrelated.AddAsync(new TapDoc { Name = "other" });
 
             var error = Assert.Catch(() => new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("d"), new TapDoc { Name = "d" }, registry: registry));
 
