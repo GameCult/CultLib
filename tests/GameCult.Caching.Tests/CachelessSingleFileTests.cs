@@ -1122,5 +1122,145 @@ namespace GameCult.Caching.Tests
             Assert.That(Refused(error), Is.True, "the read after the own-store call was refused");
             Assert.That(File.Exists(_path), Is.False);
         }
+
+        private static CultCodec? LentCodec(CacheBackingStore store) =>
+            (CultCodec?)typeof(CacheBackingStore).GetField("_codec", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(store);
+
+        // The attach lends the pull its registry and its codec, and publishes the cache only after the pull: while the pull runs the store
+        // holds both loans and no cache; once it returns the cache is there.
+        [Test]
+        public void AnAttachLendsTheCodecAndPublishesTheCacheAfterThePull()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
+            var codec = Codec(registry);
+            var store = new RoleStore(_path);
+            using var cache = new CultCache(registry, codec);
+            bool cacheDuringPull = true;
+            CultDocumentRegistry? registryDuringPull = null;
+            CultCodec? codecDuringPull = null;
+            var attach = OnThread("hook", () =>
+            {
+                RoleStore.RoleHook = () =>
+                {
+                    cacheDuringPull = store.IsAttachedToACache;
+                    registryDuringPull = store.Attached;
+                    codecDuringPull = LentCodec(store);
+                };
+                try { cache.AddBackingStore(store); }
+                finally { RoleStore.RoleHook = null; }
+            });
+            Finishes(attach.Thread, "the attach");
+
+            Assert.That(attach.Error(), Is.Null);
+            Assert.That(cacheDuringPull, Is.False, "the cache is not visible to the pull");
+            Assert.That(registryDuringPull, Is.SameAs(registry));
+            Assert.That(codecDuringPull, Is.SameAs(codec), "the pull reads the codec the attach lent");
+            Assert.That(store.IsAttachedToACache, Is.True, "published once the pull succeeded");
+        }
+
+        // A failed attach takes back both loans through the one call, and never shows the cache.
+        [Test]
+        public void AFailedAttachTakesBackTheRegistryAndTheCodecAndNeverShowsTheCache()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
+            var store = new RoleStore(_path) { FailAttachPull = true };
+            store.ReleaseAttach.Set();
+            using var cache = new CultCache(registry, Codec(registry));
+            var attach = OnThread("attach", () => cache.AddBackingStore(store));
+            Finishes(attach.Thread, "the failed attach");
+
+            Assert.That(attach.Error(), Is.Not.Null);
+            Assert.That(store.IsAttachedToACache, Is.False);
+            Assert.That(store.Attached, Is.Null, "the registry was taken back");
+            Assert.That(LentCodec(store), Is.Null, "the codec was taken back with it");
+        }
+
+        // The bound on a call's passes is structural: Cache goes from null to a cache once. This test writes it any other way (the
+        // cache, then null again, under the cache's gate and the store's, in the order they are taken); the reader, which guessed null and
+        // then the cache, is stale twice and throws instead of looping.
+        [Test]
+        public void ACallWhoseGateChangesTwiceUnderItThrowsInsteadOfLooping()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
+            var store = new RoleStore(_path);
+            using var cache = new CultCache(registry);
+            var holding = new ManualResetEventSlim();
+            var publish = new ManualResetEventSlim();
+            var retract = new ManualResetEventSlim();
+            var tamper = OnThread("tamper", () => cache.Held(() =>
+            {
+                store.UnderStoreGate(() =>
+                {
+                    holding.Set();
+                    publish.Wait(TimeSpan.FromSeconds(30));
+                    store.Cache = cache;
+                    return true;
+                });
+                retract.Wait(TimeSpan.FromSeconds(30));
+                store.UnderStoreGate(() => { store.Cache = null; return true; });
+                return true;
+            }));
+            Assert.That(holding.Wait(TimeSpan.FromSeconds(10)), Is.True);
+            Exception? readerError = null;
+            var reader = OnThread("reader", () =>
+            {
+                try { store.ReadStoreSnapshot(); }
+                catch (Exception e) { readerError = e; throw; }
+            });
+            WaitUntilBlocked(reader.Thread);
+            publish.Set();
+            Thread.Sleep(500);
+            retract.Set();
+            Finishes(tamper.Thread, "the tampering thread");
+            Finishes(reader.Thread, "the reader");
+
+            Assert.That(tamper.Error(), Is.Null);
+            Assert.That(readerError, Is.InstanceOf<InvalidOperationException>().With.Message.Contain("changed twice"));
+        }
+
+        // Failing attaches over and over, from one, two and four caches, against readers: a reader's gate changes under it at most once
+        // (the bound above throws on a second), so no reader fails and every thread finishes.
+        [TestCase(1)]
+        [TestCase(2)]
+        [TestCase(4)]
+        public void ReadersAcrossFailingAttachChurnNeverExceedTheBound(int attachers)
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
+            var store = new RoleStore(_path) { FailAttachPull = true };
+            store.ReleaseAttach.Set();
+            var caches = Enumerable.Range(0, attachers).Select(_ => new CultCache(registry)).ToArray();
+            var stop = 0;
+            var readerErrors = new System.Collections.Concurrent.ConcurrentBag<string>();
+            var attachErrors = new System.Collections.Concurrent.ConcurrentBag<string>();
+            var threads = caches.Select(c => OnThread("attach", () =>
+            {
+                while (Volatile.Read(ref stop) == 0)
+                {
+                    try { c.AddBackingStore(store); }
+                    catch (InvalidOperationException e) when (e.Message.Contains("pull fails")) { }
+                    catch (Exception e) { attachErrors.Add(e.Message); }
+                }
+            })).Concat(Enumerable.Range(0, 4).Select(_ => OnThread("reader", () =>
+            {
+                while (Volatile.Read(ref stop) == 0)
+                {
+                    try { store.ReadStoreSnapshot(); }
+                    catch (Exception e) { readerErrors.Add(e.Message); }
+                }
+            }))).ToArray();
+            Thread.Sleep(TimeSpan.FromSeconds(2));
+            Volatile.Write(ref stop, 1);
+            foreach (var t in threads)
+                Finishes(t.Thread, "a churn thread");
+
+            Assert.That(readerErrors, Is.Empty);
+            Assert.That(attachErrors, Is.Empty);
+            foreach (var c in caches)
+                c.Dispose();
+        }
     }
 }
