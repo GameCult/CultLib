@@ -918,6 +918,31 @@ namespace GameCult.Caching.Tests
             Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "read without a codec, the variant it writes cannot be seen, so it is marked");
         }
 
+        // The pull builds a variant with the codec the attach lent the store, so a variant loaded during an attach (the cache is not
+        // published yet) reports what its values hold: a name override holds no id. Without the lent codec it would count as holding one.
+        [Test]
+        public void AVariantLoadedByAPullReadsItsValuesWithTheCodecTheAttachLent()
+        {
+            var path = PathOf("lent-codec-variant.cc");
+            using (var cache = Open(path))
+            {
+                cache.Commit(batch =>
+                {
+                    batch.Upsert(typeof(IdDeck), EmptyDeck("base"), new CultRecordKey("base"));
+                    batch.UpsertVariant(new CultRecordKey("v"), new CultRecordKey("base"), new[] { cache.Override<IdDeck>(nameof(IdDeck.Name), "v") });
+                });
+            }
+
+            CultStoredDocument? variant = null;
+            var store = new SingleFileMessagePackBackingStore(path);
+            store.Loaded = (loaded, _) => variant = loaded.Single(entry => entry.Variant != null);
+            store.UseRegistry(Registry, CultCacheMessagePack.CreateCodec(Registry));
+            store.PullAll();
+
+            Assert.That(variant, Is.Not.Null);
+            Assert.That(variant!.HoldsIds, Is.False, "read with the lent codec, a name override holds no id");
+        }
+
         [Test]
         public void ADirectoryStoreIsMarkedByTheIdsItWritesAndAnEmptyDeckDoesNotMarkIt()
         {
