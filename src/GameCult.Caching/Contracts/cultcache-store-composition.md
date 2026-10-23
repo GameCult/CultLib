@@ -144,11 +144,14 @@ which route wrote it.
   that cache's gate as its own lock, so a store's load callback into the cache
   cannot take the two out of order; a cacheless store takes its own gate. The
   store reads which one applies, takes it, and checks the answer again under it:
-  `Cache` is written only by the attach, holding both gates, so under the cache's
-  gate `Cache` naming that cache cannot change, and under the store's gate it
-  cannot change at all. A call whose guess went stale (it queued on a cache that
-  then failed to attach, or on a store that then gained a cache) releases and
-  retries; a cacheless write that finds a cache is refused in that same hold. A
+  `Cache` is written only by the attach, holding both gates, once and after its
+  pull has succeeded (a failed attach never shows it, and nothing detaches), so
+  under the cache's gate `Cache` naming that cache cannot change, and under the
+  store's gate it cannot change at all. The pull reads the registry and the codec
+  the attach lent the store, not `Cache`. A call whose guess went stale (it
+  guessed no cache and the store then gained one) releases and retries once, so a
+  call makes at most two passes; a cacheless write that finds a cache is refused
+  in that same hold. A
   store must not call `Loaded` while holding its own lock outside the cache's
   hold.
 - A journal runs under the cache's gate, so a slow journal slows every writer of

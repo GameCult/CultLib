@@ -2261,9 +2261,10 @@ namespace GameCult.Caching
         {
             if (store == null) throw new ArgumentNullException(nameof(store));
             homes ??= Array.Empty<Type>();
-            // The only writer of store.Cache, and it writes it only while holding the cache's gate and the store's, the failure path that
-            // resets Cache included: under the cache's gate Cache == this cache cannot change, and under the store's gate Cache cannot
-            // change at all. A store call that guessed wrong waits on whichever gate it took, finds the answer changed and retries.
+            // The only writer of store.Cache, and it writes it once, last, holding the cache's gate and the store's, after the pull has
+            // succeeded: a failed attach never publishes it, and there is no detach, so under the cache's gate Cache == this cache cannot
+            // change, and under the store's gate Cache cannot change at all. A store call that guessed null waits on the store's gate, finds
+            // the cache published and retries once.
             Held(() => store.UnderStoreGate(() =>
             {
                 if (store.Cache != null)
