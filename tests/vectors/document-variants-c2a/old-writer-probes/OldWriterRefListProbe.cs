@@ -50,13 +50,13 @@ namespace GameCult.Caching.Tests
             using var cache = new CultCache();
             var store = new SingleFileMessagePackBackingStore(file);
             cache.AddBackingStore(store);
-            await cache.AddAsync(new RefListDriftTests.RefListTarget { Name = "alpha" });
-            await cache.AddAsync(new RefListDriftTests.RefListTarget { Name = "beta" });
-            await cache.AddAsync(new RefListDriftTests.RefListHolder
+            await cache.UpsertAsync(typeof(RefListDriftTests.RefListTarget), new RefListDriftTests.RefListTarget { Name = "alpha" }, new CultRecordKey("alpha"));
+            await cache.UpsertAsync(typeof(RefListDriftTests.RefListTarget), new RefListDriftTests.RefListTarget { Name = "beta" }, new CultRecordKey("beta"));
+            await cache.UpsertAsync(typeof(RefListDriftTests.RefListHolder), new RefListDriftTests.RefListHolder
             {
                 Name = "list",
                 Items = new[] { new CultRecordRef<RefListDriftTests.RefListTarget>(new CultRecordKey("alpha")), new CultRecordRef<RefListDriftTests.RefListTarget>(new CultRecordKey("beta")) }
-            });
+            }, new CultRecordKey("list"));
             store.PushAll();
 
             var header = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(file)).FormatVersion;
