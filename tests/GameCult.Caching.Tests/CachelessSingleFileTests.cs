@@ -221,6 +221,7 @@ namespace GameCult.Caching.Tests
             // Run by the thread whose role is "hook", inside ReadStore: user code that runs under the store's gate.
             [ThreadStatic] public static Action? RoleHook;
             public CultDocumentRegistry? Attached => AttachedRegistry;
+            public bool IsAttachedToACache => Cache != null;
 
             public RoleStore(string path) : base(path) { }
 
@@ -963,6 +964,163 @@ namespace GameCult.Caching.Tests
             TapDoc.Hook = () => store.Delete(new CultStoredDocument(new CultRecordKey("x"), DateTimeOffset.UtcNow.ToString("O"), descriptor, new TapDoc { Name = "x" }));
 
             Assert.DoesNotThrow(() => store.WriteDocument(new CultRecordKey("d"), new TapDoc { Name = "d" }, registry: registry));
+        }
+
+        // A failed attach leaves the store as it found it: no cache and no registry. A cacheless PullAll after it is then a usage error
+        // that loads nothing, so the next cache to attach admits the file's records, and creating what it cannot find does not duplicate.
+        [Test]
+        public void AFailedAttachLeavesNoRegistryAndTheNextCacheSeesTheFilesRecords()
+        {
+            var callRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: callRegistry);
+            var store = new RoleStore(_path) { FailAttachPull = true };
+            store.ReleaseAttach.Set();
+            var cache1 = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) }));
+            var attach1 = OnThread("attach", () => cache1.AddBackingStore(store));
+            Finishes(attach1.Thread, "the failed attach");
+            Assert.That(Refused(attach1.Error()), Is.True);
+            Assert.That(store.IsAttachedToACache, Is.False);
+            Assert.That(store.Attached, Is.Null, "the failed attach took its registry back");
+
+            Assert.That(Assert.Throws<InvalidOperationException>(() => store.PullAll())!.Message, Does.Contain("not attached to a CultDocumentRegistry"));
+            store.FailAttachPull = false;
+            var cache2 = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) }));
+            var attach2 = OnThread("attach", () => cache2.AddBackingStore(store));
+            Finishes(attach2.Thread, "the second attach");
+            Assert.That(attach2.Error(), Is.Null);
+
+            Assert.That(cache2.Get<IdDeck>(new CultRecordKey("a")), Is.Not.Null, "the second cache holds the file's record");
+            Assert.That(cache2.GetAll<IdDeck>().Count(), Is.EqualTo(1));
+            cache2.FlushAllBackingStores();
+            Assert.That(new SingleFileMessagePackBackingStore(_path).ReadStoreSnapshot()!.Records, Has.Length.EqualTo(1));
+            cache1.Dispose();
+            cache2.Dispose();
+        }
+
+        // Soul P4's load: cacheless writers and snapshot readers race an attach that fails (odd rounds) or succeeds. Whoever ends up
+        // owning the store owns its registry, and its cache writes and flushes. A call split into a refusal hold and a body hold fails here:
+        // a body that runs after the attach took the store leaves the call's registry (or none) on the cache's store.
+        [Test]
+        public async Task CachelessCallsRacingAnAttachNeverLeaveTheCachesStoreWithoutItsRegistry()
+        {
+            var bad = new System.Collections.Generic.List<string>();
+            for (var round = 0; round < 60; round++)
+            {
+                var path = Path.Combine(_directory, $"load{round}.cc");
+                var mine = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+                var reg1 = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+                var reg2 = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+                var attachFails = round % 2 == 1;
+                var store = new RoleStore(path) { FailAttachPull = attachFails };
+                store.ReleaseAttach.Set();
+                store.WriteDocument(new CultRecordKey("seed"), new IdDeck { Name = "seed" }, registry: mine);
+                using var cache1 = new CultCache(reg1);
+                using var cache2 = new CultCache(reg2);
+                var go = new ManualResetEventSlim();
+                var tasks = new System.Collections.Generic.List<Task>();
+                for (var writer = 0; writer < 4; writer++)
+                {
+                    var n = writer;
+                    tasks.Add(Task.Run(() =>
+                    {
+                        go.Wait();
+                        for (var k = 0; k < 8; k++)
+                        {
+                            try { store.WriteDocument(new CultRecordKey($"w{n}-{k}"), new IdDeck { Name = $"w{n}-{k}" }, registry: mine); }
+                            catch (InvalidOperationException) { }
+                        }
+                    }));
+                }
+                for (var reader = 0; reader < 2; reader++)
+                    tasks.Add(Task.Run(() =>
+                    {
+                        go.Wait();
+                        for (var k = 0; k < 12; k++)
+                            store.ReadStoreSnapshot();
+                    }));
+                tasks.Add(Task.Run(() =>
+                {
+                    go.Wait();
+                    Thread.SpinWait(1500 * round);
+                    RoleStore.Role = "attach";
+                    try { cache1.AddBackingStore(store); }
+                    catch (InvalidOperationException) { }
+                    finally { RoleStore.Role = null; }
+                    if (!store.IsAttachedToACache)
+                        cache2.AddBackingStore(store);
+                }));
+                go.Set();
+                Assert.That(Task.WhenAll(tasks).Wait(TimeSpan.FromSeconds(60)), Is.True, "the racing calls and the attach finished (a deadlock fails here, it does not hang)");
+                var owner = attachFails ? cache2 : cache1;
+                var ownerRegistry = attachFails ? reg2 : reg1;
+                if (!ReferenceEquals(store.Attached, ownerRegistry))
+                    bad.Add($"round {round}: the owning cache's registry is not on its store");
+                else
+                {
+                    await owner.AddAsync(new IdDeck { Name = "after" });
+                    owner.FlushAllBackingStores();
+                }
+            }
+
+            Assert.That(bad, Is.Empty);
+        }
+
+        // Every way into a cache's gate refuses a thread that holds a store's gate and not that cache's.
+        [TestCase("Get")]
+        [TestCase("GetWithSequence")]
+        [TestCase("GetStored")]
+        [TestCase("GetAll")]
+        [TestCase("IsDirty")]
+        [TestCase("BackingStores")]
+        [TestCase("AllEntries")]
+        [TestCase("AllStoredDocuments")]
+        [TestCase("TryGetHandle")]
+        public void EveryCacheGateEntryRefusesAGetterRunningUnderAStoresGate(string entry)
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(TapDoc) });
+            using var unrelated = new CultCache(registry);
+            var key = new CultRecordKey("x");
+            TapDoc.Hook = () =>
+            {
+                switch (entry)
+                {
+                    case "Get": unrelated.Get(key); break;
+                    case "GetWithSequence": unrelated.GetWithSequence(key); break;
+                    case "GetStored": unrelated.GetStored(key); break;
+                    case "GetAll": unrelated.GetAll<TapDoc>(); break;
+                    case "IsDirty": _ = unrelated.IsDirty; break;
+                    case "BackingStores": _ = unrelated.BackingStores; break;
+                    case "AllEntries": _ = unrelated.AllEntries; break;
+                    case "AllStoredDocuments": _ = unrelated.AllStoredDocuments; break;
+                    default: unrelated.TryGetHandle(new TapDoc()); break;
+                }
+            };
+
+            var error = Assert.Catch(() => new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("d"), new TapDoc { Name = "d" }, registry: registry));
+
+            Assert.That(Refused(error), Is.True, entry + " was refused under the store's gate");
+            Assert.That(File.Exists(_path), Is.False);
+        }
+
+        // Calling its own store from user code does not end the store's hold for the rest of the call: a cache entered afterwards is
+        // still refused.
+        [Test]
+        public void UserCodeThatCalledItsOwnStoreStillCannotEnterACacheAfterwards()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(TapDoc) });
+            var store = new SingleFileMessagePackBackingStore(_path);
+            var descriptor = registry.GetRequired<TapDoc>();
+            using var unrelated = new CultCache(registry);
+            TapDoc.Hook = () =>
+            {
+                store.Delete(new CultStoredDocument(new CultRecordKey("x"), DateTimeOffset.UtcNow.ToString("O"), descriptor, new TapDoc { Name = "x" }));
+                unrelated.Get(new CultRecordKey("x"));
+            };
+
+            var error = Assert.Catch(() => store.WriteDocument(new CultRecordKey("d"), new TapDoc { Name = "d" }, registry: registry));
+
+            Assert.That(Refused(error), Is.True, "the read after the own-store call was refused");
+            Assert.That(File.Exists(_path), Is.False);
         }
     }
 }
