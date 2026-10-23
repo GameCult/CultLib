@@ -2293,8 +2293,7 @@ namespace GameCult.Caching
                             "attach routed stores before the untyped store.");
                 }
 
-                store.UseRegistry(_registry);
-                store.Cache = this;
+                store.UseRegistry(_registry, _codec);
                 store.Loaded = (loaded, dropped) => Admit(loaded, dropped, store, (_, _) => CultCommitOutcome.Committed);
                 _stores.Add(candidate);
                 try
@@ -2305,10 +2304,10 @@ namespace GameCult.Caching
                 {
                     _stores.Remove(candidate);
                     store.Loaded = null;
-                    store.Cache = null;
-                    store.UseRegistry(null);
+                    store.UseRegistry(null, null);
                     throw;
                 }
+                store.Cache = this;
                 return true;
             }));
         }
@@ -3543,6 +3542,8 @@ namespace GameCult.Caching
     public abstract class CacheBackingStore : IDisposable
     {
         private CultDocumentRegistry? _registry;
+        // Lent with the registry by UseRegistry: the attaching cache's codec, which a pull builds variants with. Null on a cacheless store.
+        private CultCodec? _codec;
         private CultSchemaMigrationReport[] _lastSchemaMigrationReports = Array.Empty<CultSchemaMigrationReport>();
 
         protected CacheBackingStore(bool readOnly = false)
@@ -3580,7 +3581,8 @@ namespace GameCult.Caching
         protected internal Action<IReadOnlyList<CultStoredDocument>, IReadOnlyList<CultStoredDocument>>? Loaded;
 
         private readonly object _storeGate = new();
-        // Written only by CultCache.AddBackingStore, holding the cache's gate and this store's gate.
+        // Written only by CultCache.AddBackingStore, holding the cache's gate and this store's gate, and only once the attach's pull has
+        // succeeded: a failed attach never makes it visible, and there is no detach, so it goes from null to a cache at most once.
         internal CultCache? Cache;
 
         private const string DirectoryFormatV4 = "cultcache.store.v4.directory-content-addressed-pages";
@@ -3623,9 +3625,10 @@ namespace GameCult.Caching
                 directoryStore,
                 holdsVariants);
 
-        // Each pass beyond the first needs an attach to have finished inside the call's wait, so no real call comes near this; a broken
-        // validation, which loops forever, throws instead.
-        private const int MaxStaleGuesses = 1_000;
+        // Cache goes from null to a cache at most once (a failed attach never publishes it, and there is no detach), so a guess is stale
+        // at most once: a pass that guessed null and found a cache, whose retry guesses that cache and finds it still there. A third
+        // pass means something else wrote Cache, and throws.
+        private const int MaxPasses = 2;
 
         // Every store call comes through here, and this is the one owner of which gate it holds. Cache is read once, unlocked, as a
         // guess that only chooses which gate to try; the gate is then taken and the guess checked under it, and a stale guess
@@ -3633,14 +3636,14 @@ namespace GameCult.Caching
         // Cache == that cache cannot change, and under the store's gate Cache cannot change at all. Attached, the call holds the cache's
         // gate: the store and its cache share one lock, so a load calling back into the cache never takes the gate after the store's,
         // and a direct call publishes what it loaded when it returns. Detached, it holds the store's gate; a cacheless call (WriteRecord,
-        // WriteDocument) that finds a cache there is refused in that same hold. File locks are always taken inside either gate. Retries
-        // are bounded: Cache changes only by attaches.
+        // WriteDocument) that finds a cache there is refused in that same hold. File locks are always taken inside either gate. A call
+        // makes at most MaxPasses passes: Cache changes once, from null to the cache that attached the store.
         private T Gate<T>(Func<T> body, bool cacheless)
         {
-            for (var stale = 0; ; stale++)
+            for (var pass = 0; ; pass++)
             {
-                if (stale == MaxStaleGuesses)
-                    throw new InvalidOperationException("A store call's gate changed under it more often than any sequence of attaches can explain.");
+                if (pass == MaxPasses)
+                    throw new InvalidOperationException("A store call's gate changed twice under it; the store's cache is published once, by a successful attach.");
                 var cache = cacheless ? null : Volatile.Read(ref Cache);
                 if (cache != null)
                 {
@@ -3671,14 +3674,14 @@ namespace GameCult.Caching
         private protected void Cacheless(CultDocumentRegistry? registry, Action body) =>
             Gate(() =>
             {
-                UseRegistry(registry);
+                UseRegistry(registry, null);
                 try
                 {
                     body();
                 }
                 finally
                 {
-                    UseRegistry(null);
+                    UseRegistry(null, null);
                 }
                 return true;
             }, cacheless: true);
@@ -3686,9 +3689,14 @@ namespace GameCult.Caching
         // The store's own gate, taken only here. Lock order: a cache's gate, then a store's; nothing takes a store's gate and then a cache's.
         internal T UnderStoreGate<T>(Func<T> body) => CultCache.InStoreHold(_storeGate, body);
 
-        // The one writer of the registry: a cacheless call for the call, an attach for as long as it holds the store, and a failed attach
-        // puts it back, so a cacheless store holds none between calls and a pull on one loads nothing.
-        internal void UseRegistry(CultDocumentRegistry? registry) => _registry = registry;
+        // The one writer of what an attach lends the store, the registry and the codec: a cacheless call for the call (no codec), an attach
+        // for as long as it holds the store, and a failed attach puts both back, so a cacheless store holds none between calls and a pull
+        // on one loads nothing. The pull reads the codec here, not from Cache, which is published only after the pull succeeds.
+        internal void UseRegistry(CultDocumentRegistry? registry, CultCodec? codec)
+        {
+            _registry = registry;
+            _codec = codec;
+        }
 
         public abstract void PullAll();
         public abstract void Push(CultStoredDocument entry);
@@ -3780,7 +3788,7 @@ namespace GameCult.Caching
                     descriptor,
                     new CultVariantDelta(record.Variant.BaseKey, record.Variant.Overrides.Where(Has).ToArray()),
                     null,
-                    Cache?.Codec)
+                    _codec)
                 {
                     StoredSchemaId = record.SchemaId,
                     StoredVersion = version
