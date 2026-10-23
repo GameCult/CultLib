@@ -6,37 +6,16 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
-using MessagePack;
 using NUnit.Framework;
 
 namespace GameCult.Caching.Tests
 {
     // Copied into a checkout of cultlib-unity-v2.0.1 (b8fc5eb0) by old-reader-refusal.sh. Not part of this tree's suite.
     // It attaches the store the 1.0.60 writer produced and prints the REFLIST-SUMMARY line that
-    // RefListDriftTests.A_1_0_60_Written_Store_Opens_Like_2_0_1 prints at head; 'gate csharp' diffs the two lines.
+    // RefListDriftTests.A_1_0_60_Written_Store_Opens_Like_2_0_1 prints at head; 'gate csharp' diffs the two lines. The document
+    // types are 2.0.1's own RefListDriftTests.RefListTarget and RefListHolder.
     public class OldReaderRefListProbe
     {
-        [CultDocument("tests.reflist_target", "tests.reflist_target.v1")]
-        [MessagePackObject(AllowPrivate = true)]
-        internal sealed class RefListTarget
-        {
-            [Key(0)]
-            [CultName]
-            public string Name = string.Empty;
-        }
-
-        [CultDocument("tests.reflist_holder", "tests.reflist_holder.v1")]
-        [MessagePackObject(AllowPrivate = true)]
-        internal sealed class RefListHolder
-        {
-            [Key(0)]
-            [CultName]
-            public string Name = string.Empty;
-
-            [Key(1)]
-            public CultRecordRef<RefListTarget>[] Items = Array.Empty<CultRecordRef<RefListTarget>>();
-        }
-
         [Test]
         public async Task A_1_0_60_Written_Store_Attaches_As_Compatible_Drift()
         {
@@ -50,7 +29,7 @@ namespace GameCult.Caching.Tests
                 await cache.PullAllBackingStoresAsync();
                 var warnings = store.LastSchemaMigrationReports.SelectMany(report => report.Warnings).Select(warning => warning.Code).Distinct().OrderBy(code => code, StringComparer.Ordinal).ToArray();
                 Assert.That(warnings, Does.Contain("gained_reference_semantics"));
-                var items = cache.GetAll<RefListHolder>().Single().Items.Select(item => item.Key.Value).ToArray();
+                var items = cache.GetAll<RefListDriftTests.RefListHolder>().Single().Items.Select(item => item.Key.Value).ToArray();
                 Assert.That(items, Is.EqualTo(new[] { "alpha", "beta" }));
 
                 store.PushAll();
