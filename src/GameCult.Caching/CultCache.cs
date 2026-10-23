@@ -2257,12 +2257,12 @@ namespace GameCult.Caching
         {
             if (store == null) throw new ArgumentNullException(nameof(store));
             homes ??= Array.Empty<Type>();
-            // The cache's gate, then the store's, held across the whole body, the failure path that resets Cache included: a cacheless call
-            // is either finished before the attach starts, or waits on the store's gate and, once the attach is over, finds the cache (and
-            // refuses) or finds the store free again (and runs).
-            Held(() => store.WhileDetached(() =>
+            // The only writer of store.Cache, and it writes it only while holding the cache's gate and the store's, the failure path that
+            // resets Cache included: under the cache's gate Cache == this cache cannot change, and under the store's gate Cache cannot
+            // change at all. A store call that guessed wrong waits on whichever gate it took, finds the answer changed and retries.
+            Held(() => store.UnderStoreGate(() =>
             {
-                if (store.Loaded != null)
+                if (store.Cache != null)
                     throw new InvalidOperationException($"Backing store {store} is already attached to a cache.");
                 if (store.IsDirty)
                     throw new InvalidOperationException($"Backing store {store} has staged writes; attach it clean.");
@@ -2805,6 +2805,13 @@ namespace GameCult.Caching
         // if an observer or an OnUpdate handler throws; then the exception (an AggregateException for several, whatever their
         // origin: a journal, an observer, a second database) is rethrown. A writer looking for one type unwraps InnerExceptions.
         // If the body threw, its exception wins.
+        // The one lock of a store's gate. A store gate is held by one thread at a time, and a store call may be entered from inside it.
+        internal static T InStoreHold<T>(object storeGate, Func<T> body)
+        {
+            lock (storeGate)
+                return body();
+        }
+
         internal T Held<T>(Func<T> body)
         {
             if (Monitor.IsEntered(_gate))
@@ -3538,7 +3545,8 @@ namespace GameCult.Caching
         // any of it; if the cache refuses a record the call throws and the store keeps its previous view.
         protected internal Action<IReadOnlyList<CultStoredDocument>, IReadOnlyList<CultStoredDocument>>? Loaded;
 
-        private readonly object _detachedGate = new();
+        private readonly object _storeGate = new();
+        // Written only by CultCache.AddBackingStore, holding the cache's gate and this store's gate.
         internal CultCache? Cache;
 
         private const string DirectoryFormatV4 = "cultcache.store.v4.directory-content-addressed-pages";
@@ -3581,26 +3589,62 @@ namespace GameCult.Caching
                 directoryStore,
                 holdsVariants);
 
-        // Once attached, a hold on the cache's gate: the store and its cache share one lock, so a load calling back into
-        // the cache can never take the gate after the store lock, and a direct call publishes what it loaded when it
-        // returns. File locks are always taken inside it. A cacheless write does not come through here: this picks
-        // its gate from a read of Cache, and ForTheCall decides under the store's own gate instead.
-        protected T Held<T>(Func<T> body)
+        // Every store call comes through here, and this is the one owner of which gate it holds. Cache is read once, unlocked, as a
+        // guess that only chooses which gate to try; the gate is then taken and the guess checked under it, and a stale guess
+        // releases and tries again. Cache is written only by CultCache.AddBackingStore holding both gates, so under the cache's gate
+        // Cache == that cache cannot change, and under the store's gate Cache cannot change at all. Attached, the call holds the cache's
+        // gate: the store and its cache share one lock, so a load calling back into the cache never takes the gate after the store's,
+        // and a direct call publishes what it loaded when it returns. Detached, it holds the store's gate; a cacheless call (WriteRecord,
+        // WriteDocument) that finds a cache there is refused in that same hold. File locks are always taken inside either gate. Retries
+        // are bounded: Cache changes only by attaches.
+        private T Gate<T>(Func<T> body, bool cacheless)
         {
-            if (Cache is { } cache)
-                return cache.Held(body);
-            lock (_detachedGate)
-                return body();
+            while (true)
+            {
+                var cache = cacheless ? null : Volatile.Read(ref Cache);
+                if (cache != null)
+                {
+                    var (ran, result) = cache.Held(() => Cache == cache ? (true, body()) : (false, default(T)!));
+                    if (ran)
+                        return result;
+                }
+                else
+                {
+                    var (ran, result) = UnderStoreGate(() =>
+                        Cache == null
+                            ? (true, body())
+                            : cacheless
+                                ? throw new InvalidOperationException("The store is attached to a cache, write through the cache.")
+                                : (false, default(T)!));
+                    if (ran)
+                        return result;
+                }
+            }
         }
+
+        protected T Held<T>(Func<T> body) => Gate(body, cacheless: false);
 
         protected void Held(Action body) => Held(() => { body(); return true; });
 
-        // The store's own gate. The attach holds it across its whole body, and a cacheless call holds it for its whole run (ForTheCall), so no call is mid-flight while the store gains a cache and none starts between the attach's refusal and its end.
-        internal T WhileDetached<T>(Func<T> body)
-        {
-            lock (_detachedGate)
-                return body();
-        }
+        // A cacheless call. The registry is the call's argument, not store state: it is attached for the call and detached when the
+        // call ends, whatever it does. A cacheless store holds none between calls.
+        private void Cacheless(CultDocumentRegistry? registry, Action body) =>
+            Gate(() =>
+            {
+                UseRegistry(registry);
+                try
+                {
+                    body();
+                }
+                finally
+                {
+                    UseRegistry(null);
+                }
+                return true;
+            }, cacheless: true);
+
+        // The store's own gate, taken only here. Lock order: a cache's gate, then a store's; nothing takes a store's gate and then a cache's.
+        internal T UnderStoreGate<T>(Func<T> body) => CultCache.InStoreHold(_storeGate, body);
 
         private protected void UseRegistry(CultDocumentRegistry? registry) => _registry = registry;
 
@@ -4248,7 +4292,7 @@ namespace GameCult.Caching
         {
             if (record == null) throw new ArgumentNullException(nameof(record));
             if (catalogEntry == null) throw new ArgumentNullException(nameof(catalogEntry));
-            ForTheCall(registry, () => WriteOne(record, catalogEntry, holdsIds));
+            Cacheless(registry, () => WriteOne(record, catalogEntry, holdsIds));
         }
 
         /// <summary>
@@ -4273,7 +4317,7 @@ namespace GameCult.Caching
             if (document == null) throw new ArgumentNullException(nameof(document));
             var resolvedRegistry = registry ?? CultDocumentRegistry.Shared;
             var catalogEntry = resolvedRegistry.GetRequired<TDocument>().ToCatalogEntry();
-            ForTheCall(resolvedRegistry, () =>
+            Cacheless(resolvedRegistry, () =>
             {
                 var ids = CultElementIds.Plan(typeof(TDocument), document, key.Value, deterministic: false);
                 ids.Apply();
@@ -4298,38 +4342,10 @@ namespace GameCult.Caching
             });
         }
 
-        // The one place a cacheless call decides whether it may run. The call takes the store's own gate, never the gate Held would
-        // pick from a read of Cache, and decides attachment under it. The attach sets Cache only while it holds this same gate (and
-        // clears it, on failure, before releasing it), so Cache cannot change from the refusal to the end of the call. The registry is
-        // the call's argument, not store state: it is attached for the call and detached when the call ends, whatever it does. A
-        // cacheless store holds none between calls. Lock order: an attach takes the cache's gate, then the store's. This takes only the
-        // store's, and nothing takes the store's gate and then a cache's.
-        private void ForTheCall(CultDocumentRegistry? registry, Action body) =>
-            WhileDetached(() =>
-            {
-                RefuseWhenAttached();
-                UseRegistry(registry);
-                try
-                {
-                    body();
-                }
-                finally
-                {
-                    UseRegistry(null);
-                }
-                return true;
-            });
-
         private void WriteOne(CultPersistedRecord record, CultSchemaCatalogEntry catalogEntry, bool? holdsIds)
         {
             using (AcquireLock(wait: true))
                 _ = ApplyWriteSet(ReadSnapshot(), new[] { new CultStagedRecord(record, catalogEntry, holdsIds) }, Array.Empty<string>(), Array.Empty<string>());
-        }
-
-        private void RefuseWhenAttached()
-        {
-            if (Cache != null)
-                throw new InvalidOperationException("The store is attached to a cache, write through the cache.");
         }
 
         // Flush, commit and Mesh's write all end here, with the durable store they read under the lock they hold. First, a key the write
