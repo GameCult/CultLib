@@ -3595,7 +3595,7 @@ namespace GameCult.Caching
 
         protected void Held(Action body) => Held(() => { body(); return true; });
 
-        // The store's cacheless gate, taken by the attach so that no cacheless call is mid-flight while the store gains a cache.
+        // The store's own gate. The attach holds it across its whole body, and a cacheless call holds it for its whole run (ForTheCall), so no call is mid-flight while the store gains a cache and none starts between the attach's refusal and its end.
         internal T WhileDetached<T>(Func<T> body)
         {
             lock (_detachedGate)
@@ -4304,9 +4304,8 @@ namespace GameCult.Caching
         // the call's argument, not store state: it is attached for the call and detached when the call ends, whatever it does. A
         // cacheless store holds none between calls. Lock order: an attach takes the cache's gate, then the store's. This takes only the
         // store's, and nothing takes the store's gate and then a cache's.
-        private void ForTheCall(CultDocumentRegistry? registry, Action body)
-        {
-            lock (_detachedGate)
+        private void ForTheCall(CultDocumentRegistry? registry, Action body) =>
+            WhileDetached(() =>
             {
                 RefuseWhenAttached();
                 UseRegistry(registry);
@@ -4318,8 +4317,8 @@ namespace GameCult.Caching
                 {
                     UseRegistry(null);
                 }
-            }
-        }
+                return true;
+            });
 
         private void WriteOne(CultPersistedRecord record, CultSchemaCatalogEntry catalogEntry, bool? holdsIds)
         {
