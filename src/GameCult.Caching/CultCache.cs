@@ -3628,7 +3628,7 @@ namespace GameCult.Caching
 
         // A cacheless call. The registry is the call's argument, not store state: it is attached for the call and detached when the
         // call ends, whatever it does. A cacheless store holds none between calls.
-        private void Cacheless(CultDocumentRegistry? registry, Action body) =>
+        private protected void Cacheless(CultDocumentRegistry? registry, Action body) =>
             Gate(() =>
             {
                 UseRegistry(registry);
