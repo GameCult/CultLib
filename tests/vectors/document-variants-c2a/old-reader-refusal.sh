@@ -89,32 +89,39 @@ probe() {
 
 # Stage a runtime's probes, then run them in a worktree of the staged commit.
 probe_staged() {
-  local sha tree
+  local sha tree rc=0
   sha="$(stage "$1")"
   tree="$(mktemp -d)/staged"
   git worktree add --detach "$tree" "$sha" >/dev/null
-  (cd "$tree" && "$self" probe "$1")
+  (cd "$tree" && "$self" probe "$1") || rc=$?
   git worktree remove --force "$tree"
+  return $rc
 }
 
 summary_of() { grep -o 'REFLIST-SUMMARY .*' "$1" | sort -u; }
 
+# Every csharp stage runs, so a writer that stamps the wrong header is also caught by the 2.0.1 reader opening what it wrote;
+# the gate fails if any stage failed and names them.
 gate() {
   case "$1" in
     csharp)
-      local out="${GATE_OUT:-/tmp/gate}"
+      local out="${GATE_OUT:-/tmp/gate}" failures=""
       rm -rf "$out"; mkdir -p "$out"
       export CULTLIB_GATE_OUT="$out"
-      dotnet test tests/GameCult.Caching.Tests --filter FullyQualifiedName~C2aGateWriter --logger "console;verbosity=detailed"
-      probe_staged writer
-      probe_staged csharp 2>&1 | tee "$out/reader.log"
-      CULTLIB_GATE_OLD_STORE="$out/v1-0-60-ref-list.cc" dotnet test tests/GameCult.Caching.Tests \
-        --filter "FullyQualifiedName~RefListDriftTests.A_1_0_60_Written_Store_Opens_Like_2_0_1" --logger "console;verbosity=detailed" 2>&1 | tee "$out/head.log"
+      dotnet test tests/GameCult.Caching.Tests --filter FullyQualifiedName~C2aGateWriter --logger "console;verbosity=detailed" || failures+=" c2a-writer"
+      probe_staged writer || failures+=" 1.0.60-writer"
+      probe_staged csharp 2>&1 | tee "$out/reader.log" || failures+=" 2.0.1-reader"
+      CULTLIB_GATE_OLD_STORE="$out/v1-0-60-ref-list.cc" dotnet test tests/GameCult.Caching.Tests         --filter "FullyQualifiedName~RefListDriftTests.A_1_0_60_Written_Store_Opens_Like_2_0_1" --logger "console;verbosity=detailed" 2>&1 | tee "$out/head.log" || failures+=" head-ref-list"
       summary_of "$out/reader.log" > "$out/reader.summary"
       summary_of "$out/head.log" > "$out/head.summary"
-      test "$(wc -l < "$out/reader.summary")" -eq 1 && test "$(wc -l < "$out/head.summary")" -eq 1
       cat "$out/reader.summary" "$out/head.summary"
-      diff "$out/reader.summary" "$out/head.summary" && echo "GATE csharp: the 2.0.1 and head REFLIST-SUMMARY lines are identical" ;;
+      if [ "$(wc -l < "$out/reader.summary")" -eq 1 ] && [ "$(wc -l < "$out/head.summary")" -eq 1 ] && diff "$out/reader.summary" "$out/head.summary"; then
+        echo "GATE csharp: the 2.0.1 and head REFLIST-SUMMARY lines are identical"
+      else
+        failures+=" summary-diff"
+      fi
+      if [ -n "$failures" ]; then echo "GATE csharp FAILED:$failures"; return 1; fi
+      echo "GATE csharp ok" ;;
     typescript|python|rust) probe_staged "$1" ;;
     *) usage ;;
   esac
