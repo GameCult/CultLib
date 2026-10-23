@@ -233,6 +233,19 @@ namespace GameCult.Caching.Tests
             Assert.That(snapshot.Records.Single().Payload, Is.EqualTo(CultDocumentMessagePackSerialization.SerializeUntyped(new IdBase { Name = "n" }, typeof(IdBase), registry)));
         }
 
+        // The id plan comes from the declared type too: an unset id that only the derived type holds is not the stored document's, so
+        // it is not minted into the caller's object.
+        [Test]
+        public void WriteDocumentMintsIdsOfTheDeclaredTypeNotTheRuntimeType()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdBase) });
+            var derived = new IdDerived { Name = "n", Reels = { new IdReel { Label = "r" } } };
+
+            new SingleFileMessagePackBackingStore(_path).WriteDocument<IdBase>(new CultRecordKey("d"), derived, registry: registry);
+
+            Assert.That(derived.Reels.Single().Id, Is.Null.Or.Empty, "an id outside the declared type is left unset");
+        }
+
         // No call leaves its registry on the store: after a write, a refused write and WriteRecord, the store holds none.
         [Test]
         public void NoCacheCallLeavesARegistryOnTheStore()
