@@ -2293,7 +2293,7 @@ namespace GameCult.Caching
                             "attach routed stores before the untyped store.");
                 }
 
-                store.AttachRegistry(_registry);
+                store.UseRegistry(_registry);
                 store.Cache = this;
                 store.Loaded = (loaded, dropped) => Admit(loaded, dropped, store, (_, _) => CultCommitOutcome.Committed);
                 _stores.Add(candidate);
@@ -2306,6 +2306,7 @@ namespace GameCult.Caching
                     _stores.Remove(candidate);
                     store.Loaded = null;
                     store.Cache = null;
+                    store.UseRegistry(null);
                     throw;
                 }
                 return true;
@@ -3630,10 +3631,15 @@ namespace GameCult.Caching
         // and a direct call publishes what it loaded when it returns. Detached, it holds the store's gate; a cacheless call (WriteRecord,
         // WriteDocument) that finds a cache there is refused in that same hold. File locks are always taken inside either gate. Retries
         // are bounded: Cache changes only by attaches.
+        // Far beyond what attaches can cost a call; it turns a broken validation into a thrown error instead of a loop that never ends.
+        private const int MaxStaleGuesses = 1_000_000;
+
         private T Gate<T>(Func<T> body, bool cacheless)
         {
-            while (true)
+            for (var stale = 0; ; stale++)
             {
+                if (stale == MaxStaleGuesses)
+                    throw new InvalidOperationException("A store call's gate changed under it more often than any sequence of attaches can explain.");
                 var cache = cacheless ? null : Volatile.Read(ref Cache);
                 if (cache != null)
                 {
@@ -3679,12 +3685,9 @@ namespace GameCult.Caching
         // The store's own gate, taken only here. Lock order: a cache's gate, then a store's; nothing takes a store's gate and then a cache's.
         internal T UnderStoreGate<T>(Func<T> body) => CultCache.InStoreHold(_storeGate, body);
 
-        private protected void UseRegistry(CultDocumentRegistry? registry) => _registry = registry;
-
-        internal void AttachRegistry(CultDocumentRegistry registry)
-        {
-            _registry = registry ?? throw new ArgumentNullException(nameof(registry));
-        }
+        // The one writer of the registry: a cacheless call for the call, an attach for as long as it holds the store, and a failed attach
+        // puts it back, so a cacheless store holds none between calls and a pull on one loads nothing.
+        internal void UseRegistry(CultDocumentRegistry? registry) => _registry = registry;
 
         public abstract void PullAll();
         public abstract void Push(CultStoredDocument entry);

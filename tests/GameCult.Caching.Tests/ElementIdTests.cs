@@ -902,7 +902,7 @@ namespace GameCult.Caching.Tests
             Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v2"), "read with a codec, a name override holds no id");
 
             var blind = new SingleFileMessagePackBackingStore(path);
-            blind.AttachRegistry(Registry);
+            blind.UseRegistry(Registry);
             blind.PullAll();
             blind.PushAll();
             Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v2"), "a flush that staged nothing copies the variant and its header");
