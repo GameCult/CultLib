@@ -2130,7 +2130,7 @@ test("bytes with no readable store stamp are not refused", () => {
   const stamp = [...Buffer.from("cultcache.store.v4", "utf8")];
   const cases: Record<string, number[]> = {
     empty: [],
-    "empty array": [0x90],
+    "empty array": [0x90, 0xb2, ...stamp],
     "empty array16": [0xdc, 0x00, 0x00, 0xb2, ...stamp],
     "empty array32": [0xdd, 0x00, 0x00, 0x00, 0x00, 0xb2, ...stamp],
     "array16 cut before its count": [0xdc, 0x00],
