@@ -845,34 +845,42 @@ namespace GameCult.Caching.Tests
             Finishes(writer.Thread, "the writer");
             Finishes(attach2.Thread, "the second attach");
             Assert.That(store.MostInside, Is.EqualTo(1), "never two threads inside the store's read at once");
-            Assert.That(reader.Error(), Is.Null, "the reader was not refused");
+            // A PullAll on a cacheless store with no registry (the cacheless writer that ran before it detached its own) is a usage error;
+            // being refused for entering a cache's hold is not.
+            Assert.That(reader.Error()?.Message, Is.Null.Or.Contain("not attached to a CultDocumentRegistry"), "the reader was not refused");
             Assert.That(attach2.Error(), Is.Null);
             await cache2.AddAsync(new IdDeck { Name = "b" });
             Assert.DoesNotThrow(() => cache2.FlushAllBackingStores());
         }
 
-        // A PullAll queued behind a failed attach runs under whichever gate owns the store when it gets its turn, and the cache that
-        // attached next sees the file's records, not an error about another cache's hold.
+        // After a failed attach left the store cacheless, the next cache attaches it, and a PullAll that queues on that attach (it guesses
+        // the second cache from Cache) runs under the second cache's gate once the attach ends: no refusal, and the cache holds the records.
         [Test]
         public void AFailedAttachThenPullAllLoadsIntoTheSecondCache()
         {
             var callRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
-            var registry2 = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
             new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: callRegistry);
             var store = new RoleStore(_path) { FailAttachPull = true };
             using var cache1 = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) }));
-            using var cache2 = new CultCache(registry2);
+            using var cache2 = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) }));
             var attach1 = OnThread("attach", () => cache1.AddBackingStore(store));
             Assert.That(store.AttachInside.Wait(TimeSpan.FromSeconds(10)), Is.True);
+            store.ReleaseAttach.Set();
+            Finishes(attach1.Thread, "the failed attach");
+            Assert.That(Refused(attach1.Error()), Is.True);
+
+            store.AttachInside.Reset();
+            store.ReleaseAttach.Reset();
+            store.FailAttachPull = false;
+            var attach2 = OnThread("attach", () => cache2.AddBackingStore(store));
+            Assert.That(store.AttachInside.Wait(TimeSpan.FromSeconds(10)), Is.True, "the second attach is inside its pull");
             var pull = OnThread("pull", () => store.PullAll());
             WaitUntilBlocked(pull.Thread);
 
             store.ReleaseAttach.Set();
-            Finishes(attach1.Thread, "the failed attach");
-            store.FailAttachPull = false;
-            cache2.AddBackingStore(store);
+            Finishes(attach2.Thread, "the second attach");
             Finishes(pull.Thread, "the queued PullAll");
-
+            Assert.That(attach2.Error(), Is.Null);
             Assert.That(pull.Error(), Is.Null, "the queued PullAll was not refused");
             Assert.That(cache2.Get<IdDeck>(new CultRecordKey("a")), Is.Not.Null, "the second cache holds the file's records");
         }
