@@ -1244,7 +1244,7 @@ namespace GameCult.Caching.Tests
                     catch (InvalidOperationException e) when (e.Message.Contains("pull fails")) { }
                     catch (Exception e) { attachErrors.Add(e.Message); }
                 }
-            })).Concat(Enumerable.Range(0, 4).Select(_ => OnThread("reader", () =>
+            })).Concat(Enumerable.Range(0, 4).Select(_ => OnThread("churn-reader", () =>
             {
                 while (Volatile.Read(ref stop) == 0)
                 {
