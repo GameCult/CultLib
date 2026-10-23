@@ -323,7 +323,9 @@ namespace GameCult.Caching.Tests
             Assert.That(store.Attached, Is.SameAs(registry2), "the call's end did not detach the second cache's registry");
             await cache2.AddAsync(new IdDeck { Name = "c" });
             Assert.DoesNotThrow(() => cache2.FlushAllBackingStores());
-            Assert.That(new SingleFileMessagePackBackingStore(_path).ReadStoreSnapshot()!.Records.Select(record => record.Key), Is.SupersetOf(new[] { "a", "first", "c" }));
+            var keys = new SingleFileMessagePackBackingStore(_path).ReadStoreSnapshot()!.Records.Select(record => record.Key).ToArray();
+            Assert.That(keys, Has.Length.EqualTo(3), "the seed, the call's record and the cache's record");
+            Assert.That(keys, Does.Contain("a").And.Contain("first"));
         }
 
         // The attach waits for a call that is already inside the store, wherever in the call it is: here inside the payload encoding,
