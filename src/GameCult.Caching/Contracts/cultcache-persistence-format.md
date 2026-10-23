@@ -109,7 +109,8 @@ parity cuts land.
 A store that fails to hydrate on open (corrupt bytes, unresolvable schema)
 makes the open throw and is left byte-identical; it is never silently
 overwritten. Within one process the lock order is the cache's gate, then the
-store's file lock; a store's I/O blocks its cache's readers.
+store's gate, then the file lock; nothing under a store's gate enters a cache's
+gate. A store's I/O blocks its cache's readers.
 
 C# implements batch and conditional commit (`CultCache.Commit`, `TryCommit`,
 `CultCacheBatch`). Rust implements both. TypeScript and Python implement

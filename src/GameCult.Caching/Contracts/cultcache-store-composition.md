@@ -126,10 +126,26 @@ which route wrote it.
 
 ## Locking
 
-- One lock order: the cache's gate, then the store's lock. A store attached to a
-  cache takes that cache's gate as its own lock, so a store's load callback into
-  the cache cannot take the two out of order. A store must not call `Loaded`
-  while holding its own lock outside the cache's hold.
+- One lock order: the cache's gate, then the store's gate, then the file lock. A
+  thread holds at most one cache's gate and at most one store's gate. A store's
+  gate may be taken inside a cache's gate (the attach; a journal writing a
+  cacheless file), never the reverse: while a thread holds a store's gate it
+  enters no cache gate it does not already hold, reads included, and no other
+  store's gate. Breaking the order throws `InvalidOperationException`. This is
+  checked at run time, not by comment: user code a cacheless call or an attach
+  runs under the store's gate (a document's getter, a constructor while a copied
+  record is read) is the way in.
+- One owner picks the gate a store call holds. A store attached to a cache takes
+  that cache's gate as its own lock, so a store's load callback into the cache
+  cannot take the two out of order; a cacheless store takes its own gate. The
+  store reads which one applies, takes it, and checks the answer again under it:
+  `Cache` is written only by the attach, holding both gates, so under the cache's
+  gate `Cache` naming that cache cannot change, and under the store's gate it
+  cannot change at all. A call whose guess went stale (it queued on a cache that
+  then failed to attach, or on a store that then gained a cache) releases and
+  retries; a cacheless write that finds a cache is refused in that same hold. A
+  store must not call `Loaded` while holding its own lock outside the cache's
+  hold.
 - A journal runs under the cache's gate, so a slow journal slows every writer of
   that cache. It must not enter the cache, and must not wait for anything that
   needs the cache or its gate: another thread's write, a lock a writer holds.
@@ -354,7 +370,7 @@ example `SingleFileMessagePackBackingStore`): `ReadStoreSnapshot()`, `WriteRecor
 and `WriteDocument<T>(key, document, storedAt, registry)`. Decoding a stored payload needs no file, so it is on the codec, not the store:
 `CultCodec.DecodeDocument<T>(key, payload)` (`CultCacheMessagePack.CreateCodec(registry)` makes the codec).
 
-- `ReadStoreSnapshot()` reads the file once, under the store's gate, and returns the durable snapshot (records, schema catalog,
+- `ReadStoreSnapshot()` reads the file once, under the store's gate (or its cache's gate when attached, validated after it is taken), and returns the durable snapshot (records, schema catalog,
   format stamp), or null when nothing is at the path. It throws `CultStoreUnreadableException` for a file the reader refuses.
 - `WriteRecord` writes one record under the store's lock: the record replaces the one at its key, every other record and catalog
   entry is copied forward as stored, and the file is replaced atomically. It takes a payload the caller already encoded, so a
