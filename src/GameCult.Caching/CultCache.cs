@@ -3623,6 +3623,10 @@ namespace GameCult.Caching
                 directoryStore,
                 holdsVariants);
 
+        // Each pass beyond the first needs an attach to have finished inside the call's wait, so no real call comes near this; a broken
+        // validation, which loops forever, throws instead.
+        private const int MaxStaleGuesses = 1_000;
+
         // Every store call comes through here, and this is the one owner of which gate it holds. Cache is read once, unlocked, as a
         // guess that only chooses which gate to try; the gate is then taken and the guess checked under it, and a stale guess
         // releases and tries again. Cache is written only by CultCache.AddBackingStore holding both gates, so under the cache's gate
@@ -3631,9 +3635,6 @@ namespace GameCult.Caching
         // and a direct call publishes what it loaded when it returns. Detached, it holds the store's gate; a cacheless call (WriteRecord,
         // WriteDocument) that finds a cache there is refused in that same hold. File locks are always taken inside either gate. Retries
         // are bounded: Cache changes only by attaches.
-        // Far beyond what attaches can cost a call; it turns a broken validation into a thrown error instead of a loop that never ends.
-        private const int MaxStaleGuesses = 1_000_000;
-
         private T Gate<T>(Func<T> body, bool cacheless)
         {
             for (var stale = 0; ; stale++)
