@@ -106,6 +106,38 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        // The store the 1.0.60 writer wrote (tests/vectors/ref-list-drift/v1-0-60-written.cc, made by OldWriterRefListProbe), or the one
+        // old-reader-refusal.sh gate csharp names in CULTLIB_GATE_OLD_STORE. The line it prints is the one OldReaderRefListProbe prints
+        // at 2.0.1; the gate diffs them.
+        [Test]
+        public async Task A_1_0_60_Written_Store_Opens_Like_2_0_1()
+        {
+            var source = Environment.GetEnvironmentVariable("CULTLIB_GATE_OLD_STORE");
+            var copy = Path.Combine(Path.GetTempPath(), $"reflist-1060-{Guid.NewGuid():N}.cc");
+            File.Copy(string.IsNullOrEmpty(source) ? VectorPath("v1-0-60-written.cc") : source, copy);
+            try
+            {
+                using var cache = new CultCache();
+                var store = new SingleFileMessagePackBackingStore(copy);
+                cache.AddBackingStore(store);
+                await cache.PullAllBackingStoresAsync();
+                var warnings = store.LastSchemaMigrationReports.SelectMany(report => report.Warnings).Select(warning => warning.Code).Distinct().OrderBy(code => code, StringComparer.Ordinal).ToArray();
+                Assert.That(warnings, Does.Contain("gained_reference_semantics"));
+                var items = cache.GetAll<RefListHolder>().Single().Items.Select(item => item.Key.Value).ToArray();
+                Assert.That(items, Is.EqualTo(new[] { "alpha", "beta" }));
+                Assert.That(cache.Get<RefListTarget>(cache.GetAll<RefListHolder>().Single().Items[0].Key)!.Name, Is.EqualTo("alpha"));
+
+                store.PushAll();
+                var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(copy));
+                var records = snapshot.Records.OrderBy(record => record.Key, StringComparer.Ordinal).Select(record => record.Key + "=" + record.SchemaId).ToArray();
+                TestContext.Out.WriteLine("REFLIST-SUMMARY " + System.Text.Json.JsonSerializer.Serialize(new { records, items, warnings, header = snapshot.FormatVersion }));
+            }
+            finally
+            {
+                File.Delete(copy);
+            }
+        }
+
         private static CultSchemaMigrationReport Resolve(Action<CultSchemaMemberCatalogEntry> persistedItems)
         {
             var catalog = CultDocumentRegistry.Shared.GetRequired<RefListHolder>().ToCatalogEntry();
