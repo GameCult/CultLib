@@ -3591,12 +3591,7 @@ namespace GameCult.Caching
 
         protected void Held(Action body) => Held(() => { body(); return true; });
 
-        private protected CultDocumentRegistry? SwapRegistry(CultDocumentRegistry? registry)
-        {
-            var previous = _registry;
-            _registry = registry;
-            return previous;
-        }
+        private protected void UseRegistry(CultDocumentRegistry? registry) => _registry = registry;
 
         internal void AttachRegistry(CultDocumentRegistry registry)
         {
@@ -4294,19 +4289,19 @@ namespace GameCult.Caching
             });
         }
 
-        // The registry is the call's argument, not store state: it is attached for the call under the store's gate and the store's
-        // previous registry (none, for a store no cache ever attached) comes back whatever the call does.
+        // The registry is the call's argument, not store state: it is attached for the call under the store's gate and detached when
+        // the call ends, whatever it does. A cacheless store holds none between calls.
         private void ForTheCall(CultDocumentRegistry? registry, Action body) =>
             Held(() =>
             {
-                var previous = SwapRegistry(registry);
+                UseRegistry(registry);
                 try
                 {
                     body();
                 }
                 finally
                 {
-                    SwapRegistry(previous);
+                    UseRegistry(null);
                 }
             });
 

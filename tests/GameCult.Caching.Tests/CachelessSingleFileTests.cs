@@ -45,6 +45,19 @@ namespace GameCult.Caching.Tests
             [Key(0)] [CultName] public string Name { get; set; } = "";
         }
 
+        [CultDocument("tests.cacheless.id_base", "tests.cacheless.id_base.v1")]
+        [MessagePackObject]
+        public class IdBase
+        {
+            [Key(0)] [CultName] public string Name { get; set; } = "";
+        }
+
+        [MessagePackObject]
+        public sealed class IdDerived : IdBase
+        {
+            [Key(1)] public System.Collections.Generic.List<IdReel> Reels { get; set; } = new();
+        }
+
         [MessagePackObject]
         public sealed class UndeclaredDerived : DeclaredBase
         {
@@ -60,6 +73,7 @@ namespace GameCult.Caching.Tests
             private int _mostInside;
             public readonly ManualResetEventSlim Entered = new();
             public readonly ManualResetEventSlim Release = new();
+            public CultDocumentRegistry? Attached => AttachedRegistry;
             public CultDocumentRegistry? RegistryBeforeWait;
             public CultDocumentRegistry? RegistryAfterWait;
 
@@ -162,6 +176,40 @@ namespace GameCult.Caching.Tests
             var asBase = CultDocumentMessagePackSerialization.SerializeUntyped(new DeclaredBase { Name = "n" }, typeof(DeclaredBase), registry);
             Assert.That(record.SchemaId, Is.EqualTo(registry.GetRequired<DeclaredBase>().SchemaId));
             Assert.That(record.Payload, Is.EqualTo(asBase), "base bytes under the base schema: one slot, not the derived type's two");
+        }
+
+        // The header, like the bytes and the id plan, comes from the declared type: ids that only the derived type holds are not the
+        // stored document's.
+        [Test]
+        public void WriteDocumentMarksTheStoreByTheDeclaredTypeNotTheRuntimeType()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdBase) });
+            var derived = new IdDerived { Name = "n", Reels = { new IdReel { Id = "0123456789ab", Label = "r" } } };
+
+            new SingleFileMessagePackBackingStore(_path).WriteDocument<IdBase>(new CultRecordKey("d"), derived, registry: registry);
+
+            var snapshot = new SingleFileMessagePackBackingStore(_path).ReadStoreSnapshot()!;
+            Assert.That(snapshot.FormatVersion, Is.EqualTo(CultPersistedStoreSnapshot.FormatV1), "the stored IdBase holds no element id");
+            Assert.That(snapshot.Records.Single().Payload, Is.EqualTo(CultDocumentMessagePackSerialization.SerializeUntyped(new IdBase { Name = "n" }, typeof(IdBase), registry)));
+        }
+
+        // No call leaves its registry on the store: after a write, a refused write and WriteRecord, the store holds none.
+        [Test]
+        public void NoCacheCallLeavesARegistryOnTheStore()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            new SingleFileMessagePackBackingStore(_path).WriteRecord(Record("a", One, 1), One);
+            var store = new GatedStore(_path);
+            store.Release.Set();
+
+            store.WriteDocument(new CultRecordKey("d"), new IdDeck { Name = "d" }, registry: registry);
+            Assert.That(store.Attached, Is.Null, "after WriteDocument");
+            store.WriteRecord(Record("b", One, 2), One, holdsIds: false, registry: registry);
+            Assert.That(store.Attached, Is.Null, "after WriteRecord");
+
+            File.WriteAllBytes(_path, new byte[] { 0xC1 });
+            Assert.Throws<CultStoreUnreadableException>(() => store.WriteDocument(new CultRecordKey("e"), new IdDeck { Name = "e" }, registry: registry));
+            Assert.That(store.Attached, Is.Null, "after a refused write");
         }
 
         // The registry is the call's argument. A typed call on a store instance leaves nothing behind, so a later WriteRecord that
