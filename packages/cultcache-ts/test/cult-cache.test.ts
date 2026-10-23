@@ -2121,9 +2121,17 @@ test("a store's header is judged from its first bytes, in every MessagePack arra
   assert.equal(headerRefused(storeStart([0x91], `cultcache.store.v4${"x".repeat(13)}`, "fix")), true);
   assert.equal(headerRefused(storeStart([0x91], `cultcache.store.v4${"x".repeat(300)}`, "16")), true);
   assert.equal(headerRefused(storeStart([0x91], `cultcache.store.v4${"x".repeat(300)}`, "32")), true);
-  // A view into a larger buffer is read from its own start.
-  const padded = new Uint8Array([9, 9, ...storeStart([0x91], "cultcache.store.v4", "fix")]);
-  assert.equal(headerRefused(padded.subarray(2)), true);
+  // A view into a larger buffer is read from its own start, in every form that reads a length through the DataView.
+  for (const lead of leads) {
+    for (const form of ["fix", "8", "16", "32"] as const) {
+      const padded = new Uint8Array([7, 7, 7, ...storeStart(lead, "cultcache.store.v4", form)]);
+      assert.equal(padded.subarray(3).byteOffset, 3);
+      assert.equal(headerRefused(padded.subarray(3)), true, `${lead} ${form} v4 at a byte offset`);
+    }
+  }
+  // The stamp is judged as written: a stamp with a space is not the stamp this runtime reads, and not one it ignores.
+  assert.equal(headerRefused(storeStart([0x91], "cultcache.store.v3 ", "fix")), true, "a v3 stamp with a trailing space is a header this runtime does not read");
+  assert.equal(headerRefused(storeStart([0x91], " cultcache.store.v4", "fix")), false, "a leading space makes it no cultcache.store.* header");
 });
 
 test("bytes with no readable store stamp are not refused", () => {

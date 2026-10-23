@@ -16,16 +16,12 @@ const PERSISTED_RECORD_SLOTS = 4;
 const STORE_SLOTS = 3;
 
 /**
- * True for a v1 or v3 snapshot, false for anything that is not a CultCache store header (the legacy
- * envelope array). Any other `cultcache.store.*` header is refused by name.
+ * True for a decoded array that leads with a `cultcache.store.*` stamp, false for the legacy envelope array. It judges the
+ * shape only: the verdict on the stamp is {@link refuseUnreadStoreBytes}, which a reader calls on the bytes before it decodes,
+ * so the stamp of a decoded array it is given is one this runtime reads.
  */
 export function isStoreSnapshot(decoded: unknown): decoded is [StoreFormat, ...unknown[]] {
-  if (!Array.isArray(decoded) || typeof decoded[0] !== "string" || !decoded[0].startsWith(STORE_FORMAT_PREFIX)) {
-    return false;
-  }
-
-  refuseUnreadFormat(decoded[0]);
-  return true;
+  return Array.isArray(decoded) && typeof decoded[0] === "string" && decoded[0].startsWith(STORE_FORMAT_PREFIX);
 }
 
 /**
