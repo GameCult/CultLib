@@ -203,6 +203,170 @@ namespace GameCult.Caching.Tests
             Assert.That(store.Attached, Is.SameAs(cacheRegistry));
         }
 
+        // A store whose hooks fire by the role of the thread inside it, so a test can hold an attach and a cacheless call at chosen
+        // points: the attach inside its pull (and make that pull fail), a call inside its read or inside its payload encoding.
+        private sealed class RoleStore : SingleFileBackingStore
+        {
+            [ThreadStatic] public static string? Role;
+            public bool FailAttachPull;
+            public readonly ManualResetEventSlim AttachInside = new();
+            public readonly ManualResetEventSlim ReleaseAttach = new();
+            public readonly ManualResetEventSlim CallInside = new();
+            public readonly ManualResetEventSlim ReleaseCall = new();
+            public CultDocumentRegistry? Attached => AttachedRegistry;
+
+            public RoleStore(string path) : base(path) { }
+
+            protected override byte[] SerializeStore(string formatVersion, System.Collections.Generic.IReadOnlyList<byte[]> catalogEntries, System.Collections.Generic.IReadOnlyList<byte[]> records) =>
+                CultDocumentMessagePackSerialization.SerializeStore(formatVersion, catalogEntries, records);
+
+            protected override byte[] SerializeRecord(CultPersistedRecord record) =>
+                CultDocumentMessagePackSerialization.SerializePersistedRecord(record);
+
+            protected override byte[] SerializeCatalogEntry(CultSchemaCatalogEntry entry) =>
+                CultDocumentMessagePackSerialization.SerializeCatalogEntry(entry);
+
+            protected override (CultPersistedStoreSnapshot Snapshot, byte[][] CatalogBytes, byte[][] RecordBytes) ReadStore(byte[] data)
+            {
+                if (Role == "attach")
+                {
+                    AttachInside.Set();
+                    ReleaseAttach.Wait(TimeSpan.FromSeconds(30));
+                    if (FailAttachPull)
+                        throw new InvalidOperationException("the attach's pull fails");
+                }
+                else if (Role == "call-in-read")
+                {
+                    CallInside.Set();
+                    ReleaseCall.Wait(TimeSpan.FromSeconds(30));
+                }
+                var store = CultDocumentMessagePackSerialization.ReadStore(data);
+                CultDocumentMessagePackSerialization.RequireSingleFileFormat(store.Snapshot);
+                return store;
+            }
+
+            protected override byte[] SerializePayload(object document, Type documentType)
+            {
+                if (Role == "call-in-payload")
+                {
+                    CallInside.Set();
+                    ReleaseCall.Wait(TimeSpan.FromSeconds(30));
+                }
+                return CultDocumentMessagePackSerialization.SerializeUntyped(document, documentType, Registry);
+            }
+
+            protected override object DeserializePayload(Type documentType, byte[] payload) =>
+                CultDocumentMessagePackSerialization.DeserializeUntyped(documentType, payload, Registry);
+        }
+
+        // Runs body on its own thread under a role, and returns the thread with whatever it threw.
+        private static (Thread Thread, Func<Exception?> Error) OnThread(string role, Action body)
+        {
+            Exception? error = null;
+            var thread = new Thread(() =>
+            {
+                RoleStore.Role = role;
+                try { body(); }
+                catch (Exception e) { error = e; }
+                finally { RoleStore.Role = null; }
+            });
+            thread.Start();
+            return (thread, () => error);
+        }
+
+        private static void WaitUntilBlocked(Thread thread) =>
+            Assert.That(SpinWait.SpinUntil(() => thread.ThreadState.HasFlag(ThreadState.WaitSleepJoin), TimeSpan.FromSeconds(10)), Is.True, "the thread is blocked at a gate");
+
+        // A cacheless call that arrives during an attach waits for the attach to end, whatever the attach does. The call's thread blocks
+        // on the store's gate (it does not read Cache first and queue on the cache's gate), so when the pull fails the call runs, and the
+        // next attach waits for it; when the pull succeeds the call finds the cache and is refused, leaving the cache's registry.
+        [TestCase(true)]
+        [TestCase(false)]
+        public async Task ACallArrivingDuringAnAttachWaitsForTheAttachToEnd(bool theAttachFails)
+        {
+            var callRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            var registry1 = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            var registry2 = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: callRegistry);
+            var store = new RoleStore(_path) { FailAttachPull = theAttachFails };
+            using var cache1 = new CultCache(registry1);
+            var attach = OnThread("attach", () => cache1.AddBackingStore(store));
+            Assert.That(store.AttachInside.Wait(TimeSpan.FromSeconds(10)), Is.True, "the attach reached its pull");
+            var call = OnThread("call-in-read", () => store.WriteDocument(new CultRecordKey("first"), new IdDeck { Name = "first" }, registry: callRegistry));
+            WaitUntilBlocked(call.Thread);
+            Assert.That(store.CallInside.IsSet, Is.False, "the call waits while the attach is inside the store");
+
+            store.ReleaseAttach.Set();
+            attach.Thread.Join();
+            Assert.That(attach.Error(), theAttachFails ? Is.InstanceOf<InvalidOperationException>() : Is.Null);
+
+            if (!theAttachFails)
+            {
+                call.Thread.Join();
+                Assert.That(call.Error(), Is.InstanceOf<InvalidOperationException>(), "the attach succeeded, so the call is refused");
+                Assert.That(store.CallInside.IsSet, Is.False);
+                Assert.That(store.Attached, Is.SameAs(registry1), "the refused call left the cache's registry");
+                await cache1.AddAsync(new IdDeck { Name = "b" });
+                Assert.DoesNotThrow(() => cache1.FlushAllBackingStores());
+                return;
+            }
+
+            Assert.That(store.CallInside.Wait(TimeSpan.FromSeconds(10)), Is.True, "the attach failed, so the call runs");
+            using var cache2 = new CultCache(registry2);
+            var secondAttach = Task.Run(() => cache2.AddBackingStore(store));
+            Assert.That(secondAttach.Wait(TimeSpan.FromMilliseconds(500)), Is.False, "the next attach waits while the call is inside the store");
+            store.ReleaseCall.Set();
+            call.Thread.Join();
+            await secondAttach;
+
+            Assert.That(call.Error(), Is.Null);
+            Assert.That(store.Attached, Is.SameAs(registry2), "the call's end did not detach the second cache's registry");
+            await cache2.AddAsync(new IdDeck { Name = "c" });
+            Assert.DoesNotThrow(() => cache2.FlushAllBackingStores());
+            Assert.That(new SingleFileMessagePackBackingStore(_path).ReadStoreSnapshot()!.Records.Select(record => record.Key), Is.SupersetOf(new[] { "a", "first", "c" }));
+        }
+
+        // The attach waits for a call that is already inside the store, wherever in the call it is: here inside the payload encoding,
+        // before the file is read. The call ends on its own registry, then the cache owns the store and its registry.
+        [Test]
+        public async Task AnAttachDuringACallEncodingItsPayloadWaitsForIt()
+        {
+            var callRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            var cacheRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            var store = new RoleStore(_path);
+            var call = OnThread("call-in-payload", () => store.WriteDocument(new CultRecordKey("first"), new IdDeck { Name = "first" }, registry: callRegistry));
+            Assert.That(store.CallInside.Wait(TimeSpan.FromSeconds(10)), Is.True, "the call reached its payload encoding");
+            using var cache = new CultCache(cacheRegistry);
+            var attach = Task.Run(() => cache.AddBackingStore(store));
+            Assert.That(attach.Wait(TimeSpan.FromMilliseconds(500)), Is.False, "the attach waits while a call is inside the store");
+
+            store.ReleaseCall.Set();
+            call.Thread.Join();
+            await attach;
+
+            Assert.That(call.Error(), Is.Null);
+            Assert.That(store.Attached, Is.SameAs(cacheRegistry), "the call's end did not detach the cache's registry");
+            await cache.AddAsync(new IdDeck { Name = "b" });
+            Assert.DoesNotThrow(() => cache.FlushAllBackingStores());
+        }
+
+        // An attach the cache refuses before it pulls leaves the store as it found it: no cache, no registry, and a cacheless call
+        // still runs.
+        [Test]
+        public void ARefusedAttachLeavesTheStoreCacheless()
+        {
+            var cacheRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            using var cache = new CultCache(cacheRegistry);
+            cache.AddBackingStore(new RoleStore(Path.Combine(_directory, "first.cc")));
+            var second = new RoleStore(_path);
+
+            Assert.Throws<InvalidOperationException>(() => cache.AddBackingStore(second), "a second untyped store is refused");
+            Assert.DoesNotThrow(() => second.WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: cacheRegistry));
+
+            Assert.That(second.Attached, Is.Null);
+            Assert.That(second.ReadStoreSnapshot()!.Records, Has.Length.EqualTo(1));
+        }
+
         // WriteDocument<T> stores the document as T: the schema id, the id plan, the header and the bytes all come from the one
         // declared type, as they did when CultMesh encoded typeof(T).
         [Test]
