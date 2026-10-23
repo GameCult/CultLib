@@ -163,6 +163,46 @@ namespace GameCult.Caching.Tests
             Assert.That(new SingleFileMessagePackBackingStore(_path).ReadStoreSnapshot()!.Records.Select(record => record.Key), Is.EquivalentTo(new[] { "a", "first", "second" }));
         }
 
+        // An attach during a cacheless call waits for it: the call finishes on the registry it was given, the store then gains the
+        // cache's registry, and the cache's next flush works.
+        [Test]
+        public async Task AnAttachDuringACachelessCallWaitsForIt()
+        {
+            var mine = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            var cacheRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: mine);
+            var store = new GatedStore(_path);
+
+            var write = Task.Run(() => store.WriteDocument(new CultRecordKey("first"), new IdDeck { Name = "first" }, registry: mine));
+            Assert.That(store.Entered.Wait(TimeSpan.FromSeconds(10)), Is.True, "the call reached the reader");
+            using var cache = new CultCache(cacheRegistry);
+            var attach = Task.Run(() => cache.AddBackingStore(store));
+            Assert.That(attach.Wait(TimeSpan.FromMilliseconds(500)), Is.False, "the attach waits while a cacheless call is inside the store");
+            store.Release.Set();
+            await write;
+            await attach;
+
+            Assert.That(store.RegistryAfterWait, Is.SameAs(mine), "the call kept its own registry to its end");
+            Assert.That(store.Attached, Is.SameAs(cacheRegistry), "the call's end did not detach the cache's registry");
+            await cache.AddAsync(new IdDeck { Name = "b" });
+            Assert.DoesNotThrow(() => cache.FlushAllBackingStores());
+        }
+
+        // A cacheless call that finds the store attached by the time it holds the gate is refused, and leaves the cache's registry.
+        [Test]
+        public void ACachelessCallOnAnAttachedStoreIsRefusedAndLeavesTheRegistry()
+        {
+            var cacheRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            var store = new GatedStore(_path);
+            store.Release.Set();
+            using var cache = new CultCache(cacheRegistry);
+            cache.AddBackingStore(store);
+
+            Assert.Throws<InvalidOperationException>(() => store.WriteDocument(new CultRecordKey("x"), new IdDeck { Name = "x" }));
+            Assert.Throws<InvalidOperationException>(() => store.WriteRecord(Record("a", One, 1), One));
+            Assert.That(store.Attached, Is.SameAs(cacheRegistry));
+        }
+
         // WriteDocument<T> stores the document as T: the schema id, the id plan, the header and the bytes all come from the one
         // declared type, as they did when CultMesh encoded typeof(T).
         [Test]

@@ -2257,7 +2257,8 @@ namespace GameCult.Caching
         {
             if (store == null) throw new ArgumentNullException(nameof(store));
             homes ??= Array.Empty<Type>();
-            Held(() =>
+            // The store's own gate too: a cacheless call on it is either finished or waiting, and a waiting one finds the cache and refuses.
+            Held(() => store.WhileDetached(() =>
             {
                 if (store.Loaded != null)
                     throw new InvalidOperationException($"Backing store {store} is already attached to a cache.");
@@ -2302,7 +2303,7 @@ namespace GameCult.Caching
                     throw;
                 }
                 return true;
-            });
+            }));
         }
 
         public Task PullAllBackingStoresAsync()
@@ -3591,6 +3592,13 @@ namespace GameCult.Caching
 
         protected void Held(Action body) => Held(() => { body(); return true; });
 
+        // The store's cacheless gate, taken by the attach so that no cacheless call is mid-flight while the store gains a cache.
+        internal T WhileDetached<T>(Func<T> body)
+        {
+            lock (_detachedGate)
+                return body();
+        }
+
         private protected void UseRegistry(CultDocumentRegistry? registry) => _registry = registry;
 
         internal void AttachRegistry(CultDocumentRegistry registry)
@@ -4237,7 +4245,6 @@ namespace GameCult.Caching
         {
             if (record == null) throw new ArgumentNullException(nameof(record));
             if (catalogEntry == null) throw new ArgumentNullException(nameof(catalogEntry));
-            RefuseWhenAttached();
             ForTheCall(registry, () => WriteOne(record, catalogEntry, holdsIds));
         }
 
@@ -4261,7 +4268,6 @@ namespace GameCult.Caching
             where TDocument : class
         {
             if (document == null) throw new ArgumentNullException(nameof(document));
-            RefuseWhenAttached();
             var resolvedRegistry = registry ?? CultDocumentRegistry.Shared;
             var catalogEntry = resolvedRegistry.GetRequired<TDocument>().ToCatalogEntry();
             ForTheCall(resolvedRegistry, () =>
@@ -4294,6 +4300,7 @@ namespace GameCult.Caching
         private void ForTheCall(CultDocumentRegistry? registry, Action body) =>
             Held(() =>
             {
+                RefuseWhenAttached();
                 UseRegistry(registry);
                 try
                 {
