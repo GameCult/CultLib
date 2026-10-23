@@ -763,7 +763,7 @@ namespace GameCult.Caching.Tests
         {
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(TapDoc) });
             var store = new RoleStore(_path);
-            using var cache = new CultCache(registry);
+            var cache = new CultCache(registry);
             var inside = new ManualResetEventSlim();
             var attachWaits = new ManualResetEventSlim();
             var write = OnThread("writer", () =>
@@ -787,6 +787,8 @@ namespace GameCult.Caching.Tests
             Assert.That(attach.Error(), Is.Null);
             await cache.AddAsync(new TapDoc { Name = "after" });
             Assert.DoesNotThrow(() => cache.FlushAllBackingStores());
+            // Disposed only after every join passed: a deadlocked gate would make Dispose wait for it.
+            cache.Dispose();
         }
 
         // The attach holds the store's gate while it pulls; user code in the pull may not enter a second store.
@@ -797,7 +799,7 @@ namespace GameCult.Caching.Tests
             new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
             var store = new RoleStore(_path);
             var second = new SingleFileMessagePackBackingStore(Path.Combine(_directory, "second.cc"));
-            using var cache = new CultCache(registry);
+            var cache = new CultCache(registry);
             var attach = OnThread("hook", () =>
             {
                 RoleStore.RoleHook = () => second.WriteDocument(new CultRecordKey("b"), new IdDeck { Name = "b" }, registry: registry);
@@ -810,6 +812,8 @@ namespace GameCult.Caching.Tests
             Assert.That(File.Exists(Path.Combine(_directory, "second.cc")), Is.False);
             Assert.That(cache.BackingStores, Is.Empty, "the failed attach left nothing behind");
             Assert.DoesNotThrow(() => store.WriteDocument(new CultRecordKey("c"), new IdDeck { Name = "c" }, registry: registry), "the store is cacheless after");
+            // Disposed only after every join passed: a deadlocked gate would make Dispose wait for it.
+            cache.Dispose();
         }
 
         // Soul P4's window: a reader queued on a failed attach's cache gate must retry under the store's gate. Whichever of the reader and
@@ -823,8 +827,8 @@ namespace GameCult.Caching.Tests
             var registry2 = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
             new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: callRegistry);
             var store = new RoleStore(_path) { FailAttachPull = true };
-            using var cache1 = new CultCache(registry1);
-            using var cache2 = new CultCache(registry2);
+            var cache1 = new CultCache(registry1);
+            var cache2 = new CultCache(registry2);
             var attach1 = OnThread("attach", () => cache1.AddBackingStore(store));
             Assert.That(store.AttachInside.Wait(TimeSpan.FromSeconds(10)), Is.True);
             var reader = OnThread("reader", () => { if (how == "snapshot") store.ReadStoreSnapshot(); else store.PullAll(); });
@@ -851,6 +855,9 @@ namespace GameCult.Caching.Tests
             Assert.That(attach2.Error(), Is.Null);
             await cache2.AddAsync(new IdDeck { Name = "b" });
             Assert.DoesNotThrow(() => cache2.FlushAllBackingStores());
+            // Disposed only after every join passed: a deadlocked gate would make Dispose wait for it.
+            cache1.Dispose();
+            cache2.Dispose();
         }
 
         // After a failed attach left the store cacheless, the next cache attaches it, and a PullAll that queues on that attach (it guesses
@@ -861,8 +868,8 @@ namespace GameCult.Caching.Tests
             var callRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
             new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: callRegistry);
             var store = new RoleStore(_path) { FailAttachPull = true };
-            using var cache1 = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) }));
-            using var cache2 = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) }));
+            var cache1 = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) }));
+            var cache2 = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) }));
             var attach1 = OnThread("attach", () => cache1.AddBackingStore(store));
             Assert.That(store.AttachInside.Wait(TimeSpan.FromSeconds(10)), Is.True);
             store.ReleaseAttach.Set();
@@ -883,6 +890,9 @@ namespace GameCult.Caching.Tests
             Assert.That(attach2.Error(), Is.Null);
             Assert.That(pull.Error(), Is.Null, "the queued PullAll was not refused");
             Assert.That(cache2.Get<IdDeck>(new CultRecordKey("a")), Is.Not.Null, "the second cache holds the file's records");
+            // Disposed only after every join passed: a deadlocked gate would make Dispose wait for it.
+            cache1.Dispose();
+            cache2.Dispose();
         }
     }
 }
