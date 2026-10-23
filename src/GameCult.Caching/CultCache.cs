@@ -2056,6 +2056,10 @@ namespace GameCult.Caching
         private long _sequence;
         // What this thread's outermost hold admitted, published by that hold when it exits.
         [ThreadStatic] private static Hold? _held;
+        // The store gate this thread holds (InStoreHold), if any. With _held this is the whole of what a thread holds: at most one
+        // cache's gate and at most one store's. A store's gate may be taken inside a cache's, never the reverse, so while this is set a
+        // thread enters no cache gate it does not already hold, reads included (Gate).
+        [ThreadStatic] private static object? _storeHeld;
         // Journals run under the gate, in registration order; both fields are read and written only under it.
         private readonly List<Action<IReadOnlyList<CultCacheDocumentChange<object>>>> _journals = new();
         private bool _journaling;
@@ -2137,7 +2141,7 @@ namespace GameCult.Caching
         {
             get
             {
-                lock (_gate)
+                lock (Gate())
                     return _stores.Count == 0 ? _dirtyInMemory : _stores.Any(entry => entry.Store.IsDirty);
             }
         }
@@ -2150,7 +2154,7 @@ namespace GameCult.Caching
         {
             get
             {
-                lock (_gate)
+                lock (Gate())
                     return _stores.Select(entry => entry.Store).ToArray();
             }
         }
@@ -2159,7 +2163,7 @@ namespace GameCult.Caching
         {
             get
             {
-                lock (_gate)
+                lock (Gate())
                     return _entries.Values.Select(entry => entry.Document).ToArray();
             }
         }
@@ -2168,7 +2172,7 @@ namespace GameCult.Caching
         {
             get
             {
-                lock (_gate)
+                lock (Gate())
                     return _entries.Values
                         .OrderBy(entry => entry.Descriptor.SchemaName, StringComparer.Ordinal)
                         .ThenBy(entry => entry.Key.Value, StringComparer.Ordinal)
@@ -2448,20 +2452,20 @@ namespace GameCult.Caching
         public CultRecordHandle<T>? TryGetHandle<T>(T document)
         {
             if (document == null) throw new ArgumentNullException(nameof(document));
-            lock (_gate)
+            lock (Gate())
                 return _handles.TryGetValue(document, out var box) ? new CultRecordHandle<T>(box.Key) : null;
         }
 
         // The stored form of a record: for a variant, the delta beside the resolved document.
         public CultStoredDocument? GetStored(CultRecordKey key)
         {
-            lock (_gate)
+            lock (Gate())
                 return _entries.TryGetValue(key.Value, out var stored) ? stored : null;
         }
 
         public object? Get(CultRecordKey key)
         {
-            lock (_gate)
+            lock (Gate())
                 return _entries.TryGetValue(key.Value, out var stored) ? stored.Document : null;
         }
 
@@ -2473,7 +2477,7 @@ namespace GameCult.Caching
         // Every change whose Sequence is at or below the returned one is reflected in the returned document.
         public (object? Document, long Sequence) GetWithSequence(CultRecordKey key)
         {
-            lock (_gate)
+            lock (Gate())
                 return (_entries.TryGetValue(key.Value, out var stored) ? stored.Document : null, _sequence);
         }
 
@@ -2485,7 +2489,7 @@ namespace GameCult.Caching
 
         public IEnumerable<T> GetAll<T>() where T : class
         {
-            lock (_gate)
+            lock (Gate())
                 return _entries.Values.Select(entry => entry.Document).OfType<T>().ToArray();
         }
 
@@ -2566,7 +2570,7 @@ namespace GameCult.Caching
         internal CultStoredDocument CreateStoredDocument(object document, CultRecordKey? key)
         {
             var descriptor = _registry.GetRequired(document.GetType());
-            lock (_gate)
+            lock (Gate())
                 return Stamp(
                     key ?? (_handles.TryGetValue(document, out var box) ? box.Key
                         : descriptor.IsGlobal ? new CultRecordKey($"global:{descriptor.SchemaId}")
@@ -2629,7 +2633,7 @@ namespace GameCult.Caching
         {
             if (current == null)
                 return null;
-            lock (_gate)
+            lock (Gate())
             {
                 if (_handles.TryGetValue(current, out var box) && box.Key.Equals(key) &&
                     _entries.TryGetValue(key.Value, out var stored) && ReferenceEquals(stored.Document, current))
@@ -2805,11 +2809,40 @@ namespace GameCult.Caching
         // if an observer or an OnUpdate handler throws; then the exception (an AggregateException for several, whatever their
         // origin: a journal, an observer, a second database) is rethrown. A writer looking for one type unwraps InnerExceptions.
         // If the body threw, its exception wins.
-        // The one lock of a store's gate. A store gate is held by one thread at a time, and a store call may be entered from inside it.
+        // Every cache gate entry takes the gate here: a thread that holds a store's gate may not enter a cache's gate it does not
+        // already hold. User code a cacheless call or an attach runs (a document's getter, a constructor) is the way in; entering a cache
+        // from it could wait on a thread that holds that cache and waits for this store, so it is refused instead.
+        private object Gate()
+        {
+            if (_storeHeld != null && !Monitor.IsEntered(_gate))
+                throw new InvalidOperationException(
+                    "A cache's gate was entered inside a store's hold; user code run by a cacheless call or an attach may not enter another cache.");
+            return _gate;
+        }
+
+        // The one lock of a store's gate. A thread holds one store's gate at a time; a store call may be entered again from inside it.
         internal static T InStoreHold<T>(object storeGate, Func<T> body)
         {
+            if (_storeHeld != null)
+            {
+                if (ReferenceEquals(_storeHeld, storeGate))
+                    return body();
+                throw new InvalidOperationException(
+                    "A store's gate was entered inside another store's hold; user code run by a cacheless call or an attach may not enter a second store.");
+            }
+
             lock (storeGate)
-                return body();
+            {
+                _storeHeld = storeGate;
+                try
+                {
+                    return body();
+                }
+                finally
+                {
+                    _storeHeld = null;
+                }
+            }
         }
 
         internal T Held<T>(Func<T> body)
@@ -2828,7 +2861,7 @@ namespace GameCult.Caching
             var result = default(T)!;
             try
             {
-                lock (_gate)
+                lock (Gate())
                     result = body();
             }
             catch (Exception exception)
@@ -3404,7 +3437,7 @@ namespace GameCult.Caching
 
         private T? Single<T>(string lookup, Func<IEnumerable<string>> keys) where T : class
         {
-            lock (_gate)
+            lock (Gate())
             {
                 var found = keys().Distinct().ToArray();
                 if (found.Length > 1)
@@ -4286,6 +4319,7 @@ namespace GameCult.Caching
         /// <param name="catalogEntry">The schema catalog entry for the record's schema id.</param>
         /// <param name="holdsIds">Whether the record's payload holds element ids, or null when the caller cannot tell.</param>
         /// <param name="registry">The registry the payload was encoded with. Given, the write decides the header for copied records that registry can read; omitted, it decides nothing for them. It serves this call only: the store keeps no registry.</param>
+        /// <remarks>The call holds the store's gate while it runs. User code it runs must not enter a cache or another store; that throws <see cref="InvalidOperationException"/>.</remarks>
         /// <exception cref="InvalidOperationException">The store is attached to a cache; write through the cache.</exception>
         /// <exception cref="CultStoreUnreadableException">The file at the path is not a store this runtime can read.</exception>
         public void WriteRecord(CultPersistedRecord record, CultSchemaCatalogEntry catalogEntry, bool? holdsIds = null, CultDocumentRegistry? registry = null)
@@ -4308,6 +4342,7 @@ namespace GameCult.Caching
         /// <param name="document">The document to store.</param>
         /// <param name="storedAt">The stored-at stamp, or null for now.</param>
         /// <param name="registry">The registry that describes and encodes the document, or null for <see cref="CultDocumentRegistry.Shared"/>. It serves this call only: the store keeps no registry.</param>
+        /// <remarks>The call holds the store's gate while it runs. User code it runs (property getters while the document is encoded, constructors while a copied record is read) must not enter a cache or another store; that throws <see cref="InvalidOperationException"/>, carried by the encoder's wrapper when the code ran inside it.</remarks>
         /// <exception cref="InvalidOperationException">The store is attached to a cache; write through the cache.</exception>
         /// <exception cref="CultStoreUnreadableException">The file at the path is not a store this runtime can read.</exception>
         /// <exception cref="CultElementIdException">The document holds an element id or list a cache write refuses.</exception>
