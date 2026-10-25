@@ -1186,6 +1186,8 @@ namespace GameCult.Caching.Tests
 
         private const string ReentryRefusal = "A cacheless write was made inside a call that already holds this store";
 
+        private const string AttachedRefusal = "The store is attached to a cache, write through the cache.";
+
         private const string JournalRefusal = "A journal entered the cache it journals";
 
         // Every store entry point, called by a journal the attach's pull runs on the attaching thread, through a real attach. The store is
@@ -1276,7 +1278,7 @@ namespace GameCult.Caching.Tests
 
             Assert.That(journalRuns, Is.GreaterThan(0), "the pull's admission ran the journal");
             Assert.That(journalError, Is.InstanceOf<InvalidOperationException>());
-            Assert.That(journalError!.Message, Does.StartWith(op is "writedoc" or "writerecord" ? ReentryRefusal : JournalRefusal));
+            Assert.That(journalError!.Message, Does.StartWith(op is "writedoc" or "writerecord" ? AttachedRefusal : JournalRefusal));
             Assert.That(store.IsDirty, Is.False, "nothing the cache never admitted is staged");
 
             await cache.UpsertAsync(typeof(IdDeck), new IdDeck { Name = "later" }, new CultRecordKey("later"));
@@ -1414,6 +1416,50 @@ namespace GameCult.Caching.Tests
 
             Assert.That(readerErrors, Is.Empty);
             Assert.That(attachErrors, Is.Empty);
+            foreach (var c in caches)
+                c.Dispose();
+        }
+
+        // One call takes at most three gates (the guessed cache's, the store's, the settled cache's), however often failing attaches
+        // publish and retract Cache under it. A retry around the unlocked guess would take one per stale guess and exceed this.
+        [Test]
+        public void OneStoreCallTakesAtMostThreeGatesUnderFailingAttachChurn()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
+            var store = new RoleStore(_path) { FailAttachPull = true };
+            store.ReleaseAttach.Set();
+            var caches = Enumerable.Range(0, 4).Select(_ => new CultCache(registry)).ToArray();
+            var stop = 0;
+            var mostTakes = 0;
+            var calls = 0;
+            var threads = caches.Select(c => OnThread("attach", () =>
+            {
+                while (Volatile.Read(ref stop) == 0)
+                {
+                    try { c.AddBackingStore(store); }
+                    catch (InvalidOperationException e) when (e.Message.Contains("pull fails")) { }
+                }
+            })).Concat(Enumerable.Range(0, 4).Select(_ => OnThread("counting-reader", () =>
+            {
+                while (Volatile.Read(ref stop) == 0)
+                {
+                    CacheBackingStore.GateTakes = 0;
+                    try { store.ReadStoreSnapshot(); }
+                    catch (InvalidOperationException) { }
+                    var takes = CacheBackingStore.GateTakes;
+                    Interlocked.Increment(ref calls);
+                    int seen;
+                    while (takes > (seen = Volatile.Read(ref mostTakes)) && Interlocked.CompareExchange(ref mostTakes, takes, seen) != seen) { }
+                }
+            }))).ToArray();
+            Thread.Sleep(TimeSpan.FromSeconds(3));
+            Volatile.Write(ref stop, 1);
+            foreach (var t in threads)
+                Finishes(t.Thread, "a churn thread");
+
+            Assert.That(calls, Is.GreaterThan(100), "the readers made calls under churn");
+            Assert.That(mostTakes, Is.LessThanOrEqualTo(3), "no call took more than three gates");
             foreach (var c in caches)
                 c.Dispose();
         }

@@ -2264,7 +2264,8 @@ namespace GameCult.Caching
             // The only writer of store.Cache, holding the cache's gate and the store's. It publishes Cache before the pull, so the store is
             // attached for the whole of its hold and every entry point agrees: a journal the pull runs that calls the store is a journal
             // entering its cache and is refused, as it is after the attach; every other thread waits on the cache's or the store's gate.
-            // A failed pull takes Cache back in that same hold, so no other thread ever sees the cache come and go, and there is no detach.
+            // A failed pull takes Cache back in that same hold. Another thread's unlocked guess may read the tentative cache, but none runs a
+            // body against it: the guess is checked under that cache's gate, which the attach holds, and fails once the pull retracts it.
             Held(() => store.UnderStoreGate(() =>
             {
                 if (store.Cache != null)
@@ -2824,15 +2825,19 @@ namespace GameCult.Caching
 
         // The one lock of a store's gate. A thread holds one store's gate at a time; a store call may be entered again from inside it,
         // except a cacheless write: it owns its store outright, so it is the outermost hold of the store's gate.
-        internal static T InStoreHold<T>(object storeGate, Func<T> body, bool cacheless = false)
+        // A cacheless write that re-enters its own store's hold is refused by whichever fact is true: Cache is the one attachment fact, so
+        // a store with a cache published (an attach's pull included) gets the attached refusal, and one without gets the re-entry refusal.
+        internal static T InStoreHold<T>(CacheBackingStore store, Func<T> body, bool cacheless = false)
         {
+            var storeGate = store._storeGate;
             if (_storeHeld != null)
             {
                 if (ReferenceEquals(_storeHeld, storeGate))
                 {
                     if (cacheless)
-                        throw new InvalidOperationException(
-                            "A cacheless write was made inside a call that already holds this store (an attach's pull, or a store call whose user code made it); write through the cache.");
+                        throw new InvalidOperationException(store.Cache != null
+                            ? CacheBackingStore.AttachedRefusal
+                            : "A cacheless write was made inside a call that already holds this store (a store call whose user code made it); write through the cache.");
                     return body();
                 }
                 throw new InvalidOperationException(
@@ -3586,7 +3591,13 @@ namespace GameCult.Caching
         // any of it; if the cache refuses a record the call throws and the store keeps its previous view.
         protected internal Action<IReadOnlyList<CultStoredDocument>, IReadOnlyList<CultStoredDocument>>? Loaded;
 
-        private readonly object _storeGate = new();
+        internal readonly object _storeGate = new();
+
+        // Gates the current thread has taken for store calls, read by tests (InternalsVisibleTo) to pin the bound of three per call.
+        [ThreadStatic]
+        internal static int GateTakes;
+
+        internal const string AttachedRefusal = "The store is attached to a cache, write through the cache.";
         // Written only by CultCache.AddBackingStore, holding the cache's gate and this store's: set before the pull, and set back to null
         // in the same hold if the pull fails. Read under this store's gate it is settled, and a settled cache never changes, because
         // nothing detaches.
@@ -3647,23 +3658,26 @@ namespace GameCult.Caching
             var guess = cacheless ? null : Volatile.Read(ref Cache);
             if (guess != null)
             {
+                GateTakes++;
                 var (ran, result) = guess.Held(() => Cache == guess ? (true, body()) : (false, default(T)!));
                 if (ran)
                     return result;
             }
 
+            GateTakes++;
             var (done, value, settled) = UnderStoreGate(() =>
             {
                 var cache = Cache;
                 if (cache == null)
                     return (true, body(), (CultCache?)null);
                 if (cacheless)
-                    throw new InvalidOperationException("The store is attached to a cache, write through the cache.");
+                    throw new InvalidOperationException(AttachedRefusal);
                 return (false, default(T)!, cache);
             }, cacheless);
             if (done)
                 return value;
 
+            GateTakes++;
             return settled!.Held(() => Cache == settled
                 ? body()
                 : throw new InvalidOperationException(
@@ -3692,7 +3706,7 @@ namespace GameCult.Caching
             }, cacheless: true);
 
         // The store's own gate, taken only here. Lock order: a cache's gate, then a store's; nothing takes a store's gate and then a cache's.
-        internal T UnderStoreGate<T>(Func<T> body, bool cacheless = false) => CultCache.InStoreHold(_storeGate, body, cacheless);
+        internal T UnderStoreGate<T>(Func<T> body, bool cacheless = false) => CultCache.InStoreHold(this, body, cacheless);
 
         // The one writer of the lent registry: a cacheless call for the call, an attach for as long as it holds the store, and a failed
         // attach puts it back, so a cacheless store holds none between calls and a pull on one loads nothing. Nothing else is lent, and the
