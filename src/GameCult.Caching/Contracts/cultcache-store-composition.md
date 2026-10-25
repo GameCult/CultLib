@@ -145,16 +145,16 @@ which route wrote it.
   that cache's gate as its own lock, so a store's load callback into the cache
   cannot take the two out of order; a cacheless store takes its own gate. The
   store reads which one applies, takes it, and checks the answer again under it:
-  `Cache` is written only by the attach, holding both gates, once and after its
-  pull has succeeded (a failed attach never shows it, and nothing detaches), so
-  under the cache's gate `Cache` naming that cache cannot change, and under the
-  store's gate it cannot change at all. The pull reads the registry the attach
-  lent, not `Cache`; a variant it loads carries no codec, and the cache resolves
-  it with its own. Until `Cache` is published the store's hold is the attach's,
-  so a journal the pull runs cannot write the store cacheless. A call whose guess went stale (it
-  guessed no cache and the store then gained one) releases and retries once, so a
-  call makes at most two passes; a cacheless write that finds a cache is refused
-  in that same hold. A
+  `Cache` is written only by the attach, holding both gates: it publishes `Cache`
+  before its pull and takes it back in the same hold if the pull fails, so no
+  other thread ever sees the cache come and go. Under the store's gate `Cache` is
+  settled, and a settled cache never changes, because nothing detaches. A call
+  takes at most three gates: the guessed cache's, the store's, the settled
+  cache's. The pull reads the registry the attach lent, not `Cache`; a variant it
+  loads carries no codec, and the cache resolves it with its own. During an
+  attach the store is attached, so a journal the pull runs that calls the store
+  is refused as it would be afterwards; a cacheless write that finds a cache is
+  refused in that same hold. A
   store must not call `Loaded` while holding its own lock outside the cache's
   hold.
 - A journal runs under the cache's gate, so a slow journal slows every writer of
