@@ -1170,6 +1170,14 @@ namespace GameCult.Caching.Tests
             Assert.That(store.Attached, Is.Null, "the registry was taken back");
         }
 
+        [Test]
+        public void AttachingNoStoreIsRefusedBeforeAnythingIsHeld()
+        {
+            using var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) }));
+
+            Assert.Throws<ArgumentNullException>(() => cache.AddBackingStore(null!));
+        }
+
         private const string ReentryRefusal = "A cacheless write was made inside a call that already holds this store";
 
         // Until the attach publishes the cache the store's hold is the attach's, so a journal the pull's Admit runs on the attaching
