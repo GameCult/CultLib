@@ -1123,13 +1123,10 @@ namespace GameCult.Caching.Tests
             Assert.That(File.Exists(_path), Is.False);
         }
 
-        private static CultCodec? LentCodec(CacheBackingStore store) =>
-            (CultCodec?)typeof(CacheBackingStore).GetField("_codec", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(store);
-
-        // The attach lends the pull its registry and its codec, and publishes the cache only after the pull: while the pull runs the store
-        // holds both loans and no cache; once it returns the cache is there.
+        // The attach lends the pull its registry, and publishes the cache only after the pull: while the pull runs the store holds the
+        // loan and no cache; once it returns the cache is there.
         [Test]
-        public void AnAttachLendsTheCodecAndPublishesTheCacheAfterThePull()
+        public void AnAttachLendsTheRegistryAndPublishesTheCacheAfterThePull()
         {
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
             new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
@@ -1138,14 +1135,12 @@ namespace GameCult.Caching.Tests
             using var cache = new CultCache(registry, codec);
             bool cacheDuringPull = true;
             CultDocumentRegistry? registryDuringPull = null;
-            CultCodec? codecDuringPull = null;
             var attach = OnThread("hook", () =>
             {
                 RoleStore.RoleHook = () =>
                 {
                     cacheDuringPull = store.IsAttachedToACache;
                     registryDuringPull = store.Attached;
-                    codecDuringPull = LentCodec(store);
                 };
                 try { cache.AddBackingStore(store); }
                 finally { RoleStore.RoleHook = null; }
@@ -1155,13 +1150,12 @@ namespace GameCult.Caching.Tests
             Assert.That(attach.Error(), Is.Null);
             Assert.That(cacheDuringPull, Is.False, "the cache is not visible to the pull");
             Assert.That(registryDuringPull, Is.SameAs(registry));
-            Assert.That(codecDuringPull, Is.SameAs(codec), "the pull reads the codec the attach lent");
             Assert.That(store.IsAttachedToACache, Is.True, "published once the pull succeeded");
         }
 
-        // A failed attach takes back both loans through the one call, and never shows the cache.
+        // A failed attach takes back the registry through the one call, and never shows the cache.
         [Test]
-        public void AFailedAttachTakesBackTheRegistryAndTheCodecAndNeverShowsTheCache()
+        public void AFailedAttachTakesBackTheRegistryAndNeverShowsTheCache()
         {
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
             new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
@@ -1174,7 +1168,6 @@ namespace GameCult.Caching.Tests
             Assert.That(attach.Error(), Is.Not.Null);
             Assert.That(store.IsAttachedToACache, Is.False);
             Assert.That(store.Attached, Is.Null, "the registry was taken back");
-            Assert.That(LentCodec(store), Is.Null, "the codec was taken back with it");
         }
 
         // The bound on a call's passes is structural: Cache goes from null to a cache once. This test writes it any other way (the

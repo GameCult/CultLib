@@ -2294,7 +2294,7 @@ namespace GameCult.Caching
                             "attach routed stores before the untyped store.");
                 }
 
-                store.UseRegistry(_registry, _codec);
+                store.UseRegistry(_registry);
                 store.Loaded = (loaded, dropped) => Admit(loaded, dropped, store, (_, _) => CultCommitOutcome.Committed);
                 _stores.Add(candidate);
                 try
@@ -2305,7 +2305,7 @@ namespace GameCult.Caching
                 {
                     _stores.Remove(candidate);
                     store.Loaded = null;
-                    store.UseRegistry(null, null);
+                    store.UseRegistry(null);
                     throw;
                 }
                 store.Cache = this;
@@ -3543,8 +3543,6 @@ namespace GameCult.Caching
     public abstract class CacheBackingStore : IDisposable
     {
         private CultDocumentRegistry? _registry;
-        // Lent with the registry by UseRegistry: the attaching cache's codec, which a pull builds variants with. Null on a cacheless store.
-        private CultCodec? _codec;
         private CultSchemaMigrationReport[] _lastSchemaMigrationReports = Array.Empty<CultSchemaMigrationReport>();
 
         protected CacheBackingStore(bool readOnly = false)
@@ -3675,14 +3673,14 @@ namespace GameCult.Caching
         private protected void Cacheless(CultDocumentRegistry? registry, Action body) =>
             Gate(() =>
             {
-                UseRegistry(registry, null);
+                UseRegistry(registry);
                 try
                 {
                     body();
                 }
                 finally
                 {
-                    UseRegistry(null, null);
+                    UseRegistry(null);
                 }
                 return true;
             }, cacheless: true);
@@ -3690,14 +3688,10 @@ namespace GameCult.Caching
         // The store's own gate, taken only here. Lock order: a cache's gate, then a store's; nothing takes a store's gate and then a cache's.
         internal T UnderStoreGate<T>(Func<T> body) => CultCache.InStoreHold(_storeGate, body);
 
-        // The one writer of what an attach lends the store, the registry and the codec: a cacheless call for the call (no codec), an attach
-        // for as long as it holds the store, and a failed attach puts both back, so a cacheless store holds none between calls and a pull
-        // on one loads nothing. The pull reads the codec here, not from Cache, which is published only after the pull succeeds.
-        internal void UseRegistry(CultDocumentRegistry? registry, CultCodec? codec)
-        {
-            _registry = registry;
-            _codec = codec;
-        }
+        // The one writer of the lent registry: a cacheless call for the call, an attach for as long as it holds the store, and a failed
+        // attach puts it back, so a cacheless store holds none between calls and a pull on one loads nothing. Nothing else is lent, and the
+        // pull does not read Cache, which is published only after the pull succeeds.
+        internal void UseRegistry(CultDocumentRegistry? registry) => _registry = registry;
 
         public abstract void PullAll();
         public abstract void Push(CultStoredDocument entry);
@@ -3782,14 +3776,16 @@ namespace GameCult.Caching
                     })).ToArray();
                 }
 
-                // The cache resolves it against its base when it admits the load.
+                // The store holds the delta and the cache resolves it against its base, with its own codec, when it admits the load. A
+                // codecless variant counts as holding ids, but a header reads HoldsIds only on staged entries, which are always the cache's
+                // pushed documents.
                 return new CultStoredDocument(
                     new CultRecordKey(record.Key),
                     record.StoredAt,
                     descriptor,
                     new CultVariantDelta(record.Variant.BaseKey, record.Variant.Overrides.Where(Has).ToArray()),
                     null,
-                    _codec)
+                    null)
                 {
                     StoredSchemaId = record.SchemaId,
                     StoredVersion = version
