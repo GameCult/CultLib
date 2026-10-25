@@ -930,12 +930,10 @@ namespace GameCult.Caching.Tests
                 cache.Commit(batch =>
                 {
                     batch.Upsert(typeof(IdDeck), EmptyDeck("base"), new CultRecordKey("base"));
-                    batch.UpsertVariant(new CultRecordKey("v"), new CultRecordKey("base"), new[]
-                    {
-                        overridden == "name"
-                            ? cache.Override<IdDeck>(nameof(IdDeck.Name), "v")
-                            : cache.Override<IdDeck>(nameof(IdDeck.Reels), new List<IdReel> { new() { Label = "r", Id = HexA } }),
-                    });
+                    var name = cache.Override<IdDeck>(nameof(IdDeck.Name), "v");
+                    batch.UpsertVariant(new CultRecordKey("v"), new CultRecordKey("base"), overridden == "name"
+                        ? new[] { name }
+                        : new[] { name, cache.Override<IdDeck>(nameof(IdDeck.Reels), new List<IdReel> { new() { Label = "r", Id = HexA } }) });
                 });
             }
 

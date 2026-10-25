@@ -1213,18 +1213,15 @@ namespace GameCult.Caching.Tests
         {
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(TapDoc) });
             var store = new RoleStore(_path);
-            Exception? inner = null;
-            TapDoc.Hook = () =>
-            {
-                try { store.WriteDocument(new CultRecordKey("inner"), new TapDoc { Name = "inner" }, registry: registry); }
-                catch (Exception error) { inner = error; }
-            };
+            TapDoc.Hook = () => store.WriteDocument(new CultRecordKey("inner"), new TapDoc { Name = "inner" }, registry: registry);
 
             var outer = Assert.Catch<Exception>(() => store.WriteDocument(new CultRecordKey("outer"), new TapDoc { Name = "outer" }, registry: registry));
 
-            Assert.That(inner, Is.InstanceOf<InvalidOperationException>());
-            Assert.That(inner!.Message, Does.StartWith(ReentryRefusal));
-            Assert.That(Refused(outer), Is.True, "the outer write failed with the getter's exception");
+            Assert.That(Refused(outer), Is.True, "the outer write failed with the inner call's refusal");
+            var refusal = outer!;
+            while (refusal is not InvalidOperationException && refusal.InnerException != null)
+                refusal = refusal.InnerException;
+            Assert.That(refusal.Message, Does.StartWith(ReentryRefusal));
             Assert.That(File.Exists(_path), Is.False);
             Assert.That(store.Attached, Is.Null);
         }
