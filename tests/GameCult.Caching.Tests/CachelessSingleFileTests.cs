@@ -810,6 +810,12 @@ namespace GameCult.Caching.Tests
             Finishes(attach.Thread, "the attach");
 
             Assert.That(Refused(attach.Error()), Is.True, "the pull's write to a second store was refused");
+            var refusal = attach.Error()!;
+            while (refusal is not InvalidOperationException && refusal.InnerException != null)
+                refusal = refusal.InnerException;
+            while (refusal.InnerException is InvalidOperationException deeper)
+                refusal = deeper;
+            Assert.That(refusal.Message, Does.StartWith("A store's gate was entered inside another store's hold"));
             Assert.That(File.Exists(Path.Combine(_directory, "second.cc")), Is.False);
             Assert.That(cache.BackingStores, Is.Empty, "the failed attach left nothing behind");
             Assert.DoesNotThrow(() => store.WriteDocument(new CultRecordKey("c"), new IdDeck { Name = "c" }, registry: registry), "the store is cacheless after");
@@ -1123,10 +1129,10 @@ namespace GameCult.Caching.Tests
             Assert.That(File.Exists(_path), Is.False);
         }
 
-        // The attach lends the pull its registry, and publishes the cache only after the pull: while the pull runs the store holds the
-        // loan and no cache; once it returns the cache is there.
+        // The attach lends the pull its registry and publishes the cache before the pull: while the pull runs the store holds the loan and
+        // is attached, so every entry point agrees on what the store is for the whole attach.
         [Test]
-        public void AnAttachLendsTheRegistryAndPublishesTheCacheAfterThePull()
+        public void AnAttachLendsTheRegistryAndPublishesTheCacheForThePull()
         {
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
             new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
@@ -1148,14 +1154,14 @@ namespace GameCult.Caching.Tests
             Finishes(attach.Thread, "the attach");
 
             Assert.That(attach.Error(), Is.Null);
-            Assert.That(cacheDuringPull, Is.False, "the cache is not visible to the pull");
+            Assert.That(cacheDuringPull, Is.True, "the store is attached for the pull");
             Assert.That(registryDuringPull, Is.SameAs(registry));
-            Assert.That(store.IsAttachedToACache, Is.True, "published once the pull succeeded");
+            Assert.That(store.IsAttachedToACache, Is.True, "still attached once the pull succeeded");
         }
 
-        // A failed attach takes back the registry through the one call, and never shows the cache.
+        // A failed attach takes back both the registry and the cache, in its own hold of the store.
         [Test]
-        public void AFailedAttachTakesBackTheRegistryAndNeverShowsTheCache()
+        public void AFailedAttachTakesBackTheRegistryAndTheCache()
         {
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
             new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
@@ -1180,39 +1186,130 @@ namespace GameCult.Caching.Tests
 
         private const string ReentryRefusal = "A cacheless write was made inside a call that already holds this store";
 
-        // Until the attach publishes the cache the store's hold is the attach's, so a journal the pull's Admit runs on the attaching
-        // thread cannot write the store cacheless: it would write the file behind the cache and take back the registry the attach lent.
-        [Test]
-        public void AJournalOnTheAttachingThreadCannotWriteItsStoreCacheless()
+        private const string JournalRefusal = "A journal entered the cache it journals";
+
+        // Every store entry point, called by a journal the attach's pull runs on the attaching thread, through a real attach. The store is
+        // attached for its whole attach, so each call is refused as it is after the attach, and nothing reaches the file or the store's
+        // staging that the cache never admitted: after a flush the attaching cache and a fresh cache over the file hold the same keys.
+        [TestCase("single", "pullall")]
+        [TestCase("single", "push")]
+        [TestCase("single", "delete")]
+        [TestCase("single", "pushall")]
+        [TestCase("single", "push+pushall")]
+        [TestCase("single", "delete+pushall")]
+        [TestCase("single", "commit")]
+        [TestCase("single", "judge")]
+        [TestCase("single", "stage")]
+        [TestCase("single", "snapshot")]
+        [TestCase("single", "writedoc")]
+        [TestCase("single", "writerecord")]
+        [TestCase("directory", "pullall")]
+        [TestCase("directory", "push")]
+        [TestCase("directory", "delete")]
+        [TestCase("directory", "pushall")]
+        [TestCase("directory", "push+pushall")]
+        [TestCase("directory", "delete+pushall")]
+        [TestCase("directory", "commit")]
+        [TestCase("directory", "judge")]
+        [TestCase("directory", "stage")]
+        public async Task AJournalOnTheAttachingThreadCannotReachItsStore(string kind, string op)
         {
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
-            new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
-            var store = new RoleStore(_path);
+            var descriptor = registry.GetRequired(typeof(IdDeck));
+            var path = kind == "single" ? _path : Path.Combine(_directory, "dir");
+            CacheBackingStore Open() => kind == "single"
+                ? new SingleFileMessagePackBackingStore(path)
+                : new DirectoryMessagePackBackingStore(path);
+
+            using (var seed = new CultCache(registry, Codec(registry)))
+            {
+                seed.AddBackingStore(Open());
+                await seed.UpsertAsync(typeof(IdDeck), new IdDeck { Name = "a" }, new CultRecordKey("a"));
+                seed.FlushAllBackingStores();
+            }
+            CultPersistedRecord? recordA = null;
+            CultSchemaCatalogEntry? entryA = null;
+            if (kind == "single")
+            {
+                var snapshot = new SingleFileMessagePackBackingStore(path).ReadStoreSnapshot()!;
+                recordA = snapshot.Records.First();
+                entryA = snapshot.SchemaCatalog.First();
+            }
+
+            var store = Open();
             using var cache = new CultCache(registry, Codec(registry));
+            var docB = new CultStoredDocument(new CultRecordKey("b"), DateTimeOffset.UtcNow.ToString("O"), descriptor, new IdDeck { Name = "b" });
             var journalRuns = 0;
             Exception? journalError = null;
             using var journal = cache.AddJournal(_ =>
             {
-                journalRuns++;
-                try { store.WriteDocument(new CultRecordKey("b"), new IdDeck { Name = "b" }, registry: registry); }
+                if (journalRuns++ > 0)
+                    return;
+                try
+                {
+                    switch (op)
+                    {
+                        case "pullall": store.PullAll(); break;
+                        case "push": store.Push(docB); break;
+                        case "delete": store.Delete(cache.GetStored(new CultRecordKey("a"))!); break;
+                        case "pushall": store.PushAll(); break;
+                        case "push+pushall": store.Push(docB); store.PushAll(); break;
+                        case "delete+pushall": store.Delete(cache.GetStored(new CultRecordKey("a"))!); store.PushAll(); break;
+                        case "commit":
+                            store.CommitBatch(new CultCommitRequest(new[] { docB }, Array.Empty<CultStoredDocument>(), Array.Empty<string>(),
+                                Array.Empty<(CultRecordKey, string?)>(), false), wait: true);
+                            break;
+                        case "judge": store.JudgeChecks(new[] { "a" }, wait: true); break;
+                        case "stage": store.RefuseRemovalOfUndeclared(new[] { "zz" }); break;
+                        case "snapshot": ((SingleFileBackingStore)store).ReadStoreSnapshot(); break;
+                        case "writedoc":
+                            ((SingleFileBackingStore)store).WriteDocument(new CultRecordKey("b"), new IdDeck { Name = "b" }, registry: registry);
+                            break;
+                        case "writerecord": ((SingleFileBackingStore)store).WriteRecord(recordA!, entryA!, registry: registry); break;
+                        default: throw new ArgumentException(op);
+                    }
+                }
                 catch (Exception error) { journalError = error; }
             });
 
             cache.AddBackingStore(store);
 
-            Assert.That(journalRuns, Is.EqualTo(1), "the pull's admission ran the journal");
+            Assert.That(journalRuns, Is.GreaterThan(0), "the pull's admission ran the journal");
             Assert.That(journalError, Is.InstanceOf<InvalidOperationException>());
-            Assert.That(journalError!.Message, Does.StartWith(ReentryRefusal));
-            Assert.That(store.Attached, Is.SameAs(registry), "the refused call did not take back the attach's registry");
-            Assert.That(store.ReadStoreSnapshot()!.Records.Select(record => record.Key), Is.EquivalentTo(new[] { "a" }));
+            Assert.That(journalError!.Message, Does.StartWith(op is "writedoc" or "writerecord" ? ReentryRefusal : JournalRefusal));
+            Assert.That(store.IsDirty, Is.False, "nothing the cache never admitted is staged");
 
-            Assert.DoesNotThrow(() => cache.AddAsync(new IdDeck { Name = "later" }).GetAwaiter().GetResult());
+            await cache.AddAsync(new IdDeck { Name = "later" });
             Assert.DoesNotThrow(() => cache.FlushAllBackingStores());
-            Assert.DoesNotThrow(() => store.PullAll());
-            var keys = store.ReadStoreSnapshot()!.Records.Select(record => record.Key).ToArray();
-            Assert.That(keys, Has.Length.EqualTo(2));
-            Assert.That(keys, Does.Contain("a"));
-            Assert.That(keys, Does.Not.Contain("b"));
+            using var fresh = new CultCache(registry, Codec(registry));
+            fresh.AddBackingStore(Open());
+            string[] Keys(CultCache from) => from.AllStoredDocuments.Select(document => document.Key.Value).OrderBy(key => key, StringComparer.Ordinal).ToArray();
+            Assert.That(Keys(cache), Does.Contain("a").And.Contain("later").And.Not.Contain("b"));
+            Assert.That(Keys(cache), Is.EqualTo(Keys(fresh)), "the attaching cache and a fresh cache over the same file agree");
+        }
+
+        // A cacheless write made inside another store's hold is refused as entering a second store, not as re-entering its own: the
+        // second-store rule is checked before the same-store one, so the message sends the caller to the right place.
+        [Test]
+        public void ACachelessWriteInsideAnotherStoresHoldGetsTheSecondStoreRefusal()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(TapDoc) });
+            var pathB = Path.Combine(_directory, "second.cc");
+            var storeA = new RoleStore(_path);
+            var storeB = new RoleStore(pathB);
+            TapDoc.Hook = () => storeB.WriteDocument(new CultRecordKey("inner"), new TapDoc { Name = "inner" }, registry: registry);
+
+            var outer = Assert.Catch<Exception>(() => storeA.WriteDocument(new CultRecordKey("outer"), new TapDoc { Name = "outer" }, registry: registry));
+
+            var refusal = outer!;
+            while (refusal is not InvalidOperationException && refusal.InnerException != null)
+                refusal = refusal.InnerException;
+            while (refusal.InnerException is InvalidOperationException deeper)
+                refusal = deeper;
+            Assert.That(refusal, Is.InstanceOf<InvalidOperationException>());
+            Assert.That(refusal.Message, Does.StartWith("A store's gate was entered inside another store's hold"));
+            Assert.That(File.Exists(_path), Is.False);
+            Assert.That(File.Exists(pathB), Is.False);
         }
 
         // A cacheless write owns its store outright: user code another cacheless write of the same store runs may not make a second.
@@ -1234,11 +1331,11 @@ namespace GameCult.Caching.Tests
             Assert.That(store.Attached, Is.Null);
         }
 
-        // The bound on a call's passes is structural: Cache goes from null to a cache once. This test writes it any other way (the
-        // cache, then null again, under the cache's gate and the store's, in the order they are taken); the reader, which guessed null and
-        // then the cache, is stale twice and throws instead of looping.
+        // The bound on a call's gates is structural: an attach publishes Cache and takes it back inside one hold of the store's gate, so a
+        // cache read under that gate is settled. This test publishes and retracts in two holds, the only way to miss; the reader, which
+        // settled on the cache and then finds it gone under that cache's gate, throws.
         [Test]
-        public void ACallWhoseGateChangesTwiceUnderItThrowsInsteadOfLooping()
+        public void ACallWhoseSettledCacheChangesThrows()
         {
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
             new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
@@ -1275,7 +1372,7 @@ namespace GameCult.Caching.Tests
             Finishes(reader.Thread, "the reader");
 
             Assert.That(tamper.Error(), Is.Null);
-            Assert.That(readerError, Is.InstanceOf<InvalidOperationException>().With.Message.Contain("changed twice"));
+            Assert.That(readerError, Is.InstanceOf<InvalidOperationException>().With.Message.StartWith("A store's settled cache changed"));
         }
 
         // Failing attaches over and over, from one, two and four caches, against readers: a reader's gate changes under it at most once
