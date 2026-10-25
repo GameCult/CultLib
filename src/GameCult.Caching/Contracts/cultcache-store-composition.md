@@ -131,8 +131,9 @@ which route wrote it.
   a cacheless file), never the reverse. What the code enforces, at run time and
   by `InvalidOperationException`: a thread holds at most one store's gate;
   while it holds a store's gate it enters no cache gate it does not already
-  hold, reads included; and a cache's hold (a write, a flush, an attach) entered
-  inside another cache's hold is refused. What it does not enforce: a cache
+  hold, reads included; a cacheless write made while the thread already holds
+  that store's gate is refused; and a cache's hold (a write, a flush, an attach)
+  entered inside another cache's hold is refused. What it does not enforce: a cache
   read made inside another cache's hold takes that cache's gate without a
   check, so two threads each holding one cache and reading the other can
   deadlock. That is open as `variants:follow_up:cross-cache-read-lock-order`;
@@ -147,8 +148,10 @@ which route wrote it.
   `Cache` is written only by the attach, holding both gates, once and after its
   pull has succeeded (a failed attach never shows it, and nothing detaches), so
   under the cache's gate `Cache` naming that cache cannot change, and under the
-  store's gate it cannot change at all. The pull reads the registry and the codec
-  the attach lent the store, not `Cache`. A call whose guess went stale (it
+  store's gate it cannot change at all. The pull reads the registry the attach
+  lent, not `Cache`; a variant it loads carries no codec, and the cache resolves
+  it with its own. Until `Cache` is published the store's hold is the attach's,
+  so a journal the pull runs cannot write the store cacheless. A call whose guess went stale (it
   guessed no cache and the store then gained one) releases and retries once, so a
   call makes at most two passes; a cacheless write that finds a cache is refused
   in that same hold. A

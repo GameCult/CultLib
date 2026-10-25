@@ -2264,7 +2264,8 @@ namespace GameCult.Caching
             // The only writer of store.Cache, and it writes it once, last, holding the cache's gate and the store's, after the pull has
             // succeeded: a failed attach never publishes it, and there is no detach, so under the cache's gate Cache == this cache cannot
             // change, and under the store's gate Cache cannot change at all. A store call that guessed null waits on the store's gate, finds
-            // the cache published and retries once.
+            // the cache published and retries once. Until it publishes Cache the attach owns the store's hold, so a cacheless write on the
+            // attaching thread (a journal the pull's Admit runs) re-enters that hold and InStoreHold refuses it.
             Held(() => store.UnderStoreGate(() =>
             {
                 if (store.Cache != null)
@@ -2821,13 +2822,19 @@ namespace GameCult.Caching
             return _gate;
         }
 
-        // The one lock of a store's gate. A thread holds one store's gate at a time; a store call may be entered again from inside it.
-        internal static T InStoreHold<T>(object storeGate, Func<T> body)
+        // The one lock of a store's gate. A thread holds one store's gate at a time; a store call may be entered again from inside it,
+        // except a cacheless write: it owns its store outright, so it is the outermost hold of the store's gate.
+        internal static T InStoreHold<T>(object storeGate, Func<T> body, bool cacheless = false)
         {
             if (_storeHeld != null)
             {
                 if (ReferenceEquals(_storeHeld, storeGate))
+                {
+                    if (cacheless)
+                        throw new InvalidOperationException(
+                            "A cacheless write was made inside a call that already holds this store (an attach's pull, or a store call whose user code made it); write through the cache.");
                     return body();
+                }
                 throw new InvalidOperationException(
                     "A store's gate was entered inside another store's hold; user code run by a cacheless call or an attach may not enter a second store.");
             }
@@ -3635,8 +3642,9 @@ namespace GameCult.Caching
         // Cache == that cache cannot change, and under the store's gate Cache cannot change at all. Attached, the call holds the cache's
         // gate: the store and its cache share one lock, so a load calling back into the cache never takes the gate after the store's,
         // and a direct call publishes what it loaded when it returns. Detached, it holds the store's gate; a cacheless call (WriteRecord,
-        // WriteDocument) that finds a cache there is refused in that same hold. File locks are always taken inside either gate. A call
-        // makes at most MaxPasses passes: Cache changes once, from null to the cache that attached the store.
+        // WriteDocument) that finds a cache there is refused in that same hold, and one that re-enters a hold of this store (an attach in
+        // its pull, or another store call's user code) is refused by InStoreHold before it reads Cache. File locks are always taken inside
+        // either gate. A call makes at most MaxPasses passes: Cache changes once, from null to the cache that attached the store.
         private T Gate<T>(Func<T> body, bool cacheless)
         {
             for (var pass = 0; ; pass++)
@@ -3657,7 +3665,7 @@ namespace GameCult.Caching
                             ? (true, body())
                             : cacheless
                                 ? throw new InvalidOperationException("The store is attached to a cache, write through the cache.")
-                                : (false, default(T)!));
+                                : (false, default(T)!), cacheless);
                     if (ran)
                         return result;
                 }
@@ -3686,7 +3694,7 @@ namespace GameCult.Caching
             }, cacheless: true);
 
         // The store's own gate, taken only here. Lock order: a cache's gate, then a store's; nothing takes a store's gate and then a cache's.
-        internal T UnderStoreGate<T>(Func<T> body) => CultCache.InStoreHold(_storeGate, body);
+        internal T UnderStoreGate<T>(Func<T> body, bool cacheless = false) => CultCache.InStoreHold(_storeGate, body, cacheless);
 
         // The one writer of the lent registry: a cacheless call for the call, an attach for as long as it holds the store, and a failed
         // attach puts it back, so a cacheless store holds none between calls and a pull on one loads nothing. Nothing else is lent, and the

@@ -1170,6 +1170,65 @@ namespace GameCult.Caching.Tests
             Assert.That(store.Attached, Is.Null, "the registry was taken back");
         }
 
+        private const string ReentryRefusal = "A cacheless write was made inside a call that already holds this store";
+
+        // Until the attach publishes the cache the store's hold is the attach's, so a journal the pull's Admit runs on the attaching
+        // thread cannot write the store cacheless: it would write the file behind the cache and take back the registry the attach lent.
+        [Test]
+        public void AJournalOnTheAttachingThreadCannotWriteItsStoreCacheless()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
+            var store = new RoleStore(_path);
+            using var cache = new CultCache(registry, Codec(registry));
+            var journalRuns = 0;
+            Exception? journalError = null;
+            using var journal = cache.AddJournal(_ =>
+            {
+                journalRuns++;
+                try { store.WriteDocument(new CultRecordKey("b"), new IdDeck { Name = "b" }, registry: registry); }
+                catch (Exception error) { journalError = error; }
+            });
+
+            cache.AddBackingStore(store);
+
+            Assert.That(journalRuns, Is.EqualTo(1), "the pull's admission ran the journal");
+            Assert.That(journalError, Is.InstanceOf<InvalidOperationException>());
+            Assert.That(journalError!.Message, Does.StartWith(ReentryRefusal));
+            Assert.That(store.Attached, Is.SameAs(registry), "the refused call did not take back the attach's registry");
+            Assert.That(store.ReadStoreSnapshot()!.Records.Select(record => record.Key), Is.EquivalentTo(new[] { "a" }));
+
+            Assert.DoesNotThrow(() => cache.AddAsync(new IdDeck { Name = "later" }).GetAwaiter().GetResult());
+            Assert.DoesNotThrow(() => cache.FlushAllBackingStores());
+            Assert.DoesNotThrow(() => store.PullAll());
+            var keys = store.ReadStoreSnapshot()!.Records.Select(record => record.Key).ToArray();
+            Assert.That(keys, Has.Length.EqualTo(2));
+            Assert.That(keys, Does.Contain("a"));
+            Assert.That(keys, Does.Not.Contain("b"));
+        }
+
+        // A cacheless write owns its store outright: user code another cacheless write of the same store runs may not make a second.
+        [Test]
+        public void ACachelessWriteInsideACachelessWriteOfTheSameStoreIsRefused()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(TapDoc) });
+            var store = new RoleStore(_path);
+            Exception? inner = null;
+            TapDoc.Hook = () =>
+            {
+                try { store.WriteDocument(new CultRecordKey("inner"), new TapDoc { Name = "inner" }, registry: registry); }
+                catch (Exception error) { inner = error; }
+            };
+
+            var outer = Assert.Catch<Exception>(() => store.WriteDocument(new CultRecordKey("outer"), new TapDoc { Name = "outer" }, registry: registry));
+
+            Assert.That(inner, Is.InstanceOf<InvalidOperationException>());
+            Assert.That(inner!.Message, Does.StartWith(ReentryRefusal));
+            Assert.That(Refused(outer), Is.True, "the outer write failed with the getter's exception");
+            Assert.That(File.Exists(_path), Is.False);
+            Assert.That(store.Attached, Is.Null);
+        }
+
         // The bound on a call's passes is structural: Cache goes from null to a cache once. This test writes it any other way (the
         // cache, then null again, under the cache's gate and the store's, in the order they are taken); the reader, which guessed null and
         // then the cache, is stale twice and throws instead of looping.

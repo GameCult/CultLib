@@ -918,6 +918,36 @@ namespace GameCult.Caching.Tests
             Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "read without a codec, the variant it writes cannot be seen, so it is marked");
         }
 
+        // Through a real attach: the second cache reads the variant from the file, and the flush it then makes writes the header its
+        // resolved values hold, never the one a codecless copy would claim (a codecless variant counts as holding ids).
+        [TestCase("name", "cultcache.store.v2")]
+        [TestCase("reels", "cultcache.store.v3")]
+        public void AnAttachedVariantStoreFlushesTheHeaderItsValuesHold(string overridden, string header)
+        {
+            var path = PathOf("attached-variant-" + overridden + ".cc");
+            using (var cache = Open(path))
+            {
+                cache.Commit(batch =>
+                {
+                    batch.Upsert(typeof(IdDeck), EmptyDeck("base"), new CultRecordKey("base"));
+                    batch.UpsertVariant(new CultRecordKey("v"), new CultRecordKey("base"), new[]
+                    {
+                        overridden == "name"
+                            ? cache.Override<IdDeck>(nameof(IdDeck.Name), "v")
+                            : cache.Override<IdDeck>(nameof(IdDeck.Reels), new List<IdReel> { new() { Label = "r", Id = HexA } }),
+                    });
+                });
+            }
+
+            using (var second = Open(path))
+            {
+                second.Commit(batch => batch.Upsert(typeof(IdDeck), EmptyDeck("other"), new CultRecordKey("other")));
+                second.FlushAllBackingStores();
+            }
+
+            Assert.That(HeaderOf(path), Is.EqualTo(header));
+        }
+
         [Test]
         public void ADirectoryStoreIsMarkedByTheIdsItWritesAndAnEmptyDeckDoesNotMarkIt()
         {
