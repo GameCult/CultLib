@@ -180,3 +180,108 @@ Spec `variants:cut_spec:cut-store-gate-one-owner.r2` (base ec94ab98), question
 - Behaviour change, stated in the CHANGELOG: a cacheless write made from user code that
   another cacheless write of the same store runs used to succeed, and its `finally` took
   the outer call's registry. It is now refused.
+
+## Store gate: Cache is the one attachment fact (store-gate-one-owner r3)
+
+Spec `variants:cut_spec:cut-store-gate-one-owner.r3` (base 0fa836cb), superseding r2. It
+closes Soul s4's `attach-window-held-store-writes` (Medium), `cacheless-refusal-order-unpinned`
+(Low) and `interop-consumer-suite-unrun` (Low). This is the third time the attach window has
+beaten the rule (s3 from the cacheless side, s4 from the held side), so r3 moves the
+decision instead of patching the next entry point.
+
+**Facts: every entry point that reads or decides attachment, at 0fa836cb.** Source reads of
+CultCache.cs, DirectoryMessagePackBackingStore.cs and CultMeshSingleFileDocuments.cs. The
+window column is a journal on the attaching thread, through a real attach of a store holding
+`a`. Probe: scratch clone `imagination-store-gate-r3/clone`, commit b2330b6d (test R3Probes),
+Yggdrasil `probe-base.log`, 2026-10-25 around 23:00 CEST. "Disagree" means that after the
+attach, a commit of `later` and a flush, the attaching cache holds `a,later` and a fresh cache
+over the same file reads something else.
+
+| Entry point (line) | Fact it reads | In the attach window at 0fa836cb |
+| --- | --- | --- |
+| Single-file `PullAll` (4156) | `Gate`: `Cache` guessed unlocked, then re-read under the re-entered store gate | Runs as detached; its `Loaded` re-enters the cache and is refused as a journal write. Agrees. |
+| Single-file `Push` (4212) | same | Runs as detached and stages `b`. Disagree: fresh reads `a,b,later`. |
+| Single-file `Delete` (4223) | same | Runs as detached and stages a removal the cache never made (dirty after the attach). |
+| Single-file `PushAll` (4239), and `Dispose` (3722) through it | same, then in-body `Cache == null` (4531, 4543, 4588, 4603, 4611, 4661) | Runs as a cacheless writer. Push then PushAll writes `b` to the file inside the attach (disagree). Delete then PushAll is refused with the cacheless writer's text. On a variant store it is refused as "a writer with no CultCache" (Soul s4). |
+| Single-file `CommitBatch` (4256) | same | Runs as detached and commits `b`. Disagree. |
+| Single-file `JudgeChecks` (4568), `RefuseRemovalOfUndeclared` and `StageChecks` (4558, 3915) | same | Run as detached. Agree in the probe, but under the wrong gate's rules. |
+| Single-file `ReadStoreSnapshot` (4687) | same | Runs as detached and reads the file. |
+| `WriteRecord` (4342), `WriteDocument` (4366) | `InStoreHold`'s per-thread hold (cacheless re-entry), before `Cache` | Refused with the re-entry text (h5). Agree. |
+| Directory `PullAll` (48) | `Gate`, as above | Refused as a journal write. Agree. |
+| Directory `Push` (147), `Delete` (160), `CommitBatch` (172) | same | Run as detached. Disagree: fresh reads `a,b,later` after Push or CommitBatch, and `later` after Delete. |
+| Directory `PushAll` (235) | same | Runs as detached. Push then PushAll and Delete then PushAll disagree. |
+| Directory `JudgeChecks` (269), `RefuseRemovalOfUndeclared` (259) | same | Run as detached. Agree. |
+| In-body reads: `StoredAtOver` clock (4028), refusal text and `DurableAt` (4531, 4543), declares and cacheless refusal (4588, 4603, 4611), `Wrote` (4661) | `Cache`, under the gate `Gate` chose | On the attaching thread they read null while the thread holds the cache's gate, so a held call runs as a cacheless writer. |
+| `AddBackingStore` (2259-2314) | writes `Cache` under both gates, after the pull | The window's author: the store is attached for the pull (registry lent, `Loaded` set, in `_stores`) while `Cache` is null. |
+| Mesh `CultMeshSingleFileDocuments` writes and reads (99, 143, 174, 226) | none of the attached store's | `StoreAt` (239) builds a new store per call, so they never touch an attached store object. A file it shares with an attached store is the file lock's and the write set's business. |
+| `IsDirty`, `HasStagedChecks`, `ForeignRecords`, `LastSchemaMigrationReports`, `HeaderFor`, `HeaderForWrite` | none | Ungated values or static decisions. They read no attachment fact. |
+
+So during an attach, cacheless entry points decide attachment from the hold, and every held
+entry point, plus every in-body read, decides it from `Cache`, which is still null. These are
+two facts.
+
+**Probe of the chosen shape** (commit 4695390c on b2330b6d; `proto-full.log`). `AddBackingStore`
+publishes `Cache` before the pull and takes it back in the same hold if the pull fails. `Gate`
+becomes straight-line code: guess, then the store's gate, where `Cache` is settled, then the
+settled cache's gate. Results:
+
+- All 21 probe cases are refused. The cacheless writes get the re-entry text and every other
+  case gets "A journal entered the cache it journals". After the flush, the attaching cache
+  and a fresh cache both read `a,later`.
+- Caching: the only failures are the two tests that pin the late publish:
+  `AnAttachLendsTheRegistryAndPublishesTheCacheAfterThePull` (asserts no cache during the
+  pull) and `ACallWhoseGateChangesTwiceUnderItThrowsInsteadOfLooping` (asserts the old message
+  text; the tampering reader still throws). The churn, queued-reader and failed-attach tests
+  pass unchanged.
+- Mesh and Networking are green.
+- The cultcache-ts suite, which builds and drives the C# InteropPeer, passes on this shape:
+  175 tests, 171 pass, 0 fail, 4 skipped. The C#, Rust and Python interop tests ran, the C#
+  edit-in-place one included (`proto-ts2.log`, commit f5f02053). Recipe `clone/r3ts.sh`:
+  image node:24-bookworm, apt python3-msgpack, dotnet-install for 10.0, rustup minimal.
+
+**Shapes weighed (rationale).**
+
+- (a) Publish `Cache` before the pull, as a616431e did. Chosen. What s2 found was not that an
+  early publish is unbounded. It was that `Gate` re-read `Cache` *unlocked* after a stale
+  guess, so a churn of failing attaches could hand it a new stale guess every pass. The fix is
+  where `Gate` reads on its second step. Under the store's gate, `Cache` is settled: an attach
+  publishes and takes it back inside one hold of that gate, and no other thread can hold that
+  gate during the attach. A settled cache is permanent, because there is no detach. So `Gate`
+  needs at most three acquisitions, with no loop and no counter: the guess's gate, the store's
+  gate, and then the settled cache's gate, which cannot miss. This deletes a fact rather than
+  reconciling two. During the attach the store *is* attached, so every entry point, cacheless
+  or held, and every in-body read sees one answer. A journal's call is then refused by the rule
+  journals already have (AddJournal: "any hold on this cache while a journal runs throws"),
+  exactly as it is after the attach. Prior art: `ConcurrentHashMap.computeIfAbsent` installs a
+  ReservationNode in the bin *before* running the mapping function, so a recursive update on
+  the same thread finds the owner and throws, and on failure the reservation is removed (see
+  `docs/research/2026-10-23-store-lock-user-code-prior-art.md` item 4 on main: the re-check
+  after locking, and the ReservationNode on the empty-bin path). The validate-after-acquire in
+  `Gate` is the same item.
+- (b) Keep the late publish and make the attach's hold the one fact for every entry point.
+  Rejected. `InStoreHold` knows that this thread holds the store's gate, not *whose* hold it is.
+  Refusing every same-store re-entry kills `UserCodeInACachelessCallMayCallItsOwnStore` (r2's
+  R5), so (b) needs an "attaching" marker beside `Cache`. That is the second fact that s3 and
+  s4 rule out, plus every in-body `Cache == null` read would need to consult it as well.
+- (c) Run no user code on the attaching thread under the store's hold during a pull: defer the
+  pull's journals to after the hold (open calls). Rejected as insufficient on its own. Getters
+  and constructors still run during the pull's decode, so the window stays open to any user
+  code that is not a journal. It also moves journal timing, which is a documented contract
+  ("right after an admission is applied").
+- Scar check: `git log -S` over CultCache.cs finds `store.Cache = null` and `MaxStaleGuesses`
+  only in ba658965 and 1468a83a. The early publish was not removed for a correctness reason of
+  its own: 1468a83a removed it to bound `Gate` and to lend the codec, and the codec loan is gone
+  (`pulled-variant-codec`). No settled read under the store's gate was built before. The
+  precedent recipe (no root filter) finds no same decision.
+- Not a product fork. A journal's store call during an attach now throws, as it already does
+  after the attach. Cacheless writes on the attaching thread stay refused, with the same text.
+  Getters and constructors during the pull see an attached store, as they do during any held
+  call. It changes the late-publish clause of Defaulted ruling `variants:ruling:pulled-variant-codec`,
+  so Self defaults a superseding ruling (recommended label `cache-published-for-the-pull`)
+  before dispatch.
+- Residual, not in r3. `Push`, `Delete`, `PushAll` and `CommitBatch` are public, so user code
+  that is not a journal (another thread, or a getter during any held call) can stage records
+  behind an attached store's cache. Soul s4 shows this with `other-thread-push`: file `a,b`,
+  cache `a`. That is true before, during and after an attach, so it is not the window's
+  two-fact problem. Closing it changes public API (a store's writes taken only from its
+  cache), so it is a follow-up and an operator question for Self, not part of this cut.
