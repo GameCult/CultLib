@@ -106,3 +106,77 @@ unused by Eve and Brokkr. Fork: `variants:question:unpinned-consumers-at-land`.
   calls, then one Soul pass.
 - **Precondition (question).** Eve.Surface, and Brokkr if confirmed, are pinned or swept
   before the merge reaches main.
+
+## Store gate: attachment is the attach's hold (store-gate-one-owner r2)
+
+Spec `variants:cut_spec:cut-store-gate-one-owner.r2` (base ec94ab98), question
+`variants:question:pulled-variant-codec`. It closes Soul s3's
+`attach-window-cacheless-write` (Medium) and `codec-loan-pinned-by-reflection` (Low).
+
+**Facts (source reads at ec94ab98 and a probe, 2026-10-25).**
+
+- The window. AddBackingStore holds the cache's gate, then the store's gate through
+  `InStoreHold`, lends the registry and codec, sets `Loaded`, adds the store to `_stores`,
+  pulls, and only then sets `store.Cache` (CultCache.cs 2268-2312). `InStoreHold` lets any
+  call on the same store's gate re-enter it (2825-2831). So a journal the pull's Admit runs
+  on the attaching thread can call `store.WriteDocument`: `Gate(cacheless)` guesses null,
+  re-enters the store's gate, finds `Cache == null` and runs the write, and its `finally`
+  calls `UseRegistry(null, null)` (Soul s3 P1, full1.log lines 49-53). Other threads are not
+  in the window: they queue on the store's gate and see either the published cache or a
+  store that the failed attach put back.
+- The codec loan has no reader on the attach path. A pulled variant's codec is read only
+  by `CultStoredDocument.HoldsIds` (543-557). Header decisions read `HoldsIds` only on
+  staged entries (single-file 4318, 4447 and 4472; directory store 362), and a staged entry
+  is always the document the cache pushed (`Push` sets `Entries[key] = entry`, 4211-4215).
+  A single-file `PullAll` returns without loading while the store is dirty (4157-4159), so
+  a pulled copy is never staged. A refused write unstages its keys before it adopts the
+  reload. The directory store refuses variants (ruling `q6-directory-and-cultnet-refuse`;
+  DirectoryMessagePackBackingStore.cs 139-144 and 642-643). Admit re-resolves every pulled
+  variant with the cache's codec (CultCache.cs 3259). Soul's N4 mutant (the attach lends
+  no codec) was caught only by the reflection test, and h4's M2 only by a bare-store test
+  that sets `Loaded` and calls `UseRegistry` by hand.
+- Probe (scratch clone `imagination-store-gate-r2/clone`, commits 4663934e and c099b9e8 on
+  ec94ab98; Yggdrasil t1.log, t2.log and t3.log; 2026-10-25 around 20:50 CEST). The
+  probe did three things. `InStoreHold` refuses a cacheless call that re-enters the same
+  store's gate. The `_codec` field and the two-argument `UseRegistry` are deleted. The pull
+  builds variants with a null codec. Results:
+  - Mesh is 342/0/4.
+  - In the Caching suite, the only failures were two probe tests, both from authoring
+    errors: a key `AddAsync` minted, and an element id that was not 12 hex characters.
+    No existing test failed, `UserCodeInACachelessCallMayCallItsOwnStore` included.
+  - Soul's P1 as a test: the journal's write is refused with the new message. The attach
+    keeps its registry and the file holds only `a`. After the attach, a cache write, a
+    flush and `store.PullAll()` all succeed.
+  - A cacheless write nested in another on the same store is refused, the outer write
+    fails, and no file is written.
+  - Through a real attach, a store holding a name-override variant flushes an unrelated
+    commit with a `cultcache.store.v2` header. With no codec loan, the pulled copy does not
+    mark the store.
+  - Mutant `return cacheless` changed to `return false`, which is ec94ab98's behaviour,
+    fails both new gate tests. In that mutant the nested write succeeds and the file exists.
+
+**Rationale.**
+
+- Attachment has one fact again. While the attach runs, the store's gate is the attach's
+  hold, and `Cache` is published when that hold ends. A cacheless write is a write the
+  store owns outright, so it must be the outermost hold of its store's gate. One more
+  argument to the existing owner of per-thread gate facts (`InStoreHold`) refuses it. No
+  field mirrors `Cache`, and `Loaded` and `_registry` are not read. Precedent:
+  `ConcurrentHashMap.computeIfAbsent` refuses a mapping function that updates the same
+  map with `IllegalStateException("Recursive update")` since Java 9. That is from
+  memory, not fetched this pass; the 2026-10-23 prior-art note covers the documented
+  restriction in its counter-positions. Non-cacheless store calls from user code still
+  re-enter: `UserCodeInACachelessCallMayCallItsOwnStore` stays green.
+- The late publish stays. It is what bounds `Gate` at two passes (s2's finding). Publishing
+  early would bring back the failure-rate-bounded retry.
+- The codec loan goes: it is a value nothing on the attach path reads. A pulled variant
+  carries no codec and counts as holding ids (the documented conservative answer), and
+  the cache's resolved copy is what any header decision sees. This reverses the codec
+  half of Defaulted ruling `late-publish-needs-attach-codec`, so it goes to Self as
+  `variants:question:pulled-variant-codec`. The spec is written for the recommended option.
+- Scar check: `git log -S` over CultCache.cs for `reentrant`, `outermost` and `_attaching`
+  finds nothing. `Cache?.Codec` appears in 1468a83a (h4) and 619e089f only. No earlier
+  re-entry refusal was built and deleted.
+- Behaviour change, stated in the CHANGELOG: a cacheless write made from user code that
+  another cacheless write of the same store runs used to succeed, and its `finally` took
+  the outer call's registry. It is now refused.
