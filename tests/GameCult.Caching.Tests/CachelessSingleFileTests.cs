@@ -1279,7 +1279,7 @@ namespace GameCult.Caching.Tests
             Assert.That(journalError!.Message, Does.StartWith(op is "writedoc" or "writerecord" ? ReentryRefusal : JournalRefusal));
             Assert.That(store.IsDirty, Is.False, "nothing the cache never admitted is staged");
 
-            await cache.AddAsync(new IdDeck { Name = "later" });
+            await cache.UpsertAsync(typeof(IdDeck), new IdDeck { Name = "later" }, new CultRecordKey("later"));
             Assert.DoesNotThrow(() => cache.FlushAllBackingStores());
             using var fresh = new CultCache(registry, Codec(registry));
             fresh.AddBackingStore(Open());
