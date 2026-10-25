@@ -1281,6 +1281,7 @@ namespace GameCult.Caching.Tests
 
             await cache.UpsertAsync(typeof(IdDeck), new IdDeck { Name = "later" }, new CultRecordKey("later"));
             Assert.DoesNotThrow(() => cache.FlushAllBackingStores());
+            Assert.DoesNotThrow(() => store.PullAll(), "the refused call did not take back the attach's registry");
             using var fresh = new CultCache(registry, Codec(registry));
             fresh.AddBackingStore(Open());
             string[] Keys(CultCache from) => from.AllStoredDocuments.Select(document => document.Key.Value).OrderBy(key => key, StringComparer.Ordinal).ToArray();
