@@ -21,9 +21,10 @@
 #       back and reread the file, and their REFLIST-SUMMARY lines (records by schema id, the list's items in order, the Items
 #       slot's catalog entry, warnings, header) must be identical.
 #
-# Every stage asserts how many cases it ran, so a probe that was renamed out of its filter or a leaf test that was skipped
-# fails the gate by name ('<stage>-count') instead of passing with nothing run. The expected counts are the constants below;
-# each is confirmed against the probe's source: C#, the TRX the run wrote (cases by class); Rust, the sum of 'N passed';
+# Every stage asserts how many cases it PASSED, so a probe that was renamed out of its filter or a leaf test that was skipped
+# fails the gate by name ('<stage>-count') instead of passing with nothing run; a C# result that is not Passed (an [Ignore]d
+# case is NotExecuted) fails '<stage>-notpassed' and Python's skipped/expected-failure forms fail 'python-notpassed'. The expected counts are the constants below;
+# each is confirmed against the probe's source: C#, the Passed results in the TRX the run wrote (by class); Rust, the sum of 'N passed';
 # Python, 'Ran N tests'; TypeScript, node's 'pass N'.
 set -euo pipefail
 
@@ -41,6 +42,12 @@ EXPECT_HEAD_REFLIST=1      # RefListDriftTests.A_1_0_60_Written_Store_Opens_Like
 EXPECT_RUST=3              # tests/old_reader_v3.rs
 EXPECT_PYTHON=4            # test_old_reader_v3.py
 EXPECT_TYPESCRIPT=3        # old-reader-v3.test.ts
+
+# The committed 1.0.60 writer vector is pinned by hash, not by regenerating it: the 1.0.60 writer stamps wall-clock times, so two
+# writes of the same documents differ and no writer stage can reproduce the bytes. A hand edit changes the hash and fails the
+# gate as 1.0.60-vector; a deliberate regeneration (README) commits the new hash with the file.
+OLD_WRITER_VECTOR="tests/vectors/ref-list-drift/v1-0-60-written.cc"
+OLD_WRITER_VECTOR_SHA256=c05e6baa780380ea53a0dc4d0110aedb9e760d7617babb26fbb8a27f9d199a7b
 
 usage() { echo "usage: $0 stage|probe|gate csharp|typescript|python|rust (writer for stage and probe)" >&2; exit 2; }
 
@@ -116,10 +123,23 @@ probe_staged() {
 # A log with no summary line (a stage that failed before printing one) yields an empty file, and the gate names the failure.
 summary_of() { { grep -o 'REFLIST-SUMMARY .*' "$1" || true; } | sort -u; }
 
-# Cases a TRX records for test classes whose name ends in $2 (every class when $2 is empty); 0 when the run wrote no TRX.
-trx_cases() { if [ -f "$1" ]; then grep -o "<TestMethod [^>]*className=\"[^\"]*$2\"" "$1" | wc -l; else echo 0; fi; }
+# Cases a TRX records as Passed, for test classes whose name ends in $2; 0 when the run wrote no TRX. A result is tied to its class
+# through its execution id, so one class cannot stand in for another. Every result that is not Passed (Skipped, NotExecuted,
+# Inconclusive, Failed) is listed by trx_unpassed, and the stage fails on it by name.
+trx_passed() {
+  [ -f "$1" ] || { echo 0; return; }
+  local flat ids
+  flat="$(tr '\n' ' ' < "$1")"
+  ids="$(printf %s "$flat" | grep -o "<Execution id=\"[^\"]*\" */> *<TestMethod [^>]*className=\"[^\"]*$2\"" | grep -o "Execution id=\"[^\"]*\"" | cut -d\" -f2 || true)"
+  printf %s "$flat" | grep -o "<UnitTestResult [^>]*outcome=\"Passed\"" | grep -o "executionId=\"[^\"]*\"" | cut -d\" -f2 | { grep -Fxc -f <(printf %s "$ids") || true; }
+}
+trx_unpassed() { if [ -f "$1" ]; then tr '\n' ' ' < "$1" | grep -o "<UnitTestResult [^>]*" | grep -v "outcome=\"Passed\"" | grep -o "testName=\"[^\"]*\" [^>]*outcome=\"[A-Za-z]*\"" || true; fi; }
 
-# Cases a leaf runtime's own output says it ran.
+# Python's runner says "Ran N tests" even when some were skipped or expected to fail; those forms are not passes.
+python_unrun() { grep -E '(skipped|expected failures|unexpected successes)=' "$1" || true; }
+
+# Cases a leaf runtime's own output says it passed: Rust's 'N passed' lines summed, Python's 'Ran N' (python_unrun catches the
+# skips that line hides), node's 'pass N'.
 leaf_cases() {
   case "$1" in
     rust) awk '/^test result:/ { n += $4 } END { print n + 0 }' "$2" ;;
@@ -133,21 +153,28 @@ leaf_cases() {
 gate() {
   local failures=""
   # A stage that ran a number of cases other than the one pinned fails as '<stage>-count'.
-  expect() { if [ "$2" != "$3" ]; then echo "COUNT $1: expected $2 case(s), ran $3"; failures+=" $1-count"; fi; }
+  expect() { if [ "$2" = "$3" ]; then echo "COUNT $1: $3 passed, as expected"; else echo "COUNT $1: expected $2 passed case(s), got $3"; failures+=" $1-count"; fi; }
+  # A TRX result that is not Passed (an [Ignore]d case is NotExecuted) fails its stage by name even when the count is met.
+  unpassed() { local rows; rows="$(trx_unpassed "$2")"; if [ -n "$rows" ]; then echo "NOT PASSED in $1: $rows"; failures+=" $1-notpassed"; fi; }
   case "$1" in
     csharp)
       local out="${GATE_OUT:-/tmp/gate}" trx
+      if [ "$(sha256sum "$OLD_WRITER_VECTOR" | cut -d" " -f1)" = "$OLD_WRITER_VECTOR_SHA256" ]; then echo "VECTOR 1.0.60-vector: sha256 as recorded"; else echo "VECTOR 1.0.60-vector: sha256 differs from the one recorded in this script"; failures+=" 1.0.60-vector"; fi
       rm -rf "$out"; mkdir -p "$out"
       export CULTLIB_GATE_OUT="$out" GATE_TRX_DIR="$out/trx"
       trx="$GATE_TRX_DIR"
       dotnet test tests/GameCult.Caching.Tests --filter FullyQualifiedName~C2aGateWriter --logger "console;verbosity=detailed" --logger "trx;LogFileName=c2a-writer.trx" --results-directory "$trx" || failures+=" c2a-writer"
-      expect c2a-writer "$EXPECT_C2A_WRITER" "$(trx_cases "$trx/c2a-writer.trx" C2aGateWriter)"
+      expect c2a-writer "$EXPECT_C2A_WRITER" "$(trx_passed "$trx/c2a-writer.trx" C2aGateWriter)"
+      unpassed c2a-writer "$trx/c2a-writer.trx"
       probe_staged writer || failures+=" 1.0.60-writer"
-      expect 1.0.60-writer "$EXPECT_OLD_WRITER" "$(trx_cases "$trx/writer.trx" OldWriterRefListProbe)"
+      expect 1.0.60-writer "$EXPECT_OLD_WRITER" "$(trx_passed "$trx/writer.trx" OldWriterRefListProbe)"
+      unpassed 1.0.60-writer "$trx/writer.trx"
       probe_staged csharp 2>&1 | tee "$out/reader.log" || failures+=" 2.0.1-reader"
-      expect 2.0.1-reader "$EXPECT_READER_GATE+$EXPECT_READER_REFLIST" "$(trx_cases "$trx/reader.trx" OldReaderGateProbe)+$(trx_cases "$trx/reader.trx" OldReaderRefListProbe)"
+      expect 2.0.1-reader "$EXPECT_READER_GATE+$EXPECT_READER_REFLIST" "$(trx_passed "$trx/reader.trx" OldReaderGateProbe)+$(trx_passed "$trx/reader.trx" OldReaderRefListProbe)"
+      unpassed 2.0.1-reader "$trx/reader.trx"
       CULTLIB_GATE_OLD_STORE="$out/v1-0-60-ref-list.cc" dotnet test tests/GameCult.Caching.Tests         --filter "FullyQualifiedName~RefListDriftTests.A_1_0_60_Written_Store_Opens_Like_2_0_1" --logger "console;verbosity=detailed" --logger "trx;LogFileName=head.trx" --results-directory "$trx" 2>&1 | tee "$out/head.log" || failures+=" head-ref-list"
-      expect head-ref-list "$EXPECT_HEAD_REFLIST" "$(trx_cases "$trx/head.trx" RefListDriftTests)"
+      expect head-ref-list "$EXPECT_HEAD_REFLIST" "$(trx_passed "$trx/head.trx" RefListDriftTests)"
+      unpassed head-ref-list "$trx/head.trx"
       summary_of "$out/reader.log" > "$out/reader.summary"
       summary_of "$out/head.log" > "$out/head.summary"
       cat "$out/reader.summary" "$out/head.summary"
@@ -164,6 +191,7 @@ gate() {
       case "$1" in rust) expected="$EXPECT_RUST" ;; python) expected="$EXPECT_PYTHON" ;; typescript) expected="$EXPECT_TYPESCRIPT" ;; esac
       probe_staged "$1" 2>&1 | tee "$log" || failures+=" $1"
       expect "$1" "$expected" "$(leaf_cases "$1" "$log")"
+      if [ "$1" = python ] && [ -n "$(python_unrun "$log")" ]; then echo "NOT PASSED in python: $(python_unrun "$log")"; failures+=" python-notpassed"; fi
       if [ -n "$failures" ]; then echo "GATE $1 FAILED:$failures"; return 1; fi
       echo "GATE $1 ok" ;;
     *) usage ;;

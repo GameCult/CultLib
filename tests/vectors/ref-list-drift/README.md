@@ -13,4 +13,4 @@ reviewed commit.
 `tests/vectors/document-variants-c2a/old-writer-probes/`), compiled into a checkout of `cultlib-unity-v1.0.60` (45c2f400) and run
 as `old-reader-refusal.sh gate csharp`, which stages that tree and writes the store through `CultCache` and
 `SingleFileMessagePackBackingStore`. It is `cultcache.store.v1` with records `alpha`, `beta` and `list` (`Items = [alpha, beta]`).
-The runtime under test never regenerates it; `RefListDriftTests.A_1_0_60_Written_Store_Opens_Like_2_0_1` reads it.
+The runtime under test never regenerates it, and `old-reader-refusal.sh gate csharp` fails as `1.0.60-vector` unless the file's sha256 is the one recorded in that script (the 1.0.60 writer stamps wall-clock times, so the bytes cannot be reproduced by running it). Regenerating the file is a reviewed commit that updates both; `RefListDriftTests.A_1_0_60_Written_Store_Opens_Like_2_0_1` reads it.
