@@ -556,49 +556,116 @@ namespace GameCult.Caching.Tests
             Assert.That(Fingerprint(path), Is.EqualTo(before));
         }
 
-        // A direct WriteRecord is bound by the entry it passes: a lent registry whose entry for the same schema id lists an old id the
-        // passed entry omits does not widen it. The same write with the entry listing the id is owned, as a cache owns it.
-        [TestCase(false)]
-        [TestCase(true)]
-        public void ALentRegistryNeverWidensWhatThePassedEntryDeclares(bool entryListsOldId)
+        private const string ListerDriftId = "tests.restamp.lister_drift";
+
+        // The Lister type's entry as a caller passes it: its id's own listing, or the id list the caller chooses.
+        private static CultSchemaCatalogEntry ListerEntry(string[] compatible, CultSchemaMemberCatalogEntry[]? members = null, string hashPrefix = "")
         {
-            var path = SeedRenamed(listsNarrow: false, name: "tests.restamp_old");
-            var snapshot = Snapshot(path);
-            snapshot.SchemaCatalog.Single().SchemaId = snapshot.SchemaCatalog.Single().ContentHash = ListerOldId;
-            snapshot.SchemaCatalog.Single().CompatibleSchemaIds = new[] { ListerOldId };
-            foreach (var seeded in snapshot.Records)
-                seeded.SchemaId = ListerOldId;
-            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
-            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(NoteLister) });
-            var full = registry.GetRequired<NoteLister>().ToCatalogEntry();
-            var passed = new CultSchemaCatalogEntry
+            var full = NarrowListerRegistry.GetRequired<NoteLister>().ToCatalogEntry();
+            return new CultSchemaCatalogEntry
             {
                 SchemaId = full.SchemaId,
-                ContentHash = full.ContentHash,
+                ContentHash = hashPrefix + full.ContentHash,
                 SchemaName = full.SchemaName,
                 SchemaVersion = full.SchemaVersion,
-                CompatibleSchemaIds = entryListsOldId ? full.CompatibleSchemaIds : new[] { full.SchemaId },
-                Members = full.Members,
+                CompatibleSchemaIds = compatible,
+                Members = members ?? full.Members,
                 CanonicalSchemaJson = full.CanonicalSchemaJson,
             };
-            var record = new CultPersistedRecord
-            {
-                Key = "note",
-                SchemaId = full.SchemaId,
-                StoredAt = "2026-10-22T00:00:00.0000000+00:00",
-                Payload = MessagePackSerializer.Serialize(new NoteLister { Name = "note", Value = 2 }),
-            };
+        }
+
+        private static CultPersistedRecord ListerRecord(byte[]? payload = null) => new()
+        {
+            Key = "note",
+            SchemaId = NarrowListerRegistry.GetRequired<NoteLister>().SchemaId,
+            StoredAt = "2026-10-22T00:00:00.0000000+00:00",
+            Payload = payload ?? MessagePackSerializer.Serialize(new NoteLister { Name = "note", Value = 2 }),
+        };
+
+        // The one stored entry and its records renamed to the given id, name and compatible ids (ContentHash kept), Narrow-shaped.
+        private string SeedListerStore(string id, string name, params string[] compatible)
+        {
+            var path = SeedRenamed(listsNarrow: false, name: name);
+            var snapshot = Snapshot(path);
+            var entry = snapshot.SchemaCatalog.Single();
+            entry.SchemaId = id;
+            entry.CompatibleSchemaIds = compatible;
+            foreach (var seeded in snapshot.Records)
+                seeded.SchemaId = id;
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            return path;
+        }
+
+        // A direct WriteRecord is bound by the entry it passes, and by it alone: the entry the registry holds for the same schema id
+        // changes nothing, lent or not. An entry omitting the old id refuses the record; one listing it owns the record, as a cache would.
+        [TestCase(false, false)]
+        [TestCase(false, true)]
+        [TestCase(true, false)]
+        [TestCase(true, true)]
+        public void ThePassedEntryAloneDecidesTheWrittenTypesIds(bool entryListsOldId, bool lend)
+        {
+            var path = SeedListerStore(ListerOldId, "tests.restamp_old", ListerOldId);
+            var passed = ListerEntry(entryListsOldId ? new[] { NarrowListerRegistry.GetRequired<NoteLister>().SchemaId, ListerOldId } : new[] { NarrowListerRegistry.GetRequired<NoteLister>().SchemaId });
+            var registry = lend ? CultDocumentRegistry.ForTypes(new[] { typeof(NoteLister) }) : null;
             var before = Fingerprint(path);
 
             if (entryListsOldId)
             {
-                new SingleFileMessagePackBackingStore(path).WriteRecord(record, passed, null, registry);
-                Assert.That(Snapshot(path).Records.Single(stored => stored.Key == "note").SchemaId, Is.EqualTo(full.SchemaId));
+                new SingleFileMessagePackBackingStore(path).WriteRecord(ListerRecord(), passed, null, registry);
+                Assert.That(Snapshot(path).Records.Single(stored => stored.Key == "note").SchemaId, Is.EqualTo(passed.SchemaId));
                 return;
             }
-            Assert.Throws<CultSchemaConflictException>(() => new SingleFileMessagePackBackingStore(path).WriteRecord(record, passed, null, registry));
+            Assert.Throws<CultSchemaConflictException>(() => new SingleFileMessagePackBackingStore(path).WriteRecord(ListerRecord(), passed, null, registry));
             Assert.That(Fingerprint(path), Is.EqualTo(before));
-            Assert.Throws<CultSchemaConflictException>(() => new SingleFileMessagePackBackingStore(path).WriteRecord(record, passed));
+        }
+
+        // The written type's own drift, read whole, is owned however the entry lists ids and whatever registry is lent: a registry
+        // that holds the written type never refuses what its own entry would own.
+        [TestCase(false, false)]
+        [TestCase(false, true)]
+        [TestCase(true, false)]
+        [TestCase(true, true)]
+        public void ALentRegistryNeverRefusesTheWrittenTypesOwnDrift(bool passedListsOwnId, bool lend)
+        {
+            var path = SeedListerStore(ListerDriftId, "tests.restamp_lister", ListerDriftId);
+            var own = NarrowListerRegistry.GetRequired<NoteLister>().SchemaId;
+            var passed = ListerEntry(passedListsOwnId ? new[] { own } : Array.Empty<string>());
+
+            new SingleFileMessagePackBackingStore(path).WriteRecord(ListerRecord(), passed, null, lend ? NarrowListerRegistry : null);
+
+            Assert.That(Snapshot(path).Records.Single(stored => stored.Key == "note").SchemaId, Is.EqualTo(own));
+        }
+
+        // A lent registry never widens the shape of the passed entry: an entry narrower than the stored one reads it only by dropping
+        // a slot, and the registry's wider entry for the same id is not asked.
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ALentRegistryNeverWidensTheShapeOfThePassedEntry(bool lend)
+        {
+            var path = SeedListerStore(ListerDriftId, "tests.restamp_lister", ListerDriftId);
+            var passed = ListerEntry(new[] { NarrowListerRegistry.GetRequired<NoteLister>().SchemaId }, ListerEntry(Array.Empty<string>()).Members.Take(1).ToArray(), "narrow-");
+            var before = Fingerprint(path);
+
+            Assert.Throws<CultSchemaConflictException>(() =>
+                new SingleFileMessagePackBackingStore(path).WriteRecord(ListerRecord(MessagePackSerializer.Serialize(new[] { "note" })), passed, null, lend ? NarrowListerRegistry : null));
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+        }
+
+        // The shadow, where it is decided: a written entry answers for its schema id whatever the registry holds, and the registry
+        // still adds its other types.
+        [Test]
+        public void AWrittenEntryShadowsTheLentRegistrysTypeForItsId()
+        {
+            var written = NarrowRegistry.GetRequired<NoteNarrow>().ToCatalogEntry();
+            var lookup = new CatalogEntryLookup(new[] { written }, NarrowListerRegistry);
+            var lister = NarrowListerRegistry.GetRequired<NoteLister>();
+
+            Assert.That(lookup.Owner(written.SchemaId), Is.SameAs(written));
+            Assert.That(lookup.Named(written.SchemaName), Is.EqualTo(new[] { written }).Using<CultSchemaCatalogEntry>((x, y) => ReferenceEquals(x, y)));
+            Assert.That(lookup.Listing(written.SchemaId), Is.EqualTo(new[] { written }).Using<CultSchemaCatalogEntry>((x, y) => ReferenceEquals(x, y)));
+            Assert.That(lookup.Owner(lister.SchemaId)!.SchemaId, Is.EqualTo(lister.SchemaId));
+            Assert.That(lookup.Listing(ListerOldId).Select(entry => entry.SchemaId), Is.EqualTo(new[] { lister.SchemaId }));
+            Assert.That(lookup.Named(lister.SchemaName).Select(entry => entry.SchemaId), Is.EqualTo(new[] { lister.SchemaId }));
         }
 
         // The registry's other types change nothing about a record the written type claims itself.
@@ -676,8 +743,8 @@ namespace GameCult.Caching.Tests
             var writes = new[] { narrow };
             Func<string, bool> declares = id => id == narrow.SchemaId;
 
-            Assert.That(CultDocumentRegistry.Owns("tests.restamp.unpublished", writes, declares, new CatalogEntryLookup(writes), entry => entry, _ => true), Is.False);
-            Assert.That(CultDocumentRegistry.Owns(narrow.SchemaId, writes, declares, new CatalogEntryLookup(writes), entry => entry, _ => true), Is.True);
+            Assert.That(CultDocumentRegistry.Owns("tests.restamp.unpublished", writes, declares, new CatalogEntryLookup(writes, null), entry => entry, _ => true), Is.False);
+            Assert.That(CultDocumentRegistry.Owns(narrow.SchemaId, writes, declares, new CatalogEntryLookup(writes, null), entry => entry, _ => true), Is.True);
         }
 
         private static string VectorPath(string name)
