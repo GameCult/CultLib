@@ -1441,65 +1441,45 @@ namespace GameCult.Caching.Tests
             Assert.That(CacheBackingStore.GateTakes, Is.EqualTo(1), "a settled store's call takes only its cache's gate");
         }
 
-        [CultDocument("tests.gate_filler", "tests.gate_filler.v1")]
-        [MessagePackObject(AllowPrivate = true)]
-        internal sealed class GateFiller
-        {
-            [Key(0)] [CultName] public string Name = string.Empty;
-        }
-
-        // Under attaches that succeed, a call takes at most three gates, and three is reachable: the guess was null, an attach then
-        // settled before the call took the store's gate, and the call took the settled cache's gate as its third.
+        // Three gates are reached only by a stale guess that a later attach outdates: the call read the cache a failing attach had
+        // published (its first gate, taken only to find Cache moved), then the store's gate (its second) found another cache settled
+        // by an attach that won the store in between (its third). One round is ordered with the store's hooks, and no call exceeds three.
         [Test]
-        public void OneStoreCallTakesAtMostThreeGatesUnderSuccessfulAttachChurnAndThreeIsReached()
+        public void OneStoreCallTakesThreeGatesWhenAStaleGuessIsFollowedBySuccessAndNeverMore()
         {
-            var rounds = 0;
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
             new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
-            var withFiller = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck), typeof(GateFiller) });
             var mostTakes = 0;
-            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
-            for (var round = 0; mostTakes < 3 && DateTime.UtcNow < deadline; round++)
+            for (var round = 0; round < 20 && mostTakes < 3; round++)
             {
-                rounds++;
-                var store = new RoleStore(_path);
-                store.ReleaseAttach.Set();
-                // A cache holding many records in a store of its own makes the attach's checks before it publishes Cache take long
-                // enough to race.
-                var cache = new CultCache(withFiller);
-                cache.AddBackingStore(new SingleFileMessagePackBackingStore(_path + ".filler" + round), typeof(GateFiller));
-                cache.Commit(batch =>
-                {
-                    for (var index = 0; index < 20000; index++)
-                        batch.Upsert(new GateFiller { Name = "held" + index }, new CultRecordHandle<GateFiller>(new CultRecordKey("held" + index)));
-                });
-                using var barrier = new Barrier(2);
+                var store = new RoleStore(_path) { FailAttachPull = true };
+                using var failing = new CultCache(registry);
+                using var settling = new CultCache(registry);
+                var failed = OnThread("attach", () => failing.AddBackingStore(store));
+                Assert.That(store.AttachInside.Wait(TimeSpan.FromSeconds(10)), Is.True, "the failing attach is inside its pull, Cache published");
+                var settled = OnThread("settling", () => settling.AddBackingStore(store));
+                WaitUntilBlocked(settled.Thread);
                 var takes = 0;
-                var spin = (round % 200) * 400;
-                var caller = new Thread(() =>
+                var call = OnThread("call", () =>
                 {
-                    barrier.SignalAndWait();
-                    Thread.SpinWait(spin);
                     CacheBackingStore.GateTakes = 0;
                     store.ReadStoreSnapshot();
                     takes = CacheBackingStore.GateTakes;
                 });
-                var attacher = new Thread(() =>
-                {
-                    barrier.SignalAndWait();
-                    cache.AddBackingStore(store);
-                });
-                caller.Start();
-                attacher.Start();
-                Finishes(caller, "a calling thread");
-                Finishes(attacher, "an attaching thread");
-                cache.Dispose();
-                File.Delete(_path + ".filler" + round);
+                WaitUntilBlocked(call.Thread);
+                Thread.Sleep(100);
+                store.ReleaseAttach.Set();
+                Finishes(failed.Thread, "the failing attach");
+                Finishes(settled.Thread, "the settling attach");
+                Finishes(call.Thread, "the call");
+
+                Assert.That(Refused(failed.Error()), Is.True, "the first attach failed");
+                Assert.That(settled.Error(), Is.Null, "the second attach settled");
                 Assert.That(takes, Is.InRange(1, 3), "no call took more than three gates");
                 mostTakes = Math.Max(mostTakes, takes);
             }
 
-            Assert.That(mostTakes, Is.EqualTo(3), $"a call that raced a successful attach took the third gate ({rounds} rounds)");
+            Assert.That(mostTakes, Is.EqualTo(3), "a call that read a stale guess and then met a settled cache took three gates");
         }
 
         // Under attaches that fail, Cache read under the store's gate is always null (an attach publishes and retracts it inside one

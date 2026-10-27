@@ -3618,7 +3618,8 @@ namespace GameCult.Caching
         internal readonly object _storeGate = new();
 
         // Gates the current thread has taken for store calls, read by tests (InternalsVisibleTo) to pin the two bounds of Gate<T>: at
-        // most two under failing-attach churn (Cache read under the store's gate is then always null), at most three otherwise.
+        // most two under failing-attach churn (Cache read under the store's gate is then always null), at most three otherwise: a
+        // stale non-null guess (its gate), the store's gate, and the settled cache's gate.
         [ThreadStatic]
         internal static int GateTakes;
 
