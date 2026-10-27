@@ -49,6 +49,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CultMath.Tests", "packages\
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GameCult.Caching.ConsumerBuild", "tests\GameCult.Caching.ConsumerBuild\GameCult.Caching.ConsumerBuild.csproj", "{D3138F3C-9531-4906-A5D3-74BD857D0685}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GameCult.Caching.GeneratorConsumer", "tests\GameCult.Caching.GeneratorConsumer\GameCult.Caching.GeneratorConsumer.csproj", "{1A75EA8F-00B3-49AB-8398-B1B7723BE10B}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -275,6 +277,18 @@ Global
 		{D3138F3C-9531-4906-A5D3-74BD857D0685}.Release|x64.Build.0 = Release|Any CPU
 		{D3138F3C-9531-4906-A5D3-74BD857D0685}.Release|x86.ActiveCfg = Release|Any CPU
 		{D3138F3C-9531-4906-A5D3-74BD857D0685}.Release|x86.Build.0 = Release|Any CPU
+		{1A75EA8F-00B3-49AB-8398-B1B7723BE10B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1A75EA8F-00B3-49AB-8398-B1B7723BE10B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1A75EA8F-00B3-49AB-8398-B1B7723BE10B}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{1A75EA8F-00B3-49AB-8398-B1B7723BE10B}.Debug|x64.Build.0 = Debug|Any CPU
+		{1A75EA8F-00B3-49AB-8398-B1B7723BE10B}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{1A75EA8F-00B3-49AB-8398-B1B7723BE10B}.Debug|x86.Build.0 = Debug|Any CPU
+		{1A75EA8F-00B3-49AB-8398-B1B7723BE10B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1A75EA8F-00B3-49AB-8398-B1B7723BE10B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{1A75EA8F-00B3-49AB-8398-B1B7723BE10B}.Release|x64.ActiveCfg = Release|Any CPU
+		{1A75EA8F-00B3-49AB-8398-B1B7723BE10B}.Release|x64.Build.0 = Release|Any CPU
+		{1A75EA8F-00B3-49AB-8398-B1B7723BE10B}.Release|x86.ActiveCfg = Release|Any CPU
+		{1A75EA8F-00B3-49AB-8398-B1B7723BE10B}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -299,5 +313,6 @@ Global
 		{54D543F7-8EB7-4A11-977E-22D3EE2D8C3F} = {B48EAE30-152F-01E3-6E31-82B350494D3C}
 		{FEF9DA88-2177-4FD0-885D-7096ACFA8A9D} = {B48EAE30-152F-01E3-6E31-82B350494D3C}
 		{D3138F3C-9531-4906-A5D3-74BD857D0685} = {39D316AB-ABB5-49A2-8E83-CAF4C75B48F4}
+		{1A75EA8F-00B3-49AB-8398-B1B7723BE10B} = {39D316AB-ABB5-49A2-8E83-CAF4C75B48F4}
 	EndGlobalSection
 EndGlobal

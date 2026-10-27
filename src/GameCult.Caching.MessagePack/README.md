@@ -59,6 +59,13 @@ await cache.PullAllBackingStoresAsync();
 - The raw CultNet document lane should treat these payload bytes as already
   blessed, not decode and re-encode them for sport.
 
+## MessagePack source generator
+
+NuGet consumers get `[assembly: MessagePackAssumedFormattable(typeof(CultRecordRef<>))]` from the package, so a
+`CultRecordRef<T>` member or dictionary key compiles with MessagePack's source generator on and is formatted by
+CultLib's resolver; no per-member `[MessagePackFormatter]` is needed. Unity and `ProjectReference` consumers that turn the generator
+on write that line themselves (or import `buildTransitive/GameCult.Caching.MessagePack.targets`).
+
 ## CultMath Value Shapes
 
 Every public CultMath value type has one MessagePack shape (`CultMathResolver`,
