@@ -158,6 +158,21 @@ fn cases() -> Vec<Case> {
                 }),
             },
         },
+        Case {
+            name: "write_not_authorized",
+            // C#: ForRemoteWriteRefused(new CultNetRemoteWriteRequest(null, Put, "some.schema.v1", new CultRecordKey("some:key"), null, null), "not granted")
+            csharp_hex: "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D92177726974655F6E6F745F617574686F72697A65643A206E6F74206772616E746564AB726F7574696E6748696E74C0A4636F6465B477726974655F6E6F745F617574686F72697A6564A764657461696C7384A56669656C64A97265636F72644B6579A576616C7565A8736F6D653A6B6579A461734F66C0A763757272656E74C0",
+            message: || CultNetMessage::Error {
+                error: "write_not_authorized: not granted".to_string(),
+                code: Some(CultNetErrorCode::WriteNotAuthorized),
+                details: Some(CultNetErrorDetails {
+                    field: Some("recordKey".to_string()),
+                    value: Some("some:key".to_string()),
+                    as_of: None,
+                    current: None,
+                }),
+            },
+        },
     ]
 }
 

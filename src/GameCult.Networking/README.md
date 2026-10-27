@@ -197,7 +197,10 @@ reply.
 The first coherent shard policy is primary ownership. Each shard has one
 authoritative writer at a time. Clients may connect to any node; a non-owner
 node forwards a write to the owner or rejects it honestly when forwarding is
-not available. Followers subscribe to committed shard mutations and apply them
+not available. A node applies or forwards a peer's write only after its
+`RemoteWriteAuthority` grants it; with none configured it refuses all of them, and a
+write forwarded to a primary is judged again there for the forwarder's connection.
+Followers subscribe to committed shard mutations and apply them
 through the same CultCache reconciliation path as local file changes.
 
 This should feel like the local-first parts of Firebase or RethinkDB without
