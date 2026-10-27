@@ -34,7 +34,7 @@ OLD_READER_REV_LEAF="${OLD_READER_REV_LEAF:-02cf04b5}"       # cultcache-rs-v0.3
 OLD_WRITER_REV="${OLD_WRITER_REV:-45c2f400}"                 # cultlib-unity-v1.0.60
 
 EXPECT_C2A_WRITER=2        # C2aGateWriter: C2aStamps..., TheCommittedVectorsAreWhatC2aWrites
-EXPECT_READER_GATE=12      # OldReaderGateProbe: five TestCaseSource tests over the committed and live stores
+EXPECT_READER_GATE=10      # OldReaderGateProbe: five TestCaseSource tests, each over the committed and the live store
 EXPECT_READER_REFLIST=1    # OldReaderRefListProbe
 EXPECT_OLD_WRITER=1        # OldWriterRefListProbe
 EXPECT_HEAD_REFLIST=1      # RefListDriftTests.A_1_0_60_Written_Store_Opens_Like_2_0_1
