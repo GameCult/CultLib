@@ -138,12 +138,11 @@ trx_unpassed() { if [ -f "$1" ]; then tr '\n' ' ' < "$1" | grep -o "<UnitTestRes
 # Python's runner says "Ran N tests" even when some were skipped or expected to fail; those forms are not passes.
 python_unrun() { grep -E '(skipped|expected failures|unexpected successes)=' "$1" || true; }
 
-# Cases a leaf runtime's own output says it passed: Rust's 'N passed' lines summed, Python's 'Ran N' (python_unrun catches the
-# skips that line hides), node's 'pass N'.
+# Cases a leaf runtime's own output says it passed: Rust's 'N passed' lines summed, # skips that line hides), node's 'pass N'.
 leaf_cases() {
   case "$1" in
     rust) awk '/^test result:/ { n += $4 } END { print n + 0 }' "$2" ;;
-    python) awk '/^Ran [0-9]+ test/ { n = $2 } /^FAILED [(]/ { s = $0; while (match(s, /(failures|errors)=[0-9]+/)) { n -= substr(s, RSTART + index(substr(s, RSTART), "=")); s = substr(s, RSTART + RLENGTH) } } END { print n + 0 }' "$2" ;;
+    python) awk '/^Ran [0-9]+ test/ { n = $2 } /^(OK|FAILED) [(]/ { s = $0; while (match(s, /[a-z]+=[0-9]+/)) { n -= substr(s, RSTART + index(substr(s, RSTART), "=")); s = substr(s, RSTART + RLENGTH) } } END { print n + 0 }' "$2" ;;
     typescript) awk '/^[^[:alnum:]]*pass [0-9]+$/ { n = $NF } END { print n + 0 }' "$2" ;;
   esac
 }
