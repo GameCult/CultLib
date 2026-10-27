@@ -44,6 +44,15 @@ namespace GameCult.Caching.Tests
             [Key(3)] public string Extra = string.Empty;
         }
 
+        // Another schema with Narrow's exact shape: never the same type, whatever the members say.
+        [CultDocument("tests.restamp_other", "tests.restamp_other.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class NoteOther
+        {
+            [Key(0)] [CultName] public string Name = string.Empty;
+            [Key(1)] public int Value;
+        }
+
         // Grown with the lossy id declared: declaration is the consent to the loss.
         [CultDocument("tests.restamp_note", "tests.restamp_note.v4", CompatibleSchemaIds = new[] { WideId })]
         [MessagePackObject(AllowPrivate = true)]
@@ -307,6 +316,137 @@ namespace GameCult.Caching.Tests
                 batch.Expect(Note, second.Get(Note));
                 batch.Upsert(new NoteGrown { Name = "note", Value = 3 }, new CultRecordHandle<NoteGrown>(Note));
             }), Is.False, "a cache loaded before the restamp fails its Expect: the bytes changed");
+        }
+
+        private static readonly CultRecordKey Base = new("base");
+        private static readonly CultRecordKey Delta = new("delta");
+
+        private CultCache OpenWithCodec(string path, bool directory, CultDocumentRegistry registry)
+        {
+            var cache = new CultCache(registry, CultCacheMessagePack.CreateCodec(registry));
+            cache.AddBackingStore(Store(path, directory));
+            return cache;
+        }
+
+        // A base and a variant of it, written by a writer that knew Narrow; Grown then reads the variant whole as compatible drift.
+        private string SeedNarrowVariant(bool directory)
+        {
+            var path = Path.Combine(_directory, directory ? "store" : "store.cc");
+            using var cache = OpenWithCodec(path, directory, NarrowRegistry);
+            Assert.That(cache.Commit(batch => batch.Upsert(new NoteNarrow { Name = "base", Value = 1 }, new CultRecordHandle<NoteNarrow>(Base))), Is.True);
+            Assert.That(cache.Commit(batch => batch.UpsertVariant(Delta, Base, new[] { cache.Override<NoteNarrow>("Name", "delta"), cache.Override<NoteNarrow>("Value", 5) })), Is.True);
+            return path;
+        }
+
+        // The staging half asks the flag ToStoredDocument set on a loaded variant, and Resolved and Flatten carry it on: an owned
+        // drift variant is rewritten, flattened and removed like a plain drift record, restamping only what is written.
+        [TestCaseSource(nameof(StoreKinds))]
+        public async Task AnOwnedDriftVariantIsRewritten(bool directory)
+        {
+            var path = SeedNarrowVariant(directory);
+            using (var cache = OpenWithCodec(path, directory, GrownRegistry))
+            {
+                await cache.PullAllBackingStoresAsync();
+                Assert.That(cache.Commit(batch => batch.UpsertVariant(Delta, Base, new[] { cache.Override<NoteGrown>("Name", "delta"), cache.Override<NoteGrown>("Value", 6) })), Is.True);
+            }
+
+            Assert.That(StoredIdOf(path, directory, GrownRegistry, Delta), Is.EqualTo(GrownRegistry.GetRequired<NoteGrown>().SchemaId));
+            Assert.That(StoredIdOf(path, directory, NarrowRegistry, Base), Is.EqualTo(NarrowRegistry.GetRequired<NoteNarrow>().SchemaId), "the base was not written");
+        }
+
+        [TestCaseSource(nameof(StoreKinds))]
+        public async Task AnOwnedDriftVariantIsFlattened(bool directory)
+        {
+            var path = SeedNarrowVariant(directory);
+            using (var cache = OpenWithCodec(path, directory, GrownRegistry))
+            {
+                await cache.PullAllBackingStoresAsync();
+                Assert.That(cache.Commit(batch => batch.Flatten(Delta)), Is.True);
+            }
+
+            Assert.That(StoredIdOf(path, directory, GrownRegistry, Delta), Is.EqualTo(GrownRegistry.GetRequired<NoteGrown>().SchemaId));
+        }
+
+        [TestCaseSource(nameof(StoreKinds))]
+        public async Task AnOwnedDriftVariantIsRemoved(bool directory)
+        {
+            var path = SeedNarrowVariant(directory);
+            using (var cache = OpenWithCodec(path, directory, GrownRegistry))
+            {
+                await cache.PullAllBackingStoresAsync();
+                Assert.That(cache.Commit(batch => batch.Remove(Delta)), Is.True);
+            }
+
+            using var reopened = OpenWithCodec(path, directory, GrownRegistry);
+            await reopened.PullAllBackingStoresAsync();
+            Assert.That(reopened.GetStored(Delta), Is.Null);
+            Assert.That(reopened.GetStored(Base), Is.Not.Null);
+        }
+
+        // A store whose entry is a newer writer's rename of Narrow's schema, with identical members and the given compatible ids.
+        private string SeedRenamed(bool listsNarrow)
+        {
+            var path = SeedNarrow(directory: false);
+            var snapshot = Snapshot(path);
+            var narrowId = NarrowRegistry.GetRequired<NoteNarrow>().SchemaId;
+            var entry = snapshot.SchemaCatalog.Single();
+            entry.SchemaId = entry.ContentHash = "tests.restamp.renamed";
+            entry.SchemaName = "tests.restamp_note_renamed";
+            entry.SchemaVersion = "tests.restamp_note_renamed.v2";
+            entry.CompatibleSchemaIds = listsNarrow ? new[] { "tests.restamp.renamed", narrowId } : new[] { "tests.restamp.renamed" };
+            foreach (var record in snapshot.Records)
+                record.SchemaId = entry.SchemaId;
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            return path;
+        }
+
+        // One writer of NoteNarrow, with a cache or without one: the same Owns answer for the same record.
+        private void WriteNarrow(string path, bool cacheless)
+        {
+            if (cacheless)
+            {
+                new SingleFileMessagePackBackingStore(path).WriteDocument(Note, new NoteNarrow { Name = "note", Value = 2 }, registry: NarrowRegistry);
+                return;
+            }
+
+            using var cache = Open(path, false, NarrowRegistry);
+            cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+            Assert.That(cache.Commit(batch => batch.Upsert(new NoteNarrow { Name = "note", Value = 2 }, new CultRecordHandle<NoteNarrow>(Note))), Is.True);
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ARenamedEntryListingTheWritersIdIsOwnedByCacheAndCachelessWriterAlike(bool cacheless)
+        {
+            var path = SeedRenamed(listsNarrow: true);
+            WriteNarrow(path, cacheless);
+
+            Assert.That(Snapshot(path).Records.Single(record => record.Key == "note").SchemaId, Is.EqualTo(NarrowRegistry.GetRequired<NoteNarrow>().SchemaId));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ARenamedEntryNotListingTheWritersIdIsRefusedByCacheAndCachelessWriterAlike(bool cacheless)
+        {
+            var path = SeedRenamed(listsNarrow: false);
+            var before = Fingerprint(path);
+            Assert.Throws<CultSchemaConflictException>(() => WriteNarrow(path, cacheless));
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+        }
+
+        // A writer of one schema never overwrites and retypes a record of another schema, however alike their members.
+        [TestCase(false)]
+        [TestCase(true)]
+        public void AWriterOfOneSchemaNeverRetypesASameShapeRecordOfAnother(bool cacheless)
+        {
+            var path = Path.Combine(_directory, "store.cc");
+            var otherRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(NoteOther) });
+            using (var seed = Open(path, false, otherRegistry))
+                Assert.That(seed.Commit(batch => batch.Upsert(new NoteOther { Name = "note", Value = 1 }, new CultRecordHandle<NoteOther>(Note))), Is.True);
+            var before = Fingerprint(path);
+
+            Assert.Throws<CultSchemaConflictException>(() => WriteNarrow(path, cacheless));
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
         }
 
         private static string VectorPath(string name)
