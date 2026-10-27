@@ -181,6 +181,21 @@ namespace GameCult.Caching.Tests
             Assert.That(Fingerprint(path), Is.EqualTo(before), "a refused write leaves the store as it was");
         }
 
+        // A held record read only by dropping a slot is refused before anything is staged: with the store's lock held by another
+        // writer, the write is refused typed instead of waiting on the lock and reporting contention.
+        [TestCaseSource(nameof(StoreKinds))]
+        public void ALossyDriftRecordIsRefusedBeforeTheStoresLockIsAsked(bool directory)
+        {
+            var path = SeedWide(directory);
+            using var cache = Open(path, directory, GrownRegistry);
+            using var held = directory
+                ? new FileStream(Path.Combine(DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(path), ".commit.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)
+                : new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+            Assert.Throws<CultSchemaConflictException>(() =>
+                cache.TryCommit(batch => batch.Upsert(new NoteGrown { Name = "note", Value = 2 }, new CultRecordHandle<NoteGrown>(Note))));
+        }
+
         [TestCaseSource(nameof(StoreKinds))]
         public void ADeclaredLossyDriftRecordIsWritable(bool directory)
         {
