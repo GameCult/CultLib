@@ -65,7 +65,7 @@ order:
    Geometry, WebSockets, ConsumerBuild, InteropPeer, cultcache-ts/-rs/-py, cultnet-ts and cultmesh-ts.
    Run `old-reader-refusal.sh gate` for csharp, typescript, python and rust. If main gained code by then,
    a Soul pass covers the merge.
-6. **Land.** The land is `git merge --no-ff`, never a squash, so the SHAs that every report and verdict cites stay reachable from main (skip the branch's non-building commits with `git bisect --first-parent`). Steps 1 and 2 closed at 723b7996 (claimant-one-owner, land-c2a-gate); step 5 closed at the merge commit 3157d4b3. Run `git merge --no-ff hands/variants-c2a` onto main, with an empty diff against the
+6. **Land.** The land is `git merge --no-ff`, never a squash, so the SHAs that every report and verdict cites stay reachable from main (skip the branch's non-building commits with `git bisect --first-parent`). Steps 1 and 2 closed at 723b7996 (claimant-one-owner, land-c2a-gate); step 5 closed at the merge commit 3157d4b3 (Soul `cut-land-c2a-main.s1` holds). Step 3 closed except `cut-land-c2a.s1.stale-unity-plugin-dlls` and `cut-land-c2a-gate.s2.mutation-table-reads-gate-as-zero`, which wait on the 3.0.0 release cut and the Eureka tools respectively; step 4 closed with `consumer-pins-before-land` (pins since 2026-10-22). Run `git merge --no-ff hands/variants-c2a` onto main, with an empty diff against the
    verified head. There is no tag: tags, the Unity plugin rebuild and `declared-range-gate-own-version`
    belong to the 3.0.0 release cut. Open follow-ups `c2a-load-slower` (load 2 to 2.3 times slower than
    main on a synthetic Aetheria catalog) and `drift-write-ownership-leaves` do not say "before land".
