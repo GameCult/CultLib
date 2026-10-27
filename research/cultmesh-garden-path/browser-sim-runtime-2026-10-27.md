@@ -127,3 +127,17 @@ Date: 2026-10-27. Read-only Eyes pass. Facts with evidence pointers; no recommen
 3. Mono-wasm is the shipping .NET browser runtime; CoreCLR-on-wasm and NativeAOT-LLVM are both pre-default, with conflicting reports on how far CoreCLR-wasm has come.
 4. Colyseus, the nearest prediction-bearing framework, requires one shared `step` function and documents it in TS with ports in other SDKs.
 5. No .io-class game on .NET wasm and no published .io payload sizes were found.
+
+## Addendum (Self, 2026-10-27): NetWasm, and CultCache's reflection
+
+Source: https://github.com/zion-sati/NetWasm README, fetched 2026-10-27 (operator pointer from HN). Self-reported, not measured by us.
+
+- An independent compiler, CoreLib, runtime and SDK: CIL to WebAssembly directly, generics specialised, only reachable runtime support linked, wasm-opt always. Not NativeAOT-LLVM, not Mono.
+- Print-42 workload, Compact GC: 38,919 B raw, 13,213 B Brotli-11 (Rust size profile: 16,963 B). Empty Blazor AOT app for context: about 12.3 MB (.NET 10).
+- Benchmarks (Wasmtime, M1 Max, 15-run medians): 41-73% less time than Mono AOT on allocation-heavy workloads; parity on n-body and CRC-32. Run in Wasmtime, not a browser.
+- Outside the profile, refused at compile time: runtime reflection, `dynamic`, runtime assembly loading, managed threading, named-culture globalisation. Expression trees without general reflection; JSImport scalar calls are direct wasm imports, spans cross as typed-array views.
+- Floating-point determinism: not addressed.
+- Licence: compiler and tooling under the NetWasm Community License 1.0 (free under 250 employees and USD 10M revenue, paid tiers above); runtime libraries and generated code MIT.
+- Maturity: 0.10.3, pre-1.0, contracts may change between minors; 269 stars, 301 commits, single vendor.
+
+CultLib consequence (source read, `src/GameCult.Caching/CultCache.cs` at main 16074345): the C# document path uses runtime reflection (`GetProperties` :1105, :1138; `MakeGenericType` :1330) and MessagePack's `DynamicObjectResolver` (comment :1274), which emits IL at runtime. Neither NetWasm nor Mono wasm AOT runs emitted IL, and NetWasm refuses reflection outright. Any C#-in-the-browser option therefore needs a reflection-free, source-generated CultCache codec first. The same codec is what NativeAOT and Unity IL2CPP consumers need.
