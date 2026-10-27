@@ -1459,7 +1459,7 @@ namespace GameCult.Caching.Tests
                 // A cache holding many records makes the attach's checks before it publishes Cache take long enough to race.
                 var cache = new CultCache(registry);
                 for (var index = 0; index < 20000; index++)
-                    cache.Upsert(new IdDeck { Name = "held" + index });
+                    cache.AddAsync(new IdDeck { Name = "held" + index }).GetAwaiter().GetResult();
                 using var barrier = new Barrier(2);
                 var takes = 0;
                 var spin = (round % 200) * 400;
