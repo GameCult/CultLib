@@ -667,6 +667,11 @@ namespace GameCult.Caching.Tests
             Assert.That(lookup.Owner(lister.SchemaId)!.SchemaId, Is.EqualTo(lister.SchemaId));
             Assert.That(lookup.Listing(ListerOldId).Select(entry => entry.SchemaId), Is.EqualTo(new[] { lister.SchemaId }));
             Assert.That(lookup.Named(lister.SchemaName).Select(entry => entry.SchemaId), Is.EqualTo(new[] { lister.SchemaId }));
+
+            // A write of several entries shadows by the entry that has the id, not by all of them having it.
+            var other = CultDocumentRegistry.ForTypes(new[] { typeof(NoteOther) }).GetRequired<NoteOther>().ToCatalogEntry();
+            var several = new CatalogEntryLookup(new[] { other, written }, NarrowListerRegistry);
+            Assert.That(several.Named(written.SchemaName), Is.EqualTo(new[] { written }).Using<CultSchemaCatalogEntry>((x, y) => ReferenceEquals(x, y)));
         }
 
         // The registry's other types change nothing about a record the written type claims itself.
