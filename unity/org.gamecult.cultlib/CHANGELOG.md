@@ -35,6 +35,10 @@ Releases as 3.0.0 (major).
 - `CultElementIdAttribute` declares an element id (derived from a named member when given), `CultForeignRecord` is a record a store carries untouched because no registered type reads it, and `CultElementIdException`, `CultSchemaConflictException`, `CultStoreUnreadableException` and `CultWriteConflictException` are the refusals named above.
 - A store written by 1.0.x with a record-reference list in a slot still opens (from 2.0.1).
 
+### Fixed
+
+- A consumer with MessagePack's source generator on can declare `CultRecordRef<T>` members and `CultRecordRef<T>` dictionary keys. The NuGet package injects the assembly attribute that makes this compile; Unity consumers add one line (see the MessagePack README). Bytes are unchanged.
+
 ## [2.0.1] - 2026-10-22
 
 ### Fixed

@@ -1,0 +1,9 @@
+<Project>
+  <!-- MessagePack's source generator invents a formatter for CultRecordRef<T> instead of asking the resolver chain (MessagePack-CSharp#2133); assuming it formattable leaves the ref to CultDocumentResolver. -->
+  <ItemGroup>
+    <AssemblyAttribute Include="MessagePack.MessagePackAssumedFormattableAttribute">
+      <_Parameter1>typeof(global::GameCult.Caching.CultRecordRef&lt;&gt;)</_Parameter1>
+      <_Parameter1_IsLiteral>true</_Parameter1_IsLiteral>
+    </AssemblyAttribute>
+  </ItemGroup>
+</Project>

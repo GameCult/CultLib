@@ -15,6 +15,8 @@
     <PackageReference Include="System.Text.Json" Version="9.0.10" />
   </ItemGroup>
 
+  <Import Project="..\GameCult.Caching.MessagePack\buildTransitive\GameCult.Caching.MessagePack.targets" />
+
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="\" />
     <None Include="ISOSURFACE-PROVENANCE.md" Pack="true" PackagePath="\" />

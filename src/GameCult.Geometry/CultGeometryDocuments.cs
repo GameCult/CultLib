@@ -161,7 +161,6 @@ namespace GameCult.Geometry
         public string RequestId { get; set; } = string.Empty;
 
         [Key(1)]
-        [MessagePackFormatter(typeof(CultRecordRefFormatter<CultGeometryDomainDocument>))]
         public CultRecordRef<CultGeometryDomainDocument> DomainKey { get; set; }
 
         [Key(2)]
@@ -236,7 +235,6 @@ namespace GameCult.Geometry
         public string CutId { get; set; } = string.Empty;
 
         [Key(1)]
-        [MessagePackFormatter(typeof(CultRecordRefFormatter<CultGeometryBuildRequest>))]
         public CultRecordRef<CultGeometryBuildRequest> RequestKey { get; set; }
 
         [Key(2)]
@@ -325,7 +323,6 @@ namespace GameCult.Geometry
         public string ChunkId { get; set; } = string.Empty;
 
         [Key(1)]
-        [MessagePackFormatter(typeof(CultRecordRefFormatter<CultGeometrySelectedCutManifest>))]
         public CultRecordRef<CultGeometrySelectedCutManifest> CutKey { get; set; }
 
         [Key(2)]
