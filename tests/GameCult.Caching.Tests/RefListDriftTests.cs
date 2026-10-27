@@ -107,9 +107,10 @@ namespace GameCult.Caching.Tests
         }
 
         // The store the 1.0.60 writer wrote (tests/vectors/ref-list-drift/v1-0-60-written.cc, made by OldWriterRefListProbe), or the one
-        // old-reader-refusal.sh gate csharp names in CULTLIB_GATE_OLD_STORE. The line it prints is the one OldReaderRefListProbe prints
-        // at 2.0.1; the gate diffs them. A record is named by its schema name, not its id: a flush of an untouched record carries its
-        // persisted id forward at this tree and restamps it at 2.0.1, so the id after PushAll is not what "opens alike" is about.
+        // old-reader-refusal.sh gate csharp names in CULTLIB_GATE_OLD_STORE. It attaches the store, upserts alpha, beta and the list
+        // reversed, flushes, rereads the file and prints the REFLIST-SUMMARY line OldReaderRefListProbe prints at 2.0.1 after the same
+        // write; the gate diffs them, so the two must stay the same code. Ids are compared, not names: the write is what makes a record's
+        // schema id the one its type owns, and a record left under its persisted id is a type that cannot write it.
         [Test]
         public async Task A_1_0_60_Written_Store_Opens_Like_2_0_1()
         {
@@ -118,20 +119,35 @@ namespace GameCult.Caching.Tests
             File.Copy(string.IsNullOrEmpty(source) ? VectorPath("v1-0-60-written.cc") : source, copy);
             try
             {
-                using var cache = new CultCache();
-                var store = new SingleFileMessagePackBackingStore(copy);
-                cache.AddBackingStore(store);
-                await cache.PullAllBackingStoresAsync();
-                var warnings = store.LastSchemaMigrationReports.SelectMany(report => report.Warnings).Select(warning => warning.Code).Distinct().OrderBy(code => code, StringComparer.Ordinal).ToArray();
-                Assert.That(warnings, Does.Contain("gained_reference_semantics"));
-                var items = cache.GetAll<RefListHolder>().Single().Items.Select(item => item.Key.Value).ToArray();
-                Assert.That(items, Is.EqualTo(new[] { "alpha", "beta" }));
-                Assert.That(cache.Get<RefListTarget>(cache.GetAll<RefListHolder>().Single().Items[0].Key)!.Name, Is.EqualTo("alpha"));
+                string[] warnings;
+                using (var cache = new CultCache())
+                {
+                    var store = new SingleFileMessagePackBackingStore(copy);
+                    cache.AddBackingStore(store);
+                    await cache.PullAllBackingStoresAsync();
+                    warnings = store.LastSchemaMigrationReports.SelectMany(report => report.Warnings).Select(warning => warning.Code).Distinct().OrderBy(code => code, StringComparer.Ordinal).ToArray();
+                    Assert.That(warnings, Does.Contain("gained_reference_semantics"));
+                    var holder = cache.GetAll<RefListHolder>().Single();
+                    Assert.That(holder.Items.Select(item => item.Key.Value), Is.EqualTo(new[] { "alpha", "beta" }));
 
-                store.PushAll();
+                    // The write both runtimes make: the targets as they are, the holder with its list reversed.
+                    foreach (var target in cache.GetAll<RefListTarget>().ToArray()) await cache.UpsertAsync(target, cache.TryGetHandle(target));
+                    holder.Items = holder.Items.AsEnumerable().Reverse().ToArray();
+                    await cache.UpsertAsync(holder, cache.TryGetHandle(holder));
+                    await cache.FlushAsync();
+                }
+
                 var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(copy));
-                var records = snapshot.Records.OrderBy(record => record.Key, StringComparer.Ordinal).Select(record => record.Key + "=" + snapshot.SchemaCatalog.Where(entry => entry.SchemaId == record.SchemaId).Select(entry => entry.SchemaName).SingleOrDefault()).ToArray();
-                TestContext.Out.WriteLine("REFLIST-SUMMARY " + System.Text.Json.JsonSerializer.Serialize(new { records, items, warnings, header = snapshot.FormatVersion }));
+                var records = snapshot.Records.OrderBy(record => record.Key, StringComparer.Ordinal).Select(record => record.Key + "=" + record.SchemaId).ToArray();
+                var listId = snapshot.Records.Single(record => record.Key == "list").SchemaId;
+                var slot = snapshot.SchemaCatalog.Single(entry => entry.SchemaId == listId).Members.Single(member => member.MemberName == "Items");
+                using var reopened = new CultCache();
+                reopened.AddBackingStore(new SingleFileMessagePackBackingStore(copy));
+                await reopened.PullAllBackingStoresAsync();
+                var items = reopened.GetAll<RefListHolder>().Single().Items.Select(item => item.Key.Value).ToArray();
+                Assert.That(items, Is.EqualTo(new[] { "beta", "alpha" }));
+                Assert.That(reopened.Get<RefListTarget>(reopened.GetAll<RefListHolder>().Single().Items[0].Key)!.Name, Is.EqualTo("beta"));
+                TestContext.Out.WriteLine("REFLIST-SUMMARY " + System.Text.Json.JsonSerializer.Serialize(new { records, items, itemsSlot = new { slot.IsReference, slot.TargetSchemaName }, warnings, header = snapshot.FormatVersion }));
             }
             finally
             {
