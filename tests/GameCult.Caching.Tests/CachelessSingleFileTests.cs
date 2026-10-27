@@ -1456,10 +1456,13 @@ namespace GameCult.Caching.Tests
                 rounds++;
                 var store = new RoleStore(_path);
                 store.ReleaseAttach.Set();
+                // A cache holding many records makes the attach's checks before it publishes Cache take long enough to race.
                 var cache = new CultCache(registry);
+                for (var index = 0; index < 20000; index++)
+                    cache.Upsert(new IdDeck { Name = "held" + index });
                 using var barrier = new Barrier(2);
                 var takes = 0;
-                var spin = (round % 128) * 20;
+                var spin = (round % 200) * 400;
                 var caller = new Thread(() =>
                 {
                     barrier.SignalAndWait();

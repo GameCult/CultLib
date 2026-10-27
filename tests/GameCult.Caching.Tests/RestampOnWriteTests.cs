@@ -54,7 +54,7 @@ namespace GameCult.Caching.Tests
             [Key(2)] public string Colour = string.Empty;
         }
 
-        private const string WideId = "sha256:f0d9ccd6e9a4a1c8b3a17f5b1ea1ce6b1fcd6a0f3ad1b28f2e1d4f7d91c0a2e3";
+        private const string WideId = "sha256:82c2b721aceb56e00288baab590fabcdd82c3bda44400f7530fa9e29c4e96252";
 
         private static readonly CultDocumentRegistry NarrowRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(NoteNarrow) });
         private static readonly CultDocumentRegistry GrownRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(NoteGrown) });
