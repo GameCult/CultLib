@@ -68,22 +68,6 @@ namespace GameCult.Networking
         public CultNetDatabase Database => _database;
 
         /// <summary>
-        /// Applies a raw put message through the database shard policy.
-        /// </summary>
-        public Task<object> ApplyPutAsync(CultNetDocumentPutRawMessage message)
-        {
-            return _database.ApplyPutAsync(message);
-        }
-
-        /// <summary>
-        /// Applies a raw delete message through the database shard policy.
-        /// </summary>
-        public Task ApplyDeleteAsync(CultNetDocumentDeleteMessage message)
-        {
-            return _database.ApplyDeleteAsync(message);
-        }
-
-        /// <summary>
         /// Creates a raw snapshot response from the database cache.
         /// </summary>
         public CultNetSnapshotResponseRawMessage CreateSnapshotResponse(CultNetSnapshotRequestMessage request)
@@ -308,7 +292,7 @@ namespace GameCult.Networking
         {
             try
             {
-                await ApplyPutAsync(message).ConfigureAwait(false);
+                await _database.ApplyPutAsync(message).ConfigureAwait(false);
             }
             catch (CultNetShardAuthorityException ex)
             {
@@ -339,7 +323,7 @@ namespace GameCult.Networking
         {
             try
             {
-                await ApplyDeleteAsync(message).ConfigureAwait(false);
+                await _database.ApplyDeleteAsync(message).ConfigureAwait(false);
             }
             catch (CultNetShardAuthorityException ex)
             {
