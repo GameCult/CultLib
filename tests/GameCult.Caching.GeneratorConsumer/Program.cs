@@ -43,7 +43,7 @@ foreach (var (type, value) in documents)
         using (var cache = new CultCache(registry))
         {
             cache.AddBackingStore(new SingleFileMessagePackBackingStore(path));
-            cache.Upsert(type, value, new CultRecordKey("k"));
+            cache.UpsertAsync(type, value, new CultRecordKey("k")).GetAwaiter().GetResult();
             cache.FlushAllBackingStores();
         }
         using var reopened = new CultCache(registry);
