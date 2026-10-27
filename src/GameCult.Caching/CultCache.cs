@@ -520,7 +520,8 @@ namespace GameCult.Caching
         // it whole and owns it (CultDocumentRegistry.Owns). Set by ToStoredDocument from the schema comparison's ignored slots,
         // before any variant override is shed. A record this cache constructed or wrote is stored under Descriptor's own id, which
         // the registry declares, so only a loaded record under another id is ever asked. The staging half asks it;
-        // ConditionsHold never reads it.
+        // ConditionsHold never reads it. Only the store's loaded view carries it: the cache's resolved copies and flattens are never
+        // asked.
         internal bool StoredSchemaReadWhole { get; set; }
 
         // Names the bytes this record was read from or written as: the SHA-256 of its persisted encoding, set by the store that
@@ -565,7 +566,7 @@ namespace GameCult.Caching
         }
 
         internal CultStoredDocument Resolved(object document, CultVariantDelta delta, bool idsInMemoryOnly, CultCodec codec) =>
-            new(Key, StoredAt, Descriptor, delta, document, codec) { IdsInMemoryOnly = idsInMemoryOnly, StoredSchemaId = StoredSchemaId, StoredSchemaReadWhole = StoredSchemaReadWhole, StoredVersion = StoredVersion };
+            new(Key, StoredAt, Descriptor, delta, document, codec) { IdsInMemoryOnly = idsInMemoryOnly, StoredSchemaId = StoredSchemaId, StoredVersion = StoredVersion };
     }
 
     public sealed class CultDocumentRegistry
@@ -3318,7 +3319,6 @@ namespace GameCult.Caching
                     {
                         Flattens = true,
                         StoredSchemaId = variant.StoredSchemaId,
-                        StoredSchemaReadWhole = variant.StoredSchemaReadWhole,
                         StoredVersion = variant.StoredVersion
                     };
             }
