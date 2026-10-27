@@ -175,6 +175,7 @@ namespace GameCult.Caching.Tests
                 cache.Commit(batch => batch.Upsert(new NoteGrown { Name = "note", Value = 2 }, new CultRecordHandle<NoteGrown>(Note))))!;
             Assert.That(upsert.RecordKey, Is.EqualTo("note"));
             Assert.That(upsert.SchemaId, Is.EqualTo(WideRegistry.GetRequired<NoteWide>().SchemaId));
+            Assert.That(upsert.Message, Does.Contain("would drop persisted slots").And.Contain("to accept the loss."), "the refusal names the narrowed rule");
             var remove = Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.Remove(Note)))!;
             Assert.That(remove.RecordKey, Is.EqualTo("note"));
             Assert.That(Fingerprint(path), Is.EqualTo(before), "a refused write leaves the store as it was");
@@ -228,9 +229,35 @@ namespace GameCult.Caching.Tests
         {
             var path = SeedWide(directory: false);
             var before = Fingerprint(path);
-            Assert.Throws<CultSchemaConflictException>(() =>
-                new SingleFileMessagePackBackingStore(path).WriteDocument(Note, new NoteGrown { Name = "note", Value = 2 }, registry: GrownRegistry));
+            var refusal = Assert.Throws<CultSchemaConflictException>(() =>
+                new SingleFileMessagePackBackingStore(path).WriteDocument(Note, new NoteGrown { Name = "note", Value = 2 }, registry: GrownRegistry))!;
+            Assert.That(refusal.Message, Does.Contain("reads it whole").And.Contain("to accept the loss of its unread slots."), "the refusal names the narrowed rule");
             Assert.That(Fingerprint(path), Is.EqualTo(before));
+        }
+
+        // A cacheless writer's entry that lists the record's id compatible consents to the loss, as a cache's declaration does.
+        [Test]
+        public void ACachelessWriteByAnEntryListingTheIdCompatibleOverwritesALossyDriftRecord()
+        {
+            var path = SeedWide(directory: false);
+            new SingleFileMessagePackBackingStore(path).WriteDocument(Note, new NoteGrownDeclaring { Name = "note", Value = 2 }, registry: DeclaringRegistry);
+
+            Assert.That(StoredIdOf(path, false, DeclaringRegistry, Note), Is.EqualTo(DeclaringRegistry.GetRequired<NoteGrownDeclaring>().SchemaId));
+        }
+
+        // The type that would read the id cannot be named (two registered versions share the schema name and the id declares neither),
+        // so the record is not owned and a write over it is refused typed, not as the resolver's own error.
+        [TestCaseSource(nameof(StoreKinds))]
+        public void ARecordNoRegisteredTypeCanBeNamedForIsNotOwned(bool directory)
+        {
+            var path = SeedNarrow(directory);
+            var both = CultDocumentRegistry.ForTypes(new[] { typeof(NoteNarrow), typeof(NoteGrown) });
+            using var cache = Open(path, directory, both);
+            using (var other = Open(path, directory, WideRegistry))
+                Assert.That(other.Commit(batch => batch.Upsert(new NoteWide { Name = "note", Value = 3 }, new CultRecordHandle<NoteWide>(Note))), Is.True);
+
+            Assert.Throws<CultSchemaConflictException>(() =>
+                cache.Commit(batch => batch.Upsert(new NoteGrown { Name = "note", Value = 4 }, new CultRecordHandle<NoteGrown>(Note))));
         }
 
         [TestCaseSource(nameof(StoreKinds))]

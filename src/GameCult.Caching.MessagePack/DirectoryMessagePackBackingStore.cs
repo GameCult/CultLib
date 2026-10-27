@@ -342,7 +342,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             var indexRecord = ToContentAddressedIndexRecord(record, pagePayload);
             stored.StoredVersion = VersionOf(indexRecord.Payload);
             stored.StoredSchemaId = stored.Descriptor.SchemaId;
-            stored.StoredSchemaReadWhole = true;
             currentIndex[key] = indexRecord;
             WriteFileAtomically(
                 ContentAddressedRecordPath(indexRecord),

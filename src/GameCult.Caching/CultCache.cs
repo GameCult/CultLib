@@ -518,9 +518,10 @@ namespace GameCult.Caching
 
         // True when the schema this record was loaded under left none of its persisted slots unread by Descriptor, so the type reads
         // it whole and owns it (CultDocumentRegistry.Owns). Set by ToStoredDocument from the schema comparison's ignored slots,
-        // before any variant override is shed; true for a record this cache constructed or wrote. Ownership at the staging half
-        // asks it; ConditionsHold never reads it.
-        internal bool StoredSchemaReadWhole { get; set; } = true;
+        // before any variant override is shed. A record this cache constructed or wrote is stored under Descriptor's own id, which
+        // the registry declares, so only a loaded record under another id is ever asked. The staging half asks it;
+        // ConditionsHold never reads it.
+        internal bool StoredSchemaReadWhole { get; set; }
 
         // Names the bytes this record was read from or written as: the SHA-256 of its persisted encoding, set by the store that
         // read or wrote them. A record no store has read or written has a version of its own that equals nothing else.
@@ -2107,7 +2108,6 @@ namespace GameCult.Caching
                 if (!_entries.TryGetValue(record.Key, out var entry))
                     continue;
                 entry.StoredSchemaId = record.SchemaId;
-                entry.StoredSchemaReadWhole = true;
                 entry.StoredAt = record.StoredAt;
                 entry.StoredVersion = version;
                 if (entry.Variant == null)
@@ -4708,7 +4708,6 @@ namespace GameCult.Caching
                 if (!Entries.TryGetValue(write.Record.Key, out var entry))
                     continue;
                 entry.StoredSchemaId = write.Record.SchemaId;
-                entry.StoredSchemaReadWhole = true;
                 entry.StoredAt = write.Record.StoredAt;
                 entry.StoredVersion = version;
             }
