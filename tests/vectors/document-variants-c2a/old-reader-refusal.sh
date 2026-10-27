@@ -143,7 +143,7 @@ python_unrun() { grep -E '(skipped|expected failures|unexpected successes)=' "$1
 leaf_cases() {
   case "$1" in
     rust) awk '/^test result:/ { n += $4 } END { print n + 0 }' "$2" ;;
-    python) awk '/^Ran [0-9]+ test/ { n = $2 } END { print n + 0 }' "$2" ;;
+    python) awk '/^Ran [0-9]+ test/ { n = $2 } /^FAILED (/ { s = $0; while (match(s, /(failures|errors)=[0-9]+/)) { n -= substr(s, RSTART + index(substr(s, RSTART), "=")); s = substr(s, RSTART + RLENGTH) } } END { print n + 0 }' "$2" ;;
     typescript) awk '/^[^[:alnum:]]*pass [0-9]+$/ { n = $NF } END { print n + 0 }' "$2" ;;
   esac
 }
