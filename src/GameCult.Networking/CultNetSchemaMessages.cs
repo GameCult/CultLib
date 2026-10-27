@@ -511,7 +511,7 @@ namespace GameCult.Networking
         [Key("routingHint")] public CultNetShardRoutingHint? RoutingHint { get; set; }
         /// <summary>
         /// Gets or sets the machine-readable refusal code (R-N), e.g. <c>selection_invalid</c>,
-        /// <c>cursor_stale</c>, <c>cursor_invalid</c>, <c>reference_outside_target</c>, <c>unowned_schema</c>. Additive to
+        /// <c>cursor_stale</c>, <c>cursor_invalid</c>, <c>reference_outside_target</c>, <c>unowned_schema</c>, <c>write_not_authorized</c>. Additive to
         /// <c>cultnet.error.v0</c>; a v0 peer that does not know this field ignores it.
         /// </summary>
         [Key("code")] public string? Code { get; set; }
@@ -541,6 +541,18 @@ namespace GameCult.Networking
                 Error = $"unowned_schema: {ex.Message}",
                 Code = "unowned_schema",
                 Details = new CultNetErrorDetails { Field = "schemaId", Value = ex.SchemaId }
+            };
+
+        /// <summary>
+        /// Builds the wire error for a peer write its authority refused: code <c>write_not_authorized</c>, details
+        /// <c>{ field: "recordKey", value }</c>.
+        /// </summary>
+        public static CultNetErrorMessage ForRemoteWriteRefused(CultNetRemoteWriteRequest request, string? reason) =>
+            new CultNetErrorMessage
+            {
+                Error = string.IsNullOrWhiteSpace(reason) ? "write_not_authorized" : $"write_not_authorized: {reason}",
+                Code = "write_not_authorized",
+                Details = new CultNetErrorDetails { Field = "recordKey", Value = request.RecordKey.Value }
             };
 
         /// <summary>

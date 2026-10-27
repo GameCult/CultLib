@@ -34,6 +34,13 @@ namespace GameCult.Networking
         /// Gets or sets the forwarder used when non-primary write forwarding is enabled.
         /// </summary>
         public ICultNetShardWriteForwarder? WriteForwarder { get; set; }
+
+        /// <summary>
+        /// Gets or sets the authority asked for every peer put and delete. None configured refuses them all: a connection
+        /// key admits a peer to the transport, never to write. A write forwarded to a primary is judged here for the
+        /// original peer and again at the primary for the forwarder's connection.
+        /// </summary>
+        public ICultNetRemoteWriteAuthority? RemoteWriteAuthority { get; set; }
     }
 
     /// <summary>

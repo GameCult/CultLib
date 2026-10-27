@@ -288,11 +288,52 @@ namespace GameCult.Networking
             return Task.CompletedTask;
         }
 
+        // The one question asked of the write authority per received write. None configured refuses; an authority that throws
+        // refuses too (fail closed) and the fault is logged as an error.
+        private Action<string, CultRecordKey> Authorize(
+            CultNetServerPeer peer,
+            CultNetRemoteWriteOperation operation,
+            string? shardId,
+            long? shardEpoch)
+        {
+            return (schemaId, key) =>
+            {
+                var request = new CultNetRemoteWriteRequest(peer, operation, schemaId, key, shardId, shardEpoch);
+                var authority = _options.RemoteWriteAuthority;
+                if (authority == null)
+                {
+                    throw new CultNetRemoteWriteRefusedException(request, "no remote write authority is configured");
+                }
+
+                CultNetRemoteWriteDecision decision;
+                try
+                {
+                    decision = authority.Decide(request);
+                }
+                catch (Exception ex)
+                {
+                    _server.Logger.LogError($"CultNet remote write authority failed: {ex.Message}");
+                    throw new CultNetRemoteWriteRefusedException(request, "the write authority failed");
+                }
+
+                if (decision == null || !decision.IsGranted)
+                {
+                    throw new CultNetRemoteWriteRefusedException(request, decision?.Reason);
+                }
+            };
+        }
+
         private async Task HandlePutAsync(CultNetDocumentPutRawMessage message, CultNetServerPeer peer)
         {
             try
             {
-                await _database.ApplyPutAsync(message).ConfigureAwait(false);
+                await _database.ApplyPutAsync(message, Authorize(peer, CultNetRemoteWriteOperation.Put, message.ShardId, message.ShardEpoch))
+                    .ConfigureAwait(false);
+            }
+            catch (CultNetRemoteWriteRefusedException ex)
+            {
+                _server.Logger.LogWarning($"CultNet raw put refused: {ex.Message}");
+                peer.SendCultNet(CultNetErrorMessage.ForRemoteWriteRefused(ex.Request, ex.Reason));
             }
             catch (CultNetShardAuthorityException ex)
             {
@@ -323,7 +364,13 @@ namespace GameCult.Networking
         {
             try
             {
-                await _database.ApplyDeleteAsync(message).ConfigureAwait(false);
+                await _database.ApplyDeleteAsync(message, Authorize(peer, CultNetRemoteWriteOperation.Delete, message.ShardId, message.ShardEpoch))
+                    .ConfigureAwait(false);
+            }
+            catch (CultNetRemoteWriteRefusedException ex)
+            {
+                _server.Logger.LogWarning($"CultNet raw delete refused: {ex.Message}");
+                peer.SendCultNet(CultNetErrorMessage.ForRemoteWriteRefused(ex.Request, ex.Reason));
             }
             catch (CultNetShardAuthorityException ex)
             {

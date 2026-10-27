@@ -733,7 +733,7 @@ namespace GameCult.Networking.Tests
             using var server = new Server(cache, ServerSecurityOptions.Development());
             var logger = new CapturingLogger();
             server.Logger = logger;
-            using var databaseServer = new CultNetDatabaseServer(server, database);
+            using var databaseServer = new CultNetDatabaseServer(server, database, new CultNetDatabaseServerOptions { RemoteWriteAuthority = new TestGrantsEverything() });
             var handler = (Func<CultNetDocumentPutRawMessage, CultNetServerPeer, Task>)typeof(CultNetDatabaseServer)
                 .GetField("_putHandler", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
                 .GetValue(databaseServer)!;
@@ -929,7 +929,7 @@ namespace GameCult.Networking.Tests
             var host = new Server(cache, ServerSecurityOptions.Development());
             var logger = new CapturingLogger();
             host.Logger = logger;
-            var databaseServer = new CultNetDatabaseServer(host, database);
+            var databaseServer = new CultNetDatabaseServer(host, database, new CultNetDatabaseServerOptions { RemoteWriteAuthority = new TestGrantsEverything() });
             var peer = (CultNetServerPeer)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(CultNetServerPeer));
             const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
             var put = (Func<CultNetDocumentPutRawMessage, CultNetServerPeer, Task>)typeof(CultNetDatabaseServer).GetField("_putHandler", flags)!.GetValue(databaseServer)!;

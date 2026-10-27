@@ -56,7 +56,7 @@ namespace GameCult.Networking.Tests
             using var server = new Server(cache, ServerSecurityOptions.Development());
             var logger = new Logger();
             server.Logger = logger;
-            using var databaseServer = new CultNetDatabaseServer(server, database);
+            using var databaseServer = new CultNetDatabaseServer(server, database, new CultNetDatabaseServerOptions { RemoteWriteAuthority = new TestGrantsEverything() });
             var handler = (Func<CultNetDocumentPutRawMessage, CultNetServerPeer, Task>)typeof(CultNetDatabaseServer)
                 .GetField("_putHandler", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
                 .GetValue(databaseServer)!;
