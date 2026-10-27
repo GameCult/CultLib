@@ -556,6 +556,51 @@ namespace GameCult.Caching.Tests
             Assert.That(Fingerprint(path), Is.EqualTo(before));
         }
 
+        // A direct WriteRecord is bound by the entry it passes: a lent registry whose entry for the same schema id lists an old id the
+        // passed entry omits does not widen it. The same write with the entry listing the id is owned, as a cache owns it.
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ALentRegistryNeverWidensWhatThePassedEntryDeclares(bool entryListsOldId)
+        {
+            var path = SeedRenamed(listsNarrow: false, name: "tests.restamp_old");
+            var snapshot = Snapshot(path);
+            snapshot.SchemaCatalog.Single().SchemaId = snapshot.SchemaCatalog.Single().ContentHash = ListerOldId;
+            snapshot.SchemaCatalog.Single().CompatibleSchemaIds = new[] { ListerOldId };
+            foreach (var record in snapshot.Records)
+                record.SchemaId = ListerOldId;
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(NoteLister) });
+            var full = registry.GetRequired<NoteLister>().ToCatalogEntry();
+            var passed = new CultSchemaCatalogEntry
+            {
+                SchemaId = full.SchemaId,
+                ContentHash = full.ContentHash,
+                SchemaName = full.SchemaName,
+                SchemaVersion = full.SchemaVersion,
+                CompatibleSchemaIds = entryListsOldId ? full.CompatibleSchemaIds : new[] { full.SchemaId },
+                Members = full.Members,
+                CanonicalSchemaJson = full.CanonicalSchemaJson,
+            };
+            var record = new CultPersistedRecord
+            {
+                Key = "note",
+                SchemaId = full.SchemaId,
+                StoredAt = "2026-10-22T00:00:00.0000000+00:00",
+                Payload = MessagePackSerializer.Serialize(new NoteLister { Name = "note", Value = 2 }),
+            };
+            var before = Fingerprint(path);
+
+            if (entryListsOldId)
+            {
+                new SingleFileMessagePackBackingStore(path).WriteRecord(record, passed, null, registry);
+                Assert.That(Snapshot(path).Records.Single(r => r.Key == "note").SchemaId, Is.EqualTo(full.SchemaId));
+                return;
+            }
+            Assert.Throws<CultSchemaConflictException>(() => new SingleFileMessagePackBackingStore(path).WriteRecord(record, passed, null, registry));
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+            Assert.Throws<CultSchemaConflictException>(() => new SingleFileMessagePackBackingStore(path).WriteRecord(record, passed));
+        }
+
         // The registry's other types change nothing about a record the written type claims itself.
         [Test]
         public void AnotherRegisteredTypeDoesNotTakeAWritersOwnDriftRecord()

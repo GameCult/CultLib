@@ -4487,7 +4487,7 @@ namespace GameCult.Caching
         /// <param name="key">The record key the document is stored under.</param>
         /// <param name="document">The document to store.</param>
         /// <param name="storedAt">The stored-at stamp, or null for now.</param>
-        /// <param name="registry">The registry that describes and encodes the document, or null for <see cref="CultDocumentRegistry.Shared"/>. It also picks the type that reads a durable record, as a cache registering it would, and that type owns the record only when it is the one written; another registered type's record is refused. It serves this call only: the store keeps no registry.</param>
+        /// <param name="registry">The registry that describes and encodes the document, or null for <see cref="CultDocumentRegistry.Shared"/>. It also picks the type that reads a durable record, as a cache registering it would, and that type owns the record only when it is the one written, with no compatible id the passed entry does not list; another registered type's record is refused, and so is a record whose stored entry lists another registered type's id the registry picks first. A stored entry that lists the written type's own id is owned only while no other registered type is picked first, so a wider registry (or Shared, when none is lent) can only refuse more, never own more. Own drift is owned only on those terms. It serves this call only: the store keeps no registry.</param>
         /// <remarks>The call holds the store's gate while it runs. User code it runs (property getters while the document is encoded, constructors while a copied record is read) must not enter a cache or another store; that throws <see cref="InvalidOperationException"/>, carried by the encoder's wrapper when the code ran inside it.</remarks>
         /// <exception cref="InvalidOperationException">The store is attached to a cache; write through the cache.</exception>
         /// <exception cref="CultStoreUnreadableException">The file at the path is not a store this runtime can read.</exception>
@@ -4732,7 +4732,8 @@ namespace GameCult.Caching
                         string.Equals(entry.SchemaId, candidate, StringComparison.Ordinal) ||
                         entry.CompatibleSchemaIds.Contains(candidate, StringComparer.Ordinal));
                     Func<CultSchemaCatalogEntry, bool> written = claimant =>
-                        writes.Any(entry => string.Equals(entry.SchemaId, claimant.SchemaId, StringComparison.Ordinal));
+                        writes.Any(entry => string.Equals(entry.SchemaId, claimant.SchemaId, StringComparison.Ordinal) &&
+                                            claimant.CompatibleSchemaIds.All(id => entry.CompatibleSchemaIds.Contains(id, StringComparer.Ordinal)));
                     return AttachedRegistry is { } lent
                         ? lent.Owns(id, catalog, declared, written)
                         : CultDocumentRegistry.Owns(id, catalog, declared, new CatalogEntryLookup(writes), entry => entry, written);
