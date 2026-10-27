@@ -249,7 +249,32 @@ namespace GameCult.Caching.Tests
             Assert.That(reader.MintElementIds(), Is.EqualTo(0));
         }
 
-        // A pre-id record this cache reads only through the catalog's schema name is read-only, so the rewrite that would persist its
+        // A pre-id record this cache reads whole through the catalog's schema name is owned: the rewrite that persists its minted
+        // ids is accepted and stores it under this type's id.
+        [Test]
+        public void MintElementIdsRewritesAPreIdRecordUnderAnotherRuntimesIdThatItReadsWhole()
+        {
+            const string otherRuntimeId = "other.runtime.id_deck";
+            var path = PathOf("mint-drift.cc");
+            WritePreIdStore(path, null, ("a", "a", 1));
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var entry = snapshot.SchemaCatalog.Single();
+            entry.SchemaId = otherRuntimeId;
+            entry.ContentHash = otherRuntimeId;
+            entry.CompatibleSchemaIds = new[] { otherRuntimeId };
+            snapshot.Records.Single().SchemaId = otherRuntimeId;
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+
+            using (var cache = Open(path))
+            {
+                Assert.That(cache.MintElementIds(), Is.EqualTo(1));
+                Assert.That(cache.GetStored(new CultRecordKey("a"))!.StoredSchemaId, Is.Not.EqualTo(otherRuntimeId), "the rewrite restamped it");
+            }
+
+            Assert.That(DiskRecord(path, "a").SchemaId, Is.Not.EqualTo(otherRuntimeId));
+        }
+
+        // A pre-id record this cache reads only by dropping a persisted slot is read-only, so the rewrite that would persist its
         // minted ids is refused typed, naming it, and the store is left byte for byte.
         [Test]
         public void MintElementIdsIsRefusedByAReadOnlyRecordWithMintedIds()
@@ -262,6 +287,7 @@ namespace GameCult.Caching.Tests
             entry.SchemaId = otherRuntimeId;
             entry.ContentHash = otherRuntimeId;
             entry.CompatibleSchemaIds = new[] { otherRuntimeId };
+            entry.Members = entry.Members.Append(new CultSchemaMemberCatalogEntry { Slot = 99, MemberName = "Dropped", TypeName = "System.String" }).ToArray();
             snapshot.Records.Single().SchemaId = otherRuntimeId;
             File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
             var before = File.ReadAllBytes(path);

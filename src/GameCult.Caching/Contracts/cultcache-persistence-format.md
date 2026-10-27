@@ -189,19 +189,26 @@ resolved is read-only (below). That serves a store written by a runtime whose sc
 cannot know (a Rust type's schema id is its entry type). A schema renamed under a stable id
 therefore opens in every runtime that holds the id.
 
-**A cache owns exactly the schema ids its types register or declare compatible.** A record stored
-under any other id that a type can read, through the catalog's schema name or an entry listing a
-local id, is loaded read-only: Get and queries serve it, a write of another record copies it as
-stored, and a staged write or removal of it (upsert, variant upsert, flatten, remove, commit) is
-refused with the typed schema conflict before anything is staged. Declaring its id compatible on any
-registered type makes it writable: the next write stores it under the writing type's own id.
+**A cache owns a record when it declares the record's schema id, or when the type that reads it reads
+it whole.** A type declares an id by registering it or listing it compatible. A type reads a record
+whole when the catalog entry that publishes the id has the same content hash as the type's entry, or
+compares compatible with it and leaves no persisted slot unread. An owned record is writable: a write,
+relabel or removal is accepted and the write stores it under the writing type's own id (restamp on
+write; only a record the cache writes is restamped, the rest is copied forward as stored). A record
+stored under any other id that a type can read, through the catalog's schema name or an entry listing a
+local id, only by dropping persisted slots is loaded read-only: Get and queries serve it, a write of
+another record copies it as stored, and a staged write or removal of it (upsert, variant upsert,
+flatten, remove, commit) is refused with the typed schema conflict before anything is staged.
+Declaring its id compatible on any registered type makes it writable and is the consent to the loss:
+the next write stores it under the writing type's own id and sheds the slots.
 
 The rule is checked again where the write lands, under the store's lock: a write or removal at a key
-whose durable record is under an undeclared id, because another writer rewrote it after this cache
+whose durable record is not owned, because another writer rewrote it after this cache
 loaded, is refused typed, and the record is reloaded as the store holds it, read-only when a type can
 read it. This holds for every write through the store, the store's own `Push`, `Delete` and
-`CommitBatch` included. A CultMesh single-file write declares the ids of the catalog entry it writes,
-its own and those it lists compatible, and is refused the same way.
+`CommitBatch` included. A CultMesh single-file write owns the ids of the catalog entry it writes,
+its own and those it lists compatible, and an id whose publishing entry has the entry's schema name and
+which the entry reads whole; it is refused the same way otherwise.
 
 A record that resolves to no local type is a foreign record, for example one of a type this build does not
 have, or one renamed under a new schema name without declaring its old id. A store never destroys or relabels it: the store carries it

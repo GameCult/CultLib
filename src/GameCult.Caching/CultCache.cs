@@ -158,8 +158,9 @@ namespace GameCult.Caching
     /// not have, or one renamed under a new schema name without declaring its old id. The store keeps its bytes as the file holds
     /// them, a write of another record keeps it, and a write that would replace or remove it is refused with a
     /// <see cref="CultSchemaConflictException"/>. The cache never holds it. Declaring its schema id on a type claims it at the next load.
-    /// A record a type can read (through the catalog's schema name) but no type owns or declares is not foreign: the cache holds it
-    /// read-only, and the same refusal applies to a write or removal of it.
+    /// A record a type can read (through the catalog's schema name) but only by dropping persisted slots, and no type declares, is
+    /// not foreign: the cache holds it read-only, and the same refusal applies to a write or removal of it. A record a type reads
+    /// whole is owned and writable.
     /// </summary>
     public sealed class CultForeignRecord
     {
@@ -512,8 +513,14 @@ namespace GameCult.Caching
         public CultDocumentDescriptor Descriptor { get; }
 
         // The schema id the record carries in its store: the id it was loaded under, which may be an older or foreign id that
-        // resolved to Descriptor, until a write of this record puts it under Descriptor's id.
+        // resolved to Descriptor, until a write of this record puts it under Descriptor's id (a write of an owned record moves it).
         public string StoredSchemaId { get; internal set; }
+
+        // True when the schema this record was loaded under left none of its persisted slots unread by Descriptor, so the type reads
+        // it whole and owns it (CultDocumentRegistry.Owns). Set by ToStoredDocument from the schema comparison's ignored slots,
+        // before any variant override is shed; true for a record this cache constructed or wrote. Ownership at the staging half
+        // asks it; ConditionsHold never reads it.
+        internal bool StoredSchemaReadWhole { get; set; } = true;
 
         // Names the bytes this record was read from or written as: the SHA-256 of its persisted encoding, set by the store that
         // read or wrote them. A record no store has read or written has a version of its own that equals nothing else.
@@ -557,7 +564,7 @@ namespace GameCult.Caching
         }
 
         internal CultStoredDocument Resolved(object document, CultVariantDelta delta, bool idsInMemoryOnly, CultCodec codec) =>
-            new(Key, StoredAt, Descriptor, delta, document, codec) { IdsInMemoryOnly = idsInMemoryOnly, StoredSchemaId = StoredSchemaId, StoredVersion = StoredVersion };
+            new(Key, StoredAt, Descriptor, delta, document, codec) { IdsInMemoryOnly = idsInMemoryOnly, StoredSchemaId = StoredSchemaId, StoredSchemaReadWhole = StoredSchemaReadWhole, StoredVersion = StoredVersion };
     }
 
     public sealed class CultDocumentRegistry
@@ -690,7 +697,7 @@ namespace GameCult.Caching
         // which a store carries untouched. Deciding this never decodes the record or compares shapes, so a store can classify what a
         // file holds without reading a payload. persisted is the catalog entry the record resolves through, and null when a
         // registered type owns the id. Claimants that cannot be told apart refuse. Branches past the listers (a local id the persisted
-        // entry lists, then the schema name) pick a type to read with. They confer no ownership: Declares decides what a cache may write.
+        // entry lists, then the schema name) pick a type to read with. They confer no ownership: Owns decides what a writer may write.
         internal CultDocumentDescriptor? Claimant(
             string schemaId,
             IReadOnlyCollection<CultSchemaCatalogEntry> catalog,
@@ -746,13 +753,52 @@ namespace GameCult.Caching
             catalog.FirstOrDefault(entry => string.Equals(entry.SchemaId, schemaId, StringComparison.Ordinal))
             ?? catalog.FirstOrDefault(entry => entry.CompatibleSchemaIds.Contains(schemaId, StringComparer.Ordinal));
 
-        // The one answer to whether a cache may write, relabel or remove a record stored under this id: a registered type owns it or
-        // declares it compatible. Read live, so a type registered later that declares the id claims its records at their next write.
-        internal bool Declares(string schemaId)
+        // The one answer to whether a writer may write, relabel or remove a record stored under this id
+        // (variants:ruling:drift-record-write-ownership): a registered type declares the id (owns it or lists it compatible), or the
+        // type that reads it reads it whole. Read live, so a type registered later that declares the id claims its records at their
+        // next write. A record read only by dropping slots is not owned: declaring its id compatible is the consent to the loss.
+        // Header only: the persisted catalog entry that publishes the id is compared with the claimant's entry, never a payload. A
+        // claimant that cannot be named (ambiguous, id missing from the catalog, shapes incompatible) owns nothing.
+        internal bool Owns(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog)
+        {
+            if (Declared(schemaId))
+                return true;
+            try
+            {
+                var claimant = Claimant(schemaId, catalog, out var persisted);
+                return claimant != null && persisted != null && ReadsWhole(persisted, claimant.ToCatalogEntry());
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
+        // Owns' declared half: a registered type owns the id or lists it compatible.
+        internal bool Declared(string schemaId)
         {
             var indexes = _indexes;
             return indexes.BySchemaId.ContainsKey(schemaId) || indexes.ByCompatibleSchemaId.ContainsKey(schemaId);
         }
+
+        // A persisted entry a local entry reads whole: identical content, or compatible shapes that leave no persisted slot ignored.
+        internal static bool ReadsWhole(CultSchemaCatalogEntry persisted, CultSchemaCatalogEntry local) =>
+            string.Equals(persisted.ContentHash, local.ContentHash, StringComparison.Ordinal) ||
+            CompareSchemaShapes(ShapeOf(persisted), ShapeOf(local)) is { IsCompatible: true, IgnoredExtraSlots.Length: 0 };
+
+        private static CanonicalSchemaShape ShapeOf(CultSchemaCatalogEntry entry) =>
+            new(
+                entry.SchemaName,
+                entry.SchemaVersion,
+                entry.Members.Select(member => new CanonicalSchemaMember(
+                    member.Slot,
+                    member.MemberName,
+                    member.TypeName,
+                    member.IsReference,
+                    member.IsMany,
+                    member.TargetSchemaName,
+                    member.IsName,
+                    member.IndexAlias)).ToArray());
 
         private CultDocumentDescriptor RegisterDescriptor(CultDocumentDescriptor descriptor)
         {
@@ -992,31 +1038,7 @@ namespace GameCult.Caching
                     });
             }
 
-            var persistedSchema = new CanonicalSchemaShape(
-                persisted.SchemaName,
-                persisted.SchemaVersion,
-                persisted.Members.Select(member => new CanonicalSchemaMember(
-                    member.Slot,
-                    member.MemberName,
-                    member.TypeName,
-                    member.IsReference,
-                    member.IsMany,
-                    member.TargetSchemaName,
-                    member.IsName,
-                    member.IndexAlias)).ToArray());
-            var localSchema = new CanonicalSchemaShape(
-                local.SchemaName,
-                local.SchemaVersion,
-                local.Members.Select(member => new CanonicalSchemaMember(
-                    member.Slot,
-                    member.MemberName,
-                    member.TypeName,
-                    member.IsReference,
-                    member.IsMany,
-                    member.TargetSchemaName,
-                    member.IsName,
-                    member.IndexAlias)).ToArray());
-            var comparison = CompareSchemaShapes(persistedSchema, localSchema);
+            var comparison = CompareSchemaShapes(ShapeOf(persisted), ShapeOf(local.ToCatalogEntry()));
             if (!comparison.IsCompatible)
             {
                 throw new InvalidOperationException(
@@ -2085,6 +2107,7 @@ namespace GameCult.Caching
                 if (!_entries.TryGetValue(record.Key, out var entry))
                     continue;
                 entry.StoredSchemaId = record.SchemaId;
+                entry.StoredSchemaReadWhole = true;
                 entry.StoredAt = record.StoredAt;
                 entry.StoredVersion = version;
                 if (entry.Variant == null)
@@ -2111,7 +2134,7 @@ namespace GameCult.Caching
 
         // The one-shot rewrite for stores written before element ids existed: upserts every record whose ids exist only in
         // memory (minted when it loaded), through the normal write path, one commit per home store. Returns how many records
-        // it rewrote; a second call finds none. A selected record stored under an id no registered type declares is read-only,
+        // it rewrote; a second call finds none. A selected record that is neither declared nor read whole is read-only,
         // so its home store's commit is refused with CultSchemaConflictException; commits to earlier stores stand.
         public int MintElementIds()
         {
@@ -3273,6 +3296,7 @@ namespace GameCult.Caching
                     {
                         Flattens = true,
                         StoredSchemaId = variant.StoredSchemaId,
+                        StoredSchemaReadWhole = variant.StoredSchemaReadWhole,
                         StoredVersion = variant.StoredVersion
                     };
             }
@@ -3773,6 +3797,7 @@ namespace GameCult.Caching
         {
             var resolution = Registry.ResolvePersistedSchemaDetailed(record.SchemaId, catalog);
             report = resolution.Report;
+            var readWhole = report.IgnoredExtraSlots.Length == 0;
             if (record.Variant != null)
             {
                 var descriptor = resolution.Descriptor;
@@ -3808,6 +3833,7 @@ namespace GameCult.Caching
                     null)
                 {
                     StoredSchemaId = record.SchemaId,
+                    StoredSchemaReadWhole = readWhole,
                     StoredVersion = version
                 };
             }
@@ -3831,6 +3857,7 @@ namespace GameCult.Caching
                 document)
             {
                 StoredSchemaId = record.SchemaId,
+                StoredSchemaReadWhole = readWhole,
                 StoredVersion = version
             };
         }
@@ -3854,16 +3881,16 @@ namespace GameCult.Caching
             _foreignRecords = foreign.OrderBy(record => record.Key, StringComparer.Ordinal).ToArray();
         }
 
-        // A cache never writes, relabels or removes a record stored under an id its types do not declare: the staging half of rule 3.
-        // Refused when the store carries a foreign record at the key, or holds one whose stored id no registered type owns or declares
-        // compatible (a record a type reads by the catalog's schema name or a persisted entry's list: read-only). Called for every
-        // record a cache write admits or evicts, before anything is staged.
+        // A cache never writes, relabels or removes a record it does not own: the staging half of rule 3. Refused when the store
+        // carries a foreign record at the key, or holds one that is not owned: its stored id is not declared by a registered type and
+        // the type that reads it drops persisted slots (read-only). A record read whole is owned; ToStoredDocument decided that from
+        // the same comparison Owns makes. Called for every record a cache write admits or evicts, before anything is staged.
         protected internal void RefuseUndeclared(string key)
         {
             var foreign = _foreignRecords.FirstOrDefault(record => string.Equals(record.Key, key, StringComparison.Ordinal));
             if (foreign != null)
                 throw Overwrites(null, new[] { (foreign.Key, foreign.SchemaId, foreign.SchemaName) });
-            if (Entries.TryGetValue(key, out var held) && !Registry.Declares(held.StoredSchemaId))
+            if (Entries.TryGetValue(key, out var held) && !Registry.Declared(held.StoredSchemaId) && !held.StoredSchemaReadWhole)
                 throw Overwrites(null, new[] { (key, held.StoredSchemaId, held.Descriptor.SchemaName) });
         }
 
@@ -3932,11 +3959,11 @@ namespace GameCult.Caching
 
         internal bool HasStagedChecks => _checks.Count > 0;
 
-        // A stored record under an id the writer does not declare, named by the catalog entry that publishes the id. Header only: no
-        // payload is decoded. Null for a record under a declared id.
+        // A stored record under an id the writer does not own, named by the catalog entry that publishes the id. Header only: no
+        // payload is decoded. Null for a record under an owned id.
         protected static (string Key, string SchemaId, string SchemaName)? Undeclared(
-            CultPersistedRecord record, IReadOnlyCollection<CultSchemaCatalogEntry> catalog, Func<string, bool> declares) =>
-            declares(record.SchemaId)
+            CultPersistedRecord record, IReadOnlyCollection<CultSchemaCatalogEntry> catalog, Func<string, IReadOnlyCollection<CultSchemaCatalogEntry>, bool> owns) =>
+            owns(record.SchemaId, catalog)
                 ? null
                 : (record.Key, record.SchemaId, CultDocumentRegistry.PublishedBy(record.SchemaId, catalog)?.SchemaName ?? string.Empty);
 
@@ -4044,17 +4071,17 @@ namespace GameCult.Caching
             DateTimeOffset.TryParse(than, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var earlier) &&
             later > earlier;
 
-        // The one refusal of a write onto records stored under ids no registered type declares, carried foreign or held read-only.
+        // The one refusal of a write onto records the writer does not own, carried foreign or held read-only.
         // It names each record's key, stored id and schema name, never its payload. When the reload that refusal owes failed, the
         // refusal carries that failure as its inner exception.
-        // A cacheless writer (a CultMesh single-file write) declares only the catalog entry it writes, and has nothing to reload.
+        // A cacheless writer (a CultMesh single-file write) owns only what the catalog entry it writes declares or reads whole, and has nothing to reload.
         protected CultSchemaConflictException Overwrites(Exception? inner, (string Key, string SchemaId, string SchemaName)[] refused, bool cacheless = false) => new(
             $"{(refused.Length == 1 ? "Record" : "Records")} {string.Join(", ", refused.Select(record => $"'{record.Key}' (schema id '{record.SchemaId}', '{record.SchemaName}')"))} in {this}: " +
             (cacheless
-                ? "the catalog entry this write publishes neither owns this schema id nor lists it compatible, so the write never relabels or removes it; nothing was written and nothing was reloaded. " +
-                  "List the id as compatible on the schema that should own it."
-                : "no registered type owns this schema id or declares it compatible, so this cache never writes, relabels or removes it. " +
-                  "Declare the id compatible on the type that should own it.") +
+                ? "the catalog entry this write publishes neither declares this schema id nor reads it whole, so the write never relabels or removes it; nothing was written and nothing was reloaded. " +
+                  "List the id as compatible on the schema that should own it to accept the loss of its unread slots."
+                : "no registered type owns or declares this schema id, or the type that reads it would drop persisted slots, so this cache never writes, relabels or removes it. " +
+                  "Declare the id compatible on the type that should own it to accept the loss.") +
             (inner == null ? string.Empty : " Reloading what the write refused failed, so the cache is unchanged."),
             refused[0].SchemaId,
             refused.Select(record => record.SchemaName).Distinct(StringComparer.Ordinal).ToArray(),
@@ -4586,27 +4613,36 @@ namespace GameCult.Caching
                 using var fileLock = AcquireLock(wait);
                 if (fileLock == null)
                     return CultCommitOutcome.Contended;
-                RefuseUndeclaredOnDisk(ReadSnapshot(), keys, Registry.Declares);
+                RefuseUndeclaredOnDisk(ReadSnapshot(), keys, OwnsOnDisk());
                 return CultCommitOutcome.Committed;
             });
         }
 
-        // A cache declares through its registry. A cacheless CultMesh write declares the ids of the catalog entry it writes: its own id
-        // and the ids it lists compatible. The keys judged are every key staged, written, removed or checked.
+        // A cache owns through its registry (CultDocumentRegistry.Owns). A cacheless CultMesh write owns what the one catalog entry it
+        // writes declares: its own id and the ids it lists compatible, or an id whose publishing entry that entry reads whole
+        // (variants:ruling:mesh-writes-bound-by-declaration). The keys judged are every key staged, written, removed or checked.
         private void RefuseUndeclaredOnDisk(Durable? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals, IEnumerable<string> checks) =>
             RefuseUndeclaredOnDisk(
                 durable,
                 _staged.Concat(upserts.Select(staged => staged.Record.Key)).Concat(removals).Concat(checks).Concat(StagedChecks),
-                Cache != null
-                    ? Registry.Declares
-                    : id => upserts.Any(staged =>
-                        string.Equals(staged.Entry.SchemaId, id, StringComparison.Ordinal) ||
-                        staged.Entry.CompatibleSchemaIds.Contains(id, StringComparer.Ordinal)));
+                OwnsOnDisk(upserts));
+
+        // The owns predicate a write over the durable catalog asks. A cacheless writer has no registry: it owns what its one entry
+        // declares, or reads whole in the entry that publishes the id.
+        private Func<string, IReadOnlyCollection<CultSchemaCatalogEntry>, bool> OwnsOnDisk(IReadOnlyCollection<CultStagedRecord>? upserts = null) =>
+            Cache != null || upserts == null
+                ? Registry.Owns
+                : (id, catalog) => upserts.Any(staged =>
+                    string.Equals(staged.Entry.SchemaId, id, StringComparison.Ordinal) ||
+                    staged.Entry.CompatibleSchemaIds.Contains(id, StringComparer.Ordinal) ||
+                    (CultDocumentRegistry.PublishedBy(id, catalog) is { } publisher &&
+                     string.Equals(publisher.SchemaName, staged.Entry.SchemaName, StringComparison.Ordinal) &&
+                     CultDocumentRegistry.ReadsWhole(publisher, staged.Entry)));
 
         // A refused key's durable version is what this store has now read of it.
-        private void RefuseUndeclaredOnDisk(Durable? durable, IEnumerable<string> written, Func<string, bool> declares)
+        private void RefuseUndeclaredOnDisk(Durable? durable, IEnumerable<string> written, Func<string, IReadOnlyCollection<CultSchemaCatalogEntry>, bool> owns)
         {
-            var undeclared = UndeclaredOnDisk(durable, declares);
+            var undeclared = UndeclaredOnDisk(durable, owns);
             if (undeclared.Count == 0)
                 return;
             RefuseUndeclaredOnDisk(
@@ -4623,13 +4659,17 @@ namespace GameCult.Caching
                 cacheless: Cache == null);
         }
 
-        // Every durable record under an id the writer does not declare, by key, named by the catalog entry that publishes its id.
-        private static Dictionary<string, (string Key, string SchemaId, string SchemaName)> UndeclaredOnDisk(Durable? durable, Func<string, bool> declares)
+        // Every durable record under an id the writer does not own, by key, named by the catalog entry that publishes its id. The
+        // answer is decided once per distinct schema id, so a large store pays one comparison per id, not per record.
+        private static Dictionary<string, (string Key, string SchemaId, string SchemaName)> UndeclaredOnDisk(Durable? durable, Func<string, IReadOnlyCollection<CultSchemaCatalogEntry>, bool> owns)
         {
             var undeclared = new Dictionary<string, (string Key, string SchemaId, string SchemaName)>(StringComparer.Ordinal);
+            var answers = new Dictionary<string, bool>(StringComparer.Ordinal);
+            bool OwnsOnce(string id, IReadOnlyCollection<CultSchemaCatalogEntry> catalog) =>
+                answers.TryGetValue(id, out var answer) ? answer : answers[id] = owns(id, catalog);
             foreach (var record in durable?.Snapshot.Records ?? Array.Empty<CultPersistedRecord>())
             {
-                if (Undeclared(record, durable!.Snapshot.SchemaCatalog, declares) is { } carried)
+                if (Undeclared(record, durable!.Snapshot.SchemaCatalog, OwnsOnce) is { } carried)
                     undeclared[record.Key] = carried;
             }
 
@@ -4666,6 +4706,7 @@ namespace GameCult.Caching
                 if (!Entries.TryGetValue(write.Record.Key, out var entry))
                     continue;
                 entry.StoredSchemaId = write.Record.SchemaId;
+                entry.StoredSchemaReadWhole = true;
                 entry.StoredAt = write.Record.StoredAt;
                 entry.StoredVersion = version;
             }

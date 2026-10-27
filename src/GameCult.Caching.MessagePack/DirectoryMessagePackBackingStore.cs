@@ -285,7 +285,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         Foreign(record, catalog, VersionOf(record.Payload));
 
     // The manifest's other records stay as they are, foreign and read-only ones included; a write that would replace or remove a
-    // record the manifest holds under an id no registered type declares is refused before any page is written, by the one rule every
+    // record the manifest holds that the writer does not own is refused before any page is written, by the one rule every
     // store shares (CacheBackingStore.RefuseUndeclaredOnDisk). The refused records reload as a pull loads them.
     private void RefuseUndeclaredOnDisk(CultPersistedStoreSnapshot currentManifest, IEnumerable<string> written)
     {
@@ -293,7 +293,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             currentManifest.Records.FirstOrDefault(record => string.Equals(record.Key, key, StringComparison.Ordinal));
         RefuseUndeclaredOnDisk(
             written,
-            key => HeldAt(key) is { } held ? Undeclared(held, currentManifest.SchemaCatalog, Registry.Declares) : null,
+            key => HeldAt(key) is { } held ? Undeclared(held, currentManifest.SchemaCatalog, Registry.Owns) : null,
             key => HeldAt(key) is { } held && Foreign(held, currentManifest.SchemaCatalog, VersionOf(held.Payload)) == null
                 ? LoadPage(held, currentManifest.SchemaCatalog, out _, out _)
                 : null,
@@ -342,6 +342,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             var indexRecord = ToContentAddressedIndexRecord(record, pagePayload);
             stored.StoredVersion = VersionOf(indexRecord.Payload);
             stored.StoredSchemaId = stored.Descriptor.SchemaId;
+            stored.StoredSchemaReadWhole = true;
             currentIndex[key] = indexRecord;
             WriteFileAtomically(
                 ContentAddressedRecordPath(indexRecord),
