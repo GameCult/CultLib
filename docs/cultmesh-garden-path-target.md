@@ -109,6 +109,11 @@ deterministic. Then the analyzer names exactly those systems.
   documentation and tests claim nothing past it.
 - `browser-is-first-class`: the reference game's client runs in a browser and can
   write (submit inputs, own predicted state), not only watch.
+- `built-for-load`: what the garden path ships that is database-shaped (the
+  tick commit, the batch door, logs, subscriptions) is architected for
+  unreasonable load from the start (operator 2026-10-27,
+  `cultlib-gaps:ruling:database-shaped-built-for-load`): "if what we're shipping
+  is database shaped, people will use it as such".
 
 ## Sequence (each a campaign or stage of its own; one foundation at a time)
 
@@ -127,9 +132,9 @@ deterministic. Then the analyzer names exactly those systems.
 ## Not in scope
 
 - Aetheria until stage 6. Eve and Gjallar (deprecated).
-- Growing CultCache into a general database (operator 2026-10-02: scope
-  restraint). The garden path uses CultCache as it is and fills gaps in their
-  owners.
+- A new CultCache storage engine (the paged single-file store stays postponed,
+  `variants:ruling:page-tree-store-postponed`). The garden path fills gaps in
+  their owners, built for load.
 - Asynchronous Byzantine total ordering, zero-knowledge proofs, and chains of
   any kind.
 - The existing witness aggregator (`CultNetSimulationConsensus`, unsigned and
