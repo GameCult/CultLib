@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -24,14 +25,19 @@ foreach (var (type, _) in documents)
         return Fail($"{type.Name} is formatted by {formatter.FullName}, not a generated formatter");
 }
 
-var hex = Convert.ToHexString(MessagePackSerializer.Serialize(typeof(RefDoc), documents[2].Value, options));
-Console.WriteLine(hex);
-if (hex != "93A172A17081A170CA3F000000")
-    return Fail("RefDoc payload is " + hex);
-
 var aot = !RuntimeFeature.IsDynamicCodeSupported;
 if (aot)
     Console.WriteLine("SKIP ref-keyed dictionary under NativeAOT: AOT cut 3 (map A6)");
+foreach (var (type, expected) in new[] { (typeof(MemberDoc), "92A172A170"), (typeof(RefDoc), "93A172A17081A170CA3F000000") })
+{
+    if (aot && type != typeof(MemberDoc))
+        continue;
+    var hex = Convert.ToHexString(MessagePackSerializer.Serialize(type, documents.First(d => d.Type == type).Value, options));
+    Console.WriteLine(hex);
+    if (hex != expected)
+        return Fail($"{type.Name} payload is {hex}");
+}
+
 foreach (var (type, value) in documents)
 {
     if (aot && type != typeof(MemberDoc))
