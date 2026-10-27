@@ -652,6 +652,22 @@ namespace GameCult.Caching.Tests
             Assert.That(Fingerprint(path), Is.EqualTo(before));
         }
 
+        // An unattached store's Delete then PushAll is a cacheless write that writes no entry, so nothing is declared and no written
+        // entry can claim the stored record: the removal is refused and the file left as it was. A call that writes nothing owns nothing.
+        [Test]
+        public void AnUnattachedStoresRemovalWithNoWrittenEntryOwnsNothing()
+        {
+            var path = SeedNarrow(directory: false);
+            var before = Fingerprint(path);
+            var descriptor = NarrowRegistry.GetRequired<NoteNarrow>();
+            var store = new SingleFileMessagePackBackingStore(path);
+
+            store.Delete(new CultStoredDocument(Note, "2026-10-22T00:00:00.0000000+00:00", descriptor, new NoteNarrow { Name = "note", Value = 1 }));
+
+            Assert.Throws<CultSchemaConflictException>(() => store.PushAll());
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+        }
+
         // The shadow, where it is decided: a written entry answers for its schema id whatever the registry holds, and the registry
         // still adds its other types.
         [Test]
