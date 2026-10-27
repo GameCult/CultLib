@@ -615,8 +615,8 @@ namespace GameCult.Caching.Tests
             var writes = new[] { narrow };
             Func<string, bool> declares = id => id == narrow.SchemaId;
 
-            Assert.That(CultDocumentRegistry.Owns("tests.restamp.unpublished", writes, declares, new CatalogEntryLookup(writes), entry => entry), Is.False);
-            Assert.That(CultDocumentRegistry.Owns(narrow.SchemaId, writes, declares, new CatalogEntryLookup(writes), entry => entry), Is.True);
+            Assert.That(CultDocumentRegistry.Owns("tests.restamp.unpublished", writes, declares, new CatalogEntryLookup(writes), entry => entry, _ => true), Is.False);
+            Assert.That(CultDocumentRegistry.Owns(narrow.SchemaId, writes, declares, new CatalogEntryLookup(writes), entry => entry, _ => true), Is.True);
         }
 
         private static string VectorPath(string name)
