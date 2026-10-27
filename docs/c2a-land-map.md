@@ -6,6 +6,41 @@ on 2026-10-22 against main 7a8933b0 and the 2.0.0 release candidate
 is the merge plus the gate. Everything else is classified below. Governing ruling:
 `cultlib-gaps:ruling:release-now-c2a-bumps-format`.
 
+## Cut sequence to main (2026-10-27, branch head 193cf1c3)
+
+Landed since the facts below: `land-c2a` (h1), `land-c2a-merge-api-docs` (h1-h6), the 2.0.1 and
+cultcache-rs 0.3.1 merges (5baa02fa, f54472e5), `land-c2a-gate` r4 (h1) and `store-gate-one-owner`
+(h1-h7, Soul s6). Restamp-on-write had not started: `Registry.Declares` is still the ownership
+answer at 193cf1c3 (CultCache.cs:751, :3866, :4589, :4600). What stands between the branch and main,
+in order:
+
+1. **restamp-on-write** (spec r2, Hands then Soul). One ownership rule, `Owns`: a record a type reads
+   whole as compatible drift is writable and restamped on write. Fixes the High finding
+   `cut-land-c2a-gate.s1.reflist-record-read-only-at-head`. Carries follow-up `gate-bound-test-tighten`.
+2. **land-c2a-gate** (spec r6, Hands h2 then Soul). The ref-list gate compares ids after a write,
+   vectors pinned byte for byte, every stage counts its cases. Red at 193cf1c3, green after step 1.
+   Closes the three `cut-land-c2a-gate.s1` findings and follow-up `gate-reads-1x-written-store`.
+3. **Ledger** (Self, no Hands). The seven `cut-land-c2a.s1.*` findings are still in force though
+   `land-c2a-merge-api-docs` carried their pins (source reads 2026-10-27: GameCult.Caching grants
+   InternalsVisibleTo only to `.Tests` and `.MessagePack`, the residual being follow-up
+   `caching-messagepack-ivt`; PreCut2StoreFormatTests pins "with a suffix of"). Close each against its
+   commit or defer it. `stale-unity-plugin-dlls` belongs to the Unity 3.0.0 release cut (the plugins
+   are 2.0.1 builds, 1eeb1a01). Follow-up `slot-reuse-contract-doc` is done
+   (cultcache-schema-compatibility.md:64).
+4. **Consumer pins** (operator ruling `unpinned-consumers-at-land-2`, pin-then-land). Brokkr, Aquarium,
+   Ymir, AquaSynth and Mimir have no `CultLibRevision`/`VerifyCultLibRevision` guard and build against
+   the sibling `..\CultLib` checkout (grep of their checkouts, 2026-10-27). Each adopts Aetheria's guard
+   at the 2.0.0 tag, in its own repo, before the merge reaches main. No record owns this yet. Gjallar
+   was ruled deprecated like Eve afterwards (`gjallar-deprecated-ymir-off-eve`), so it likely needs no
+   pin, as Eve needs none; Self confirms.
+5. **Main into the branch, then full verification.** origin/main 0ad9811f is 4 commits past the merge
+   base 02cf04b5, and they are research docs only (3 files under docs/research, +423), so the merge
+   should be clean. Run the suites listed under "The land cut's shape" on Yggdrasil at the merged
+   head. If main gained code by then, a Soul pass on the merge.
+6. **Land.** `git merge --no-ff hands/variants-c2a` onto main, with an empty diff against the verified
+   head. No tag: tags, Unity plugin rebuild and `declared-range-gate-own-version` belong to the 3.0.0
+   release cut.
+
 ## Facts
 
 **1. The merge.** A trial `git merge origin/main` on a5c7954e gives 12 conflicted files and
