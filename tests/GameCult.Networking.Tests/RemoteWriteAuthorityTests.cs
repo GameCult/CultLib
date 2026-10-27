@@ -7,6 +7,7 @@ using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using NUnit.Framework;
+using R3;
 using static GameCult.Networking.Tests.NetworkingTests;
 
 namespace GameCult.Networking.Tests
@@ -96,7 +97,7 @@ namespace GameCult.Networking.Tests
                 Put = message => put(message, peer),
                 Delete = message => delete(message, peer)
             };
-            rig.Subscription = R3.ObservableExtensions.Subscribe(database.WatchAllChanges(), change => rig.Published.Add(change));
+            rig.Subscription = database.WatchAllChanges().Subscribe(change => rig.Published.Add(change));
             return rig;
         }
 
