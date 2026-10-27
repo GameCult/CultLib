@@ -113,7 +113,8 @@ probe_staged() {
   return $rc
 }
 
-summary_of() { grep -o 'REFLIST-SUMMARY .*' "$1" | sort -u; }
+# A log with no summary line (a stage that failed before printing one) yields an empty file, and the gate names the failure.
+summary_of() { { grep -o 'REFLIST-SUMMARY .*' "$1" || true; } | sort -u; }
 
 # Cases a TRX records for test classes whose name ends in $2 (every class when $2 is empty); 0 when the run wrote no TRX.
 trx_cases() { if [ -f "$1" ]; then grep -o "<TestMethod [^>]*className=\"[^\"]*$2\"" "$1" | wc -l; else echo 0; fi; }
