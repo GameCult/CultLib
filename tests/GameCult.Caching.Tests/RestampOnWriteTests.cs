@@ -493,26 +493,17 @@ namespace GameCult.Caching.Tests
             Assert.That(Snapshot(path).Records.Single(record => record.Key == "note").SchemaId, Is.EqualTo(NarrowRegistry.GetRequired<NoteNarrow>().SchemaId));
         }
 
-        // A durable record under an id no catalog entry publishes belongs to nobody a writer can name: another key's write carries it
-        // untouched, a write at its own key is refused.
+        // An id no catalog entry publishes belongs to nobody a writer can name, so no writer owns it. A store file cannot hold such a
+        // record (ReadStore refuses it), so the rule is pinned where it is decided, for a cacheless writer's lookup.
         [Test]
-        public void AnUnpublishedIdIsCarriedByACachelessWrite()
+        public void AnUnpublishedIdIsOwnedByNoOne()
         {
-            var path = SeedNarrow(directory: false);
-            var snapshot = Snapshot(path);
-            var stray = new CultPersistedRecord { Key = "stray", SchemaId = "tests.restamp.unpublished", StoredAt = snapshot.Records[0].StoredAt, Payload = new byte[] { 0x90 } };
-            snapshot.Records = snapshot.Records.Concat(new[] { stray }).ToArray();
-            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            var narrow = NarrowRegistry.GetRequired<NoteNarrow>().ToCatalogEntry();
+            var writes = new[] { narrow };
+            Func<string, bool> declares = id => id == narrow.SchemaId;
 
-            new SingleFileMessagePackBackingStore(path).WriteDocument(Other, new NoteNarrow { Name = "other", Value = 3 }, registry: NarrowRegistry);
-
-            var carried = Snapshot(path).Records.Single(record => record.Key == "stray");
-            Assert.That(carried.SchemaId, Is.EqualTo("tests.restamp.unpublished"));
-            Assert.That(carried.Payload, Is.EqualTo(new byte[] { 0x90 }));
-            var before = Fingerprint(path);
-            Assert.Throws<CultSchemaConflictException>(() =>
-                new SingleFileMessagePackBackingStore(path).WriteDocument(new CultRecordKey("stray"), new NoteNarrow { Name = "stray", Value = 1 }, registry: NarrowRegistry));
-            Assert.That(Fingerprint(path), Is.EqualTo(before));
+            Assert.That(CultDocumentRegistry.Owns("tests.restamp.unpublished", writes, declares, new CatalogEntryLookup(writes), entry => entry), Is.False);
+            Assert.That(CultDocumentRegistry.Owns(narrow.SchemaId, writes, declares, new CatalogEntryLookup(writes), entry => entry), Is.True);
         }
 
         private static string VectorPath(string name)
