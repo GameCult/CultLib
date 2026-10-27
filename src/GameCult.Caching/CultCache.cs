@@ -579,7 +579,19 @@ namespace GameCult.Caching
         ClaimantFacts Describe(T claimant);
     }
 
-    internal readonly record struct ClaimantFacts(string SchemaName, string SchemaVersion, string TypeLabel);
+    internal readonly struct ClaimantFacts
+    {
+        public ClaimantFacts(string schemaName, string schemaVersion, string typeLabel)
+        {
+            SchemaName = schemaName;
+            SchemaVersion = schemaVersion;
+            TypeLabel = typeLabel;
+        }
+
+        public string SchemaName { get; }
+        public string SchemaVersion { get; }
+        public string TypeLabel { get; }
+    }
 
     // The lookup of a cacheless writer without a registry: the catalog entries the call writes.
     internal sealed class CatalogEntryLookup : IClaimantLookup<CultSchemaCatalogEntry>
