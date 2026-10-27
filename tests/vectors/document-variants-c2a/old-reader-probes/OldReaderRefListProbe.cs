@@ -2,7 +2,6 @@
 using System;
 using System.IO;
 using System.Linq;
-using System.Text.Json;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -60,5 +59,6 @@ namespace GameCult.Caching.Tests
             {
                 File.Delete(copy);
             }
+        }
     }
 }
