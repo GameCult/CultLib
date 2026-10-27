@@ -25,7 +25,7 @@
 # fails the gate by name ('<stage>-count') instead of passing with nothing run; a C# result that is not Passed (an [Ignore]d
 # case is NotExecuted) fails '<stage>-notpassed' and Python's skipped/expected-failure forms fail 'python-notpassed'. The expected counts are the constants below;
 # each is confirmed against the probe's source: C#, the Passed results in the TRX the run wrote (by class); Rust, the sum of 'N passed';
-# Python, 'Ran N tests'; TypeScript, node's 'pass N'.
+# Python, 'Ran N tests'; TypeScript, node's 'pass N'. Each stage also counts the refusal lines it printed (EXPECT_REFUSED_*).
 set -euo pipefail
 
 here="tests/vectors/document-variants-c2a"
@@ -42,6 +42,13 @@ EXPECT_HEAD_REFLIST=1      # RefListDriftTests.A_1_0_60_Written_Store_Opens_Like
 EXPECT_RUST=3              # tests/old_reader_v3.rs
 EXPECT_PYTHON=4            # test_old_reader_v3.py
 EXPECT_TYPESCRIPT=3        # old-reader-v3.test.ts
+
+# Refusals each stage must PRINT: every probe writes one 'OLD-READER <runtime> refused <label>: ...' line from the point where it
+# has observed the refusal, so a case that returned or passed early (Assert.Pass, a bare return) is Passed but prints nothing.
+EXPECT_REFUSED_CSHARP=14   # OldReaderGateProbe: 7 Names calls (1+1+2+1+2 over the five tests) x 2 sources
+EXPECT_REFUSED_RUST=3
+EXPECT_REFUSED_PYTHON=4
+EXPECT_REFUSED_TYPESCRIPT=3
 
 # The committed 1.0.60 writer vector is pinned by hash, not by regenerating it: the 1.0.60 writer stamps wall-clock times, so two
 # writes of the same documents differ and no writer stage can reproduce the bytes. A hand edit changes the hash and fails the
@@ -135,6 +142,9 @@ trx_passed() {
 }
 trx_unpassed() { if [ -f "$1" ]; then tr '\n' ' ' < "$1" | grep -o "<UnitTestResult [^>]*" | grep -v "outcome=\"Passed\"" | grep -o "testName=\"[^\"]*\" [^>]*outcome=\"[A-Za-z]*\"" || true; fi; }
 
+# Refusal lines a stage's log printed for runtime $2.
+refused_lines() { grep -c "OLD-READER $2 refused " "$1" || true; }
+
 # Python's runner says "Ran N tests" even when some were skipped or expected to fail; those forms are not passes.
 python_unrun() { grep -E '(skipped|expected failures|unexpected successes)=' "$1" || true; }
 
@@ -153,6 +163,8 @@ gate() {
   local failures=""
   # A stage that ran a number of cases other than the one pinned fails as '<stage>-count'.
   expect() { if [ "$2" = "$3" ]; then echo "COUNT $1: $3 passed, as expected"; else echo "COUNT $1: expected $2 passed case(s), got $3"; failures+=" $1-count"; fi; }
+  # A stage whose probes printed another number of refusal lines than pinned fails as '<stage>-refused-count', however many cases Passed.
+  refused() { local n; n="$(refused_lines "$3" "$1")"; if [ "$n" = "$2" ]; then echo "REFUSED $1: $n refusal lines, as expected"; else echo "REFUSED $1: expected $2 refusal line(s), got $n"; failures+=" $4-refused-count"; fi; }
   # A TRX result that is not Passed (an [Ignore]d case is NotExecuted) fails its stage by name even when the count is met.
   unpassed() { local rows; rows="$(trx_unpassed "$2")"; if [ -n "$rows" ]; then echo "NOT PASSED in $1: $rows"; failures+=" $1-notpassed"; fi; }
   case "$1" in
@@ -171,6 +183,7 @@ gate() {
       probe_staged csharp 2>&1 | tee "$out/reader.log" || failures+=" 2.0.1-reader"
       expect 2.0.1-reader "$EXPECT_READER_GATE+$EXPECT_READER_REFLIST" "$(trx_passed "$trx/reader.trx" OldReaderGateProbe)+$(trx_passed "$trx/reader.trx" OldReaderRefListProbe)"
       unpassed 2.0.1-reader "$trx/reader.trx"
+      refused csharp "$EXPECT_REFUSED_CSHARP" "$out/reader.log" 2.0.1-reader
       CULTLIB_GATE_OLD_STORE="$out/v1-0-60-ref-list.cc" dotnet test tests/GameCult.Caching.Tests         --filter "FullyQualifiedName~RefListDriftTests.A_1_0_60_Written_Store_Opens_Like_2_0_1" --logger "console;verbosity=detailed" --logger "trx;LogFileName=head.trx" --results-directory "$trx" 2>&1 | tee "$out/head.log" || failures+=" head-ref-list"
       expect head-ref-list "$EXPECT_HEAD_REFLIST" "$(trx_passed "$trx/head.trx" RefListDriftTests)"
       unpassed head-ref-list "$trx/head.trx"
@@ -185,11 +198,13 @@ gate() {
       if [ -n "$failures" ]; then echo "GATE csharp FAILED:$failures"; return 1; fi
       echo "GATE csharp ok" ;;
     typescript|python|rust)
-      local log expected
+      local log expected refusals
       log="$(mktemp)"
       case "$1" in rust) expected="$EXPECT_RUST" ;; python) expected="$EXPECT_PYTHON" ;; typescript) expected="$EXPECT_TYPESCRIPT" ;; esac
+      case "$1" in rust) refusals="$EXPECT_REFUSED_RUST" ;; python) refusals="$EXPECT_REFUSED_PYTHON" ;; typescript) refusals="$EXPECT_REFUSED_TYPESCRIPT" ;; esac
       probe_staged "$1" 2>&1 | tee "$log" || failures+=" $1"
       expect "$1" "$expected" "$(leaf_cases "$1" "$log")"
+      refused "$1" "$refusals" "$log" "$1"
       if [ "$1" = python ] && [ -n "$(python_unrun "$log")" ]; then echo "NOT PASSED in python: $(python_unrun "$log")"; failures+=" python-notpassed"; fi
       if [ -n "$failures" ]; then echo "GATE $1 FAILED:$failures"; return 1; fi
       echo "GATE $1 ok" ;;
