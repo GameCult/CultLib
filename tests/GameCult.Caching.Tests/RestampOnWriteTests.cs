@@ -566,8 +566,8 @@ namespace GameCult.Caching.Tests
             var snapshot = Snapshot(path);
             snapshot.SchemaCatalog.Single().SchemaId = snapshot.SchemaCatalog.Single().ContentHash = ListerOldId;
             snapshot.SchemaCatalog.Single().CompatibleSchemaIds = new[] { ListerOldId };
-            foreach (var record in snapshot.Records)
-                record.SchemaId = ListerOldId;
+            foreach (var seeded in snapshot.Records)
+                seeded.SchemaId = ListerOldId;
             File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(NoteLister) });
             var full = registry.GetRequired<NoteLister>().ToCatalogEntry();
