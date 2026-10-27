@@ -88,10 +88,10 @@ namespace GameCult.Caching.Tests
                 .Select(file => Path.GetRelativePath(root, file) + " " + Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(file))))
                 .ToArray();
 
-        private static void Names(Exception? error, string format, string what)
+        private static void Names(Exception? error, string format, string what, string source)
         {
             Assert.That(error, Is.Not.Null, what);
-            TestContext.Out.WriteLine($"OLD-READER csharp refused {what}: " + error!.Message);
+            TestContext.Out.WriteLine($"OLD-READER csharp refused {what} [{source}]: " + error!.Message);
             Assert.That(error.ToString(), Does.Contain(format), what);
         }
 
@@ -101,7 +101,7 @@ namespace GameCult.Caching.Tests
             var file = CopySingle(source, "attach.cc");
             var before = File.ReadAllBytes(file);
             using var cache = new CultCache();
-            Names(Assert.Catch(() => cache.AddBackingStore(new SingleFileMessagePackBackingStore(file))), "cultcache.store.v3", "attach");
+            Names(Assert.Catch(() => cache.AddBackingStore(new SingleFileMessagePackBackingStore(file))), "cultcache.store.v3", "attach", source);
             Assert.That(File.ReadAllBytes(file), Is.EqualTo(before));
         }
 
@@ -111,7 +111,7 @@ namespace GameCult.Caching.Tests
             var file = CopySingle(source, "detached.cc");
             var before = File.ReadAllBytes(file);
             var store = new SingleFileMessagePackBackingStore(file);
-            Names(Assert.Catch(() => store.PushAll()), "cultcache.store.v3", "PushAll of a detached store");
+            Names(Assert.Catch(() => store.PushAll()), "cultcache.store.v3", "PushAll of a detached store", source);
             Assert.That(File.ReadAllBytes(file), Is.EqualTo(before));
         }
 
@@ -126,9 +126,9 @@ namespace GameCult.Caching.Tests
             File.Copy(Path.Combine(SourceRoot(source), SingleName), file, overwrite: true);
             var before = File.ReadAllBytes(file);
 
-            Names(Assert.Catch(() => cache.FlushAllBackingStores()), "cultcache.store.v3", "flush after a swap");
+            Names(Assert.Catch(() => cache.FlushAllBackingStores()), "cultcache.store.v3", "flush after a swap", source);
             Assert.That(File.ReadAllBytes(file), Is.EqualTo(before));
-            Names(Assert.Catch(() => store.PushAll()), "cultcache.store.v3", "PushAll after a swap");
+            Names(Assert.Catch(() => store.PushAll()), "cultcache.store.v3", "PushAll after a swap", source);
             Assert.That(File.ReadAllBytes(file), Is.EqualTo(before));
         }
 
@@ -138,7 +138,7 @@ namespace GameCult.Caching.Tests
             var manifest = CopyDirectory(source, "attach-directory");
             var before = Tree(Path.GetDirectoryName(manifest)!);
             using var cache = new CultCache();
-            Names(Assert.Catch(() => cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest))), "cultcache.store.v5", "directory attach");
+            Names(Assert.Catch(() => cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest))), "cultcache.store.v5", "directory attach", source);
             Assert.That(Tree(Path.GetDirectoryName(manifest)!), Is.EqualTo(before));
         }
 
@@ -155,9 +155,9 @@ namespace GameCult.Caching.Tests
             CopyTree(Path.Combine(SourceRoot(source), DirectoryName), root);
             var before = Tree(root);
 
-            Names(Assert.Catch(() => cache.FlushAllBackingStores()), "cultcache.store.v5", "directory flush after a swap");
+            Names(Assert.Catch(() => cache.FlushAllBackingStores()), "cultcache.store.v5", "directory flush after a swap", source);
             Assert.That(Tree(root), Is.EqualTo(before));
-            Names(Assert.Catch(() => store.PushAll()), "cultcache.store.v5", "directory PushAll after a swap");
+            Names(Assert.Catch(() => store.PushAll()), "cultcache.store.v5", "directory PushAll after a swap", source);
             Assert.That(Tree(root), Is.EqualTo(before));
         }
     }
