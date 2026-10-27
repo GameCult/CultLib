@@ -540,6 +540,22 @@ namespace GameCult.Caching.Tests
             Assert.That(Fingerprint(path), Is.EqualTo(before));
         }
 
+        // Claiming is by entry, not by schema name: a record under an id a same-named other version of the written schema lists is
+        // that version's, and a write of Narrow does not take it.
+        [Test]
+        public void ACachelessWriterNeverOwnsARecordASameNamedVersionClaims()
+        {
+            var path = SeedRenamed(listsNarrow: false, alsoLists: WideId);
+            var snapshot = Snapshot(path);
+            foreach (var record in snapshot.Records)
+                record.SchemaId = WideId;
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            var before = Fingerprint(path);
+
+            Assert.Throws<CultSchemaConflictException>(() => WriteNarrow(path, cacheless: true, CultDocumentRegistry.ForTypes(new[] { typeof(NoteNarrow), typeof(NoteGrownDeclaring) })));
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+        }
+
         // The registry's other types change nothing about a record the written type claims itself.
         [Test]
         public void AnotherRegisteredTypeDoesNotTakeAWritersOwnDriftRecord()
