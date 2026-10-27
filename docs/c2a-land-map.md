@@ -351,3 +351,91 @@ settled cache's gate. Results:
   cache `a`. That is true before, during and after an attach, so it is not the window's
   two-fact problem. Closing it changes public API (a store's writes taken only from its
   cache), so it is a follow-up and an operator question for Self, not part of this cut.
+
+## Body facts: claimant-one-owner r2 (Imagination, 2026-10-27, base fc74cf6f)
+
+Why a revision: Soul beat the same rule three times (s1 claimant choice, s2 compatible ids, s3 shape). Each time a
+cacheless write lent a registry let the registry's entry for the written schema id decide ownership beside the entry
+the caller passed. Two descriptions of one type reached `Owns`; each fix (h2 schema-id compare, h3 subset of compatible
+ids) compared one more facet of the two and left the rest open. r2 removes the second description from the lookup.
+
+### Where the two descriptions met (source read, fc74cf6f)
+
+- `OwnsOnDisk` cacheless arm (`CultCache.cs:4725-4740`): with a lent registry it called
+  `lent.Owns(id, catalog, declared, written)`, whose lookup is the registry's `_indexes` and whose `entryOf` is
+  `descriptor.ToCatalogEntry()` (`:824-825`). The claimant for the written schema id was the registry's descriptor,
+  so `ReadsWhole(persisted, claimantEntry)` (`:848`) judged shape against the registry's entry, and the claimant
+  precedence (`:756-806`) walked the registry's compatible ids. `written` (`:4734-4736`) then compared the two entries
+  by schema id plus a subset of compatible ids.
+- `WriteDocument` (`:4495-4524`) takes its entry from the registry (`resolvedRegistry.GetRequired<TDocument>().ToCatalogEntry()`),
+  so its two descriptions are always identical. Only `WriteRecord(record, catalogEntry, holdsIds, registry)` (`:4471`) can
+  pass an entry that disagrees with the registry's entry for the same id.
+- `CopiedHoldIds` (`:4600-4630`) also reads `AttachedRegistry`, to decide the v3 header from copied records. It is a
+  positive-only header decision, not ownership, and out of this cut.
+
+### Consumer audit (2026-10-27)
+
+- `WriteRecord` and `WriteDocument` are new in the Unreleased 3.0.0 entry; `main` has neither (`git show main:src/GameCult.Caching/CultCache.cs`).
+- Per-repo `rg` over every git repo directly under `F:\Projects` for `.WriteRecord(`, `.WriteDocument(`, `WriteSingleFileDocument`
+  (Library, obj, bin, PackageCache excluded): hits only in CultLib and in vendored CultLib copies under Heimdall and StreamPixels
+  (`vendor\CultLib`, older pins without these methods). No consumer outside CultLib calls either method.
+- Inside CultLib at fc74cf6f: Mesh `WriteSingleFileDocument` calls `WriteDocument(key, document, storedAt, registry)`;
+  Mesh's raw-payload path calls `WriteRecord(..., registry: null)` (`CultMeshSingleFileDocuments.cs:129, 226`). The only
+  `WriteRecord` calls with a registry are tests: `CachelessSingleFileTests.cs:453, 660` (a registry `{IdDeck}` that does
+  not hold the written entry `One` at all, used for the copied-record header), `RestampOnWriteTests.cs:595, 599`, and
+  Soul's probes. Packages: no TS, Python or Rust counterpart takes a registry (cultnet-rs `write_record` is an example helper).
+- Consequence: the registry's documented role in `WriteRecord` is to describe the other records in the store. A shape
+  that derives the written entry from the registry (or refuses an entry the registry does not hold) breaks
+  `CachelessSingleFileTests.cs:660` and removes that role.
+
+### Candidate shapes weighed
+
+| Shape | One description? | Public API | Kills s2/s3 | Cost |
+|---|---|---|---|---|
+| A. Lent registry's entry decides; refuse a passed entry that disagrees | yes, after a door check | signature kept; new refusal | yes | an equality check over a redundant parameter; breaks the registry-describes-others use (`:660`) when the registry lacks the written type unless it falls back to the passed entry, which is two descriptions again |
+| B. Passed entry is the only description of its schema id; the registry supplies other types only | yes, by construction | signature kept; doc only | yes (probed) | one lookup class gains the registry; one registry overload deleted |
+| C. Overloads: `WriteRecord(record, catalogEntry, holdsIds)` and `WriteRecord(record, registry, holdsIds)` | yes, by type | changes a 3.0.0 signature | yes | loses the registry-describes-others use |
+| D. Delete `WriteRecord`'s registry parameter | yes | changes a 3.0.0 signature | yes | loses the copied-record header decision for raw writes |
+
+Picked B. It is the only shape that keeps every documented use of the registry, needs no public signature change,
+and deletes the comparison instead of extending it. It is ordinary scoping (an inner binding shadows the outer one
+for its name), applied to schema ids.
+
+### Probes (Starfire, local filtered runs, 2026-10-27)
+
+Scratch clone of fc74cf6f at `<scratchpad>/imagination-claimant-r2/clone`, Soul's `SoulClaimantProbe.cs`,
+`SoulClaimant2Probe.cs`, `SoulClaimant3Probe.cs` copied into `tests/GameCult.Caching.Tests`.
+
+Base fc74cf6f (`probe-base.log`):
+- P7 (registry {N lists own, A, B}; passed entry N with the list varied; record k under O, named like N): lent R / no
+  registry C for rows b, b2, e, g, h, k, l, l2; lent C for a, c, d, f, i, j. Confirms `subset-refuses-own-drift`.
+- P9 (registry {NW: Name, Value, Colour}; passed NW minus Colour): lent C (restamped, Colour lost), no registry R.
+  Confirms `lent-shape-widens-passed-entry`.
+- P6 (bare X1 entry, registry {X1} listing OX, record under OX): lent R, no registry R, cache C. h3 closed the id axis.
+- P4: 12 states x 8 registries, violations=0. P1d: a cache {N,L} commits N over L's listed old id (`cache-replaces-other-types-record`).
+
+Prototype B (scratch commit 349ea3f3 on the clone, not for landing; `probe-protoB2.log`): `CatalogEntryLookup` takes
+the written entries and an optional registry and drops every registry descriptor whose schema id a written entry has;
+the registry's `Owns(schemaId, catalog, declared, mayClaim)` overload is deleted; the cacheless arm always asks
+`CultDocumentRegistry.Owns(id, catalog, declared, new CatalogEntryLookup(writes, AttachedRegistry), entry => entry,
+claimant => writes has claimant's schema id)`.
+- P7: lent == no registry on all 14 rows (all C).
+- P9: lent R, no registry R, wide entry C.
+- P6: unchanged (R, R, C). P4: identical table to base, violations=0. P1a-f, P2a-d: identical to base.
+- `RestampOnWriteTests`, `CachelessSingleFileTests` and the probes: 139/139 passed locally.
+- Yggdrasil, 349ea3f3, `ygg-protoB-full.log`: GameCult.Caching.Tests 1180 passed / 0 failed / 2 skipped;
+  GameCult.Mesh.Tests 342 / 0 / 4.
+
+Negative greps, each tested at fc74cf6f (each matches there, and none may match after the cut, src and tests):
+`claimant.CompatibleSchemaIds.All(` (1, the subset), `lent.Owns(` (1), `Func<CultSchemaCatalogEntry, bool> mayClaim) =>`
+(1, the deleted overload), `CatalogEntryLookup(writes)` (3, one-argument construction). CHANGELOG and docs:
+`never widens what the passed entry declares` (1), `with no compatible id the passed entry does not list` (1).
+
+### Not settled by r2
+
+- `cache-replaces-other-types-record` (s2, PreExisting, cache arm): r2 touches only the cacheless lookup, so it does
+  not settle whether a cache may replace another registered type's record at a shared key.
+- Whether a registry-less `WriteDocument` should consult `CultDocumentRegistry.Shared` for claimants at all (s1
+  `shared-decides-registryless-write`, closed Fixed by documentation in h2). r2 keeps today's answer.
+- `variants:finding:cut-restamp-on-write.s2.cacheless-inverts-registry-claimant` is still in force although r1 was
+  mapped to close it; Self should close or re-triage it after r2's Soul pass.
