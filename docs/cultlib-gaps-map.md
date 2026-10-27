@@ -31,6 +31,79 @@ copy of the solver and the warm/cold sweep, `suite` a scratch copy of `packages/
    conditional commit compares that (ruling `aetheria-release:ruling:expect-fix-in-cultcache`). C# only. The
    release that carries it to Aetheria follows question `cultlib-gaps:question:expect-fix-release-lane`; the
    Aetheria pin bump is an Aetheria follow-on, not this cut.
+9. `aot-record-ref-generator` (section A, AOT cut 1): a consumer with MessagePack's source generator on can declare
+   `CultRecordRef<T>` members and dictionary keys. Base: the C2a branch head `a768b821`; Hands starts after C2a merges
+   to main or rebases onto it. Serves `record-ref-breaks-msgpack-generator`, the first cut of
+   `cs-aot-safe-registration` (operator 2026-10-27: "I'm not a fan of requiring reflection. ... AoT is a nice thing to
+   support anyway.").
+10. Not mapped (AOT cut 2): the generator reaches consumers that reference only `GameCult.Caching.MessagePack` (today its
+   analyzer is `PrivateAssets="all"`, so they run every document on Reflection.Emit).
+11. Not mapped (AOT cut 3): registration descriptors are generated instead of reflected (`BuildDescriptor`,
+   `DiscoverMembers`, `CultDocumentResolver`, `CultMessagePackSecurity`), and C2a's element-id walk stops reflecting
+   (A6), so a NativeAOT consumer round-trips a ref-keyed dictionary.
+
+## A. AOT cut 1: CultRecordRef under MessagePack's source generator (cut `aot-record-ref-generator`)
+
+Imagination pass `imagination-aot-cut1`, session `self-2026-10-27-eureka`, pinned to `origin/hands/variants-c2a` at
+`a768b821` (C2a's head; merge base with main `02cf04b5`). Starting evidence: `research/cultmesh-garden-path/cultcache-aot-probe-2026-10-27.md`
+(main `eb6a8f2c`). Probes: the scratch console from that note, copied to the session scratchpad
+`imagination-aot-cut1/aot-probe/` and committed only as dangling commits on top of `a768b821` (`a0f06b2c`, `6d382961`,
+`dc6cf9dc`, `99cae039`, `07b89982`), run on Yggdrasil in `mcr.microsoft.com/dotnet/sdk:10.0` (MessagePack 3.1.7, .NET
+10.0.12). Logs `job1.log` to `job5.log` beside the probe. Variants: G = `CultRecordRef<T>` member only, H = ref-keyed
+`Dictionary<CultRecordRef<T>, float>` only, B = both. Every variant references `MessagePack` directly (generator on).
+
+### Body facts
+
+- A1. The generator does not discover `CultRecordRefFormatter<T>`. For a generic type it does not know, it collects
+  the type's definition as an object and names the formatter it would generate, `<Type>Formatter<T>`, nested in
+  `GeneratedMessagePackResolver`. For a type from another assembly it then generates nothing, so the resolver names
+  `GeneratedMessagePackResolver.GameCult.Caching.CultRecordRefFormatter<T>`, which does not exist (CS0426). The match
+  with our formatter's name is a coincidence. Evidence (job1): `[ExcludeFormatterFromSourceGeneratedResolver]` on the
+  formatter, and an `internal` formatter, both still fail G, H and B with the same line. Upstream issue
+  MessagePack-CSharp#2133 (open, no maintainer reply) reports the same failure for any open-generic type with a
+  formatter in another package.
+- A2. Consumer MessagePack 3.1.12, the newest stable, fails G, H and B the same way (job1). Upgrading does not fix it.
+- A3. `[MessagePackFormatter(typeof(CultRecordRefFormatter<>))]` on the `CultRecordRef<T>` struct stops the
+  generator naming a formatter for it (the mangled line is gone), but the generator then reports `MsgPack006` (error)
+  in every consumer: it checks `typeof(X<>)`'s interfaces, which an unbound generic does not list. Adding the
+  non-generic `IMessagePackFormatter` marker to the formatter does not help (job2 `ta2`). With `MsgPack006`
+  suppressed by the consumer, G, H and B build and run (job2). Rejected: it needs the formatter moved into
+  `GameCult.Caching`, which then needs the whole `MessagePack` package instead of `MessagePack.Annotations`, and every
+  generator consumer still has to suppress an error.
+- A4. `[assembly: MessagePackAssumedFormattable(typeof(CultRecordRef<>))]` in the consumer assembly fixes G, H and B
+  with no library change (job2 `base@ASSUMED`). The generator stops collecting `CultRecordRef<T>`; the generated
+  document formatter asks the resolver, and `CultDocumentResolver` serves the ref. This is the attribute MessagePack
+  documents for "a formatter added through a custom resolver at runtime". The same attribute as an MSBuild
+  `AssemblyAttribute` item in the consumer project (`_Parameter1_IsLiteral`), which is what a package's
+  `buildTransitive` targets injects, does the same (job3 MG, MH, MB). The attribute declared in the library assembly
+  does not reach the consumer's generator (job4 LIBATTR: CS0426).
+- A5. Generated and dynamic formatters write the same bytes. RefDoc (B) payload is `93A172A17081A170CA3F000000` from
+  the Reflection.Emit fallback with no generator (job3 BASE) and from the generated formatter (job3 MB). The document
+  formatter is `GeneratedMessagePackResolver+Probe+RefDocFormatter` (`dynamic=False`); the ref formatter is the
+  library's `CultRecordRefFormatter<PlainDoc>` through `CultDocumentResolver`.
+- A6. NativeAOT (`PublishAot`, probe assembly rooted, linux-x64): G round-trips (payload, upsert, flush, reopen) with
+  payload `92A172A170`, identical to JIT (job4 G0). B fails, in C2a code, not in the generator path: upsert fails in
+  `CultElementIds.MapEntries`, whose `MakeGenericMethod(key, value)` has no native code for a struct key (job4 B0). With
+  that walk reading the map through non-generic `IDictionary` instead, upsert passes under AOT and JIT is unchanged
+  (job5 B1), but the payload and flush still throw `TargetInvocationException` from a second reflective call on the
+  serialize path. By source read the candidate is `ResolverClaim`'s `GetFormatterMethod.MakeGenericMethod(type)`
+  (`CultDocumentMessagePackSerialization.cs:84`), not proven. Both are runtime reflection over element-id paths, which is
+  AOT cut 3's ground, so cut 1 proves AOT on the member shape and leaves the key shape's AOT round trip to cut 3.
+- A7. `GameCult.Geometry` already runs the generator (it references `MessagePack` directly) and carries the per-member
+  workaround on three members (`CultGeometryDocuments.cs:164,239,328`). Under A4 those attributes are redundant.
+
+### Shape the cut lands, and why
+
+`GameCult.Caching.MessagePack` ships `buildTransitive/GameCult.Caching.MessagePack.targets`, which adds the A4 assembly
+attribute to every project that consumes the package. NuGet consumers need no line of their own, which is what a
+consumer expects from a library whose type breaks the generator. Unity consumers and in-repo `ProjectReference`
+consumers do not get `buildTransitive`: Unity consumers write the one attribute line (README), and in-repo consumers
+import the targets file, so they exercise the file that ships. The attribute type comes from `MessagePack.Annotations`,
+which `GameCult.Caching` already brings, so the injection compiles in a consumer with or without the generator. Wire
+bytes do not change: no formatter changes, only which code path asks for it (A5).
+
+Rejected: a type-level formatter attribute (A3); excluding or hiding the formatter (A1); upgrading MessagePack (A2);
+declaring the attribute in the library (A4); keeping per-member attributes, which cannot reach dictionary keys.
 
 ## B. BoundedLeastSquares stopping
 
