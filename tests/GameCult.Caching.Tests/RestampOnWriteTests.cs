@@ -328,56 +328,62 @@ namespace GameCult.Caching.Tests
             return cache;
         }
 
-        // A base and a variant of it, written by a writer that knew Narrow; Grown then reads the variant whole as compatible drift.
-        private string SeedNarrowVariant(bool directory)
+        private string StoredIdOfVariantStore(string path, CultDocumentRegistry registry, CultRecordKey key)
         {
-            var path = Path.Combine(_directory, directory ? "store" : "store.cc");
-            using var cache = OpenWithCodec(path, directory, NarrowRegistry);
+            using var cache = OpenWithCodec(path, false, registry);
+            return cache.GetStored(key)!.StoredSchemaId;
+        }
+
+        // A base and a variant of it, written by a writer that knew Narrow; Grown then reads the variant whole as compatible drift.
+        private string SeedNarrowVariant()
+        {
+            var path = Path.Combine(_directory, "store.cc");
+            using var cache = OpenWithCodec(path, false, NarrowRegistry);
             Assert.That(cache.Commit(batch => batch.Upsert(new NoteNarrow { Name = "base", Value = 1 }, new CultRecordHandle<NoteNarrow>(Base))), Is.True);
             Assert.That(cache.Commit(batch => batch.UpsertVariant(Delta, Base, new[] { cache.Override<NoteNarrow>("Name", "delta"), cache.Override<NoteNarrow>("Value", 5) })), Is.True);
             return path;
         }
 
-        // The staging half asks the flag ToStoredDocument set on a loaded variant, and Resolved and Flatten carry it on: an owned
+        // Variants live in a single file (the directory store refuses them). The staging half asks the flag ToStoredDocument set on a loaded variant, and Resolved and Flatten carry it on: an owned
         // drift variant is rewritten, flattened and removed like a plain drift record, restamping only what is written.
-        [TestCaseSource(nameof(StoreKinds))]
-        public async Task AnOwnedDriftVariantIsRewritten(bool directory)
+        [Test]
+        public async Task AnOwnedDriftVariantIsRewritten()
         {
-            var path = SeedNarrowVariant(directory);
-            using (var cache = OpenWithCodec(path, directory, GrownRegistry))
+            var path = SeedNarrowVariant();
+            using (var cache = OpenWithCodec(path, false, GrownRegistry))
             {
                 await cache.PullAllBackingStoresAsync();
                 Assert.That(cache.Commit(batch => batch.UpsertVariant(Delta, Base, new[] { cache.Override<NoteGrown>("Name", "delta"), cache.Override<NoteGrown>("Value", 6) })), Is.True);
             }
 
-            Assert.That(StoredIdOf(path, directory, GrownRegistry, Delta), Is.EqualTo(GrownRegistry.GetRequired<NoteGrown>().SchemaId));
-            Assert.That(StoredIdOf(path, directory, NarrowRegistry, Base), Is.EqualTo(NarrowRegistry.GetRequired<NoteNarrow>().SchemaId), "the base was not written");
+            Assert.That(StoredIdOfVariantStore(path, GrownRegistry, Delta), Is.EqualTo(GrownRegistry.GetRequired<NoteGrown>().SchemaId));
+            Assert.That(StoredIdOfVariantStore(path, NarrowRegistry, Base), Is.EqualTo(NarrowRegistry.GetRequired<NoteNarrow>().SchemaId), "the base was not written");
         }
 
-        [TestCaseSource(nameof(StoreKinds))]
-        public async Task AnOwnedDriftVariantIsFlattened(bool directory)
+        [Test]
+        public async Task AnOwnedDriftVariantIsFlattened()
         {
-            var path = SeedNarrowVariant(directory);
-            using (var cache = OpenWithCodec(path, directory, GrownRegistry))
+            var path = SeedNarrowVariant();
+            using (var cache = OpenWithCodec(path, false, GrownRegistry))
             {
                 await cache.PullAllBackingStoresAsync();
                 Assert.That(cache.Commit(batch => batch.Flatten(Delta)), Is.True);
             }
 
-            Assert.That(StoredIdOf(path, directory, GrownRegistry, Delta), Is.EqualTo(GrownRegistry.GetRequired<NoteGrown>().SchemaId));
+            Assert.That(StoredIdOfVariantStore(path, GrownRegistry, Delta), Is.EqualTo(GrownRegistry.GetRequired<NoteGrown>().SchemaId));
         }
 
-        [TestCaseSource(nameof(StoreKinds))]
-        public async Task AnOwnedDriftVariantIsRemoved(bool directory)
+        [Test]
+        public async Task AnOwnedDriftVariantIsRemoved()
         {
-            var path = SeedNarrowVariant(directory);
-            using (var cache = OpenWithCodec(path, directory, GrownRegistry))
+            var path = SeedNarrowVariant();
+            using (var cache = OpenWithCodec(path, false, GrownRegistry))
             {
                 await cache.PullAllBackingStoresAsync();
                 Assert.That(cache.Commit(batch => batch.Remove(Delta)), Is.True);
             }
 
-            using var reopened = OpenWithCodec(path, directory, GrownRegistry);
+            using var reopened = OpenWithCodec(path, false, GrownRegistry);
             await reopened.PullAllBackingStoresAsync();
             Assert.That(reopened.GetStored(Delta), Is.Null);
             Assert.That(reopened.GetStored(Base), Is.Not.Null);
