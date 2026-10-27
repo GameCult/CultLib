@@ -142,8 +142,8 @@ trx_passed() {
 }
 trx_unpassed() { if [ -f "$1" ]; then tr '\n' ' ' < "$1" | grep -o "<UnitTestResult [^>]*" | grep -v "outcome=\"Passed\"" | grep -o "testName=\"[^\"]*\" [^>]*outcome=\"[A-Za-z]*\"" || true; fi; }
 
-# Refusal lines a stage's log printed for runtime $2.
-refused_lines() { grep -c "OLD-READER $2 refused " "$1" || true; }
+# Refusal lines printed for runtime $2 in a log or, for C#, in the TRX (the console logger repeats each test's output in its summary, the TRX holds it once).
+refused_lines() { { grep -o "OLD-READER $2 refused " "$1" || true; } | wc -l | tr -d " "; }
 
 # Python's runner says "Ran N tests" even when some were skipped or expected to fail; those forms are not passes.
 python_unrun() { grep -E '(skipped|expected failures|unexpected successes)=' "$1" || true; }
@@ -183,7 +183,7 @@ gate() {
       probe_staged csharp 2>&1 | tee "$out/reader.log" || failures+=" 2.0.1-reader"
       expect 2.0.1-reader "$EXPECT_READER_GATE+$EXPECT_READER_REFLIST" "$(trx_passed "$trx/reader.trx" OldReaderGateProbe)+$(trx_passed "$trx/reader.trx" OldReaderRefListProbe)"
       unpassed 2.0.1-reader "$trx/reader.trx"
-      refused csharp "$EXPECT_REFUSED_CSHARP" "$out/reader.log" 2.0.1-reader
+      refused csharp "$EXPECT_REFUSED_CSHARP" "$trx/reader.trx" 2.0.1-reader
       CULTLIB_GATE_OLD_STORE="$out/v1-0-60-ref-list.cc" dotnet test tests/GameCult.Caching.Tests         --filter "FullyQualifiedName~RefListDriftTests.A_1_0_60_Written_Store_Opens_Like_2_0_1" --logger "console;verbosity=detailed" --logger "trx;LogFileName=head.trx" --results-directory "$trx" 2>&1 | tee "$out/head.log" || failures+=" head-ref-list"
       expect head-ref-list "$EXPECT_HEAD_REFLIST" "$(trx_passed "$trx/head.trx" RefListDriftTests)"
       unpassed head-ref-list "$trx/head.trx"
