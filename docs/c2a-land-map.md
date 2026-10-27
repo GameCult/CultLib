@@ -6,40 +6,71 @@ on 2026-10-22 against main 7a8933b0 and the 2.0.0 release candidate
 is the merge plus the gate. Everything else is classified below. Governing ruling:
 `cultlib-gaps:ruling:release-now-c2a-bumps-format`.
 
-## Cut sequence to main (2026-10-27, branch head 193cf1c3)
+## Cut sequence to main (2026-10-27, branch head 7c7cc799)
 
 Landed since the facts below: `land-c2a` (h1), `land-c2a-merge-api-docs` (h1-h6), the 2.0.1 and
-cultcache-rs 0.3.1 merges (5baa02fa, f54472e5), `land-c2a-gate` r4 (h1) and `store-gate-one-owner`
-(h1-h7, Soul s6). Restamp-on-write had not started: `Registry.Declares` is still the ownership
-answer at 193cf1c3 (CultCache.cs:751, :3866, :4589, :4600). What stands between the branch and main,
-in order:
+cultcache-rs 0.3.1 merges (5baa02fa, f54472e5), `land-c2a-gate` r4 (h1), `store-gate-one-owner`
+(h1-h7, Soul s6) and `restamp-on-write` (h1-h2, 8ee66714..7c7cc799, Soul s2 holds). One static `Owns`
+decides ownership for cache and cacheless writers, and the High finding
+`cut-land-c2a-gate.s1.reflist-record-read-only-at-head` is Fixed by 7c7cc799. origin/main is 73e684b1:
+21 commits past the merge base 02cf04b5, all docs and research (15 files, +1879, none under src/,
+tests/ or packages/, none on a path the branch changed). What stands between the branch and main, in
+order:
 
-1. **restamp-on-write** (spec r2, Hands then Soul). One ownership rule, `Owns`: a record a type reads
-   whole as compatible drift is writable and restamped on write. Fixes the High finding
-   `cut-land-c2a-gate.s1.reflist-record-read-only-at-head`. Carries follow-up `gate-bound-test-tighten`.
-2. **land-c2a-gate** (spec r6, Hands h2 then Soul). The ref-list gate compares ids after a write,
-   vectors pinned byte for byte, every stage counts its cases. Red at 193cf1c3, green after step 1.
-   Closes the three `cut-land-c2a-gate.s1` findings and follow-up `gate-reads-1x-written-store`.
-3. **Ledger** (Self, no Hands). The seven `cut-land-c2a.s1.*` findings are still in force though
-   `land-c2a-merge-api-docs` carried their pins (source reads 2026-10-27: GameCult.Caching grants
-   InternalsVisibleTo only to `.Tests` and `.MessagePack`, the residual being follow-up
-   `caching-messagepack-ivt`; PreCut2StoreFormatTests pins "with a suffix of"). Close each against its
-   commit or defer it. `stale-unity-plugin-dlls` belongs to the Unity 3.0.0 release cut (the plugins
-   are 2.0.1 builds, 1eeb1a01). Follow-up `slot-reuse-contract-doc` is done
-   (cultcache-schema-compatibility.md:64).
-4. **Consumer pins** (operator ruling `unpinned-consumers-at-land-2`, pin-then-land). Brokkr, Aquarium,
-   Ymir, AquaSynth and Mimir have no `CultLibRevision`/`VerifyCultLibRevision` guard and build against
-   the sibling `..\CultLib` checkout (grep of their checkouts, 2026-10-27). Each adopts Aetheria's guard
-   at the 2.0.0 tag, in its own repo, before the merge reaches main. No record owns this yet. Gjallar
-   was ruled deprecated like Eve afterwards (`gjallar-deprecated-ymir-off-eve`), so it likely needs no
-   pin, as Eve needs none; Self confirms.
-5. **Main into the branch, then full verification.** origin/main 0ad9811f is 4 commits past the merge
-   base 02cf04b5, and they are research docs only (3 files under docs/research, +423), so the merge
-   should be clean. Run the suites listed under "The land cut's shape" on Yggdrasil at the merged
-   head. If main gained code by then, a Soul pass on the merge.
-6. **Land.** `git merge --no-ff hands/variants-c2a` onto main, with an empty diff against the verified
-   head. No tag: tags, Unity plugin rebuild and `declared-range-gate-own-version` belong to the 3.0.0
-   release cut.
+1. **claimant-one-owner** (spec r1 at 7c7cc799, Hands then Soul). Restamp's Soul s2 left four Lows
+   on the landing path. Which entry reads a persisted entry is chosen twice (`Claimant` at
+   CultCache.cs:703-750, `ClaimantEntry` at :797-799), and so a cacheless writer handed registry {A,B}
+   overwrites a record that a cache with {A,B} holds read-only (probe X4). The cut keeps one `Claimant`
+   precedence over a by-id/by-name lookup that the registry or a single entry supplies. A cacheless
+   writer with a registry then takes its claimant from that registry. The cut also pins the
+   unpublished-id case and fixes the stale test comment. It closes `claimant-selection-duplicated`,
+   `cacheless-inverts-registry-claimant`, `unpublished-id-guard-unpinned` and `stale-flag-copy-comment`.
+   It is kept apart from the gate so that Soul can falsify it alone. Its files (CultCache.cs, the
+   persistence contract, RestampOnWriteTests.cs) are disjoint from the gate's, so it can run before or
+   beside step 2. The second cut to land rebases.
+2. **land-c2a-gate** (spec r7 at 7c7cc799, Hands h2 then Soul). The ref-list gate does the same write
+   at 2.0.1 and at head and compares schema ids. The committed vectors are pinned byte for byte under a
+   fixed clock, and every stage counts its cases. r7 drops r6's head-only restamp assertions, which
+   `RestampOnWriteTests.TheCommitted1060VectorsListRecordIsWrittenUnderTheHoldersOwnId` already pins.
+   It also drops the red-at-193cf1c3 run, because restamp is measured. The cut closes
+   `single-vector-hand-edit-passes`, `gate-green-with-no-refusal-probes` and follow-up
+   `gate-reads-1x-written-store`.
+3. **Ledger** (Self, no Hands; can run now, beside steps 1 and 2). Each of these is in force though
+   its fix has landed:
+   - The seven `cut-land-c2a.s1.*` findings. `land-c2a-merge-api-docs` carried their pins (source reads
+     2026-10-27: GameCult.Caching grants InternalsVisibleTo only to `.Tests` and `.MessagePack`, the
+     residual being follow-up `caching-messagepack-ivt`; PreCut2StoreFormatTests pins "with a suffix
+     of"). Close each one against its commit, or defer it. `stale-unity-plugin-dlls` defers to the
+     Unity 3.0.0 release cut (the plugins are 2.0.1 builds, 1eeb1a01).
+   - `cut-c2a-write-set.s1.untouched-dropped-slot-resurrects` and follow-up `slot-reuse-contract-doc`.
+     Ruling `slot-reuse-documented` decided the behaviour, and the paragraph is in
+     cultcache-schema-compatibility.md:64-66.
+   - `cut-restamp-on-write.s1.websockets-tests-unreported`, Fixed by h2 (s2 promise
+     `websockets-tests-reported` holds).
+   - Follow-up `gate-bound-test-tighten`, carried by restamp r2 (50362447, a768b821). Close it if
+     restamp's Soul passes measured it; otherwise route it.
+   - After steps 1 and 2 hold: the four s2 Lows, the two remaining `cut-land-c2a-gate.s1` Lows and
+     `gate-reads-1x-written-store`.
+4. **Consumer pins** (ruling `unpinned-consumers-at-land-3`, follow-up `consumer-pins-before-land`).
+   Brokkr, Aquarium, Ymir, AquaSynth and Mimir have no `CultLibRevision`/`VerifyCultLibRevision` guard,
+   and each builds against the sibling `..\CultLib` checkout. In its own repo, each adopts Aetheria's
+   guard at the 2.0.0 tag, with one Hands per repo, before the merge reaches main. The pins touch no
+   CultLib file, so they can start now and run in parallel with steps 1-3. Eve and Gjallar get no pin
+   (ruled). The step is done when each repo's guard fails a build against a CultLib checkout at
+   another revision and passes at the tag, and the follow-up is resolved.
+5. **Main into the branch, then full verification.** After steps 1, 2 and 4, `git merge origin/main`
+   into `hands/variants-c2a`. It should be clean, because main's commits since 02cf04b5 are docs and
+   research only. Re-check that before merging (`git diff --stat 02cf04b5 origin/main -- src tests
+   packages unity`). Then run every suite at the merged head on Yggdrasil: Caching, Mesh, Networking,
+   Geometry, WebSockets, ConsumerBuild, InteropPeer, cultcache-ts/-rs/-py, cultnet-ts and cultmesh-ts.
+   Run `old-reader-refusal.sh gate` for csharp, typescript, python and rust. If main gained code by then,
+   a Soul pass covers the merge.
+6. **Land.** Run `git merge --no-ff hands/variants-c2a` onto main, with an empty diff against the
+   verified head. There is no tag: tags, the Unity plugin rebuild and `declared-range-gate-own-version`
+   belong to the 3.0.0 release cut. Open follow-ups `c2a-load-slower` (load 2 to 2.3 times slower than
+   main on a synthetic Aetheria catalog) and `drift-write-ownership-leaves` do not say "before land".
+   `c2a-load-slower` still needs a reason or a fix before the 3.0.0 release, under
+   `cultlib-gaps:ruling:database-shaped-built-for-load`.
 
 ## Facts
 
