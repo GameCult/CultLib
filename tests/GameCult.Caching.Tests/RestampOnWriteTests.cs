@@ -643,7 +643,8 @@ namespace GameCult.Caching.Tests
         public void ALentRegistryNeverWidensTheShapeOfThePassedEntry(bool lend)
         {
             var path = SeedListerStore(ListerDriftId, "tests.restamp_lister", ListerDriftId);
-            var passed = ListerEntry(new[] { NarrowListerRegistry.GetRequired<NoteLister>().SchemaId }, ListerEntry(Array.Empty<string>()).Members.Take(1).ToArray(), "narrow-");
+            var full = NarrowListerRegistry.GetRequired<NoteLister>().ToCatalogEntry();
+            var passed = ListerEntry(full.CompatibleSchemaIds, full.Members.Take(1).ToArray(), "narrow-");
             var before = Fingerprint(path);
 
             Assert.Throws<CultSchemaConflictException>(() =>
