@@ -493,6 +493,24 @@ namespace GameCult.Caching.Tests
             Assert.That(Snapshot(path).Records.Single(record => record.Key == "note").SchemaId, Is.EqualTo(NarrowRegistry.GetRequired<NoteNarrow>().SchemaId));
         }
 
+        // A record stored under an id its catalog entry only lists (no entry owns it) is published by that entry, and the type that
+        // reads the entry whole owns the record: a cache and a cacheless writer alike restamp it.
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ARecordUnderAnIdOnlyListedIsPublishedByTheEntryListingIt(bool cacheless)
+        {
+            const string listedOnly = "tests.restamp.listedonly";
+            var path = SeedRenamed(listsNarrow: true, alsoLists: listedOnly);
+            var snapshot = Snapshot(path);
+            foreach (var record in snapshot.Records)
+                record.SchemaId = listedOnly;
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+
+            WriteNarrow(path, cacheless);
+
+            Assert.That(Snapshot(path).Records.Single(record => record.Key == "note").SchemaId, Is.EqualTo(NarrowRegistry.GetRequired<NoteNarrow>().SchemaId));
+        }
+
         // A raw record write names no registry, so its one entry is the claimant: it reads a renamed entry that lists its id, or has
         // its schema name, and nothing else.
         [TestCase(true, "tests.restamp_note_renamed", true)]
