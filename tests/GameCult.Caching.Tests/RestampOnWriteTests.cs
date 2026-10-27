@@ -493,6 +493,31 @@ namespace GameCult.Caching.Tests
             Assert.That(Snapshot(path).Records.Single(record => record.Key == "note").SchemaId, Is.EqualTo(NarrowRegistry.GetRequired<NoteNarrow>().SchemaId));
         }
 
+        // A raw record write names no registry, so its one entry is the claimant: it reads a renamed entry that lists its id, or has
+        // its schema name, and nothing else.
+        [TestCase(true, "tests.restamp_note_renamed", true)]
+        [TestCase(false, "tests.restamp_note", true)]
+        [TestCase(false, "tests.restamp_note_renamed", false)]
+        public void ARecordWriteWithNoRegistryTakesItsOneEntryAsClaimant(bool listsNarrow, string persistedName, bool owned)
+        {
+            var record = Snapshot(SeedNarrow(directory: false)).Records.Single(candidate => candidate.Key == "note");
+            var path = SeedRenamed(listsNarrow, name: persistedName);
+            var before = Fingerprint(path);
+            var write = new SingleFileMessagePackBackingStore(path);
+            var entry = NarrowRegistry.GetRequired<NoteNarrow>().ToCatalogEntry();
+
+            if (owned)
+            {
+                write.WriteRecord(record, entry);
+                Assert.That(Snapshot(path).Records.Single(candidate => candidate.Key == "note").SchemaId, Is.EqualTo(entry.SchemaId));
+            }
+            else
+            {
+                Assert.Throws<CultSchemaConflictException>(() => write.WriteRecord(record, entry));
+                Assert.That(Fingerprint(path), Is.EqualTo(before));
+            }
+        }
+
         // An id no catalog entry publishes belongs to nobody a writer can name, so no writer owns it. A store file cannot hold such a
         // record (ReadStore refuses it), so the rule is pinned where it is decided, for a cacheless writer's lookup.
         [Test]
