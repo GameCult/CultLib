@@ -206,13 +206,16 @@ The rule is checked again where the write lands, under the store's lock: a write
 whose durable record is not owned, because another writer rewrote it after this cache
 loaded, is refused typed, and the record is reloaded as the store holds it, read-only when a type can
 read it. This holds for every write through the store, the store's own `Push`, `Delete` and
-`CommitBatch` included. A CultMesh single-file write asks the same rule: it owns the ids its written entries declare (their own ids and the ids they
-list compatible) and an id whose publishing entry its claimant reads whole (no persisted slot unread). The claimant is picked by
-the one precedence over the written entries and the call's registry, a written entry being the only description of its schema id
-(the registry's type for that id is never asked), and the record is owned only when the claimant is a written entry. So a cacheless
-write is never more permissive than its declaration, nor than a cache registering the registry's other types beside the written
-ones: a record another registered type claims is refused, under that type's current id or an old one it lists, and a registry only
-adds refusals. With no registry the written entries are the only claimants. It is refused the same way otherwise.
+`CommitBatch` included. A CultMesh single-file write (`WriteDocument`, `WriteRecord`, or `PushAll` on an unattached store) asks the same rule: it owns the ids its
+written entries declare (their own ids and the ids they list compatible) and an id whose publishing entry its claimant reads whole (no persisted
+slot unread). The claimant is picked by the one precedence over the written entries and the call's registry, a written entry being the only
+description of its schema id (the registry's type for that id is never asked), and the record is owned only when the claimant is a written
+entry. A registry adds claimants and declares nothing, so it only adds refusals; with none the written entries are the only claimants. Refused:
+a record another registered type claims, under that type's current id or an old one it lists; a record whose stored entry lists another
+registered type's id ahead of the written one's, whatever name the stored entry carries; a record two registered types list compatible or two
+registered versions of the written schema could read; a record the picked written entry reads only by dropping persisted slots; and the
+removal of any stored record by a call that writes no entry. A registry-less `WriteDocument` reads `CultDocumentRegistry.Shared`. It is
+refused the same way otherwise.
 
 A record that resolves to no local type is a foreign record, for example one of a type this build does not
 have, or one renamed under a new schema name without declaring its old id. A store never destroys or relabels it: the store carries it
