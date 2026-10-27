@@ -593,7 +593,7 @@ namespace GameCult.Caching.Tests
             if (entryListsOldId)
             {
                 new SingleFileMessagePackBackingStore(path).WriteRecord(record, passed, null, registry);
-                Assert.That(Snapshot(path).Records.Single(r => r.Key == "note").SchemaId, Is.EqualTo(full.SchemaId));
+                Assert.That(Snapshot(path).Records.Single(stored => stored.Key == "note").SchemaId, Is.EqualTo(full.SchemaId));
                 return;
             }
             Assert.Throws<CultSchemaConflictException>(() => new SingleFileMessagePackBackingStore(path).WriteRecord(record, passed, null, registry));
