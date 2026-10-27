@@ -1420,10 +1420,74 @@ namespace GameCult.Caching.Tests
                 c.Dispose();
         }
 
-        // One call takes at most three gates (the guessed cache's, the store's, the settled cache's), however often failing attaches
-        // publish and retract Cache under it. A retry around the unlocked guess would take one per stale guess and exceed this.
+        // A call on a detached store takes exactly one gate (the store's), and one on a store whose attach has settled takes exactly
+        // one (the settled cache's, reached by the guess): the counter counts each take.
         [Test]
-        public void OneStoreCallTakesAtMostThreeGatesUnderFailingAttachChurn()
+        public void OneStoreCallTakesExactlyOneGateOnADetachedStoreAndOnASettledOne()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
+            var store = new RoleStore(_path);
+            store.ReleaseAttach.Set();
+
+            CacheBackingStore.GateTakes = 0;
+            store.ReadStoreSnapshot();
+            Assert.That(CacheBackingStore.GateTakes, Is.EqualTo(1), "a detached store's call takes the store's gate");
+
+            using var cache = new CultCache(registry);
+            cache.AddBackingStore(store);
+            CacheBackingStore.GateTakes = 0;
+            store.ReadStoreSnapshot();
+            Assert.That(CacheBackingStore.GateTakes, Is.EqualTo(1), "a settled store's call takes only its cache's gate");
+        }
+
+        // Under attaches that succeed, a call takes at most three gates, and three is reachable: the guess was null, an attach then
+        // settled before the call took the store's gate, and the call took the settled cache's gate as its third.
+        [Test]
+        public void OneStoreCallTakesAtMostThreeGatesUnderSuccessfulAttachChurnAndThreeIsReached()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
+            var mostTakes = 0;
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
+            for (var round = 0; mostTakes < 3 && DateTime.UtcNow < deadline; round++)
+            {
+                var store = new RoleStore(_path);
+                store.ReleaseAttach.Set();
+                var cache = new CultCache(registry);
+                using var barrier = new Barrier(2);
+                var takes = 0;
+                var spin = (round % 16) * 40;
+                var caller = new Thread(() =>
+                {
+                    barrier.SignalAndWait();
+                    CacheBackingStore.GateTakes = 0;
+                    store.ReadStoreSnapshot();
+                    takes = CacheBackingStore.GateTakes;
+                });
+                var attacher = new Thread(() =>
+                {
+                    barrier.SignalAndWait();
+                    Thread.SpinWait(spin);
+                    cache.AddBackingStore(store);
+                });
+                caller.Start();
+                attacher.Start();
+                Finishes(caller, "a calling thread");
+                Finishes(attacher, "an attaching thread");
+                cache.Dispose();
+                Assert.That(takes, Is.InRange(1, 3), "no call took more than three gates");
+                mostTakes = Math.Max(mostTakes, takes);
+            }
+
+            Assert.That(mostTakes, Is.EqualTo(3), "a call that raced a successful attach took the third gate");
+        }
+
+        // Under attaches that fail, Cache read under the store's gate is always null (an attach publishes and retracts it inside one
+        // hold of that gate), so one call takes at most two gates: the guessed cache's, then the store's. A retry around the unlocked
+        // guess would take one per stale guess and exceed this.
+        [Test]
+        public void OneStoreCallTakesAtMostTwoGatesUnderFailingAttachChurn()
         {
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
             new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
@@ -1459,7 +1523,7 @@ namespace GameCult.Caching.Tests
                 Finishes(t.Thread, "a churn thread");
 
             Assert.That(calls, Is.GreaterThan(100), "the readers made calls under churn");
-            Assert.That(mostTakes, Is.LessThanOrEqualTo(3), "no call took more than three gates");
+            Assert.That(mostTakes, Is.LessThanOrEqualTo(2), "no call took more than two gates");
             foreach (var c in caches)
                 c.Dispose();
         }
