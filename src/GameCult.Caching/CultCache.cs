@@ -569,6 +569,38 @@ namespace GameCult.Caching
             new(Key, StoredAt, Descriptor, delta, document, codec) { IdsInMemoryOnly = idsInMemoryOnly, StoredSchemaId = StoredSchemaId, StoredVersion = StoredVersion };
     }
 
+    // What the one claimant precedence (CultDocumentRegistry.Claimant) asks of the entries a reader holds: the entry owning an id,
+    // the entries listing an id compatible, the entries of a schema name, and how to name one in a refusal.
+    internal interface IClaimantLookup<T> where T : class
+    {
+        T? Owner(string schemaId);
+        IReadOnlyList<T> Listing(string schemaId);
+        IReadOnlyList<T> Named(string schemaName);
+        ClaimantFacts Describe(T claimant);
+    }
+
+    internal readonly record struct ClaimantFacts(string SchemaName, string SchemaVersion, string TypeLabel);
+
+    // The lookup of a cacheless writer without a registry: the catalog entries the call writes.
+    internal sealed class CatalogEntryLookup : IClaimantLookup<CultSchemaCatalogEntry>
+    {
+        private readonly IReadOnlyCollection<CultSchemaCatalogEntry> _entries;
+
+        public CatalogEntryLookup(IReadOnlyCollection<CultSchemaCatalogEntry> entries) => _entries = entries;
+
+        public CultSchemaCatalogEntry? Owner(string schemaId) =>
+            _entries.FirstOrDefault(entry => string.Equals(entry.SchemaId, schemaId, StringComparison.Ordinal));
+
+        public IReadOnlyList<CultSchemaCatalogEntry> Listing(string schemaId) =>
+            _entries.Where(entry => entry.CompatibleSchemaIds.Contains(schemaId, StringComparer.Ordinal)).ToArray();
+
+        public IReadOnlyList<CultSchemaCatalogEntry> Named(string schemaName) =>
+            _entries.Where(entry => string.Equals(entry.SchemaName, schemaName, StringComparison.Ordinal)).ToArray();
+
+        public ClaimantFacts Describe(CultSchemaCatalogEntry claimant) =>
+            new(claimant.SchemaName, claimant.SchemaVersion, claimant.SchemaId);
+    }
+
     public sealed class CultDocumentRegistry
     {
         private static readonly Lazy<CultDocumentRegistry> SharedRegistry =
@@ -703,11 +735,21 @@ namespace GameCult.Caching
         internal CultDocumentDescriptor? Claimant(
             string schemaId,
             IReadOnlyCollection<CultSchemaCatalogEntry> catalog,
+            out CultSchemaCatalogEntry? persisted) =>
+            Claimant(schemaId, catalog, _indexes, out persisted);
+
+        // The only claimant precedence: which entry reads a persisted catalog entry, over a lookup of the entries a reader holds (a
+        // registry's types, or the entries a cacheless writer writes). Exact id, then the one entry listing the id, then a local id the
+        // persisted entry lists, then the schema name. Every caller, cache or cacheless, asks it; none writes a precedence of its own.
+        internal static T? Claimant<T>(
+            string schemaId,
+            IReadOnlyCollection<CultSchemaCatalogEntry> catalog,
+            IClaimantLookup<T> lookup,
             out CultSchemaCatalogEntry? persisted)
+            where T : class
         {
-            var indexes = _indexes;
             persisted = null;
-            if (indexes.BySchemaId.TryGetValue(schemaId, out var exact))
+            if (lookup.Owner(schemaId) is { } exact)
                 return exact;
 
             persisted = PublishedBy(schemaId, catalog);
@@ -717,33 +759,35 @@ namespace GameCult.Caching
             }
 
             // No type owns the id, so the one type that lists it is the record's type. Two listers and no owner cannot say which.
-            if (indexes.ByCompatibleSchemaId.TryGetValue(schemaId, out var listers))
+            var listers = lookup.Listing(schemaId);
+            if (listers.Count > 0)
             {
-                if (listers.Length > 1)
+                if (listers.Count > 1)
                     throw new CultSchemaConflictException(
                         $"CultCache schema id '{schemaId}' is owned by no registered type and declared compatible by several " +
-                        $"({string.Join(", ", listers.Select(lister => lister.DocumentType.FullName))}), so a record under it resolves to none. " +
+                        $"({string.Join(", ", listers.Select(lister => lookup.Describe(lister).TypeLabel))}), so a record under it resolves to none. " +
                         "Register the type that owns the id, or declare it on one type.",
                         schemaId,
-                        listers.Select(lister => lister.SchemaName).ToArray(),
+                        listers.Select(lister => lookup.Describe(lister).SchemaName).ToArray(),
                         string.Empty);
                 return listers[0];
             }
 
             foreach (var compatibleSchemaId in persisted.CompatibleSchemaIds.Where(candidate => !string.IsNullOrWhiteSpace(candidate)))
             {
-                if (indexes.BySchemaId.TryGetValue(compatibleSchemaId, out var compatibleLocal))
+                if (lookup.Owner(compatibleSchemaId) is { } compatibleLocal)
                     return compatibleLocal;
             }
 
-            if (indexes.BySchemaName.TryGetValue(persisted.SchemaName, out var localVersions))
+            var localVersions = lookup.Named(persisted.SchemaName);
+            if (localVersions.Count > 0)
             {
-                if (localVersions.Length == 1)
+                if (localVersions.Count == 1)
                     return localVersions[0];
 
                 throw new InvalidOperationException(
                     $"CultCache schema name '{persisted.SchemaName}' is ambiguous across local versions " +
-                    $"[{string.Join(", ", localVersions.Select(candidate => candidate.SchemaVersion).OrderBy(version => version, StringComparer.Ordinal))}]. " +
+                    $"[{string.Join(", ", localVersions.Select(candidate => lookup.Describe(candidate).SchemaVersion).OrderBy(version => version, StringComparer.Ordinal))}]. " +
                     "Persisted schema compatibility must identify an explicit schema id.");
             }
 
@@ -761,42 +805,35 @@ namespace GameCult.Caching
         // next write. A record read only by dropping slots is not owned: declaring its id compatible is the consent to the loss.
         // Header only: the persisted catalog entry that publishes the id is compared with the claimant's entry, never a payload. A
         // claimant that cannot be named (ambiguous, id missing from the catalog, shapes incompatible) owns nothing.
-        internal bool Owns(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog) =>
-            Owns(
-                schemaId,
-                catalog,
-                Declared,
-                _ =>
-                {
-                    try
-                    {
-                        return Claimant(schemaId, catalog, out _)?.ToCatalogEntry();
-                    }
-                    catch (InvalidOperationException)
-                    {
-                        return null;
-                    }
-                });
+        internal bool Owns(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog) => Owns(schemaId, catalog, Declared);
 
-        // The rule itself, for any writer: declared, or the entry that reads the record's published entry (the writer's claimant)
-        // reads it whole. A registry supplies Declared and Claimant; a cacheless writer supplies its one entry through the same two.
-        internal static bool Owns(
+        // The same rule with the declared half supplied: a cacheless writer lent this registry declares what it writes, and claims
+        // with the types this registry would.
+        internal bool Owns(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog, Func<string, bool> declared) =>
+            Owns(schemaId, catalog, declared, _indexes, descriptor => descriptor.ToCatalogEntry());
+
+        // The rule itself, for any writer: declared, or the claimant (picked by the one Claimant over a lookup) reads the record's
+        // published entry whole. The lookup is a registry's indexes, or the entries a registry-less cacheless writer writes.
+        internal static bool Owns<T>(
             string schemaId,
             IReadOnlyCollection<CultSchemaCatalogEntry> catalog,
             Func<string, bool> declared,
-            Func<CultSchemaCatalogEntry, CultSchemaCatalogEntry?> claimantOf)
+            IClaimantLookup<T> lookup,
+            Func<T, CultSchemaCatalogEntry> entryOf)
+            where T : class
         {
             if (declared(schemaId))
                 return true;
-            var persisted = PublishedBy(schemaId, catalog);
-            return persisted != null && claimantOf(persisted) is { } claimant && ReadsWhole(persisted, claimant);
+            try
+            {
+                var claimant = Claimant(schemaId, catalog, lookup, out var persisted);
+                return persisted != null && claimant != null && ReadsWhole(persisted, entryOf(claimant));
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
         }
-
-        // The entry a cacheless writer reads a published entry with: the one that lists the writer's id compatible, else the one of
-        // the same schema name, as Claimant picks a type.
-        internal static CultSchemaCatalogEntry? ClaimantEntry(IEnumerable<CultSchemaCatalogEntry> writes, CultSchemaCatalogEntry persisted) =>
-            writes.FirstOrDefault(entry => persisted.CompatibleSchemaIds.Contains(entry.SchemaId, StringComparer.Ordinal))
-            ?? writes.FirstOrDefault(entry => string.Equals(entry.SchemaName, persisted.SchemaName, StringComparison.Ordinal));
 
         // Owns' declared half: a registered type owns the id or lists it compatible.
         internal bool Declared(string schemaId)
@@ -879,7 +916,7 @@ namespace GameCult.Caching
                 new[] { existing.SchemaName, claimed.SchemaName },
                 string.Empty);
 
-        private sealed class RegistryIndexes
+        private sealed class RegistryIndexes : IClaimantLookup<CultDocumentDescriptor>
         {
             public RegistryIndexes()
             {
@@ -902,6 +939,17 @@ namespace GameCult.Caching
             // Every type declaring the id compatible, in registration order; resolution never depends on that order.
             public Dictionary<string, CultDocumentDescriptor[]> ByCompatibleSchemaId { get; }
             public Dictionary<string, CultDocumentDescriptor[]> BySchemaName { get; }
+
+            public CultDocumentDescriptor? Owner(string schemaId) => BySchemaId.GetValueOrDefault(schemaId);
+
+            public IReadOnlyList<CultDocumentDescriptor> Listing(string schemaId) =>
+                ByCompatibleSchemaId.GetValueOrDefault(schemaId) ?? Array.Empty<CultDocumentDescriptor>();
+
+            public IReadOnlyList<CultDocumentDescriptor> Named(string schemaName) =>
+                BySchemaName.GetValueOrDefault(schemaName) ?? Array.Empty<CultDocumentDescriptor>();
+
+            public ClaimantFacts Describe(CultDocumentDescriptor claimant) =>
+                new(claimant.SchemaName, claimant.SchemaVersion, claimant.DocumentType.FullName ?? string.Empty);
         }
 
         private static CultDocumentDescriptor BuildDescriptor(Type type)
@@ -4398,7 +4446,7 @@ namespace GameCult.Caching
         /// <param name="record">The record to store.</param>
         /// <param name="catalogEntry">The schema catalog entry for the record's schema id.</param>
         /// <param name="holdsIds">Whether the record's payload holds element ids, or null when the caller cannot tell.</param>
-        /// <param name="registry">The registry the payload was encoded with. Given, the write decides the header for copied records that registry can read; omitted, it decides nothing for them. It serves this call only: the store keeps no registry.</param>
+        /// <param name="registry">The registry the payload was encoded with. Given, the write decides the header for copied records that registry can read, and the registry also picks the type that reads a durable record, as a cache registering it would; omitted, it decides nothing for them and the one catalog entry is the reader. It serves this call only: the store keeps no registry.</param>
         /// <remarks>The call holds the store's gate while it runs. User code it runs must not enter a cache or another store; that throws <see cref="InvalidOperationException"/>.</remarks>
         /// <exception cref="InvalidOperationException">The store is attached to a cache; write through the cache.</exception>
         /// <exception cref="CultStoreUnreadableException">The file at the path is not a store this runtime can read.</exception>
@@ -4651,21 +4699,21 @@ namespace GameCult.Caching
                 _staged.Concat(upserts.Select(staged => staged.Record.Key)).Concat(removals).Concat(checks).Concat(StagedChecks),
                 OwnsOnDisk(upserts));
 
-        // The owns predicate a write over the durable catalog asks. A cacheless writer has no registry: it owns what its one entry
-        // declares, or reads whole in the entry that publishes the id.
+        // The owns predicate a write over the durable catalog asks. A cacheless writer declares what the entries it writes declare
+        // (variants:ruling:mesh-writes-bound-by-declaration), and reads a published entry with the claimant a cache registering the
+        // same types would pick: its lent registry's, else the entries it writes. It is never more permissive than that cache.
         private Func<string, IReadOnlyCollection<CultSchemaCatalogEntry>, bool> OwnsOnDisk(IReadOnlyCollection<CultStagedRecord>? upserts = null) =>
             Cache != null || upserts == null
                 ? Registry.Owns
                 : (id, catalog) =>
                 {
                     var writes = upserts.Select(staged => staged.Entry).ToArray();
-                    return CultDocumentRegistry.Owns(
-                        id,
-                        catalog,
-                        declared => writes.Any(entry =>
-                            string.Equals(entry.SchemaId, declared, StringComparison.Ordinal) ||
-                            entry.CompatibleSchemaIds.Contains(declared, StringComparer.Ordinal)),
-                        persisted => CultDocumentRegistry.ClaimantEntry(writes, persisted));
+                    Func<string, bool> declared = candidate => writes.Any(entry =>
+                        string.Equals(entry.SchemaId, candidate, StringComparison.Ordinal) ||
+                        entry.CompatibleSchemaIds.Contains(candidate, StringComparer.Ordinal));
+                    return AttachedRegistry is { } lent
+                        ? lent.Owns(id, catalog, declared)
+                        : CultDocumentRegistry.Owns(id, catalog, declared, new CatalogEntryLookup(writes), entry => entry);
                 };
 
         // A refused key's durable version is what this store has now read of it.

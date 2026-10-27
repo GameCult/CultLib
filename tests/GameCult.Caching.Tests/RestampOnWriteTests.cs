@@ -53,6 +53,14 @@ namespace GameCult.Caching.Tests
             [Key(1)] public int Value;
         }
 
+        // Reads a Narrow-shaped entry only by dropping Value.
+        [CultDocument("tests.restamp_short", "tests.restamp_short.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class NoteShort
+        {
+            [Key(0)] [CultName] public string Name = string.Empty;
+        }
+
         // Grown with the lossy id declared: declaration is the consent to the loss.
         [CultDocument("tests.restamp_note", "tests.restamp_note.v4", CompatibleSchemaIds = new[] { WideId })]
         [MessagePackObject(AllowPrivate = true)]
@@ -344,7 +352,7 @@ namespace GameCult.Caching.Tests
             return path;
         }
 
-        // Variants live in a single file (the directory store refuses them). The staging half asks the flag ToStoredDocument set on a loaded variant, and Resolved and Flatten carry it on: an owned
+        // Variants live in a single file (the directory store refuses them). The staging half asks the flag ToStoredDocument set on a loaded variant; Resolved and Flatten copies are never asked (only the store's loaded view carries the read-whole flag): an owned
         // drift variant is rewritten, flattened and removed like a plain drift record, restamping only what is written.
         [Test]
         public async Task AnOwnedDriftVariantIsRewritten()
@@ -390,16 +398,19 @@ namespace GameCult.Caching.Tests
         }
 
         // A store whose entry is a newer writer's rename of Narrow's schema, with identical members and the given compatible ids.
-        private string SeedRenamed(bool listsNarrow)
+        private string SeedRenamed(bool listsNarrow, string? alsoLists = null, string name = "tests.restamp_note_renamed")
         {
             var path = SeedNarrow(directory: false);
             var snapshot = Snapshot(path);
             var narrowId = NarrowRegistry.GetRequired<NoteNarrow>().SchemaId;
             var entry = snapshot.SchemaCatalog.Single();
             entry.SchemaId = entry.ContentHash = "tests.restamp.renamed";
-            entry.SchemaName = "tests.restamp_note_renamed";
+            entry.SchemaName = name;
             entry.SchemaVersion = "tests.restamp_note_renamed.v2";
-            entry.CompatibleSchemaIds = listsNarrow ? new[] { "tests.restamp.renamed", narrowId } : new[] { "tests.restamp.renamed" };
+            entry.CompatibleSchemaIds = new[] { "tests.restamp.renamed" }
+                .Concat(listsNarrow ? new[] { narrowId } : Array.Empty<string>())
+                .Concat(alsoLists == null ? Array.Empty<string>() : new[] { alsoLists })
+                .ToArray();
             foreach (var record in snapshot.Records)
                 record.SchemaId = entry.SchemaId;
             File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
@@ -407,15 +418,16 @@ namespace GameCult.Caching.Tests
         }
 
         // One writer of NoteNarrow, with a cache or without one: the same Owns answer for the same record.
-        private void WriteNarrow(string path, bool cacheless)
+        private void WriteNarrow(string path, bool cacheless, CultDocumentRegistry? registry = null)
         {
+            registry ??= NarrowRegistry;
             if (cacheless)
             {
-                new SingleFileMessagePackBackingStore(path).WriteDocument(Note, new NoteNarrow { Name = "note", Value = 2 }, registry: NarrowRegistry);
+                new SingleFileMessagePackBackingStore(path).WriteDocument(Note, new NoteNarrow { Name = "note", Value = 2 }, registry: registry);
                 return;
             }
 
-            using var cache = Open(path, false, NarrowRegistry);
+            using var cache = Open(path, false, registry);
             cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
             Assert.That(cache.Commit(batch => batch.Upsert(new NoteNarrow { Name = "note", Value = 2 }, new CultRecordHandle<NoteNarrow>(Note))), Is.True);
         }
@@ -452,6 +464,54 @@ namespace GameCult.Caching.Tests
             var before = Fingerprint(path);
 
             Assert.Throws<CultSchemaConflictException>(() => WriteNarrow(path, cacheless));
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+        }
+
+        private static readonly CultDocumentRegistry NarrowShortRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(NoteNarrow), typeof(NoteShort) });
+
+        // Which entry reads a persisted entry is one precedence: a cacheless writer lent a registry picks the claimant that registry
+        // picks, never one by schema name over its own entry. Here the entry is named and shaped like Narrow but lists Short's id.
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ACachelessWriterPicksTheClaimantItsRegistryPicks(bool cacheless)
+        {
+            var path = SeedRenamed(listsNarrow: false, alsoLists: NarrowShortRegistry.GetRequired<NoteShort>().SchemaId, name: "tests.restamp_note");
+            var before = Fingerprint(path);
+
+            Assert.Throws<CultSchemaConflictException>(() => WriteNarrow(path, cacheless, NarrowShortRegistry));
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ACachelessWriterOwnsWhatItsRegistryOwns(bool cacheless)
+        {
+            var path = SeedRenamed(listsNarrow: false, alsoLists: NarrowShortRegistry.GetRequired<NoteShort>().SchemaId, name: "tests.restamp_note");
+
+            WriteNarrow(path, cacheless, NarrowRegistry);
+
+            Assert.That(Snapshot(path).Records.Single(record => record.Key == "note").SchemaId, Is.EqualTo(NarrowRegistry.GetRequired<NoteNarrow>().SchemaId));
+        }
+
+        // A durable record under an id no catalog entry publishes belongs to nobody a writer can name: another key's write carries it
+        // untouched, a write at its own key is refused.
+        [Test]
+        public void AnUnpublishedIdIsCarriedByACachelessWrite()
+        {
+            var path = SeedNarrow(directory: false);
+            var snapshot = Snapshot(path);
+            var stray = new CultPersistedRecord { Key = "stray", SchemaId = "tests.restamp.unpublished", StoredAt = snapshot.Records[0].StoredAt, Payload = new byte[] { 0x90 } };
+            snapshot.Records = snapshot.Records.Concat(new[] { stray }).ToArray();
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+
+            new SingleFileMessagePackBackingStore(path).WriteDocument(Other, new NoteNarrow { Name = "other", Value = 3 }, registry: NarrowRegistry);
+
+            var carried = Snapshot(path).Records.Single(record => record.Key == "stray");
+            Assert.That(carried.SchemaId, Is.EqualTo("tests.restamp.unpublished"));
+            Assert.That(carried.Payload, Is.EqualTo(new byte[] { 0x90 }));
+            var before = Fingerprint(path);
+            Assert.Throws<CultSchemaConflictException>(() =>
+                new SingleFileMessagePackBackingStore(path).WriteDocument(new CultRecordKey("stray"), new NoteNarrow { Name = "stray", Value = 1 }, registry: NarrowRegistry));
             Assert.That(Fingerprint(path), Is.EqualTo(before));
         }
 
