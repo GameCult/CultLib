@@ -3,7 +3,9 @@ import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
 
 import {
   CultCache,
+  SchemaConflictError,
   SingleFileMessagePackBackingStore,
+  schemaIdentityOf,
   type AnyCultCacheDocumentDefinition,
   type CacheBackingStore,
   type CultCacheEnvelope,
@@ -206,6 +208,15 @@ export type CultMeshCollectionWatcher<TDocument> = (
   context: CultMeshQueryContext,
   callback: (change: CultMeshCollectionChange<TDocument>) => void,
 ) => CultMeshUnsubscribe;
+
+/**
+ * The value type a catalog lookup yields. An explicit type argument wins; otherwise a CultCache document definition
+ * names its own value type, and a bare schema descriptor yields `unknown`. The value type is never inferred from a
+ * value or an expected result, so a wrong value is an error rather than a new type.
+ */
+export type CultMeshCatalogValue<TDocument, TSchema> = [TDocument] extends [never]
+  ? TSchema extends AnyCultCacheDocumentDefinition ? CultCacheDocumentValue<TSchema> : unknown
+  : NoInfer<TDocument>;
 
 export interface CultMeshDocumentSchemaDescriptor {
   readonly type?: string;
@@ -1019,38 +1030,6 @@ export class CultMeshDocumentHandle<TDocument> {
     );
   }
 
-  public asSchemaAlias<TAlias>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    options: { parse?: (value: unknown) => TAlias } = {},
-  ): CultMeshDocumentHandle<TAlias> {
-    const aliasSchema = normalizeCultMeshDocumentSchema(schema);
-    if (!cultMeshSchemasAreCompatible(this.schema, aliasSchema)) {
-      throw new Error(
-        `Document '${this.documentId}' schema ${cultMeshSchemaLabel(this.schema)} is not compatible with alias ${cultMeshSchemaLabel(aliasSchema)}.`,
-      );
-    }
-
-    const parse = options.parse ?? ((value: unknown) => value as TAlias);
-    return new CultMeshDocumentHandle<TAlias>(
-      this.documentId,
-      aliasSchema,
-      async (context) => parse(await this.latest(context)),
-      {
-        sources: this.sources,
-        routeHint: this.routeHint,
-        watchDocument: this.watchDocument
-          ? (context, callback) => this.watch(context, value => callback(parse(value)))
-          : undefined,
-        replaceDocument: this.replaceDocument
-          ? (context, value) => this.replace(context, value as unknown as TDocument)
-          : undefined,
-        submitPrediction: this.submitPredictionDocument
-          ? (context, value) => this.submitPrediction(context, value as unknown as TDocument)
-          : undefined,
-      },
-    );
-  }
-
   public bind(verse: CultMeshVerseContext | CultMeshVerse): CultMeshBoundDocumentHandle<TDocument> {
     return cultMeshBindDocument(verse, this);
   }
@@ -1484,12 +1463,6 @@ export class CultMeshBoundDocumentHandle<TDocument> {
     });
   }
 
-  public asSchemaAlias<TAlias>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    options: { parse?: (value: unknown) => TAlias } = {},
-  ): CultMeshBoundDocumentHandle<TAlias> {
-    return cultMeshBindDocument(this.verse, this.document.asSchemaAlias(schema, options));
-  }
 }
 
 export class CultMeshDocumentCatalog {
@@ -1509,6 +1482,7 @@ export class CultMeshDocumentCatalog {
   }
 
   public add<TDocument>(document: CultMeshDocumentHandle<TDocument>): this {
+    cultMeshRefuseSecondCatalogType(document.schema, this.#byType, this.#bySchemaId, this.#bySchemaNameVersion);
     this.#byDocumentId.set(document.documentId, document as CultMeshDocumentHandle<any>);
     if (document.schema.type) {
       this.#byType.set(document.schema.type, document as CultMeshDocumentHandle<any>);
@@ -1523,129 +1497,120 @@ export class CultMeshDocumentCatalog {
     return this;
   }
 
-  public tryDocument<TDocument>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    options: { parse?: (value: unknown) => TDocument } = {},
-  ): CultMeshDocumentHandle<TDocument> | undefined {
-    const descriptor = normalizeCultMeshDocumentSchema(schema);
-    const exact =
-      (descriptor.type ? this.#byType.get(descriptor.type) : undefined) ??
-      (descriptor.schemaId ? this.#bySchemaId.get(descriptor.schemaId) : undefined) ??
-      (() => {
-        const key = cultMeshSchemaNameVersionKey(descriptor);
-        return key ? this.#bySchemaNameVersion.get(key) : undefined;
-      })();
-
-    if (!exact) {
-      return undefined;
-    }
-
-    return cultMeshSchemasAreCompatible(exact.schema, descriptor)
-      ? exact.asSchemaAlias(descriptor, options)
-      : undefined;
+  // A catalog may hold several documents of one type, one per document id. A lookup by schema answers with one of them;
+  // a lookup by document id addresses each.
+  public tryDocumentById<TDocument = unknown>(documentId: string): CultMeshDocumentHandle<TDocument> | undefined {
+    return this.#byDocumentId.get(documentId);
   }
 
-  public document<TDocument>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    options: { parse?: (value: unknown) => TDocument } = {},
-  ): CultMeshDocumentHandle<TDocument> {
-    const document = this.tryDocument(schema, options);
+  public documentById<TDocument = unknown>(documentId: string): CultMeshDocumentHandle<TDocument> {
+    const document = this.tryDocumentById<TDocument>(documentId);
     if (!document) {
-      throw new Error(`Document catalog has no document for ${cultMeshSchemaLabel(schema)}.`);
+      throw new Error(`Document catalog has no document with id '${documentId}'.`);
     }
     return document;
   }
 
-  public latest<TDocument>(
-    schema: CultMeshDocumentSchemaDescriptor,
+  public tryDocument<TDocument = never, TSchema extends CultMeshDocumentSchemaDescriptor = CultMeshDocumentSchemaDescriptor>(
+    schema: TSchema,
+  ): CultMeshDocumentHandle<CultMeshCatalogValue<TDocument, TSchema>> | undefined {
+    const descriptor = normalizeCultMeshDocumentSchema(schema);
+    // One type owns a schema, so a typed lookup is answered by that type's handle or not at all.
+    if (descriptor.type) {
+      return this.#byType.get(descriptor.type);
+    }
+    const key = cultMeshSchemaNameVersionKey(descriptor);
+    return (descriptor.schemaId ? this.#bySchemaId.get(descriptor.schemaId) : undefined) ??
+      (key ? this.#bySchemaNameVersion.get(key) : undefined);
+  }
+
+  public document<TDocument = never, TSchema extends CultMeshDocumentSchemaDescriptor = CultMeshDocumentSchemaDescriptor>(
+    schema: TSchema,
+  ): CultMeshDocumentHandle<CultMeshCatalogValue<TDocument, TSchema>> {
+    return this.#require(schema);
+  }
+
+  public latest<TDocument = never, TSchema extends CultMeshDocumentSchemaDescriptor = CultMeshDocumentSchemaDescriptor>(
+    schema: TSchema,
     context: CultMeshQueryContext | string = "local",
-    options: { parse?: (value: unknown) => TDocument } = {},
-  ): Promise<TDocument> {
-    return this.document(schema, options).latest(context);
+  ): Promise<CultMeshCatalogValue<TDocument, TSchema>> {
+    return this.#require(schema).latest(context);
   }
 
   public canReplace(schema: CultMeshDocumentSchemaDescriptor): boolean {
     return this.tryDocument(schema)?.canReplace ?? false;
   }
 
-  public replace<TDocument>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    value: TDocument,
-    options?: { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string },
+  public replace<TDocument = never, TSchema extends CultMeshDocumentSchemaDescriptor = CultMeshDocumentSchemaDescriptor>(
+    schema: TSchema,
+    value: CultMeshCatalogValue<TDocument, TSchema>,
+    options?: { context?: CultMeshQueryContext | string },
   ): Promise<void>;
-  public replace<TDocument>(
-    schema: CultMeshDocumentSchemaDescriptor,
+  public replace<TDocument = never, TSchema extends CultMeshDocumentSchemaDescriptor = CultMeshDocumentSchemaDescriptor>(
+    schema: TSchema,
     context: CultMeshQueryContext | string,
-    value: TDocument,
-    options?: { parse?: (value: unknown) => TDocument },
+    value: CultMeshCatalogValue<TDocument, TSchema>,
   ): Promise<void>;
-  public replace<TDocument>(
+  public replace(
     schema: CultMeshDocumentSchemaDescriptor,
-    contextOrValue: CultMeshQueryContext | string | TDocument,
-    valueOrOptions?: TDocument | { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string },
-    maybeOptions: { parse?: (value: unknown) => TDocument } = {},
+    contextOrValue: unknown,
+    valueOrOptions?: unknown,
   ): Promise<void> {
-    const hasContext =
-      typeof contextOrValue === "string" || isCultMeshQueryContext(contextOrValue);
-    const context = hasContext
-      ? contextOrValue as CultMeshQueryContext | string
-      : (valueOrOptions as { context?: CultMeshQueryContext | string } | undefined)?.context ?? "local";
-    const value = hasContext ? valueOrOptions as TDocument : contextOrValue as TDocument;
-    const options = hasContext ? maybeOptions : valueOrOptions as { parse?: (value: unknown) => TDocument } | undefined;
-    return this.document(schema, options).replace(context, value);
+    const [context, value] = cultMeshCatalogWriteArguments(contextOrValue, valueOrOptions);
+    return this.#require(schema).replace(context, value);
   }
 
   public canSubmitPrediction(schema: CultMeshDocumentSchemaDescriptor): boolean {
     return this.tryDocument(schema)?.canSubmitPrediction ?? false;
   }
 
-  public submitPrediction<TDocument>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    value: TDocument,
-    options?: { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string },
+  public submitPrediction<TDocument = never, TSchema extends CultMeshDocumentSchemaDescriptor = CultMeshDocumentSchemaDescriptor>(
+    schema: TSchema,
+    value: CultMeshCatalogValue<TDocument, TSchema>,
+    options?: { context?: CultMeshQueryContext | string },
   ): Promise<void>;
-  public submitPrediction<TDocument>(
-    schema: CultMeshDocumentSchemaDescriptor,
+  public submitPrediction<TDocument = never, TSchema extends CultMeshDocumentSchemaDescriptor = CultMeshDocumentSchemaDescriptor>(
+    schema: TSchema,
     context: CultMeshQueryContext | string,
-    value: TDocument,
-    options?: { parse?: (value: unknown) => TDocument },
+    value: CultMeshCatalogValue<TDocument, TSchema>,
   ): Promise<void>;
-  public submitPrediction<TDocument>(
+  public submitPrediction(
     schema: CultMeshDocumentSchemaDescriptor,
-    contextOrValue: CultMeshQueryContext | string | TDocument,
-    valueOrOptions?: TDocument | { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string },
-    maybeOptions: { parse?: (value: unknown) => TDocument } = {},
+    contextOrValue: unknown,
+    valueOrOptions?: unknown,
   ): Promise<void> {
-    const hasContext =
-      typeof contextOrValue === "string" || isCultMeshQueryContext(contextOrValue);
-    const context = hasContext
-      ? contextOrValue as CultMeshQueryContext | string
-      : (valueOrOptions as { context?: CultMeshQueryContext | string } | undefined)?.context ?? "local";
-    const value = hasContext ? valueOrOptions as TDocument : contextOrValue as TDocument;
-    const options = hasContext ? maybeOptions : valueOrOptions as { parse?: (value: unknown) => TDocument } | undefined;
-    return this.document(schema, options).submitPrediction(context, value);
+    const [context, value] = cultMeshCatalogWriteArguments(contextOrValue, valueOrOptions);
+    return this.#require(schema).submitPrediction(context, value);
   }
 
-  public authoritativeWriter<TDocument extends object>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    options: { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string } = {},
-  ): CultMeshDocumentWriter<TDocument> {
-    return this.document(schema, options).authoritativeWriter(options.context ?? "local");
+  public authoritativeWriter<TDocument extends object = never, TSchema extends CultMeshDocumentSchemaDescriptor = CultMeshDocumentSchemaDescriptor>(
+    schema: TSchema,
+    options: { context?: CultMeshQueryContext | string } = {},
+  ): CultMeshDocumentWriter<CultMeshCatalogValue<TDocument, TSchema> & object> {
+    return this.#require(schema).authoritativeWriter(options.context ?? "local");
   }
 
-  public predictionWriter<TDocument extends object>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    options: { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string } = {},
-  ): CultMeshDocumentWriter<TDocument> {
-    return this.document(schema, options).predictionWriter(options.context ?? "local");
+  public predictionWriter<TDocument extends object = never, TSchema extends CultMeshDocumentSchemaDescriptor = CultMeshDocumentSchemaDescriptor>(
+    schema: TSchema,
+    options: { context?: CultMeshQueryContext | string } = {},
+  ): CultMeshDocumentWriter<CultMeshCatalogValue<TDocument, TSchema> & object> {
+    return this.#require(schema).predictionWriter(options.context ?? "local");
   }
 
-  public watch<TDocument>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    callback: (value: TDocument) => void,
-    options: { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string } = {},
+  public watch<TDocument = never, TSchema extends CultMeshDocumentSchemaDescriptor = CultMeshDocumentSchemaDescriptor>(
+    schema: TSchema,
+    callback: (value: CultMeshCatalogValue<TDocument, TSchema>) => void,
+    options: { context?: CultMeshQueryContext | string } = {},
   ): CultMeshUnsubscribe {
-    return this.document(schema, options).watch(options.context ?? "local", callback);
+    return this.#require(schema).watch(options.context ?? "local", callback);
+  }
+
+  #require(schema: CultMeshDocumentSchemaDescriptor): CultMeshDocumentHandle<any> {
+    const document = this.tryDocument(schema);
+    if (!document) {
+      throw new Error(`Document catalog has no document for ${cultMeshSchemaLabel(schema)}.`);
+    }
+    return document;
   }
 }
 
@@ -1711,35 +1676,6 @@ export class CultMeshCollectionHandle<TDocument> {
     return this.watchCollection(this.resolveContext(context), callback);
   }
 
-  public asSchemaAlias<TAlias>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    options: { parse?: (value: unknown) => TAlias } = {},
-  ): CultMeshCollectionHandle<TAlias> {
-    const aliasSchema = normalizeCultMeshDocumentSchema(schema);
-    if (!cultMeshSchemasAreCompatible(this.schema, aliasSchema)) {
-      throw new Error(
-        `Collection '${this.collectionId}' schema ${cultMeshSchemaLabel(this.schema)} is not compatible with alias ${cultMeshSchemaLabel(aliasSchema)}.`,
-      );
-    }
-
-    const parse = options.parse ?? ((value: unknown) => value as TAlias);
-    return new CultMeshCollectionHandle<TAlias>(
-      this.collectionId,
-      aliasSchema,
-      async (context) => (await this.latest(context)).map(value => parse(value)),
-      {
-        sources: this.sources,
-        routeHint: this.routeHint,
-        watchCollection: this.watchCollection
-          ? (context, callback) => this.watchChanges(context, change => callback({
-              ...change,
-              value: change.value === undefined ? undefined : parse(change.value),
-            }))
-          : undefined,
-      },
-    );
-  }
-
   public bind(verse: CultMeshVerseContext | CultMeshVerse): CultMeshBoundCollectionHandle<TDocument> {
     return cultMeshBindCollection(verse, this);
   }
@@ -1772,6 +1708,7 @@ export class CultMeshCollectionCatalog {
   }
 
   public add<TDocument>(collection: CultMeshCollectionHandle<TDocument>): this {
+    cultMeshRefuseSecondCatalogType(collection.schema, this.#byType, this.#bySchemaId, this.#bySchemaNameVersion);
     this.#byCollectionId.set(collection.collectionId, collection as CultMeshCollectionHandle<any>);
     if (collection.schema.type) {
       this.#byType.set(collection.schema.type, collection as CultMeshCollectionHandle<any>);
@@ -1786,53 +1723,46 @@ export class CultMeshCollectionCatalog {
     return this;
   }
 
-  public tryCollection<TDocument>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    options: { parse?: (value: unknown) => TDocument } = {},
-  ): CultMeshCollectionHandle<TDocument> | undefined {
+  public tryCollection<TDocument = never, TSchema extends CultMeshDocumentSchemaDescriptor = CultMeshDocumentSchemaDescriptor>(
+    schema: TSchema,
+  ): CultMeshCollectionHandle<CultMeshCatalogValue<TDocument, TSchema>> | undefined {
     const descriptor = normalizeCultMeshDocumentSchema(schema);
-    const exact =
-      (descriptor.type ? this.#byType.get(descriptor.type) : undefined) ??
-      (descriptor.schemaId ? this.#bySchemaId.get(descriptor.schemaId) : undefined) ??
-      (() => {
-        const key = cultMeshSchemaNameVersionKey(descriptor);
-        return key ? this.#bySchemaNameVersion.get(key) : undefined;
-      })();
-
-    if (!exact) {
-      return undefined;
+    // One type owns a schema, so a typed lookup is answered by that type's handle or not at all.
+    if (descriptor.type) {
+      return this.#byType.get(descriptor.type);
     }
-
-    return cultMeshSchemasAreCompatible(exact.schema, descriptor)
-      ? exact.asSchemaAlias(descriptor, options)
-      : undefined;
+    const key = cultMeshSchemaNameVersionKey(descriptor);
+    return (descriptor.schemaId ? this.#bySchemaId.get(descriptor.schemaId) : undefined) ??
+      (key ? this.#bySchemaNameVersion.get(key) : undefined);
   }
 
-  public collection<TDocument>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    options: { parse?: (value: unknown) => TDocument } = {},
-  ): CultMeshCollectionHandle<TDocument> {
-    const collection = this.tryCollection(schema, options);
+  public collection<TDocument = never, TSchema extends CultMeshDocumentSchemaDescriptor = CultMeshDocumentSchemaDescriptor>(
+    schema: TSchema,
+  ): CultMeshCollectionHandle<CultMeshCatalogValue<TDocument, TSchema>> {
+    return this.#require(schema);
+  }
+
+  public latest<TDocument = never, TSchema extends CultMeshDocumentSchemaDescriptor = CultMeshDocumentSchemaDescriptor>(
+    schema: TSchema,
+    context: CultMeshQueryContext | string = "local",
+  ): Promise<CultMeshCollectionSnapshot<CultMeshCatalogValue<TDocument, TSchema>>> {
+    return this.#require(schema).latest(context);
+  }
+
+  public watchChanges<TDocument = never, TSchema extends CultMeshDocumentSchemaDescriptor = CultMeshDocumentSchemaDescriptor>(
+    schema: TSchema,
+    callback: (change: CultMeshCollectionChange<CultMeshCatalogValue<TDocument, TSchema>>) => void,
+    options: { context?: CultMeshQueryContext | string } = {},
+  ): CultMeshUnsubscribe {
+    return this.#require(schema).watchChanges(options.context ?? "local", callback);
+  }
+
+  #require(schema: CultMeshDocumentSchemaDescriptor): CultMeshCollectionHandle<any> {
+    const collection = this.tryCollection(schema);
     if (!collection) {
       throw new Error(`Collection catalog has no collection for ${cultMeshSchemaLabel(schema)}.`);
     }
     return collection;
-  }
-
-  public latest<TDocument>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    context: CultMeshQueryContext | string = "local",
-    options: { parse?: (value: unknown) => TDocument } = {},
-  ): Promise<CultMeshCollectionSnapshot<TDocument>> {
-    return this.collection(schema, options).latest(context);
-  }
-
-  public watchChanges<TDocument>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    callback: (change: CultMeshCollectionChange<TDocument>) => void,
-    options: { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string } = {},
-  ): CultMeshUnsubscribe {
-    return this.collection(schema, options).watchChanges(options.context ?? "local", callback);
   }
 }
 
@@ -1858,12 +1788,6 @@ export class CultMeshBoundCollectionHandle<TDocument> {
     return this.collection.watchChanges(cultMeshQueryContextFromVerse(this.verse), callback);
   }
 
-  public asSchemaAlias<TAlias>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    options: { parse?: (value: unknown) => TAlias } = {},
-  ): CultMeshBoundCollectionHandle<TAlias> {
-    return cultMeshBindCollection(this.verse, this.collection.asSchemaAlias(schema, options));
-  }
 }
 
 export class CultMeshStatePointer<T> {
@@ -2415,6 +2339,17 @@ function resolveCultMeshVerseContext(verse: CultMeshVerseContext | CultMeshVerse
   return verse instanceof CultMeshVerse ? verse.context : verse;
 }
 
+// A catalog write takes (value, options?) or (context, value); both resolve to one context and one value.
+function cultMeshCatalogWriteArguments(
+  contextOrValue: unknown,
+  valueOrOptions: unknown,
+): [CultMeshQueryContext | string, unknown] {
+  if (typeof contextOrValue === "string" || isCultMeshQueryContext(contextOrValue)) {
+    return [contextOrValue, valueOrOptions];
+  }
+  return [(valueOrOptions as { context?: CultMeshQueryContext | string } | undefined)?.context ?? "local", contextOrValue];
+}
+
 function isCultMeshQueryContext(value: unknown): value is CultMeshQueryContext {
   if (typeof value !== "object" || value === null) {
     return false;
@@ -2672,19 +2607,11 @@ export function cultMeshDocumentFromPeerSnapshot<TDefinition extends AnyCultCach
   const read = async (): Promise<CultCacheDocumentValue<TDefinition>> => {
     const record = await requestCultNetRawSnapshotDocument(
       peer,
-      resolvedSchemaId,
+      cultMeshAcceptedSchemaIds(definition),
       recordKey,
       {
         timeoutMs: options.timeoutMs,
         messageIdPrefix: options.messageIdPrefix ?? documentId,
-        accepts: candidate => {
-          try {
-            decodeDocumentPayload(definition, candidate.payload);
-            return true;
-          } catch {
-            return false;
-          }
-        },
       },
     );
     return decodeDocumentPayload(definition, record.payload);
@@ -3872,11 +3799,7 @@ export class CultMeshNode {
     definition: TDefinition,
     key: string,
   ): CultCacheDocumentValue<TDefinition> | undefined {
-    const registered = this.resolveCacheDefinition(definition);
-    const value = this.cache.get(registered, key);
-    return value === undefined
-      ? undefined
-      : this.parseDocumentValue(definition, value);
+    return this.cache.get(definition, key);
   }
 
   public getRequired<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -3896,17 +3819,14 @@ export class CultMeshNode {
     key: string,
     value: CultCacheDocumentValue<TDefinition>,
   ): Promise<CultCacheDocumentValue<TDefinition>> {
-    const registered = this.resolveCacheDefinition(definition);
-    return this.cache
-      .put(registered, key, this.parseDocumentValue(definition, value) as never)
-      .then(stored => this.parseDocumentValue(definition, stored));
+    return this.cache.put(definition, key, value);
   }
 
   public delete<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
     key: string,
   ): Promise<boolean> {
-    return this.cache.delete(this.resolveCacheDefinition(definition), key);
+    return this.cache.delete(definition, key);
   }
 
   public document<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -3919,15 +3839,7 @@ export class CultMeshNode {
     } = {},
   ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
     const documentId = options.documentId ?? `${definition.type}:${key}`;
-    return this.asRequestedDocument(
-      cultMeshDocumentFromCache(
-        this.cache,
-        this.resolveCacheDefinition(definition),
-        key,
-        { ...options, documentId },
-      ),
-      definition,
-    );
+    return cultMeshDocumentFromCache(this.cache, definition, key, { ...options, documentId });
   }
 
   public async syncDocumentFromPeerSnapshot<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -3939,7 +3851,6 @@ export class CultMeshNode {
       messageIdPrefix?: string;
     } = {},
   ): Promise<CultCacheDocumentValue<TDefinition>> {
-    const registered = this.resolveCacheDefinition(definition);
     const schema = cultMeshSchemaFromDefinition(definition);
     const schemaId = schema.schemaId ?? schema.type;
     if (!schemaId) {
@@ -3947,19 +3858,11 @@ export class CultMeshNode {
     }
     const document = await requestCultNetRawSnapshotDocument(
       peer,
-      schemaId,
+      [schemaId],
       key,
       {
         timeoutMs: options.timeoutMs,
         messageIdPrefix: options.messageIdPrefix ?? key,
-        accepts: record => {
-          try {
-            decodeDocumentPayload(definition, record.payload);
-            return true;
-          } catch {
-            return false;
-          }
-        },
       },
     );
     await this.documents.applyRawDocumentPutMessage(this.cache, {
@@ -3967,7 +3870,7 @@ export class CultMeshNode {
       messageId: options.messageIdPrefix ?? `sync:${key}`,
       document,
     });
-    return this.parseDocumentValue(definition, this.cache.getRequired(registered, key));
+    return this.cache.getRequired(definition, key);
   }
 
   public syncDocumentFromPublication<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -4004,14 +3907,7 @@ export class CultMeshNode {
     } = {},
   ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
     const documentId = options.documentId ?? `${definition.type}:global`;
-    return this.asRequestedDocument(
-      cultMeshGlobalDocumentFromCache(
-        this.cache,
-        this.resolveCacheDefinition(definition),
-        { ...options, documentId },
-      ),
-      definition,
-    );
+    return cultMeshGlobalDocumentFromCache(this.cache, definition, { ...options, documentId });
   }
 
   public collection<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -4023,45 +3919,11 @@ export class CultMeshNode {
     } = {},
   ): CultMeshCollectionHandle<CultCacheDocumentValue<TDefinition>> {
     const collectionId = options.collectionId ?? definition.type;
-    return cultMeshCollectionFromCache(
-      this.cache,
-      this.resolveCacheDefinition(definition),
-      { ...options, collectionId },
-    ).asSchemaAlias<CultCacheDocumentValue<TDefinition>>(
-      cultMeshSchemaFromDefinition(definition),
-      { parse: value => this.parseDocumentValue(definition, value) },
-    );
+    return cultMeshCollectionFromCache(this.cache, definition, { ...options, collectionId });
   }
 
   public async flush(soft = false): Promise<void> {
     await this.store.pushAll?.(this.cache.snapshot(), { soft });
-  }
-
-  private resolveCacheDefinition<TDefinition extends AnyCultCacheDocumentDefinition>(
-    definition: TDefinition,
-  ): AnyCultCacheDocumentDefinition {
-    const schema = cultMeshSchemaFromDefinition(definition);
-    return (
-      this.documents.get(definition.type) ??
-      (schema.schemaId ? this.documents.getBySchemaId(schema.schemaId) : undefined)
-    )?.definition ?? definition;
-  }
-
-  private asRequestedDocument<TDefinition extends AnyCultCacheDocumentDefinition>(
-    document: CultMeshDocumentHandle<unknown>,
-    definition: TDefinition,
-  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
-    return document.asSchemaAlias<CultCacheDocumentValue<TDefinition>>(
-      cultMeshSchemaFromDefinition(definition),
-      { parse: value => this.parseDocumentValue(definition, value) },
-    );
-  }
-
-  private parseDocumentValue<TDefinition extends AnyCultCacheDocumentDefinition>(
-    definition: TDefinition,
-    value: unknown,
-  ): CultCacheDocumentValue<TDefinition> {
-    return definition.schema.parse(value) as CultCacheDocumentValue<TDefinition>;
   }
 }
 
@@ -6281,12 +6143,8 @@ export class CultMesh {
 function cultMeshSchemaFromDefinition(
   definition: AnyCultCacheDocumentDefinition,
 ): CultMeshDocumentSchemaDescriptor {
-  return {
-    type: definition.type,
-    schemaId: definition.schemaId ?? definition.type,
-    schemaName: definition.schemaName,
-    schemaVersion: definition.schemaVersion,
-  };
+  const { schemaId, schemaName, schemaVersion } = schemaIdentityOf(definition);
+  return { type: definition.type, schemaId, schemaName, schemaVersion };
 }
 
 function normalizeCultMeshDocumentSchema(
@@ -6308,32 +6166,38 @@ function normalizeCultMeshDocumentSchema(
   return normalized;
 }
 
+// One type owns a schema in a catalog, as in a registry. A handle whose type differs from the one already holding its
+// schema id or schema name and version, or whose type already holds another schema, is refused. Handles of one type
+// for one schema may repeat (one per record), and a handle without a type claims no type.
+function cultMeshRefuseSecondCatalogType(
+  schema: CultMeshDocumentSchemaDescriptor,
+  byType: ReadonlyMap<string, { readonly schema: CultMeshDocumentSchemaDescriptor }>,
+  bySchemaId: ReadonlyMap<string, { readonly schema: CultMeshDocumentSchemaDescriptor }>,
+  bySchemaNameVersion: ReadonlyMap<string, { readonly schema: CultMeshDocumentSchemaDescriptor }>,
+): void {
+  if (!schema.type) {
+    return;
+  }
+  const key = cultMeshSchemaNameVersionKey(schema);
+  const sameType = byType.get(schema.type)?.schema;
+  const holder =
+    (sameType?.schemaId && schema.schemaId && sameType.schemaId !== schema.schemaId ? sameType : undefined) ??
+    [schema.schemaId ? bySchemaId.get(schema.schemaId) : undefined, key ? bySchemaNameVersion.get(key) : undefined]
+      .map(held => held?.schema)
+      .find(held => held?.type !== undefined && held.type !== schema.type);
+  if (holder) {
+    const name = (held: CultMeshDocumentSchemaDescriptor) => held.schemaName ?? held.type ?? held.schemaId ?? "";
+    throw new SchemaConflictError(schema.schemaId ?? schema.type, [name(holder), name(schema)], "",
+      `CultMesh catalog schema ${cultMeshSchemaLabel(schema)} is held by type "${holder.type}" and cannot also be held by type "${schema.type}".`);
+  }
+}
+
 function cultMeshSchemaNameVersionKey(
   schema: CultMeshDocumentSchemaDescriptor,
 ): string | undefined {
   return schema.schemaName
     ? `${schema.schemaName}@${schema.schemaVersion ?? ""}`
     : undefined;
-}
-
-function cultMeshSchemasAreCompatible(
-  left: CultMeshDocumentSchemaDescriptor,
-  right: CultMeshDocumentSchemaDescriptor,
-): boolean {
-  if (left.schemaId && right.schemaId && left.schemaId === right.schemaId) {
-    return true;
-  }
-
-  if (
-    left.schemaName &&
-    right.schemaName &&
-    left.schemaName === right.schemaName &&
-    (left.schemaVersion ?? "") === (right.schemaVersion ?? "")
-  ) {
-    return true;
-  }
-
-  return Boolean(left.type && right.type && left.type === right.type);
 }
 
 function inferCultMeshSchemaName(schemaId: string | undefined): string | undefined {
@@ -6348,53 +6212,23 @@ function inferCultMeshSchemaName(schemaId: string | undefined): string | undefin
   return /^\d+$/.test(version) ? schemaId.slice(0, marker) : undefined;
 }
 
+// The record a store document reads: the one under the handle's schema id, else one under an id the definition lists as
+// compatible, as CultCache resolves it. A record under any other id is not this document, whatever
+// its payload parses as.
 function resolveCultMeshStoreDocumentRecord(
   records: readonly CultCacheEnvelope[],
   schema: CultMeshDocumentSchemaDescriptor,
   definition: AnyCultCacheDocumentDefinition,
 ): CultCacheEnvelope | undefined {
-  const schemaId = schema.schemaId ?? schema.type;
-  return (
-    records.find(candidate => schemaId !== undefined && candidate.schemaId === schemaId) ??
-    records.find(candidate =>
-      cultMeshEnvelopeMatchesSchema(candidate, schema) && cultMeshEnvelopeParsesAsDefinition(candidate, definition)) ??
-    records.find(candidate => cultMeshEnvelopeParsesAsDefinition(candidate, definition))
-  );
+  const own = schema.schemaId ?? schema.type;
+  const accepted = [own, ...cultMeshAcceptedSchemaIds(definition)];
+  return records.find(candidate => candidate.schemaId === own)
+    ?? records.find(candidate => candidate.schemaId !== undefined && accepted.includes(candidate.schemaId));
 }
 
-function cultMeshEnvelopeMatchesSchema(
-  envelope: CultCacheEnvelope,
-  schema: CultMeshDocumentSchemaDescriptor,
-): boolean {
-  const entry = envelope.catalogEntry;
-  if (!entry) {
-    return false;
-  }
-  if (
-    schema.schemaId &&
-    (entry.schemaId === schema.schemaId ||
-      envelope.schemaId === schema.schemaId ||
-      entry.compatibleSchemaIds?.includes(schema.schemaId))
-  ) {
-    return true;
-  }
-  return Boolean(
-    schema.schemaName &&
-    entry.schemaName === schema.schemaName &&
-    (schema.schemaVersion ?? "") === (entry.schemaVersion ?? ""),
-  );
-}
-
-function cultMeshEnvelopeParsesAsDefinition(
-  envelope: CultCacheEnvelope,
-  definition: AnyCultCacheDocumentDefinition,
-): boolean {
-  try {
-    decodeDocumentPayload(definition, envelope.payload);
-    return true;
-  } catch {
-    return false;
-  }
+// The ids a definition's records may be stored under: its own first, then the ids it declares compatible.
+function cultMeshAcceptedSchemaIds(definition: AnyCultCacheDocumentDefinition): readonly string[] {
+  return schemaIdentityOf(definition).compatibleSchemaIds;
 }
 
 function cultMeshSchemaLabel(schema: CultMeshDocumentSchemaDescriptor): string {
@@ -6441,14 +6275,15 @@ function normalizeRudpDocumentPut(
   };
 }
 
+// The peer's record at the key under the first schema id, else under another id in the list. A record at the key under any
+// other id is another type's, and is never taken in its place, whatever its payload parses as; none is not-found.
 async function requestCultNetRawSnapshotDocument(
   peerOrProvider: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
-  schemaId: string,
+  schemaIds: readonly string[],
   recordKey: string,
   options: {
     timeoutMs?: number;
     messageIdPrefix?: string;
-    accepts?: (document: CultNetRawDocumentRecord) => boolean;
   } = {},
 ): Promise<CultNetRawDocumentRecord> {
   const peer = await resolveCultNetPeer(peerOrProvider);
@@ -6457,13 +6292,11 @@ async function requestCultNetRawSnapshotDocument(
     messageId,
     timeoutMs: options.timeoutMs,
   });
-  const candidates = response.documents.filter(candidate => candidate.recordKey === recordKey);
-  const document =
-    candidates.find(candidate => candidate.schemaId === schemaId) ??
-    (options.accepts ? candidates.find(options.accepts) : undefined) ??
-    candidates[0];
+  const atKey = response.documents.filter(candidate => candidate.recordKey === recordKey);
+  const document = atKey.find(candidate => candidate.schemaId === schemaIds[0])
+    ?? atKey.find(candidate => schemaIds.includes(candidate.schemaId));
   if (!document) {
-    throw new Error(`CultMesh peer snapshot did not return ${schemaId} at ${recordKey}.`);
+    throw new Error(`CultMesh peer snapshot did not return ${schemaIds[0]} at ${recordKey}.`);
   }
   return document;
 }

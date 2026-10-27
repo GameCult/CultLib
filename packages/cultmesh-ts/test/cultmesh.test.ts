@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
 import { z } from "zod";
-import { defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "@gamecult/cultcache-ts";
+import { SchemaConflictError, defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "@gamecult/cultcache-ts";
 import {
   CultNetDocumentRegistry,
   CultNetPeer,
@@ -35,7 +35,11 @@ const noteDocument = defineDocumentType({
   name: "noteId",
 });
 
-const noteAliasDocument = defineDocumentType({
+type Note = z.infer<typeof noteDocument.schema>;
+type CultMeshDocumentSchemaDescriptorLike = { type?: string; schemaId?: string; schemaName?: string; schemaVersion?: string };
+
+// Another type claiming noteDocument's schema. It is never registered beside noteDocument: one type owns a schema.
+const otherTypeForNoteSchema = defineDocumentType({
   type: "cultmesh.note.ui",
   schemaId: "cultmesh.note.v0",
   schema: z.object({
@@ -134,36 +138,142 @@ test("CultMesh TS document handles hide local cache plumbing behind typed reacti
   await waitFor(() => observed.includes("updated"), "document handle update");
   unsubscribe();
 
-  const alias = bound.asSchemaAlias(noteAliasDocument, {
-    parse: value => noteAliasDocument.schema.parse(value),
-  });
-  assert.equal((await alias.latest()).body, "updated");
-
   const catalog = CultMesh.documents(document);
-  assert.equal(catalog.canReplace(noteAliasDocument), true);
-  await catalog.authoritativeWriter(noteAliasDocument, {
-    parse: value => noteAliasDocument.schema.parse(value),
+  assert.equal(catalog.canReplace(noteDocument), true);
+  await catalog.authoritativeWriter(noteDocument, {
     context: "browser-client",
   }).write({
     noteId: "note:1",
     body: "catalog-updated",
   });
   assert.equal(
-    (await catalog.latest(noteAliasDocument, "browser-client", {
-      parse: value => noteAliasDocument.schema.parse(value),
-    })).body,
+    (await catalog.latest(noteDocument, "browser-client")).body,
     "catalog-updated",
   );
+  // A typed lookup is answered by its own type's handle; a handle of another type for the same schema is not it.
+  assert.equal(catalog.tryDocument(otherTypeForNoteSchema), undefined);
+  assert.equal(catalog.canReplace(otherTypeForNoteSchema), false);
+  assert.throws(() => catalog.document(otherTypeForNoteSchema), /no document for/);
   const incremented = await bound.authoritativeWriter().update(value => ({
     ...value,
     body: `${value.body}:updated-through-bound-set`,
   }));
   assert.equal(incremented.body, "catalog-updated:updated-through-bound-set");
   assert.equal((await document.latest()).body, "catalog-updated:updated-through-bound-set");
-  assert.throws(
-    () => document.asSchemaAlias({ schemaId: "cultmesh.other.v0" }),
-    /not compatible/,
-  );
+});
+
+test("CultMesh TS catalogs infer a lookup's value type from its document definition", async () => {
+  const documents = CultMesh.documents(CultMesh.document("note:typed", noteDocument, async () => ({ noteId: "note:typed", body: "typed" })));
+  const collections = CultMesh.collections(CultMesh.collection("notes:typed", noteDocument, async () => [{ noteId: "note:typed", body: "typed" }]));
+  const inferred: Note = await documents.latest(noteDocument);
+  const inferredRows: readonly Note[] = await collections.latest(noteDocument);
+  assert.equal(inferred.body, "typed");
+  assert.equal(inferredRows[0]?.body, "typed");
+  // @ts-expect-error a definition names its value type: body is a string
+  const wrong: number = (await documents.latest(noteDocument)).body;
+  // @ts-expect-error a collection lookup infers its rows the same way
+  const wrongRows: readonly number[] = await collections.latest(noteDocument);
+  // @ts-expect-error a bare schema descriptor yields unknown
+  void (await documents.latest({ schemaId: "cultmesh.note.v0" })).body;
+  const explicit: { body: string } = await documents.latest<{ body: string }>({ schemaId: "cultmesh.note.v0" });
+  assert.equal(explicit.body, "typed");
+  void wrong;
+  void wrongRows;
+
+  // Writes are checked against the definition's value type. Never called: the handle is read-only.
+  const typeOnly = () => {
+    // @ts-expect-error replace checks the value against the definition
+    void documents.replace(noteDocument, { noteId: "note:typed", body: 1 });
+    // @ts-expect-error so does a prediction, with a context
+    void documents.submitPrediction(noteDocument, "local", { noteId: "note:typed" });
+    documents.watch(noteDocument, value => {
+      // @ts-expect-error a watched value is the definition's value
+      const n: number = value.body;
+      void n;
+    });
+    // @ts-expect-error a writer writes the definition's value
+    void documents.authoritativeWriter(noteDocument).write({ noteId: 1, body: "x" });
+  };
+  void typeOnly;
+});
+
+test("CultMesh TS catalogs hold one type per schema and refuse a second, typed", () => {
+  const sameNameVersion = { type: "cultmesh.note.named", schemaId: "sha256:note-named", schemaName: "cultmesh.note", schemaVersion: "cultmesh.note.v0" };
+  const sameTypeOtherSchema = { type: "cultmesh.note", schemaId: "cultmesh.note.v9" };
+  const note = { noteId: "note:held", body: "held" };
+  const kinds = [
+    {
+      catalog: (...schemas: CultMeshDocumentSchemaDescriptorLike[]) =>
+        CultMesh.documents(...schemas.map((schema, index) => CultMesh.document(`doc:${index}`, schema, async () => note))),
+      handle: (schema: CultMeshDocumentSchemaDescriptorLike, id: string) => CultMesh.document(id, schema, async () => note),
+      find: (catalog: any, schema: CultMeshDocumentSchemaDescriptorLike) => catalog.document(schema).documentId,
+    },
+    {
+      catalog: (...schemas: CultMeshDocumentSchemaDescriptorLike[]) =>
+        CultMesh.collections(...schemas.map((schema, index) => CultMesh.collection(`doc:${index}`, schema, async () => [note]))),
+      handle: (schema: CultMeshDocumentSchemaDescriptorLike, id: string) => CultMesh.collection(id, schema, async () => [note]),
+      find: (catalog: any, schema: CultMeshDocumentSchemaDescriptorLike) => catalog.collection(schema).collectionId,
+    },
+  ];
+  for (const kind of kinds) {
+    for (const claimant of [otherTypeForNoteSchema, sameNameVersion, sameTypeOtherSchema]) {
+      for (const [first, second] of [[noteDocument, claimant], [claimant, noteDocument]] as const) {
+        const catalog = kind.catalog(first);
+        assert.throws(() => catalog.add(kind.handle(second, "doc:second") as any), (error: unknown) => {
+          assert.ok(error instanceof SchemaConflictError, String(error));
+          assert.equal(error.schemaId, second.schemaId);
+          assert.deepEqual(error.schemaNames, ["cultmesh.note", "cultmesh.note"]);
+          assert.ok(error.message.includes(`type "${second.type}"`) && error.message.includes(`type "${first.type}"`), error.message);
+          assert.equal(error.recordKey, "");
+          return true;
+        });
+        assert.throws(() => kind.catalog(first, second), SchemaConflictError);
+        // The refused handle left nothing behind: the first type still answers.
+        assert.equal(kind.find(catalog, first), "doc:0");
+        assert.equal(kind.find(catalog, { schemaId: first.schemaId }), "doc:0");
+      }
+    }
+    // Handles of one type for one schema may repeat, the same handle may be added again, and an untyped handle claims no type.
+    const held = kind.handle(noteDocument, "doc:held");
+    const catalog = kind.catalog(noteDocument);
+    catalog.add(held as any).add(held as any);
+    catalog.add(kind.handle({ schemaId: "cultmesh.note.v0" }, "doc:untyped") as any);
+    assert.equal(kind.find(catalog, noteDocument), "doc:held");
+  }
+});
+
+test("CultMesh TS catalog writes take (value, options) or (context, value)", async () => {
+  const writes: string[] = [];
+  let current = { noteId: "note:writes", body: "initial" };
+  const record = (kind: string) => async (context: { runtimeId: string }, value: Note) => {
+    writes.push(`${kind}:${context.runtimeId}:${value.body}`);
+    current = value;
+  };
+  const catalog = CultMesh.documents(CultMesh.document("note:writes", noteDocument, async () => current, {
+    replaceDocument: record("replace"),
+    submitPrediction: record("predict"),
+  }));
+  const note = (body: string) => ({ noteId: "note:writes", body });
+
+  await catalog.replace(noteDocument, note("r1"));
+  await catalog.replace(noteDocument, note("r2"), {});
+  await catalog.replace(noteDocument, note("r3"), { context: "pilot-a" });
+  await catalog.replace(noteDocument, "pilot-b", note("r4"));
+  await catalog.replace(noteDocument, CultMesh.queryContext("pilot-c"), note("r5"));
+  await catalog.submitPrediction(noteDocument, note("p1"));
+  await catalog.submitPrediction(noteDocument, note("p2"), { context: "pilot-a" });
+  await catalog.submitPrediction(noteDocument, "pilot-b", note("p3"));
+
+  assert.deepEqual(writes, [
+    "replace:local:r1",
+    "replace:local:r2",
+    "replace:pilot-a:r3",
+    "replace:pilot-b:r4",
+    "replace:pilot-c:r5",
+    "predict:local:p1",
+    "predict:pilot-a:p2",
+    "predict:pilot-b:p3",
+  ]);
 });
 
 test("CultMesh TS document handles submit predictions through configured authority hooks", async () => {
@@ -193,10 +303,10 @@ test("CultMesh TS document handles submit predictions through configured authori
   assert.equal(document.canReplace, false);
   assert.equal(document.canSubmitPrediction, true);
   assert.equal(bound.canSubmitPrediction, true);
-  assert.equal(catalog.canSubmitPrediction(noteAliasDocument), true);
+  assert.equal(catalog.canSubmitPrediction(noteDocument), true);
+  assert.equal(catalog.canSubmitPrediction(otherTypeForNoteSchema), false);
 
-  await catalog.predictionWriter(noteAliasDocument, {
-    parse: value => noteAliasDocument.schema.parse(value),
+  await catalog.predictionWriter(noteDocument, {
     context: "pilot-a",
   }).write({
     noteId: "note:prediction",
@@ -207,23 +317,19 @@ test("CultMesh TS document handles submit predictions through configured authori
   assert.deepEqual(predictions, ["predicted"]);
   assert.equal((await bound.latest()).body, "predicted");
 
-  const alias = bound.asSchemaAlias(noteAliasDocument, {
-    parse: value => noteAliasDocument.schema.parse(value),
-  });
-  assert.equal(alias.canSubmitPrediction, true);
-  await alias.predictionWriter().write({
+  await bound.predictionWriter().write({
     noteId: "note:prediction",
-    body: "alias-predicted",
+    body: "bound-predicted",
   });
 
-  assert.deepEqual(predictions, ["predicted", "alias-predicted"]);
-  assert.equal((await document.latest("pilot-a")).body, "alias-predicted");
+  assert.deepEqual(predictions, ["predicted", "bound-predicted"]);
+  assert.equal((await document.latest("pilot-a")).body, "bound-predicted");
   const updated = await document.predictionWriter("pilot-a").update(value => ({
     ...value,
     body: "updated-as-prediction",
   }));
   assert.equal(updated.body, "updated-as-prediction");
-  assert.deepEqual(predictions, ["predicted", "alias-predicted", "updated-as-prediction"]);
+  assert.deepEqual(predictions, ["predicted", "bound-predicted", "updated-as-prediction"]);
 
   assert.throws(
     () => document.replace({
@@ -262,57 +368,42 @@ test("CultMesh TS documents with both capabilities require an immutable writer c
   assert.deepEqual(writes, ["authoritative:canonical", "prediction:predicted"]);
 });
 
-test("CultMesh TS store document handles choose compatible foreign schema payloads", async () => {
-  const store = {
-    async pullAll() {
-      return [
-        {
-          key: "note:foreign",
-          type: "runtime.generated.incompatible-note",
-          schemaId: "runtime.generated.incompatible-note.v1",
-          storedAt: "2026-06-27T00:00:00Z",
-          payload: payloadOf({ nope: "not the requested shape" }),
-          catalogEntry: {
-            schemaId: "runtime.generated.incompatible-note.v1",
-            schemaName: "runtime.generated.incompatible-note",
-            schemaVersion: "runtime.generated.incompatible-note.v1",
-            contentHash: "runtime.generated.incompatible-note.v1",
-            canonicalSchemaJson: "{}",
-            compatibleSchemaIds: ["runtime.generated.incompatible-note.v1"],
-          },
-        },
-        {
-          key: "note:foreign",
-          type: "runtime.generated.cultmesh.note",
-          schemaId: "runtime.generated.cultmesh.note.ui.42",
-          storedAt: "2026-06-27T00:00:01Z",
-          payload: payloadOf({
-            noteId: "note:foreign",
-            body: "foreign schema id, local store shape",
-          }),
-          catalogEntry: {
-            schemaId: "runtime.generated.cultmesh.note.ui.42",
-            schemaName: "cultmesh.note",
-            schemaVersion: "cultmesh.note.v1",
-            contentHash: "runtime.generated.cultmesh.note.ui.42",
-            canonicalSchemaJson: "{}",
-            compatibleSchemaIds: ["runtime.generated.cultmesh.note.ui.42"],
-          },
-        },
-      ];
-    },
+// A store document reads the record under its own schema id, or under an id its definition lists as compatible. A record
+// under any other id is another type's, and is never read in its place because its payload happens to parse.
+test("CultMesh TS store document handles read only records under an id their definition declares", async () => {
+  const envelope = (schemaId: string, value: unknown) => ({
+    key: "note:store",
+    type: schemaId,
+    schemaId,
+    storedAt: "2026-06-27T00:00:00Z",
+    payload: payloadOf(value),
+  });
+  const storeOf = (...records: ReturnType<typeof envelope>[]) => ({
+    async pullAll() { return records; },
     async push() {},
     async delete() {},
-  };
-
-  const document = CultMesh.documentFromStore(store, noteAliasDocument, {
-    documentId: "note:foreign.store",
   });
+  const foreign = envelope("runtime.generated.cultmesh.note.ui.42", { noteId: "note:store", body: "foreign id, local shape" });
 
-  assert.deepEqual(await document.latest(), {
-    noteId: "note:foreign",
-    body: "foreign schema id, local store shape",
+  await assert.rejects(
+    CultMesh.documentFromStore(storeOf(foreign), noteDocument).latest(),
+    /did not contain schema cultmesh\.note\.v0/,
+  );
+
+  const own = envelope("cultmesh.note.v0", { noteId: "note:store", body: "own id" });
+  assert.equal((await CultMesh.documentFromStore(storeOf(foreign, own), noteDocument).latest()).body, "own id");
+
+  const renamed = defineDocumentType({
+    type: "cultmesh.note-renamed",
+    schemaId: "cultmesh.note-renamed.v1",
+    compatibleSchemaIds: ["cultmesh.note.v0"],
+    schema: noteDocument.schema,
   });
+  assert.equal((await CultMesh.documentFromStore(storeOf(foreign, own), renamed).latest()).body, "own id");
+  await assert.rejects(CultMesh.documentFromStore(storeOf(foreign), renamed).latest(), /did not contain schema/);
+  // A record under the definition's own id wins over one under an id it lists, wherever each sits in the store.
+  const renamedOwn = envelope("cultmesh.note-renamed.v1", { noteId: "note:store", body: "renamed own id" });
+  assert.equal((await CultMesh.documentFromStore(storeOf(own, renamedOwn), renamed).latest()).body, "renamed own id");
 });
 
 test("CultMesh TS reactive documents submit predictions from explicit updates", async () => {
@@ -401,7 +492,7 @@ test("CultMesh TS reactive updates publish nested edits while snapshot mutation 
   reactive.dispose();
 });
 
-test("CultMesh TS node opens same-schema aliases with one call", async () => {
+test("CultMesh TS node opens its registered document with one call", async () => {
   const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-node-reactive-")), "node.ccmp");
   const node = await CultMesh.startNode(filePath, {
     documents: [noteDocument],
@@ -411,34 +502,25 @@ test("CultMesh TS node opens same-schema aliases with one call", async () => {
     body: "initial",
   });
 
-  const aliasHandle = node.document(noteAliasDocument, "note:node-reactive", {
+  const handle = node.document(noteDocument, "note:node-reactive", {
     pollMs: 5,
   });
-  assert.equal(aliasHandle.documentId, "cultmesh.note.ui:note:node-reactive");
-  assert.equal((await aliasHandle.latest()).body, "initial");
-  await aliasHandle.authoritativeWriter().write({
+  assert.equal(handle.documentId, "cultmesh.note:note:node-reactive");
+  assert.equal((await handle.latest()).body, "initial");
+  await handle.authoritativeWriter().write({
     noteId: "note:node-reactive",
-    body: "edited-through-alias-handle",
-  });
-  assert.equal(
-    node.getRequired(noteAliasDocument, "note:node-reactive").body,
-    "edited-through-alias-handle",
-  );
-
-  await node.put(noteAliasDocument, "note:node-reactive", {
-    noteId: "note:node-reactive",
-    body: "edited-through-alias-put",
+    body: "edited-through-handle",
   });
   assert.equal(
     node.getRequired(noteDocument, "note:node-reactive").body,
-    "edited-through-alias-put",
+    "edited-through-handle",
   );
   assert.deepEqual(
-    (await node.collection(noteAliasDocument).latest()).map(note => note.body),
-    ["edited-through-alias-put"],
+    (await node.collection(noteDocument).latest()).map(note => note.body),
+    ["edited-through-handle"],
   );
 
-  const reactive = aliasHandle.authoritativeWriter(
+  const reactive = handle.authoritativeWriter(
     CultMesh.queryContext("browser-client"),
   ).reactive({
     watch: false,
@@ -449,23 +531,44 @@ test("CultMesh TS node opens same-schema aliases with one call", async () => {
   });
   await waitFor(
     () => node.getRequired(noteDocument, "note:node-reactive").body === "edited-through-node-helper",
-    "node-level reactive alias write",
+    "node-level reactive write",
   );
 
   assert.equal(reactive.snapshot.noteId, "note:node-reactive");
   assert.equal(
-    node.document(noteDocument, "note:node-reactive").asSchemaAlias(noteAliasDocument, {
-      parse: value => noteAliasDocument.schema.parse(value),
-    }).canReplace,
-    true,
-  );
-  assert.equal(
-    (await node.document(noteAliasDocument, "note:node-reactive").observe({
+    (await node.document(noteDocument, "note:node-reactive").observe({
       watch: false,
     }).ready).body,
     "edited-through-node-helper",
   );
   reactive.dispose();
+});
+
+test("CultMesh TS node refuses a type it did not register, even one claiming a registered schema", async () => {
+  const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-node-other-type-")), "node.ccmp");
+  const node = await CultMesh.startNode(filePath, {
+    documents: [noteDocument],
+  });
+  await node.put(noteDocument, "note:owned", { noteId: "note:owned", body: "owned" });
+  const notRegistered = /"cultmesh\.note\.ui" is not registered/;
+
+  assert.throws(() => node.get(otherTypeForNoteSchema, "note:owned"), notRegistered);
+  await assert.rejects(
+    node.put(otherTypeForNoteSchema, "note:owned", { noteId: "note:owned", body: "other" }),
+    notRegistered,
+  );
+  await assert.rejects(node.delete(otherTypeForNoteSchema, "note:owned"), notRegistered);
+  await assert.rejects(node.document(otherTypeForNoteSchema, "note:owned").latest(), notRegistered);
+  await assert.rejects(node.collection(otherTypeForNoteSchema).latest(), notRegistered);
+  assert.equal(node.getRequired(noteDocument, "note:owned").body, "owned");
+
+  // The node cannot come to hold the other type beside its owner either.
+  await assert.rejects(
+    CultMesh.startNode(join(await mkdtemp(join(tmpdir(), "cultmesh-ts-node-two-types-")), "node.ccmp"), {
+      documents: [noteDocument, otherTypeForNoteSchema],
+    }),
+    (error: unknown) => error instanceof SchemaConflictError && error.schemaId === "cultmesh.note.v0",
+  );
 });
 
 test("CultMesh TS reactive documents store reconciliation deltas after misprediction", async () => {
@@ -949,15 +1052,13 @@ test("CultMesh TS binds publication document catalogs from source resolvers", as
     ["daemon:first", "daemon:second"],
   );
   assert.equal(
-    (await catalog.document(noteAliasDocument, {
-      parse: value => noteAliasDocument.schema.parse(value),
-    }).latest()).body,
+    (await catalog.document(noteDocument).latest()).body,
     "second source",
   );
   assert.equal(catalog.document(noteDocument).routeHint.description, "publication catalog");
 });
 
-test("CultMesh TS syncs configured publications into local node aliases", async () => {
+test("CultMesh TS syncs configured publications into a local node", async () => {
   const sourcePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-publication-sync-source-")), "source.ccmp");
   const targetPath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-publication-sync-target-")), "target.ccmp");
   const source = await CultMesh.startNode(sourcePath, {
@@ -965,7 +1066,7 @@ test("CultMesh TS syncs configured publications into local node aliases", async 
   });
   await source.put(noteDocument, "note:published", {
     noteId: "note:published",
-    body: "publication source hydrates local alias",
+    body: "publication source hydrates the local node",
   });
   await source.flush();
   const target = await CultMesh.startNode(targetPath, {
@@ -977,7 +1078,7 @@ test("CultMesh TS syncs configured publications into local node aliases", async 
       kind: "single-file",
       path: sourcePath,
     },
-    noteAliasDocument,
+    noteDocument,
     "note:published",
   );
   const facadeSynced = await CultMesh.syncDocumentFromPublication(
@@ -986,21 +1087,20 @@ test("CultMesh TS syncs configured publications into local node aliases", async 
       kind: "single-file",
       path: sourcePath,
     },
-    noteAliasDocument,
+    noteDocument,
     "note:published",
   );
 
   assert.deepEqual(synced, {
     noteId: "note:published",
-    body: "publication source hydrates local alias",
+    body: "publication source hydrates the local node",
   });
   assert.deepEqual(facadeSynced, synced);
-  assert.equal(target.getRequired(noteDocument, "note:published").body, "publication source hydrates local alias");
-  assert.equal(target.getRequired(noteAliasDocument, "note:published").body, "publication source hydrates local alias");
-  assert.equal((await target.document(noteAliasDocument, "note:published").observe({ watch: false }).ready).body, "publication source hydrates local alias");
+  assert.equal(target.getRequired(noteDocument, "note:published").body, "publication source hydrates the local node");
+  assert.equal((await target.document(noteDocument, "note:published").observe({ watch: false }).ready).body, "publication source hydrates the local node");
 });
 
-test("CultMesh TS syncs configured publication catalogs into local node aliases", async () => {
+test("CultMesh TS syncs configured publication catalogs into a local node", async () => {
   const firstPath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-publication-sync-catalog-first-")), "first.ccmp");
   const secondPath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-publication-sync-catalog-second-")), "second.ccmp");
   const targetPath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-publication-sync-catalog-target-")), "target.ccmp");
@@ -1027,7 +1127,7 @@ test("CultMesh TS syncs configured publication catalogs into local node aliases"
     CultMesh.publicationDocument(noteDocument, "note:first-sync", {
       documentId: "local:first",
     }),
-    CultMesh.publicationDocument(noteAliasDocument, "note:second-sync", {
+    CultMesh.publicationDocument(noteDocument, "note:second-sync", {
       documentId: "local:second",
       source: {
         kind: "single-file",
@@ -1056,37 +1156,27 @@ test("CultMesh TS syncs configured publication catalogs into local node aliases"
     bindings,
   );
 
+  // Two documents of one type, each addressed by its own id whatever order the catalog lists them in.
   assert.deepEqual(
-    catalog.documents.map(document => document.documentId),
+    catalog.documents.map(document => document.documentId).sort(),
     ["local:first", "local:second"],
   );
-  assert.equal(
-    await catalog.document(noteDocument, {
-      parse: value => noteDocument.schema.parse(value),
-    }).latest().then(value => value.body),
-    "first synced publication",
-  );
-  assert.equal(
-    await catalog.document(noteAliasDocument, {
-      parse: value => noteAliasDocument.schema.parse(value),
-    }).latest().then(value => value.body),
-    "second synced publication",
-  );
-  assert.equal(catalog.document(noteAliasDocument).routeHint.description, "publication sync catalog");
+  const secondSynced = catalog.documentById<Note>("local:second");
+  assert.equal((await catalog.documentById<Note>("local:first").latest()).body, "first synced publication");
+  assert.equal((await secondSynced.latest()).body, "second synced publication");
+  assert.equal(secondSynced.documentId, "local:second");
+  assert.equal(secondSynced.routeHint.description, "publication sync catalog");
   assert.equal(target.getRequired(noteDocument, "note:second-sync").body, "second synced publication");
-  assert.equal(target.getRequired(noteAliasDocument, "note:second-sync").body, "second synced publication");
-  assert.equal(
-    await facadeCatalog.document(noteAliasDocument, {
-      parse: value => noteAliasDocument.schema.parse(value),
-    }).latest().then(value => value.body),
-    "second synced publication",
-  );
+  assert.equal((await facadeCatalog.documentById<Note>("local:second").latest()).body, "second synced publication");
+  assert.equal((await facadeCatalog.documentById<Note>("local:first").latest()).body, "first synced publication");
+  assert.equal(catalog.tryDocumentById("note:second-sync"), undefined);
+  assert.throws(() => catalog.documentById("local:third"), /no document with id 'local:third'/);
 });
 
 test("CultMesh TS document catalogs resolve semantic schema versions passed as schema ids", async () => {
   const current = {
     noteId: "note:semantic",
-    body: "semantic alias",
+    body: "semantic version",
   };
   const document = CultMesh.document(
     "daemon:semantic-note",
@@ -1097,18 +1187,18 @@ test("CultMesh TS document catalogs resolve semantic schema versions passed as s
     },
     async () => current,
     {
-      routeHint: CultMesh.routeHint("shared-memory", "semantic alias catalog"),
+      routeHint: CultMesh.routeHint("shared-memory", "semantic version catalog"),
     },
   );
   const catalog = CultMesh.documents(document);
 
-  const alias = catalog.document({
+  const bySchemaVersion = catalog.document({
     schemaId: "cultmesh.note.v1",
   });
 
-  assert.equal(alias.documentId, "daemon:semantic-note");
-  assert.equal(alias.routeHint.description, "semantic alias catalog");
-  assert.deepEqual(await alias.latest(), current);
+  assert.equal(bySchemaVersion.documentId, "daemon:semantic-note");
+  assert.equal(bySchemaVersion.routeHint.description, "semantic version catalog");
+  assert.deepEqual(await bySchemaVersion.latest(), current);
 });
 
 test("CultMesh TS collection handles expose typed snapshots and reset watches", async () => {
@@ -1138,19 +1228,14 @@ test("CultMesh TS collection handles expose typed snapshots and reset watches", 
   await waitFor(() => changes.length >= 2, "collection reset after update");
   unsubscribe();
 
-  assert.deepEqual(
-    (await collection.asSchemaAlias(noteAliasDocument, {
-      parse: value => noteAliasDocument.schema.parse(value),
-    }).latest()).map(note => note.body).sort(),
-    ["alpha", "bravo"],
-  );
   const catalog = CultMesh.collections(collection);
   assert.deepEqual(
-    (await catalog.latest(noteAliasDocument, "local", {
-      parse: value => noteAliasDocument.schema.parse(value),
-    })).map(note => note.body).sort(),
+    (await catalog.latest(noteDocument, "local")).map(note => note.body).sort(),
     ["alpha", "bravo"],
   );
+  // A typed lookup is answered by its own type's handle; a handle of another type for the same schema is not it.
+  assert.equal(catalog.tryCollection(otherTypeForNoteSchema), undefined);
+  assert.throws(() => catalog.collection(otherTypeForNoteSchema), /no collection for/);
   assert.equal(
     catalog.collection({ schemaId: "cultmesh.note.v0" }).collectionId,
     collection.collectionId,
@@ -1159,7 +1244,7 @@ test("CultMesh TS collection handles expose typed snapshots and reset watches", 
   assert.ok(changes.every(kind => kind === "reset"));
 });
 
-test("CultMesh TS collection catalogs resolve same-schema alias watches", async () => {
+test("CultMesh TS collection catalogs resolve watches by schema version", async () => {
   const current = [{
     noteId: "note:catalog-watch",
     body: "initial",
@@ -1185,27 +1270,25 @@ test("CultMesh TS collection catalogs resolve same-schema alias watches", async 
   );
   const catalog = CultMesh.collections(collection);
   const observed: string[] = [];
-  const semanticAlias = { schemaId: "cultmesh.note.v1" };
-  const unsubscribe = catalog.watchChanges<z.infer<typeof noteAliasDocument.schema>>(semanticAlias, change => {
+  const bySchemaVersion = { schemaId: "cultmesh.note.v1" };
+  const unsubscribe = catalog.watchChanges<z.infer<typeof noteDocument.schema>>(bySchemaVersion, change => {
     if (change.value) {
       observed.push(change.value.body);
     }
-  }, {
-    parse: value => noteAliasDocument.schema.parse(value),
   });
 
   watcher?.({
     kind: "updated",
     value: {
       noteId: "note:catalog-watch",
-      body: "through-catalog-alias",
+      body: "through-catalog",
     },
   });
   unsubscribe();
 
-  assert.deepEqual(observed, ["through-catalog-alias"]);
+  assert.deepEqual(observed, ["through-catalog"]);
   assert.equal(watcher, undefined);
-  assert.equal(catalog.collection(semanticAlias).routeHint.description, "collection catalog");
+  assert.equal(catalog.collection(bySchemaVersion).routeHint.description, "collection catalog");
 });
 
 test("CultMesh TS local authority leases do not trust peer cards by contact alone", () => {
@@ -3021,33 +3104,31 @@ test("CultMesh TS reads remote RUDP snapshots through document handles", async (
       body: "remote handles feel local",
     });
     assert.equal(document.schema.type, "cultmesh.note");
-
-    const alias = CultMesh.documentFromPeerSnapshot(
-      peer,
-      defineDocumentType({
-        type: "cultmesh.note.alias",
-        schemaId: "cultmesh.note.alias.v1",
-        schema: noteDocument.schema,
-        name: "noteId",
-      }),
-      "note:remote",
-      {
-        documentId: "note:remote.alias",
-        timeoutMs: 1_000,
-      },
-    );
-
-    assert.deepEqual(await alias.latest(), {
-      noteId: "note:remote",
-      body: "remote handles feel local",
-    });
   } finally {
     peer?.close();
     server.close();
   }
 });
 
-test("CultMesh TS syncs remote RUDP snapshots into a local node with same-schema aliases", async () => {
+// What ships (F8): a node's reads and puts return the object its cache holds, not a copy, and the README says that object
+// belongs to the cache. The caller's own value is never the one held.
+test("CultMesh TS node reads and puts return the cache's own object", async () => {
+  const node = await CultMesh.startNode(
+    join(await mkdtemp(join(tmpdir(), "cultmesh-ts-held-object-")), "node.ccmp"),
+    { documents: [noteDocument] },
+  );
+  const written = { noteId: "note:held", body: "held" };
+  const put = await node.put(noteDocument, "note:held", written);
+  assert.notEqual(put, written);
+  assert.deepEqual(put, written);
+  assert.equal(node.get(noteDocument, "note:held"), put);
+  assert.equal(node.getRequired(noteDocument, "note:held"), put);
+  assert.equal(node.get(noteDocument, "note:held"), node.get(noteDocument, "note:held"));
+  written.body = "changed by the caller";
+  assert.equal(node.getRequired(noteDocument, "note:held").body, "held");
+});
+
+test("CultMesh TS syncs remote RUDP snapshots into a local node", async () => {
   const connectionId = 0x1020304a;
   const source = await CultMesh.startNode(
     join(await mkdtemp(join(tmpdir(), "cultmesh-ts-rudp-sync-source-")), "node.ccmp"),
@@ -3101,7 +3182,7 @@ test("CultMesh TS syncs remote RUDP snapshots into a local node with same-schema
 
     const synced = await target.syncDocumentFromPeerSnapshot(
       peer,
-      noteAliasDocument,
+      noteDocument,
       "note:sync-remote",
       {
         timeoutMs: 1_000,
@@ -3110,7 +3191,7 @@ test("CultMesh TS syncs remote RUDP snapshots into a local node with same-schema
     const facadeSynced = await CultMesh.syncDocumentFromPeerSnapshot(
       target,
       peer,
-      noteAliasDocument,
+      noteDocument,
       "note:sync-remote",
       {
         timeoutMs: 1_000,
@@ -3123,29 +3204,29 @@ test("CultMesh TS syncs remote RUDP snapshots into a local node with same-schema
     });
     assert.deepEqual(facadeSynced, synced);
     assert.equal(target.getRequired(noteDocument, "note:sync-remote").body, "synced once, read as local");
-    assert.equal(target.getRequired(noteAliasDocument, "note:sync-remote").body, "synced once, read as local");
-    assert.equal((await target.document(noteAliasDocument, "note:sync-remote").latest()).body, "synced once, read as local");
+    assert.equal((await target.document(noteDocument, "note:sync-remote").latest()).body, "synced once, read as local");
   } finally {
     peer?.close();
     server.close();
   }
 });
 
-test("CultMesh TS peer snapshot handles choose compatible foreign schema payloads", async () => {
+// A peer snapshot is read, and synced, only under the requested type's schema id. A record the peer holds at the key under
+// another id is another type's: it is not-found for this type, and syncing never writes it anywhere.
+test("CultMesh TS peer snapshots never take another type's record at the key", async () => {
   const connectionId = 0x10203049;
-  const node = await CultMesh.startNode(
+  const source = await CultMesh.startNode(
     join(await mkdtemp(join(tmpdir(), "cultmesh-ts-rudp-foreign-snapshot-")), "node.ccmp"),
-    {
-      documents: [incompatibleNoteDocument, foreignNoteDocument],
-    },
+    { documents: [incompatibleNoteDocument, foreignNoteDocument] },
   );
-  await node.put(incompatibleNoteDocument, "note:foreign", {
-    nope: "not the requested shape",
-  });
-  await node.put(foreignNoteDocument, "note:foreign", {
-    noteId: "note:foreign",
-    body: "foreign schema id, local shape",
-  });
+  await source.put(incompatibleNoteDocument, "note:b", { nope: "remote b" });
+  // Parses as a note: shape routing would store it as one.
+  await source.put(foreignNoteDocument, "note:c", { noteId: "note:c", body: "remote c, note-shaped" });
+  const target = await CultMesh.startNode(
+    join(await mkdtemp(join(tmpdir(), "cultmesh-ts-rudp-foreign-target-")), "node.ccmp"),
+    { documents: [noteDocument, incompatibleNoteDocument] },
+  );
+  await target.put(incompatibleNoteDocument, "note:b", { nope: "local b" });
 
   const server = CultMesh.createRudpDocumentServer(
     "cultmesh-ts-rudp-foreign-snapshot-server",
@@ -3155,7 +3236,7 @@ test("CultMesh TS peer snapshot handles choose compatible foreign schema payload
         defineCultNetDocumentBinding({ definition: incompatibleNoteDocument }),
         defineCultNetDocumentBinding({ definition: foreignNoteDocument }),
       ]),
-      getCache: () => node.cache,
+      getCache: () => source.cache,
       bindHost: "127.0.0.1",
       bindPort: 0,
       resendDelayMs: 25,
@@ -3181,20 +3262,22 @@ test("CultMesh TS peer snapshot handles choose compatible foreign schema payload
       },
     );
 
-    const alias = CultMesh.documentFromPeerSnapshot(
-      peer,
-      noteAliasDocument,
-      "note:foreign",
-      {
-        documentId: "note:foreign.alias",
-        timeoutMs: 1_000,
-      },
+    for (const key of ["note:b", "note:c"]) {
+      const notFound = new RegExp(`did not return cultmesh\\.note\\.v0 at ${key}`);
+      await assert.rejects(
+        CultMesh.documentFromPeerSnapshot(peer, noteDocument, key, { timeoutMs: 1_000 }).latest(),
+        notFound,
+      );
+      await assert.rejects(target.syncDocumentFromPeerSnapshot(peer, noteDocument, key, { timeoutMs: 1_000 }), notFound);
+      assert.equal(target.get(noteDocument, key), undefined, key);
+    }
+    // The failed sync of a note at "note:b" left the local record of the other type there untouched.
+    assert.deepEqual(target.getRequired(incompatibleNoteDocument, "note:b"), { nope: "local b" });
+    // Its own type's record under its own id still syncs.
+    assert.deepEqual(
+      await target.syncDocumentFromPeerSnapshot(peer, incompatibleNoteDocument, "note:b", { timeoutMs: 1_000 }),
+      { nope: "remote b" },
     );
-
-    assert.deepEqual(await alias.latest(), {
-      noteId: "note:foreign",
-      body: "foreign schema id, local shape",
-    });
   } finally {
     peer?.close();
     server.close();

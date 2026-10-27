@@ -3,6 +3,24 @@
 All notable changes to `@gamecult/cultcache-ts` are recorded here, following
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Breaking
+
+- A single-file store written as `cultcache.store.v3` is read and written: a record that holds an element id (an owned list element with an `[CultElementId]` member, carried through every write) marks the store v3, and a v3 store is carried through a rewrite with its ids. A runtime from before this change refuses a v3 store by name.
+- A single-file store refuses a zero-byte file as `StoreUnreadableError`; only a path with nothing at it is an empty store. A header this runtime does not read is refused, and the refusal echoes the header only as `cultcache.store.v<digits>`.
+- A write over a file the reader refuses (`StoreUnreadableError`, from `push`, `pushAll` and `delete`) refuses and leaves the file as it is. A flush used to replace such a file. A write set cannot merge with a disk it cannot read, so the file is repaired or removed by its owner before the store writes again.
+- This reverses the 0.14.2 `pushAll` fix in two ways. A full `pushAll` over a file with no readable stamp no longer replaces it (healing it): the reader refuses it, and the file is left as it is. And a `cultcache.store.v3` stamp is read, not refused. The stamp rule has one owner, `refuseUnreadFormat`, asked only by the one reader that every write consults under the lock. The reader judges the stamp from the header before it decodes the body, so a newer store is refused by name whether or not its body is whole.
+- A dangling symbolic link at the store path is an I/O error with code `ENOENT`, not an empty store.
+
+### Added
+
+- `readSingleFileStore(path)`, the one synchronous reader of a single-file store, for consumers that must read a store file rather than decode it themselves. `pullAll`, `push`, `delete` and `pushAll` ask the same reader.
+- `StoreUnreadableError` for a store file this runtime cannot read, `SchemaConflictError` for a write the catalog cannot describe, and `schemaIdentityOf` with its result type `CultCacheSchemaIdentity` (`schemaId`, `schemaName`, `schemaVersion`, `compatibleSchemaIds`), the one derivation of a definition's identity.
+- `SingleFileStoreRead`, exported: the result type of `readSingleFileStore` (`absent`, `format`, `envelopes`, `repairedLegacyPayload`).
+- `CultCacheInspection.format` is `StoreFormat | "legacy.envelope-array"`: it reports `cultcache.store.v3` for a v3 store.
+- A soft `pushAll` writes only where nothing is at the path, leaves a store it can read byte for byte, and refuses what the reader refuses.
+
 ## [0.14.2]
 
 ### Added

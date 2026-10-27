@@ -60,6 +60,10 @@ namespace GameCult.Geometry
     [MessagePackObject]
     public sealed class CultGeometryDomainNode
     {
+        [Key(7)]
+        [CultElementId]
+        public string Id { get; set; } = string.Empty;
+
         [Key(0)]
         public string Name { get; set; } = string.Empty;
 
@@ -105,6 +109,10 @@ namespace GameCult.Geometry
     [MessagePackObject]
     public sealed class CultGeometryFeatureClaim
     {
+        [Key(8)]
+        [CultElementId]
+        public string Id { get; set; } = string.Empty;
+
         [Key(0)]
         public string Name { get; set; } = string.Empty;
 
@@ -261,6 +269,10 @@ namespace GameCult.Geometry
     [MessagePackObject]
     public sealed class CultGeometryContributionRow
     {
+        [Key(13)]
+        [CultElementId]
+        public string Id { get; set; } = string.Empty;
+
         [Key(0)]
         public string DomainKey { get; set; } = string.Empty;
 

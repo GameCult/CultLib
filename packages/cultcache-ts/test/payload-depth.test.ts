@@ -20,7 +20,6 @@ import {
 } from "../src/document";
 import * as codecs from "../src/codec";
 import { checkPayloadDepth } from "../src/payload-depth";
-import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
 
 const L = MAX_PAYLOAD_DEPTH;
 const CANARY = "CANARY-payload-depth-91d3";
@@ -175,11 +174,11 @@ test("the limit and its error are exported from the root, and the walk itself is
   assert.equal("checkPayloadDepth" in root, false);
 });
 
-// A v1 store whose one record carries `payload` as bin and no catalog entry, so the record's schema is inferred from the
-// payload's first element.
+// A v1 store whose one record carries `payload` as bin, under a catalog entry that names its schema.
 async function storeWith(payload: Uint8Array): Promise<string> {
   const file = join(await mkdtemp(join(tmpdir(), "cultcache-payload-depth-")), "deep.cc");
-  await writeFile(file, encode(["cultcache.store.v1", [], [["record-1", "sha256:stale", "2026-06-25T12:00:00Z", payload]]]));
+  const entry = ["sha256:stale", "tests.schema_stamped_entry", "tests.schema_stamped_entry.v1", "stale", "", [], []];
+  await writeFile(file, encode(["cultcache.store.v1", [entry], [["record-1", "sha256:stale", "2026-06-25T12:00:00Z", payload]]]));
   return file;
 }
 const stamped = (containersInsideTheStamp: number) =>
@@ -189,23 +188,14 @@ test("the inspector previews a payload at the limit and reports one past it, or 
   const atLimit = await storeWith(stamped(L - 1));
   const previewed = inspectCultCacheBytes(atLimit, await readFile(atLimit)).records[0]!;
   assert.equal(previewed.payloadDecodeError, undefined);
-  assert.equal(previewed.schemaName, "tests.schema_stamped_entry", "a payload the walk accepts yields its stamp");
+  assert.equal(previewed.schemaName, "tests.schema_stamped_entry");
 
   for (const inside of [L, 100_000]) {
     const file = await storeWith(stamped(inside));
     const record = inspectCultCacheBytes(file, await readFile(file)).records[0]!;
     assert.equal(record.payloadDecodeError, "document payload nests 257 MessagePack containers deep; the limit is 256.");
-    assert.equal(record.schemaName, "<missing catalog entry>", "the stamp of a payload the walk refuses is not recovered");
+    assert.equal(record.schemaName, "tests.schema_stamped_entry");
   }
-});
-
-test("the single-file store infers a legacy record's schema from a payload at the limit and from none past it", async () => {
-  const atLimit = await storeWith(stamped(L - 1));
-  const [read] = await new SingleFileMessagePackBackingStore(atLimit).pullAll();
-  assert.equal(read.catalogEntry?.schemaVersion, "tests.schema_stamped_entry.v1");
-
-  const past = await storeWith(stamped(L));
-  await assert.rejects(() => new SingleFileMessagePackBackingStore(past).pullAll(), /missing schema id/u);
 });
 
 // A header whose length or count needs all four bytes: the low sixteen bits of the length are small, the whole is not.

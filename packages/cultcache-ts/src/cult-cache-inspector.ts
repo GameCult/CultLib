@@ -1,12 +1,12 @@
 import { decode } from "@msgpack/msgpack";
 
 import { checkPayloadDepth } from "./payload-depth";
-import { STORE_FORMAT_VERSION, isV1Snapshot, requireV1RecordSlots } from "./store-format";
+import { type StoreFormat, isStoreSnapshot, refuseUnreadStoreBytes, requireStoreSlots, requireV1RecordSlots } from "./store-format";
 
 export interface CultCacheInspection {
   filePath: string;
   fileSizeBytes: number;
-  format: "cultcache.store.v1" | "legacy.envelope-array";
+  format: StoreFormat | "legacy.envelope-array";
   catalog: InspectedCatalogEntry[];
   records: InspectedRecord[];
 }
@@ -47,9 +47,10 @@ export function inspectCultCacheBytes(
   bytes: Uint8Array,
   fileSizeBytes = bytes.length,
 ): CultCacheInspection {
+  refuseUnreadStoreBytes(bytes);
   const decoded = decode(bytes);
 
-  if (isV1Snapshot(decoded)) {
+  if (isStoreSnapshot(decoded)) {
     return inspectV1Snapshot(filePath, fileSizeBytes, decoded);
   }
 
@@ -60,7 +61,8 @@ export function inspectCultCacheBytes(
   throw new Error("CultCache file is not a recognized v1 snapshot or legacy envelope array.");
 }
 
-function inspectV1Snapshot(filePath: string, fileSizeBytes: number, decoded: unknown[]): CultCacheInspection {
+function inspectV1Snapshot(filePath: string, fileSizeBytes: number, decoded: [StoreFormat, ...unknown[]]): CultCacheInspection {
+  requireStoreSlots(decoded);
   const catalogRaw = decoded[1];
   const recordsRaw = decoded[2];
   if (!Array.isArray(catalogRaw) || !Array.isArray(recordsRaw)) {
@@ -68,36 +70,25 @@ function inspectV1Snapshot(filePath: string, fileSizeBytes: number, decoded: unk
   }
 
   const catalog = catalogRaw.map(decodeCatalogEntry);
+  // An id names the entry that owns it; only an id no entry owns names the entry that lists it as compatible.
   const catalogBySchemaId = new Map<string, InspectedCatalogEntry>();
   for (const entry of catalog) {
-    catalogBySchemaId.set(entry.schemaId, entry);
-    for (const compatibleSchemaId of entry.compatibleSchemaIds) {
-      catalogBySchemaId.set(compatibleSchemaId, entry);
+    if (!catalogBySchemaId.has(entry.schemaId)) {
+      catalogBySchemaId.set(entry.schemaId, entry);
     }
   }
-  const records = recordsRaw.map((record) => decodeV1Record(record, catalogBySchemaId));
-  for (const record of records) {
-    if (!catalog.some((entry) => entry.schemaId === record.schemaId)) {
-      const schemaVersion = inferSchemaVersionFromPayloadPreview(record.payloadPreview);
-      const schemaName = schemaVersion ? inferSchemaName(schemaVersion) : undefined;
-      if (schemaName) {
-        catalog.push({
-          schemaId: record.schemaId,
-          schemaName,
-          schemaVersion: schemaVersion!,
-          contentHash: record.schemaId,
-          canonicalSchemaJson: "",
-          compatibleSchemaIds: [],
-          members: [],
-        });
+  for (const entry of catalog) {
+    for (const compatibleSchemaId of entry.compatibleSchemaIds) {
+      if (!catalogBySchemaId.has(compatibleSchemaId)) {
+        catalogBySchemaId.set(compatibleSchemaId, entry);
       }
     }
   }
-
+  const records = recordsRaw.map((record) => decodeV1Record(record, catalogBySchemaId));
   return {
     filePath,
     fileSizeBytes,
-    format: STORE_FORMAT_VERSION,
+    format: decoded[0],
     catalog,
     records,
   };
@@ -205,62 +196,19 @@ function decodeV1Record(value: unknown, catalogBySchemaId: Map<string, Inspected
   }
 
   const payloadBytes = normalizePayloadBytes(payload);
-  const catalogEntry = catalogBySchemaId.get(schemaId) ?? recoverCatalogEntry(schemaId, payloadBytes);
+  const catalogEntry = catalogBySchemaId.get(schemaId);
+  if (!catalogEntry) {
+    throw new Error(`CultCache persisted record "${key}" references missing schema id "${schemaId}".`);
+  }
+
   return {
     key,
     schemaId,
-    schemaName: catalogEntry?.schemaName ?? "<missing catalog entry>",
+    schemaName: catalogEntry.schemaName,
     storedAt,
     payloadBytes: payloadBytes.length,
     ...previewPayload(payloadBytes),
   };
-}
-
-function recoverCatalogEntry(schemaId: string, payload: Uint8Array): InspectedCatalogEntry | undefined {
-  let payloadPreview: unknown;
-  try {
-    payloadPreview = decodeBoundedPayload(payload);
-  } catch {
-    return undefined;
-  }
-
-  const schemaVersion = inferSchemaVersionFromPayloadPreview(payloadPreview);
-  if (!schemaVersion) {
-    return undefined;
-  }
-
-  const schemaName = inferSchemaName(schemaVersion);
-  if (!schemaName) {
-    return undefined;
-  }
-
-  return {
-    schemaId,
-    schemaName,
-    schemaVersion,
-    contentHash: schemaId,
-    canonicalSchemaJson: "",
-    compatibleSchemaIds: [],
-    members: [],
-  };
-}
-
-function inferSchemaVersionFromPayloadPreview(payloadPreview: unknown): string | undefined {
-  if (Array.isArray(payloadPreview) && typeof payloadPreview[0] === "string") {
-    return payloadPreview[0];
-  }
-
-  if (isRecord(payloadPreview)) {
-    const schemaVersion = payloadPreview.schemaVersion ?? payloadPreview.schema_version;
-    return typeof schemaVersion === "string" ? schemaVersion : undefined;
-  }
-
-  return undefined;
-}
-
-function inferSchemaName(schemaVersion: string): string | undefined {
-  const match = /^(.*)\.v\d+$/.exec(schemaVersion);
-  return match?.[1];
 }
 
 function decodeLegacyEnvelope(value: unknown): InspectedRecord {

@@ -264,13 +264,18 @@ public sealed class CultMeshContentVectorTests
         foreach (var depth in new[] { 250, 253, 254, 255, 256, 257, 300 })
         {
             Add($"deep_extra_{depth}", Doc(fields.Append(Deep(depth))));
-            AddFields($"deep_chunkextra_{depth}", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0), Str("k"), Deep(depth)))));
+            AddFields($"deep_chunkextra_{depth}", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0), Str("k"), Str("0"), Deep(depth)))));
         }
 
         AddFields("chunk_3", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0)))));
+        // Slot 4 is the element id: a string, or nil (the reference reads null); anything else is refused.
         AddFields("chunk_5", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0), Str("k"), Nil))));
         AddFields("chunk_5_nested", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0), Str("k"), Arr(Raw(1), Raw(2))))));
-        // An extra slot inside a chunk reference is followed by more bytes, so a skip that stops short shows.
+        AddFields("chunk_id_str", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0), Str("k"), Str("0")))));
+        AddFields("chunk_id_int", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0), Str("k"), Raw(0)))));
+        AddFields("chunk_id_str8", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0), Str("k"), Raw(0xd9, 1, 0x30)))));
+        AddFields("chunk_6", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0), Str("k"), Str("0"), Nil))));
+        // An extra slot (past the id) inside a chunk reference is followed by more bytes, so a skip that stops short shows.
         var extras = new (string Name, byte[] Value)[]
         {
             ("map", MapOf(Str("a"), Str("b"), Str("c"), Str("d"))), ("map16", Cat(Raw(0xde, 0, 2), Raw(1), Raw(2), Raw(3), Raw(4))),
@@ -289,7 +294,7 @@ public sealed class CultMeshContentVectorTests
             ("nested", Arr(MapOf(Str("a"), Arr(Raw(1), Raw(2))), Arr()))
         };
         foreach (var (name, value) in extras)
-            AddFields($"chunk_extra_{name}", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0), Str("k"), value))));
+            AddFields($"chunk_extra_{name}", (7, Arr(Arr(Str(EmptyHash), Raw(0), Raw(0), Str("k"), Str("0"), value))));
         AddFields("chunk_1", (7, Arr(Arr(Str(EmptyHash)))));
         AddFields("chunk_0", (7, Arr(Arr())));
         AddFields("chunk_is_map", (7, Arr(MapOf(Str("a"), Str("b")))));

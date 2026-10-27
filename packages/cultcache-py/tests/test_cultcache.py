@@ -12,6 +12,7 @@ from cultcache_py import (
     CultCache,
     JsonLinesBackingStore,
     SingleFileMessagePackBackingStore,
+    StoreUnreadableError,
     define_database_entry_type,
     define_document_type,
 )
@@ -186,7 +187,7 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual(raw[2][0][0], "app")
             self.assertEqual(raw[2][0][1], "settings")
 
-    def test_messagepack_store_recovers_schema_stamped_record_missing_catalog_entry(self) -> None:
+    def test_messagepack_store_refuses_a_record_whose_schema_the_catalog_does_not_publish(self) -> None:
         try:
             import msgpack  # type: ignore
         except ModuleNotFoundError:
@@ -227,11 +228,490 @@ class CultCacheTests(unittest.TestCase):
                 .build()
             )
 
-            cache.pull_all_backing_stores()
-            self.assertEqual(cache.get_required(document, "record-1")["value"], "still readable")
-            envelope = cache.get_required_envelope(document, "record-1")
-            self.assertEqual(envelope.type, "runtime-policy")
-            self.assertEqual(envelope.schema_id, "sha256:stale-schema-id-from-cold-record")
+            # The payload opens with a schema version, and the catalog is the store's own description: no recovery.
+            with self.assertRaises(StoreUnreadableError):
+                cache.pull_all_backing_stores()
+
+    def _foreign_id_document(self):
+        return define_database_entry_type(
+            "tests.foreign-id",
+            [("name", 0)],
+            schema_id="tests.foreign-id.current",
+            schema_name="tests.foreign-id",
+            schema_version="tests.foreign_id.v1",
+            compatible_schema_ids=["tests.foreign-id.current", "tests.foreign-id.older"],
+        )
+
+    def _open_foreign_id_store(self, document, path: Path) -> CultCache:
+        cache = CultCache.builder().register_document_type(document).add_generic_store(
+            SingleFileMessagePackBackingStore(path)
+        ).build()
+        cache.pull_all_backing_stores()
+        return cache
+
+    # A record put under an id its schema only lists as compatible is stamped with the registered id, and the store the write
+    # leaves opens and takes the next write.
+    def test_put_envelope_under_a_compatible_schema_id_writes_a_store_that_reopens(self) -> None:
+        import msgpack  # type: ignore
+        from cultcache_py import CultCacheSchemaCatalogEntry
+
+        document = self._foreign_id_document()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            cache = self._open_foreign_id_store(document, path)
+            payload = document.encode_payload({"name": "foreign"})
+            foreign_entry = CultCacheSchemaCatalogEntry(
+                schema_id="tests.foreign-id.older",
+                schema_name="tests.foreign-id",
+                schema_version="tests.foreign_id.v1",
+                content_hash="tests.foreign-id.older",
+                canonical_schema_json="",
+                compatible_schema_ids=("tests.foreign-id.older",),
+                members=(),
+            )
+            cache.put_envelope(
+                document,
+                CultCacheEnvelope(
+                    key="foreign",
+                    type="tests.foreign-id",
+                    payload=payload,
+                    stored_at="2026-09-30T00:00:00Z",
+                    schema_id="tests.foreign-id.older",
+                    catalog_entry=foreign_entry,
+                ),
+            )
+            stored = msgpack.unpackb(path.read_bytes(), raw=False)
+            self.assertEqual([entry[0] for entry in stored[1]], ["tests.foreign-id.current"])
+            self.assertEqual(stored[2][0][1], "tests.foreign-id.current")
+            reopened = self._open_foreign_id_store(document, path)
+            self.assertEqual(reopened.get_required(document, "foreign")["name"], "foreign")
+            reopened.put(document, "next", {"name": "next"})
+            self.assertEqual(self._open_foreign_id_store(document, path).get_required(document, "next")["name"], "next")
+
+    def test_the_store_publishes_a_records_schema_id_even_when_the_envelopes_catalog_entry_does_not(self) -> None:
+        import msgpack  # type: ignore
+        from cultcache_py import CultCacheSchemaCatalogEntry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            store = SingleFileMessagePackBackingStore(path)
+            store.push(CultCacheEnvelope(
+                key="k",
+                type="tests.store-publishes",
+                payload=msgpack.packb({"name": "k"}, use_bin_type=True),
+                stored_at="2026-09-30T00:00:00Z",
+                schema_id="tests.store-publishes.record",
+                catalog_entry=CultCacheSchemaCatalogEntry(
+                    schema_id="tests.store-publishes.other",
+                    schema_name="tests.store-publishes",
+                    schema_version="tests.store_publishes.v1",
+                    content_hash="tests.store-publishes.other",
+                    canonical_schema_json="",
+                    compatible_schema_ids=("tests.store-publishes.other",),
+                    members=(),
+                ),
+            ))
+            stored = msgpack.unpackb(path.read_bytes(), raw=False)
+            self.assertEqual(stored[2][0][1], "tests.store-publishes.record")
+            self.assertEqual([entry[0] for entry in stored[1]], ["tests.store-publishes.record"])
+            self.assertEqual(len(SingleFileMessagePackBackingStore(path).pull_all()), 1)
+
+    # The catalog a write leaves is derived from its records: one entry per carried id, chosen and never merged, the same whatever
+    # order the records arrive in. A registered (supplied) entry wins over an arrived (read back) entry with the same own id.
+    @staticmethod
+    def _writer_entry(schema_id: str, name: str, content_hash: str, compatible: tuple[str, ...]):
+        from cultcache_py import CultCacheSchemaCatalogEntry
+
+        return CultCacheSchemaCatalogEntry(
+            schema_id=schema_id, schema_name=name, schema_version=name + ".v1", content_hash=content_hash,
+            canonical_schema_json="", compatible_schema_ids=compatible, members=(),
+        )
+
+    def _writer_record(self, key: str, type: str, schema_id: str, catalog_entry=None) -> CultCacheEnvelope:
+        import msgpack  # type: ignore
+
+        return CultCacheEnvelope(
+            key=key, type=type, payload=msgpack.packb({"key": key}, use_bin_type=True),
+            stored_at="2026-09-30T00:00:00Z", schema_id=schema_id, catalog_entry=catalog_entry,
+        )
+
+    @staticmethod
+    def _raw_entry(entry) -> list:
+        return [entry.schema_id, entry.schema_name, entry.schema_version, entry.content_hash, "", list(entry.compatible_schema_ids), []]
+
+    def test_a_registered_entry_is_written_as_it_is_over_the_arrived_entries_with_the_same_own_id_in_either_order(self) -> None:
+        import msgpack  # type: ignore
+
+        stale1 = self._writer_entry("tests.x", "tests.n", "a-stale-1", ("tests.x", "old"))
+        stale2 = self._writer_entry("tests.x", "tests.n", "a-stale-2", ("tests.x",))
+        registered = self._writer_record("a", "tests.n", "tests.x", self._writer_entry("tests.x", "tests.n", "fresh", ("tests.x",)))
+        for entries in ([stale1, stale2], [stale2, stale1]):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "store.msgpack"
+                path.write_bytes(msgpack.packb([
+                    "cultcache.store.v1", [self._raw_entry(entry) for entry in entries],
+                    [["b", "tests.x", "2026-09-30T00:00:00Z", msgpack.packb({"b": 1}, use_bin_type=True)]],
+                ], use_bin_type=True))
+                SingleFileMessagePackBackingStore(path).push(registered)
+                catalog = msgpack.unpackb(path.read_bytes(), raw=False)[1]
+                self.assertEqual(len(catalog), 1)
+                self.assertEqual(catalog[0][3], "fresh")
+                self.assertEqual(catalog[0][5], ["tests.x"], "written as chosen, no union with the arrived entries' ids")
+
+    def test_a_rename_with_a_stable_schema_id_a_whole_view_write_names_the_registered_schema(self) -> None:
+        import msgpack  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            path.write_bytes(msgpack.packb([
+                "cultcache.store.v1", [self._raw_entry(self._writer_entry("tests.x", "tests.old", "stale", ("tests.x",)))],
+                [["a", "tests.x", "2026-09-30T00:00:00Z", msgpack.packb({"a": 1}, use_bin_type=True)]],
+            ], use_bin_type=True))
+            SingleFileMessagePackBackingStore(path).push_all(
+                [self._writer_record("a", "tests.old", "tests.x", self._writer_entry("tests.x", "tests.new", "fresh", ("tests.x",)))]
+            )
+            catalog = msgpack.unpackb(path.read_bytes(), raw=False)[1]
+            self.assertEqual([(entry[1], entry[3]) for entry in catalog], [("tests.new", "fresh")])
+
+    def test_two_entries_of_one_tier_that_share_an_own_id_and_disagree_on_the_schema_name_refuse_the_write_typed(self) -> None:
+        from cultcache_py import SchemaConflictError
+
+        first = self._writer_record("b", "tests.first", "tests.x", self._writer_entry("tests.x", "tests.first", "h1", ("tests.x",)))
+        second = self._writer_record("a", "tests.first", "tests.x", self._writer_entry("tests.x", "tests.second", "h2", ("tests.x",)))
+        for order in ([first, second], [second, first]):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "store.msgpack"
+                with self.assertRaises(SchemaConflictError) as refused:
+                    SingleFileMessagePackBackingStore(path).push_all(order)
+                self.assertEqual(refused.exception.schema_id, "tests.x")
+                self.assertEqual(refused.exception.record_key, "a")
+                self.assertEqual(refused.exception.schema_names, ["tests.first", "tests.second"])
+                self.assertFalse(path.exists())
+
+    def test_records_of_different_types_under_one_schema_id_refuse_the_write_typed_and_no_record_changes_type(self) -> None:
+        from cultcache_py import SchemaConflictError
+
+        a = self._writer_record("a", "tests.n", "tests.y", self._writer_entry("tests.x", "tests.n", "h1", ("tests.x", "tests.y")))
+        b = self._writer_record("b", "tests.m", "tests.y", self._writer_entry("tests.y", "tests.m", "h2", ("tests.y",)))
+        for order in ([a, b], [b, a]):
+            with tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(SchemaConflictError) as refused:
+                    SingleFileMessagePackBackingStore(Path(tmp) / "store.msgpack").push_all(order)
+                self.assertEqual(refused.exception.schema_id, "tests.y")
+                self.assertEqual(refused.exception.schema_names, ["tests.m", "tests.n"])
+
+    def test_an_entry_that_owns_an_id_is_chosen_over_one_that_lists_it(self) -> None:
+        import msgpack  # type: ignore
+
+        owner = self._writer_record("a", "tests.n", "tests.y", self._writer_entry("tests.y", "tests.n", "h1", ("tests.y",)))
+        lister = self._writer_record("b", "tests.n", "tests.x", self._writer_entry("tests.x", "tests.n", "h2", ("tests.x", "tests.y")))
+        for order in ([lister, owner], [owner, lister]):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "store.msgpack"
+                SingleFileMessagePackBackingStore(path).push_all(order)
+                catalog = msgpack.unpackb(path.read_bytes(), raw=False)[1]
+                self.assertEqual(sorted((entry[0], entry[5]) for entry in catalog), [("tests.x", ["tests.x", "tests.y"]), ("tests.y", ["tests.y"])])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            SingleFileMessagePackBackingStore(path).push_all([owner])
+            self.assertEqual([entry[0] for entry in msgpack.unpackb(path.read_bytes(), raw=False)[1]], ["tests.y"])
+
+    def test_entries_of_one_tier_that_tie_are_taken_in_one_fixed_order_and_a_registered_lister_beats_an_arrived_one(self) -> None:
+        import msgpack  # type: ignore
+
+        # The content hash orders them against the order their compatible ids would give: h1 sorts first, its list sorts last.
+        one = self._writer_record("a", "tests.n", "tests.x", self._writer_entry("tests.x", "tests.n", "h2", ("tests.x",)))
+        two = self._writer_record("b", "tests.n", "tests.x", self._writer_entry("tests.x", "tests.n", "h1", ("tests.x", "tests.y")))
+        for order in ([one, two], [two, one]):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "store.msgpack"
+                SingleFileMessagePackBackingStore(path).push_all(order)
+                self.assertEqual([entry[3] for entry in msgpack.unpackb(path.read_bytes(), raw=False)[1]], ["h1"])
+
+        # z sits under old, which the arrived entry (id x) lists; the supplied entry (id r) lists it too: the registered one publishes it.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            path.write_bytes(msgpack.packb([
+                "cultcache.store.v1", [self._raw_entry(self._writer_entry("tests.x", "tests.n", "stale", ("tests.x", "old")))],
+                [["z", "old", "2026-09-30T00:00:00Z", msgpack.packb({"z": 1}, use_bin_type=True)]],
+            ], use_bin_type=True))
+            SingleFileMessagePackBackingStore(path).push(
+                self._writer_record("a", "tests.n", "tests.r", self._writer_entry("tests.r", "tests.n", "fresh", ("tests.r", "old")))
+            )
+            self.assertEqual([entry[0] for entry in msgpack.unpackb(path.read_bytes(), raw=False)[1]], ["tests.r"])
+
+    # A registered entry that owns an id keeps it against an arrived entry that owns it too and lists the id another record sits
+    # under, whichever of the two ids sorts first: the arrived entry's list is not merged in, so the record under the listed id is
+    # published by no chosen entry.
+    def test_an_arrived_entry_that_owns_a_registered_id_does_not_replace_it_nor_publish_what_it_lists(self) -> None:
+        import msgpack  # type: ignore
+        from cultcache_py import SchemaConflictError
+
+        for own_id, listed_id in (("tests.a", "tests.b"), ("tests.b", "tests.a")):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "store.msgpack"
+                path.write_bytes(msgpack.packb([
+                    "cultcache.store.v1", [self._raw_entry(self._writer_entry(own_id, "tests.arrived", "stale", (own_id, listed_id)))],
+                    [["k2", listed_id, "2026-09-30T00:00:00Z", msgpack.packb({"k": 2}, use_bin_type=True)]],
+                ], use_bin_type=True))
+                before = path.read_bytes()
+                with self.assertRaises(SchemaConflictError) as refused:
+                    SingleFileMessagePackBackingStore(path).push(
+                        self._writer_record("k1", "tests.registered", own_id, self._writer_entry(own_id, "tests.registered", "fresh", (own_id,)))
+                    )
+                self.assertEqual(refused.exception.schema_id, listed_id)
+                self.assertEqual(refused.exception.record_key, "k2")
+                self.assertEqual(path.read_bytes(), before, "the file is left as it was")
+
+    # Ids are taken in sorted order, so which entry survives, and so which id the refusal names, does not depend on the order the
+    # records arrive in.
+    def test_the_refusal_names_the_same_id_whatever_order_the_records_arrive_in(self) -> None:
+        from cultcache_py import SchemaConflictError
+
+        one = self._writer_record("r1", "tests.n", "tests.y", self._writer_entry("tests.x", "tests.n", "h1", ("tests.x", "tests.y")))
+        two = self._writer_record("r2", "tests.n", "tests.z", self._writer_entry("tests.x", "tests.n", "h2", ("tests.x", "tests.z")))
+        for order in ([one, two], [two, one]):
+            with tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(SchemaConflictError) as refused:
+                    SingleFileMessagePackBackingStore(Path(tmp) / "store.msgpack").push_all(order)
+                self.assertEqual(refused.exception.schema_id, "tests.y")
+                self.assertEqual(refused.exception.record_key, "r1")
+
+    # A write may not retype records already in the file: across tiers the id keeps the type its records resolve to, unless the
+    # entries of both tiers own it, which is a rename under a stable id and the registered descriptor wins.
+    def test_a_write_that_would_change_the_type_an_existing_record_resolves_to_refuses_typed_and_leaves_the_file(self) -> None:
+        import msgpack  # type: ignore
+        from cultcache_py import SchemaConflictError
+
+        cases = [
+            ("registered entry lists the id, arrived entry owns it",
+             self._writer_entry("tests.x", "tests.arrived", "h1", ("tests.x",)),
+             self._writer_record("a", "tests.registered", "tests.x", self._writer_entry("tests.r", "tests.registered", "h2", ("tests.r", "tests.x")))),
+            ("registered entry owns the id, arrived entry lists it",
+             self._writer_entry("tests.r", "tests.arrived", "h1", ("tests.r", "tests.x")),
+             self._writer_record("a", "tests.registered", "tests.x", self._writer_entry("tests.x", "tests.registered", "h2", ("tests.x",)))),
+        ]
+        payload = msgpack.packb({"z": 1}, use_bin_type=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, catalog, registered in cases:
+                path = Path(tmp) / (name.split(",")[0].replace(" ", "-") + ".msgpack")
+                path.write_bytes(msgpack.packb(
+                    ["cultcache.store.v1", [self._raw_entry(catalog)], [["z", "tests.x", "2026-09-30T00:00:00Z", payload]]], use_bin_type=True))
+                before = path.read_bytes()
+                with self.assertRaises(SchemaConflictError, msg=name) as refused:
+                    SingleFileMessagePackBackingStore(path).push(registered)
+                self.assertEqual(refused.exception.schema_id, "tests.x", name)
+                self.assertEqual(sorted(refused.exception.schema_names), ["tests.arrived", "tests.registered"], name)
+                self.assertEqual(path.read_bytes(), before, name)
+
+            # The same registered record renames the schema when both tiers own the id: it writes, and the reader finds every record.
+            path = Path(tmp) / "rename.msgpack"
+            path.write_bytes(msgpack.packb([
+                "cultcache.store.v1", [self._raw_entry(self._writer_entry("tests.x", "tests.arrived", "h1", ("tests.x",)))],
+                [["z", "tests.x", "2026-09-30T00:00:00Z", payload]],
+            ], use_bin_type=True))
+            SingleFileMessagePackBackingStore(path).push(
+                self._writer_record("a", "tests.registered", "tests.x", self._writer_entry("tests.x", "tests.registered", "h2", ("tests.x",)))
+            )
+            self.assertEqual([(entry[0], entry[1]) for entry in msgpack.unpackb(path.read_bytes(), raw=False)[1]], [("tests.x", "tests.registered")])
+            self.assertEqual(len(SingleFileMessagePackBackingStore(path).pull_all()), 2)
+
+    def test_a_record_no_chosen_entry_publishes_refuses_the_write_typed_and_leaves_the_file(self) -> None:
+        import msgpack  # type: ignore
+        from cultcache_py import SchemaConflictError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            path.write_bytes(msgpack.packb([
+                "cultcache.store.v1", [self._raw_entry(self._writer_entry("tests.x", "tests.legacy", "stale", ("tests.x", "old")))],
+                [["z", "old", "2026-09-30T00:00:00Z", msgpack.packb({"z": 1}, use_bin_type=True)]],
+            ], use_bin_type=True))
+            before = path.read_bytes()
+            with self.assertRaises(SchemaConflictError) as refused:
+                SingleFileMessagePackBackingStore(path).push(
+                    self._writer_record("a", "tests.legacy", "tests.x", self._writer_entry("tests.x", "tests.legacy", "fresh", ("tests.x",)))
+                )
+            self.assertEqual(refused.exception.schema_id, "old")
+            self.assertEqual(refused.exception.record_key, "z")
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_an_id_an_entry_owns_names_that_entry_not_one_that_lists_it_as_compatible(self) -> None:
+        for vector in ("own-id-over-compatible-v3.bin", "compatible-before-owner-v3.bin"):
+            store = SingleFileMessagePackBackingStore(self._C2A_VECTORS / "readability" / vector)
+            self.assertEqual([envelope.type for envelope in store.pull_all()], ["vectors.item", "vectors.item"], vector)
+
+    def test_a_record_loaded_under_a_compatible_schema_id_is_written_back_under_the_id_its_catalog_entry_carries(self) -> None:
+        import msgpack  # type: ignore
+
+        document = self._foreign_id_document()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            path.write_bytes(msgpack.packb([
+                "cultcache.store.v1",
+                [["tests.foreign-id.current", "tests.foreign-id", "tests.foreign_id.v1", "tests.foreign-id.current", "",
+                  ["tests.foreign-id.current", "tests.foreign-id.older"], []]],
+                [["old", "tests.foreign-id.older", "2026-09-30T00:00:00Z", document.encode_payload({"name": "old"})]],
+            ], use_bin_type=True))
+            cache = self._open_foreign_id_store(document, path)
+            self.assertEqual(cache.get_required_envelope(document, "old").schema_id, "tests.foreign-id.current")
+            cache.put(document, "next", {"name": "next"})
+            reopened = self._open_foreign_id_store(document, path)
+            self.assertEqual(reopened.get_required(document, "old")["name"], "old")
+            self.assertEqual(reopened.get_required(document, "next")["name"], "next")
+
+    # The cache restamps a record on load, so a store's writer never has to: a record loaded under an id the registered document
+    # only lists is held, and written back by a whole write, under the id its catalog entry carries. A document that does not list
+    # the id a record sits under cannot have that record published by a write that leaves it in place: the put is refused, typed.
+    def test_a_cache_that_does_not_list_the_id_a_loaded_record_sits_under_is_refused_a_put_and_the_file_is_left(self) -> None:
+        import msgpack  # type: ignore
+        from cultcache_py import SchemaConflictError
+
+        document = define_database_entry_type(
+            "tests.foreign-id", [("name", 0)], schema_id="tests.foreign-id.current",
+            schema_name="tests.foreign-id", schema_version="tests.foreign_id.v1",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            path.write_bytes(msgpack.packb([
+                "cultcache.store.v1",
+                [["tests.foreign-id.current", "tests.foreign-id", "tests.foreign_id.v1", "tests.foreign-id.current", "",
+                  ["tests.foreign-id.current", "tests.foreign-id.older"], []]],
+                [["old", "tests.foreign-id.older", "2026-09-30T00:00:00Z", document.encode_payload({"name": "old"})]],
+            ], use_bin_type=True))
+            before = path.read_bytes()
+            cache = self._open_foreign_id_store(document, path)
+            self.assertEqual(cache.get_required_envelope(document, "old").schema_id, "tests.foreign-id.current")
+            with self.assertRaises(SchemaConflictError) as refused:
+                cache.put(document, "next", {"name": "next"})
+            self.assertEqual(refused.exception.schema_id, "tests.foreign-id.older")
+            self.assertEqual(refused.exception.record_key, "old")
+            self.assertEqual(path.read_bytes(), before)
+
+    # A record resolves to a local document by its schema id, never by the name its catalog entry carries: a schema renamed under
+    # a stable id opens, and an id that names one document is not overruled by a name that names another.
+    def _store_of(self, path: Path, catalog: list, records: list) -> None:
+        import msgpack  # type: ignore
+
+        path.write_bytes(msgpack.packb(["cultcache.store.v1", catalog, records], use_bin_type=True))
+
+    def test_a_schema_renamed_under_a_stable_id_opens_by_its_id(self) -> None:
+        document = define_database_entry_type(
+            "tests.old", [("name", 0)], schema_id="tests.stable", schema_name="tests.old", schema_version="tests.old.v1",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            self._store_of(
+                path,
+                [["tests.stable", "tests.renamed", "tests.renamed.v1", "renamed", "", ["tests.stable"], []]],
+                [["a", "tests.stable", "2026-09-30T00:00:00Z", document.encode_payload({"name": "a"})]],
+            )
+            cache = self._open_foreign_id_store(document, path)
+            self.assertEqual(cache.get_required(document, "a")["name"], "a")
+
+    def test_a_schema_id_that_names_one_document_is_not_overruled_by_a_name_that_names_another(self) -> None:
+        first = define_database_entry_type("tests.a", [("name", 0)], schema_id="id.a", schema_name="tests.a", schema_version="tests.a.v1")
+        second = define_database_entry_type(
+            "tests.b", [("name", 0)], schema_id="id.b", schema_name="tests.b", schema_version="tests.b.v1", compatible_schema_ids=["id.b", "id.b.older"],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            for schema_id in ("id.b", "id.b.older"):
+                path = Path(tmp) / (schema_id + ".msgpack")
+                # The entry that publishes the id carries the other document's name.
+                self._store_of(
+                    path,
+                    [["id.b", "tests.a", "tests.b.v1", "h", "", ["id.b", "id.b.older"], []]],
+                    [["k", schema_id, "2026-09-30T00:00:00Z", second.encode_payload({"name": "k"})]],
+                )
+                cache = CultCache.builder().register_document_type(first).register_document_type(second).add_generic_store(
+                    SingleFileMessagePackBackingStore(path)
+                ).build()
+                cache.pull_all_backing_stores()
+                self.assertEqual(cache.get_required(second, "k")["name"], "k", schema_id)
+                self.assertIsNone(cache.get(first, "k"), schema_id)
+
+    def _assert_second_claim_refused(self, first, second, schema_id: str) -> None:
+        """A registration refusal is typed, names the id and both schema names and document types, and the cache keeps what it
+        had."""
+        from cultcache_py import SchemaConflictError
+
+        cache = CultCache()
+        cache.register_document_type(first)
+        with self.assertRaises(SchemaConflictError) as refused:
+            cache.register_document_type(second)
+        self.assertEqual(refused.exception.schema_id, schema_id)
+        self.assertEqual(refused.exception.schema_names, [first.catalog_entry().schema_name, second.catalog_entry().schema_name])
+        self.assertIn(first.type, str(refused.exception))
+        self.assertIn(second.type, str(refused.exception))
+        if second is not first:
+            with self.assertRaisesRegex(CultCacheError, "not registered"):
+                cache.put(second, "k", {"name": "k"})
+
+    def _pull(self, documents: list, catalog: list, records: list) -> CultCache:
+        tmp = tempfile.mkdtemp()
+        path = Path(tmp) / "store.msgpack"
+        self._store_of(path, catalog, records)
+        builder = CultCache.builder()
+        for document in documents:
+            builder = builder.register_document_type(document)
+        cache = builder.add_generic_store(SingleFileMessagePackBackingStore(path)).build()
+        cache.pull_all_backing_stores()
+        return cache
+
+    def test_a_document_listing_an_id_another_owns_registers_beside_it_in_either_order_and_the_owner_wins(self) -> None:
+        owner = define_database_entry_type("tests.owner", [("name", 0)], schema_id="id.owned", schema_name="tests.owner", schema_version="tests.owner.v1")
+        lister = define_database_entry_type(
+            "tests.lister", [("name", 0)], schema_id="id.lister", schema_name="tests.lister", schema_version="tests.lister.v1",
+            compatible_schema_ids=["id.lister", "id.owned"],
+        )
+        catalog = [
+            ["id.owned", "tests.owner", "tests.owner.v1", "h1", "", ["id.owned"], []],
+            ["id.lister", "tests.lister", "tests.lister.v1", "h2", "", ["id.lister", "id.owned"], []],
+        ]
+        records = [
+            ["o", "id.owned", "2026-09-30T00:00:00Z", owner.encode_payload({"name": "o"})],
+            ["l", "id.lister", "2026-09-30T00:00:00Z", lister.encode_payload({"name": "l"})],
+        ]
+        for order in ([owner, lister], [lister, owner]):
+            cache = self._pull(order, catalog, records)
+            self.assertEqual(cache.get_required(owner, "o")["name"], "o")
+            self.assertIsNone(cache.get(lister, "o"))
+            self.assertEqual(cache.get_required(lister, "l")["name"], "l")
+        self.assertEqual(self._pull([lister], catalog, records[:1]).get_required(lister, "o")["name"], "o")
+
+    def test_two_documents_listing_one_id_register_and_a_record_under_it_needs_an_owner(self) -> None:
+        from cultcache_py import SchemaConflictError
+
+        a = define_database_entry_type(
+            "tests.list-a", [("name", 0)], schema_id="id.a", schema_name="tests.list-a", compatible_schema_ids=["id.a", "id.shared"],
+        )
+        b = define_database_entry_type(
+            "tests.list-b", [("name", 0)], schema_id="id.b", schema_name="tests.list-b", compatible_schema_ids=["id.b", "id.shared"],
+        )
+        owner = define_database_entry_type("tests.shared", [("name", 0)], schema_id="id.shared", schema_name="tests.shared")
+        catalog = [["id.shared", "tests.shared", "tests.shared.v1", "h", "", ["id.shared"], []]]
+        records = [["k", "id.shared", "2026-09-30T00:00:00Z", owner.encode_payload({"name": "k"})]]
+        for listers in ([a, b], [b, a]):
+            with self.assertRaises(SchemaConflictError) as refused:
+                self._pull(listers, catalog, records)
+            self.assertEqual(refused.exception.schema_id, "id.shared")
+            self.assertEqual(refused.exception.record_key, "k")
+            self.assertEqual(refused.exception.schema_names, ["tests.list-a", "tests.list-b"])
+            for documents in ([*listers, owner], [owner, *listers]):
+                cache = self._pull(documents, catalog, records)
+                self.assertEqual(cache.get_required(owner, "k")["name"], "k")
+
+    def test_two_documents_owning_one_schema_id_are_refused_in_either_order(self) -> None:
+        # Each declares an older id and not its own, so the id they share is only ever their own.
+        a = define_database_entry_type("tests.own-a", [("name", 0)], schema_id="id.same", schema_name="tests.own-a", compatible_schema_ids=["id.a-older"])
+        b = define_database_entry_type("tests.own-b", [("name", 0)], schema_id="id.same", schema_name="tests.own-b", compatible_schema_ids=["id.b-older"])
+        self._assert_second_claim_refused(a, b, "id.same")
+        self._assert_second_claim_refused(b, a, "id.same")
+
+    def test_every_registration_refusal_is_a_schema_conflict(self) -> None:
+        first = define_database_entry_type("tests.named", [("name", 0)], schema_id="id.first", schema_name="tests.named")
+        same_name = define_database_entry_type("tests.renamed", [("name", 0)], schema_id="id.second", schema_name="tests.named")
+        self._assert_second_claim_refused(first, same_name, "id.second")
+        self._assert_second_claim_refused(first, first, "id.first")
 
     def test_interop_cli_helpers_round_trip_v1_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -893,6 +1373,32 @@ class CultCacheTests(unittest.TestCase):
                         self.assertNotIn(repr(value[0]), message)
                         self.assertIn(f"of {len(value[0])} bytes", message)
 
+    def test_single_file_refusals_say_exactly_what_was_found_and_what_is_read(self) -> None:
+        import msgpack  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.cc"
+            reads = "it reads 'cultcache.store.v1' and 'cultcache.store.v3' only"
+            for header, found in (
+                ("cultcache.store.v12", "'cultcache.store.v12'"),
+                ("cultcache.store.SECRET", "an unrecognised cultcache.store.* header of 22 bytes"),
+                ("cultcache.store.v", "an unrecognised cultcache.store.* header of 17 bytes"),
+                # Digits are ASCII only: two Arabic-Indic digits are four bytes and are not the known shape.
+                ("cultcache.store.v١٢", "an unrecognised cultcache.store.* header of 21 bytes"),
+            ):
+                path.write_bytes(msgpack.packb([header, [], []], use_bin_type=True))
+                with self.assertRaises(ValueError) as caught:
+                    SingleFileMessagePackBackingStore(path).pull_all()
+                self.assertIn(f"CultCache store format {found} is not one this runtime reads; {reads}", str(caught.exception))
+
+            path.write_bytes(msgpack.packb(["cultcache.store.v1", [], [["k", "s", "t", b"\x90", "extra"]]], use_bin_type=True))
+            with self.assertRaises(ValueError) as caught:
+                SingleFileMessagePackBackingStore(path).pull_all()
+            self.assertIn(
+                "CultCache record 'k' (schema 's') has 5 slots, more than the 4 of a cultcache.store.v1 record, so this is not a valid store",
+                str(caught.exception),
+            )
+
     def test_single_file_record_refusal_names_only_a_string_key(self) -> None:
         import msgpack  # type: ignore
 
@@ -964,6 +1470,121 @@ class CultCacheTests(unittest.TestCase):
                 with self.assertRaises(OSError) as caught:
                     SingleFileMessagePackBackingStore(path).pull_all()
                 self.assertNotIsInstance(caught.exception, FileNotFoundError)
+
+
+    # The element-id marker: tests/vectors/document-variants-c2a/v3-base.msgpack is v1-base with its header replaced.
+    _C2A_VECTORS = Path(__file__).resolve().parents[3] / "tests" / "vectors" / "document-variants-c2a"
+
+    def _header_after_rewrite(self, vector: Path) -> str:
+        import msgpack
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = Path(tmp) / "store.msgpack"
+            store_path.write_bytes(vector.read_bytes())
+            store = SingleFileMessagePackBackingStore(store_path)
+            envelopes = store.pull_all()
+            self.assertEqual([e.key for e in envelopes], ["alpha", "beta"])
+            store.push(envelopes[0])
+            return msgpack.unpackb(store_path.read_bytes(), raw=False)[0]
+
+    def test_single_file_reads_a_v3_element_id_store_and_a_rewrite_keeps_the_marker(self) -> None:
+        self.assertEqual(self._header_after_rewrite(self._C2A_VECTORS / "v3-base.msgpack"), "cultcache.store.v3")
+
+    def test_single_file_rewrite_of_a_v1_store_stays_v1(self) -> None:
+        self.assertEqual(self._header_after_rewrite(self._VECTORS / "v1-base.msgpack"), "cultcache.store.v1")
+
+    def test_single_file_flush_after_the_marked_file_is_gone_writes_unmarked(self) -> None:
+        import msgpack
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = Path(tmp) / "store.msgpack"
+            store_path.write_bytes((self._C2A_VECTORS / "v3-base.msgpack").read_bytes())
+            store = SingleFileMessagePackBackingStore(store_path)
+            envelopes = store.pull_all()
+            store_path.unlink()
+            store.push_all(envelopes)
+            self.assertEqual(msgpack.unpackb(store_path.read_bytes(), raw=False)[0], "cultcache.store.v1")
+
+    def test_single_file_push_after_the_marked_file_is_gone_writes_unmarked(self) -> None:
+        import msgpack
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = Path(tmp) / "store.msgpack"
+            store_path.write_bytes((self._C2A_VECTORS / "v3-base.msgpack").read_bytes())
+            store = SingleFileMessagePackBackingStore(store_path)
+            envelopes = store.pull_all()
+            store_path.unlink()
+            store.push(envelopes[0])
+            self.assertEqual(msgpack.unpackb(store_path.read_bytes(), raw=False)[0], "cultcache.store.v1")
+
+    def test_single_file_push_all_refuses_a_store_whose_header_it_cannot_read_and_leaves_it_untouched(self) -> None:
+        envelopes = SingleFileMessagePackBackingStore(self._C2A_VECTORS / "v3-base.msgpack").pull_all()
+        vectors = self._VECTORS.parent
+        for vector in (
+            self._VECTORS / "unknown-header.msgpack",
+            self._VECTORS / "variant-v2.msgpack",
+            vectors / "document-variants-c1" / "variant-store.msgpack",
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                store_path = Path(tmp) / "store.msgpack"
+                store_path.write_bytes(vector.read_bytes())
+                before = store_path.read_bytes()
+                with self.assertRaisesRegex(StoreUnreadableError, "is not readable"):
+                    SingleFileMessagePackBackingStore(store_path).push_all(envelopes)
+                self.assertEqual(store_path.read_bytes(), before, f"{vector.name} was rewritten")
+
+    # A file is replaced by a rewrite exactly when this runtime's own reader opens it: one verdict per file, asked by
+    # pull_all, push_all, push and delete alike. The bytes and every runtime's verdict:
+    # tests/vectors/document-variants-c2a/readability.
+    def test_single_file_replaces_a_file_exactly_when_it_reads(self) -> None:
+        import msgpack  # type: ignore
+
+        root = self._C2A_VECTORS / "readability"
+        rows = [
+            line.split()
+            for line in (root / "manifest.txt").read_text(encoding="utf-8").splitlines()
+            if line and not line.startswith("#")
+        ]
+        # Every vector in the folder has a manifest row.
+        self.assertEqual(
+            sorted(path.name for path in root.glob("*.bin")),
+            sorted(vector for vector, *_ in rows if not vector.startswith("..")),
+        )
+        envelopes = SingleFileMessagePackBackingStore(self._C2A_VECTORS / "v3-base.msgpack").pull_all()
+        for vector, _, _, _, python in rows:
+            content = (root / vector).read_bytes()
+            for operation in ("pull_all", "push_all", "push", "delete"):
+                with tempfile.TemporaryDirectory() as tmp:
+                    store_path = Path(tmp) / "store.msgpack"
+                    store_path.write_bytes(content)
+                    store = SingleFileMessagePackBackingStore(store_path)
+                    run = {
+                        "pull_all": store.pull_all,
+                        "push_all": lambda: store.push_all(envelopes),
+                        "push": lambda: store.push(envelopes[0]),
+                        "delete": lambda: store.delete(envelopes[0].type, envelopes[0].key),
+                    }[operation]
+                    if python == "reads":
+                        run()
+                        if operation == "pull_all":
+                            continue
+                        # The replaced file is a store: it carries the header its old content decides (a v3 store keeps its
+                        # marker, all else is v1), and it holds what the operation wrote.
+                        expected = "cultcache.store.v3" if "v3" in vector else "cultcache.store.v1"
+                        self.assertEqual(msgpack.unpackb(store_path.read_bytes(), raw=False)[0], expected, f"{vector} {operation}")
+                        keys = [envelope.key for envelope in SingleFileMessagePackBackingStore(store_path).pull_all()]
+                        if operation == "push_all":
+                            self.assertEqual(sorted(set(keys) & {e.key for e in envelopes}), sorted(e.key for e in envelopes), f"{vector} {operation}")
+                        elif operation == "push":
+                            self.assertIn(envelopes[0].key, keys, f"{vector} {operation}")
+                        else:
+                            self.assertNotIn(envelopes[0].key, keys, f"{vector} {operation}")
+                    else:
+                        with self.assertRaises(StoreUnreadableError, msg=f"{vector} {operation}") as refused:
+                            run()
+                        self.assertIsNotNone(refused.exception.__cause__, f"{vector} {operation}")
+                        self.assertEqual(store_path.read_bytes(), content, f"{vector} {operation} rewrote a file it cannot read")
+
 
 
 if __name__ == "__main__":

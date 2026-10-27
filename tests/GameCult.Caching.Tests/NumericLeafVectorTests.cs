@@ -36,7 +36,7 @@ namespace GameCult.Caching.Tests
         [MessagePackObject] public sealed class ArrayStringSlot { [Key(0)] public string[]? V; }
         [MessagePackObject] public sealed class NullableInt32Slot { [Key(0)] public int? V; }
         [MessagePackObject] public sealed class ListInt32Slot { [Key(0)] public List<int>? V; }
-        [MessagePackObject] public sealed class LeafInner { [Key(0)] public string N = string.Empty; [Key(1)] public float W; }
+        [MessagePackObject] public sealed class LeafInner { [Key(0)] public string N = string.Empty; [Key(1)] public float W; [Key(2)] [CultElementId] public string Id = string.Empty; }
         [MessagePackObject] public sealed class RecordSlot { [Key(0)] public LeafInner? V; }
         [MessagePackObject] public sealed class ListRecordSlot { [Key(0)] public List<LeafInner>? V; }
         [Union(0, typeof(LeafCircle))] public interface ILeafShape { }
@@ -308,7 +308,7 @@ namespace GameCult.Caching.Tests
         {
             Id = "leaves", Flag = true, Blob = new byte[] { 1, 2, 3 }, I = -7, L = 5_000_000_000, F = 0.1f, D = 0.1, MaybeI = 9,
             Tags = new List<string> { "a", "b" }, Names = new[] { "x", "y" }, Any = "text",
-            Nested = new LeafInner { N = "inner", W = 0.1f }, Items = new List<LeafInner> { new() { N = "one", W = 0.1f }, new() { N = "two", W = 1.5f } },
+            Nested = new LeafInner { N = "inner", W = 0.1f, Id = "000000000011" }, Items = new List<LeafInner> { new() { N = "one", W = 0.1f, Id = "000000000012" }, new() { N = "two", W = 1.5f, Id = "000000000013" } },
             Shape = new LeafCircle { R = 0.1f }, Floats = new[] { 0.1f, 1.5f }, MaybeF = 0.1f,
         };
 

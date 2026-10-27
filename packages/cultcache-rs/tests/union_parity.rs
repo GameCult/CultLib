@@ -32,6 +32,8 @@ enum Node {
 struct WrapArm {
     #[cultcache(key = 0)]
     inner: Option<std::boxed::Box<Node>>,
+    #[cultcache(key = 1)]
+    id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, CultSlots)]
@@ -86,6 +88,17 @@ enum Outcome {
     #[cultcache(key = 1)]
     Completed(CompletedArm),
     #[cultcache(key = 2)]
+    Denied(IdArm),
+    #[cultcache(key = -2147483648)]
+    Floor(IdArm),
+    #[cultcache(key = 2147483647)]
+    Ceiling(IdArm),
+}
+
+// The codec's unit arm (no members, written [key, []]), kept apart from the golden: a document list's arms carry ids.
+#[derive(Clone, Debug, PartialEq, CultUnion)]
+enum UnitOutcome {
+    #[cultcache(key = 2)]
     Denied,
     #[cultcache(key = -2147483648)]
     Floor,
@@ -97,12 +110,23 @@ enum Outcome {
 struct PendingArm {
     #[cultcache(key = 0)]
     message: String,
+    #[cultcache(key = 1)]
+    id: String,
+}
+
+// An arm with no members of its own: just its element id.
+#[derive(Clone, Debug, PartialEq, CultSlots)]
+struct IdArm {
+    #[cultcache(key = 0)]
+    id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, CultSlots)]
 struct CompletedArm {
     #[cultcache(key = 0)]
     source_version: i32,
+    #[cultcache(key = 1)]
+    id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, CultSlots)]
@@ -178,31 +202,35 @@ fn boxed(id: &str, children: Vec<Node>) -> Node {
 }
 
 fn constructed() -> UnionSurface {
-    let inner = boxed("inner", vec![text("deep", "x"), image("img", "uri://a", "alt")]);
+    let inner = boxed("0000000000d0", vec![text("0000000000d1", "x"), image("0000000000d2", "uri://a", "alt")]);
     UnionSurface {
         id: "surface".into(),
         version: 3,
         root: Some(boxed(
-            "root",
+            "0000000000c0",
             vec![
-                text("t1", "hello"),
+                text("0000000000c1", "hello"),
                 Node::Use(UseArm {
-                    id: "u1".into(),
+                    id: "0000000000c2".into(),
                     composition: Composition { name: "comp".into(), body: Some(std::boxed::Box::new(inner)) },
-                    slots: vec![Some(text("s1", "slot")), None, Some(boxed("b2", vec![]))],
+                    slots: vec![Some(text("0000000000e1", "slot")), None, Some(boxed("0000000000e2", vec![]))],
                 }),
-                image("i2", "uri://b", ""),
+                image("0000000000c3", "uri://b", ""),
             ],
         )),
         outcomes: vec![
-            Outcome::Pending(PendingArm { message: "wait".into() }),
-            Outcome::Completed(CompletedArm { source_version: 7 }),
-            Outcome::Denied,
+            Outcome::Pending(PendingArm { message: "wait".into(), id: "0000000000a1".into() }),
+            Outcome::Completed(CompletedArm { source_version: 7, id: "0000000000a2".into() }),
+            Outcome::Denied(id_arm("0000000000a3")),
         ],
         part: Some(Item::Tool(UsesArm { name: "hammer".into(), uses: 12 })),
         crafted: Some(CraftedItem::Part(CountArm { name: "gear".into(), count: 4 })),
         missing: None,
     }
+}
+
+fn id_arm(id: &str) -> IdArm {
+    IdArm { id: id.into() }
 }
 
 fn vector(name: &str) -> Vec<u8> {
@@ -226,8 +254,25 @@ fn union_surface_decodes_and_reencodes() {
 
 #[test]
 fn a_unit_arm_is_a_key_and_an_empty_slots_array() {
-    assert_eq!(rmp_serde::to_vec(&Outcome::Denied).unwrap(), [0x92, 0x02, 0x90]);
-    assert_eq!(rmp_serde::from_slice::<Outcome>(&[0x92, 0x02, 0x90]).unwrap(), Outcome::Denied);
+    // The bytes are the C# reference's, not spelled here.
+    for (file, arm) in [
+        ("unit-arm-denied.msgpack", UnitOutcome::Denied),
+        ("unit-arm-floor.msgpack", UnitOutcome::Floor),
+        ("unit-arm-ceiling.msgpack", UnitOutcome::Ceiling),
+    ] {
+        let reference = vector(file);
+        assert_eq!(rmp_serde::to_vec(&arm).unwrap(), reference, "{file}");
+        assert_eq!(rmp_serde::from_slice::<UnitOutcome>(&reference).unwrap(), arm, "{file}");
+    }
+}
+
+#[test]
+fn an_id_only_arm_is_a_key_and_a_one_slot_array() {
+    let mut bytes = vec![0x92, 0x02, 0x91, 0xac];
+    bytes.extend_from_slice(b"0000000000a3");
+    let denied = Outcome::Denied(id_arm("0000000000a3"));
+    assert_eq!(rmp_serde::to_vec(&denied).unwrap(), bytes);
+    assert_eq!(rmp_serde::from_slice::<Outcome>(&bytes).unwrap(), denied);
 }
 
 #[test]
@@ -246,7 +291,7 @@ fn union_refusal_vectors() {
                     let key = key.expect(&file);
                     assert!(message.contains(&format!("unknown arm key {key} ")), "{file}: {message}");
                 }
-                for canary in ["root", "hello", "uri://", "surface"] {
+                for canary in ["0000000000c0", "hello", "uri://", "surface"] {
                     assert!(!message.contains(canary), "{file} echoed a value: {message}");
                 }
             }
@@ -287,8 +332,8 @@ fn a_union_that_is_not_a_key_and_slots_pair_is_refused_naming_the_enum() {
         ("a unit arm with slots", rmp_serde::to_vec(&(2u64, ("CANARY-slot",))).unwrap()),
     ];
     for (label, bytes) in cases {
-        let message = rmp_serde::from_slice::<Outcome>(&bytes).unwrap_err().to_string();
-        assert!(message.contains("Outcome"), "{label}: {message}");
+        let message = rmp_serde::from_slice::<UnitOutcome>(&bytes).unwrap_err().to_string();
+        assert!(message.contains("UnitOutcome"), "{label}: {message}");
         assert!(!message.contains("CANARY"), "{label}: {message}");
     }
 }
@@ -679,9 +724,9 @@ fn bounds_vectors() {
                 let value = result.unwrap_or_else(|message| panic!("{file}: {message}"));
                 assert_eq!(rmp_serde::to_vec(&value).unwrap(), vector(detail), "{file}");
                 match file {
-                    "arm-key-int32-min.msgpack" => assert_eq!(value.outcomes.last(), Some(&Outcome::Floor)),
+                    "arm-key-int32-min.msgpack" => assert_eq!(value.outcomes.last(), Some(&Outcome::Floor(id_arm("0000000000a4")))),
                     "arm-key-int32-max.msgpack" | "arm-key-wide-coding.msgpack" => {
-                        assert_eq!(value.outcomes.last(), Some(&Outcome::Ceiling))
+                        assert_eq!(value.outcomes.last(), Some(&Outcome::Ceiling(id_arm("0000000000a5"))))
                     }
                     _ => {}
                 }
@@ -715,7 +760,7 @@ fn bounds_vectors() {
 fn wrap_chain(wraps: usize, leaf: Node) -> UnionSurface {
     let mut node = leaf;
     for _ in 0..wraps {
-        node = Node::Wrap(WrapArm { inner: Some(std::boxed::Box::new(node)) });
+        node = Node::Wrap(WrapArm { inner: Some(std::boxed::Box::new(node)), id: "0000000000b1".into() });
     }
     UnionSurface { root: Some(node), ..constructed() }
 }
@@ -724,9 +769,9 @@ fn wrap_chain(wraps: usize, leaf: Node) -> UnionSurface {
 // children) ends at 2 * (wraps + 1) + 2 and a Text leaf at 2 * (wraps + 1) + 1.
 #[test]
 fn the_constructed_chains_write_the_vector_bytes() {
-    let at_limit = wrap_chain(126, boxed("leaf", vec![]));
+    let at_limit = wrap_chain(126, boxed("0000000000f0", vec![]));
     assert_eq!(rmp_serde::to_vec(&at_limit).unwrap(), vector("depth-at-limit.msgpack"));
-    let past_limit = wrap_chain(127, text("leaf", CANARY));
+    let past_limit = wrap_chain(127, text("0000000000f0", CANARY));
     assert_eq!(rmp_serde::to_vec(&past_limit).unwrap(), vector("depth-past-limit.msgpack"));
 }
 
@@ -744,14 +789,14 @@ fn write_refused_past_limit() {
     cache.register_entry_type::<UnionSurface>().unwrap();
     cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
 
-    let at_limit = wrap_chain(126, boxed("leaf", vec![]));
+    let at_limit = wrap_chain(126, boxed("0000000000f0", vec![]));
     assert_eq!(cache.put("at", &at_limit).unwrap(), at_limit);
     let stored = cache.snapshot_envelopes();
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].payload, vector("depth-at-limit.msgpack"));
     let file_before = std::fs::read(&path).unwrap();
 
-    let error = cache.put("past", &wrap_chain(127, text("leaf", CANARY))).unwrap_err();
+    let error = cache.put("past", &wrap_chain(127, text("0000000000f0", CANARY))).unwrap_err();
     assert_eq!(error.downcast_ref::<PayloadTooDeep>(), Some(&PayloadTooDeep { depth: 257, limit: 256 }));
     assert!(!format!("{error:#}").contains(CANARY), "{error:#}");
     assert_eq!(cache.get::<UnionSurface>("past").unwrap(), None);
@@ -808,8 +853,8 @@ fn raw(type_name: &str, key: &str, payload: Vec<u8>) -> CultCacheEnvelope {
 
 #[test]
 fn the_raw_doors_hold_the_bound_for_arms_maps_and_arrays() {
-    let arms_at = rmp_serde::to_vec(&wrap_chain(126, boxed("leaf", vec![]))).unwrap();
-    let arms_past = rmp_serde::to_vec(&wrap_chain(127, text("leaf", CANARY))).unwrap();
+    let arms_at = rmp_serde::to_vec(&wrap_chain(126, boxed("0000000000f0", vec![]))).unwrap();
+    let arms_past = rmp_serde::to_vec(&wrap_chain(127, text("0000000000f0", CANARY))).unwrap();
     let maps_at = rmp_serde::to_vec_named(&map_doc(MAX_PAYLOAD_DEPTH - 1)).unwrap();
     let maps_past = rmp_serde::to_vec_named(&map_doc(MAX_PAYLOAD_DEPTH)).unwrap();
     let arrays_at = vector("depth-at-limit.msgpack");
@@ -857,13 +902,13 @@ fn the_union_chain_at_the_limit_decodes_on_a_1mib_thread() {
         .spawn(|| {
             assert_eq!(
                 through_cache(&vector("depth-at-limit.msgpack")).unwrap(),
-                wrap_chain(126, boxed("leaf", vec![]))
+                wrap_chain(126, boxed("0000000000f0", vec![]))
             );
             let refused = through_cache(&vector("depth-past-limit.msgpack")).unwrap_err();
             assert!(refused.contains("the limit is 256"), "{refused}");
             let mut cache = CultCache::new();
             cache.register_entry_type::<UnionSurface>().unwrap();
-            let value = wrap_chain(126, boxed("leaf", vec![]));
+            let value = wrap_chain(126, boxed("0000000000f0", vec![]));
             assert_eq!(cache.put("at", &value).unwrap(), value);
             assert_eq!(cache.get::<UnionSurface>("at").unwrap(), Some(value));
             let mut deep = vec![0x91u8; 100_000];

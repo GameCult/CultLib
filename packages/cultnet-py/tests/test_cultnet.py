@@ -2102,6 +2102,51 @@ class CultNetTests(unittest.TestCase):
         self.assertEqual(applied_delete[0].change_kind, "removed")
         self.assertIsNone(cache.get(document, "policy:1"))
 
+    # A compatible schema id applies through the real replication function, the record is stamped with the registered id, and
+    # the store it leaves reopens and takes the next write.
+    def test_cultnet_raw_replication_under_a_compatible_schema_id_leaves_a_store_that_reopens(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from cultcache_py import SingleFileMessagePackBackingStore
+
+        document = define_database_entry_type(
+            "replica.compatible-policy",
+            [("schema_version", 0), ("name", 1)],
+            schema_id="replica.compatible-policy.current",
+            schema_name="replica.compatible_policy",
+            schema_version="replica.compatible_policy.v1",
+            compatible_schema_ids=["replica.compatible-policy.current", "replica.compatible-policy.older"],
+        )
+        value = {"schema_version": "replica.compatible_policy.v1", "name": "synced"}
+        record = {
+            "schemaId": "replica.compatible-policy.older",
+            "recordKey": "policy:1",
+            "storedAt": "2026-06-25T00:00:00Z",
+            "payloadEncoding": "messagepack",
+            "payload": document.encode_payload(value),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+
+            def open_cache() -> CultCache:
+                cache = CultCache.builder().register_document_type(document).add_generic_store(
+                    SingleFileMessagePackBackingStore(path)
+                ).build()
+                cache.pull_all_backing_stores()
+                return cache
+
+            cache = open_cache()
+            applied = apply_raw_document_record(cache, schema_document_map([document]), record)
+            self.assertEqual(applied.schema_id, document.catalog_entry().schema_id)
+            self.assertEqual(
+                cache.get_required_envelope(document, "policy:1").schema_id, document.catalog_entry().schema_id
+            )
+            reopened = open_cache()
+            self.assertEqual(reopened.get_required(document, "policy:1")["name"], "synced")
+            reopened.put(document, "policy:2", {**value, "name": "next"})
+            self.assertEqual(open_cache().get_required(document, "policy:2")["name"], "next")
+
     def test_cultnet_document_delete_helper_matches_schema_v0_shape(self) -> None:
         message = document_delete(
             message_id="delete-1",
@@ -2425,9 +2470,9 @@ class CultNetTests(unittest.TestCase):
             witness_kind="interop-proof",
             captured_at="2026-06-13T00:00:03Z",
             subject={"documentType": "cultnet.interop-note", "subjectId": "note:python"},
-            contracts=[{"role": "payload", "schemaId": "schema-a"}],
-            artifacts=[{"role": "log", "uri": "cultcache://bundle-1/log", "mediaType": "text/plain"}],
-            timing_witnesses=[{"stage": "roundtrip", "startedAt": "2026-06-13T00:00:03Z", "completedAt": "2026-06-13T00:00:04Z", "latencyMs": 1.0}],
+            contracts=[{"id": "c0e1a2b3c4d5", "role": "payload", "schemaId": "schema-a"}],
+            artifacts=[{"id": "a0e1a2b3c4d5", "role": "log", "uri": "cultcache://bundle-1/log", "mediaType": "text/plain"}],
+            timing_witnesses=[{"id": "e0e1a2b3c4d5", "stage": "roundtrip", "startedAt": "2026-06-13T00:00:03Z", "completedAt": "2026-06-13T00:00:04Z", "latencyMs": 1.0}],
             provenance={"pipelineId": "interop", "runId": "run-1", "runtimeId": "python-test"},
         )
         payload = encode_witness_artifact_bundle_payload(bundle)
@@ -2443,6 +2488,8 @@ class CultNetTests(unittest.TestCase):
         self.assertEqual(slots[2], "2026-06-13T00:00:03Z")
         self.assertEqual(slots[3]["subjectId"], "note:python")
         self.assertEqual(slots[4][0]["schemaId"], "schema-a")
+        self.assertEqual([slots[4][0]["id"], slots[5][0]["id"], slots[6][0]["id"]], ["c0e1a2b3c4d5", "a0e1a2b3c4d5", "e0e1a2b3c4d5"])
+        self.assertEqual(typed_decoded.contracts[0]["id"], "c0e1a2b3c4d5")
         self.assertEqual(slots[5][0]["uri"], "cultcache://bundle-1/log")
         self.assertEqual(slots[6][0]["latencyMs"], 1.0)
         self.assertEqual(slots[7]["runtimeId"], "python-test")
@@ -2462,7 +2509,7 @@ class CultNetTests(unittest.TestCase):
             runtime_kind="python",
             display_name="Python Interop Test",
             agent_id="python-interop-test-agent",
-            schema_path=str(Path("contracts/cultnet/interop/cultnet.interop-note.schema.json")),
+            schema_path=str(Path(__file__).resolve().parents[3] / "contracts" / "cultnet" / "interop" / "cultnet.interop-note.schema.json"),
         )
         binding = state.bindings["note"]
         logged_value = {

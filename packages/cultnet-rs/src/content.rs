@@ -27,6 +27,8 @@ pub struct CultMeshCdnChunkRef {
     pub offset: i64,
     pub size_bytes: i32,
     pub record_key: String,
+    /// Element id (key 4): the decimal text of `offset`, never random. Absent in a manifest written before ids.
+    pub id: String,
 }
 
 /// `CultMeshCdnArtifactManifest`. Encodes as the reference's positional array (keys 0-9).
@@ -50,7 +52,7 @@ pub struct CultMeshCdnArtifactManifest {
 // The tuple mirrors: `to_vec_named` would write a map for a named-field struct, but a tuple
 // struct is an array under every serde encoder.
 #[derive(Serialize, Deserialize)]
-struct ChunkRefWire(String, i64, i32, String);
+struct ChunkRefWire(String, i64, i32, String, #[serde(default)] String);
 
 #[derive(Serialize, Deserialize)]
 struct ManifestWire(
@@ -105,7 +107,7 @@ mod ordered_map {
 
 impl From<CultMeshCdnChunkRef> for ChunkRefWire {
     fn from(value: CultMeshCdnChunkRef) -> Self {
-        Self(value.chunk_hash, value.offset, value.size_bytes, value.record_key)
+        Self(value.chunk_hash, value.offset, value.size_bytes, value.record_key, value.id)
     }
 }
 
@@ -116,6 +118,7 @@ impl From<ChunkRefWire> for CultMeshCdnChunkRef {
             offset: value.1,
             size_bytes: value.2,
             record_key: value.3,
+            id: value.4,
         }
     }
 }
@@ -217,6 +220,7 @@ pub fn pack_content(
             offset,
             // A piece is at most `chunk_size` bytes, which fits an i32 (checked above).
             size_bytes: piece.len() as i32,
+            id: offset.to_string(),
         });
         offset += piece.len() as i64;
         chunks.push(CultMeshCdnChunk {

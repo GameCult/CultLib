@@ -49,14 +49,14 @@ const HASH = "a".repeat(64);
 
 const manifestOf = (over: Partial<CultMeshCdnArtifactManifest> = {}): CultMeshCdnArtifactManifest => ({
   artifactId: "id", kind: "asset", version: "1", contentHash: HASH, sizeBytes: 4, mimeType: "text/plain", createdAtUtc: "t",
-  chunks: [{ chunkHash: HASH, offset: 0, sizeBytes: 4, recordKey: `mesh:cdn:chunk:${HASH}` }], tags: ["t"], metadata: [["k", "v"]],
+  chunks: [{ chunkHash: HASH, offset: 0, sizeBytes: 4, recordKey: `mesh:cdn:chunk:${HASH}`, id: "0" }], tags: ["t"], metadata: [["k", "v"]],
   ...over,
 });
 // Wire bytes of a ten-array with any field replaced, metadata as a plain object (no integer-like keys).
 const fieldsOf = (over: Record<number, unknown> = {}) => {
   const m = manifestOf();
   const fields: unknown[] = [m.artifactId, m.kind, m.version, m.contentHash, m.sizeBytes, m.mimeType, m.createdAtUtc,
-    m.chunks.map(c => [c.chunkHash, c.offset, c.sizeBytes, c.recordKey]), m.tags, { k: "v" }];
+    m.chunks.map(c => [c.chunkHash, c.offset, c.sizeBytes, c.recordKey, c.id]), m.tags, { k: "v" }];
   for (const [index, value] of Object.entries(over)) fields[Number(index)] = value;
   return fields;
 };
@@ -95,7 +95,7 @@ test("the packed chunks are copies that rejoin to the body, each named by the ha
   assert.deepEqual(Array.from(chunks.flatMap(c => Array.from(c.payload))), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
   for (const [i, c] of chunks.entries()) {
     assert.equal(c.chunkHash, await sha256Hex(c.payload));
-    assert.deepEqual(manifest.chunks[i], { chunkHash: c.chunkHash, offset: i * 4, sizeBytes: c.payload.length, recordKey: chunkRecordKey(c.chunkHash) });
+    assert.deepEqual(manifest.chunks[i], { chunkHash: c.chunkHash, offset: i * 4, sizeBytes: c.payload.length, recordKey: chunkRecordKey(c.chunkHash), id: String(i * 4) });
   }
   const twins = await packContent("x", new Uint8Array(8), { chunkSizeBytes: 4 });
   assert.equal(twins.manifest.chunks[0]!.chunkHash, twins.manifest.chunks[1]!.chunkHash, "equal chunks share a hash");
@@ -216,7 +216,7 @@ test("a metadata key that is not a string names the field", () => {
 });
 
 test("validateManifest refuses negative size, a gap, an overlap and a size-sum mismatch with the C# messages", () => {
-  const chunk = (offset: number, sizeBytes: number) => ({ chunkHash: HASH, offset, sizeBytes, recordKey: "k" });
+  const chunk = (offset: number, sizeBytes: number) => ({ chunkHash: HASH, offset, sizeBytes, recordKey: "k", id: String(offset) });
   const refuses = (over: Partial<CultMeshCdnArtifactManifest>, message: string) =>
     assert.throws(() => validateManifest(manifestOf(over)), new Error(message));
   refuses({ sizeBytes: -1, chunks: [] }, "CDN artifact manifest has a negative size.");
@@ -232,7 +232,7 @@ test("validateManifest refuses negative size, a gap, an overlap and a size-sum m
 });
 
 test("validateManifest refuses a size that is not a whole number below 2^53 and a chunk size an int cannot hold, whether decoded or hand-built", () => {
-  const chunk = (offset: number, sizeBytes: number) => ({ chunkHash: HASH, offset, sizeBytes, recordKey: "k" });
+  const chunk = (offset: number, sizeBytes: number) => ({ chunkHash: HASH, offset, sizeBytes, recordKey: "k", id: String(offset) });
   const refuses = (over: Partial<CultMeshCdnArtifactManifest>, message: string) =>
     assert.throws(() => validateManifest(manifestOf(over)), new Error(message));
   const manifestMessage = "CDN artifact manifest size is not a whole number below 2^53.";
@@ -405,6 +405,23 @@ test("nil in a reference slot reads as null and writes back as nil; a missing tr
   assert.deepEqual(short, { artifactId: "id", kind: "asset", version: "", contentHash: "", sizeBytes: 0, mimeType: "application/octet-stream", createdAtUtc: "", chunks: [], tags: [], metadata: [] });
 });
 
+test("a chunk reference's id is slot 4: nil reads null and writes nil, an absent slot reads \"\" and is written, packContent writes the decimal offset", async () => {
+  const chunk = (id: unknown[]) => [HASH, 0, 4, "k", ...id];
+  const read = (id: unknown[]) => decodeManifest(encode(fieldsOf({ 7: [chunk(id)] }) as unknown[], { useBigInt64: true, maxDepth: 1000 })).chunks[0]!;
+  const nilled = encode(fieldsOf({ 7: [chunk([null])] }), { useBigInt64: true, maxDepth: 1000 });
+  const nilManifest = decodeManifest(nilled);
+  assert.equal(nilManifest.chunks[0]!.id, null);
+  assert.deepEqual(encodeManifest(nilManifest), nilled);
+  const absent = decodeManifest(encode(fieldsOf({ 7: [[HASH, 0, 4, "k"]] }), { useBigInt64: true, maxDepth: 1000 }));
+  assert.equal(absent.chunks[0]!.id, "");
+  assert.deepEqual(decodeManifest(encodeManifest(absent)).chunks[0], { chunkHash: HASH, offset: 0, sizeBytes: 4, recordKey: "k", id: "" });
+  assert.equal(read(["7"]).id, "7");
+  assert.throws(() => read([0]), /chunks.id/);
+  const packed = await packContent("x", new Uint8Array(9), { chunkSizeBytes: 4 });
+  assert.deepEqual(packed.manifest.chunks.map(c => c.id), ["0", "4", "8"]);
+  assert.deepEqual((await packContent("x", new Uint8Array(0))).manifest.chunks.map(c => c.id), ["0"]);
+});
+
 // Refusals that are the same refusal in the reference but would read differently if the wrong rule fired: the message
 // names the true cause (the sign, the nil chunk, the reserved code, the early end), never a neighbouring field.
 test("a refusal names its true cause", () => {
@@ -433,7 +450,7 @@ test("a lone surrogate is written as U+FFFD at every string length, short and lo
       const withText = (value: string): CultMeshCdnArtifactManifest => ({
         ...base,
         artifactId: value, kind: value, version: value, mimeType: value, createdAtUtc: value,
-        chunks: [{ ...base.chunks[0]!, recordKey: value }],
+        chunks: [{ ...base.chunks[0]!, chunkHash: value, recordKey: value, id: value }],
         tags: [value],
         metadata: [[value, value]],
       });

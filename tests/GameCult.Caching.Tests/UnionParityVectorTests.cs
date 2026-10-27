@@ -65,7 +65,7 @@ namespace GameCult.Caching.Tests
             return File.ReadAllBytes(path);
         }
 
-        // ---- the fixture: a recursive union, a unit arm, a union inside a record inside a union, a list of unions ----
+        // ---- the fixture: a recursive union, id-only arms, a union inside a record inside a union, a list of unions ----
 
         // Keys 0, 1, 2, 5 and 6: 3 and 4 are retired, so the key map is not sequential. Wrap is the +2 nesting step beside
         // Box's +3, so any container depth from 4 up is reachable exactly.
@@ -76,26 +76,27 @@ namespace GameCult.Caching.Tests
         public sealed class Wrap : Node
         {
             [Key(0)] public Node? Inner;
+            [Key(1)] [CultElementId] public string Id = string.Empty;
         }
 
         [MessagePackObject]
         public sealed class Box : Node
         {
-            [Key(0)] public string Id = string.Empty;
+            [Key(0)] [CultElementId] public string Id = string.Empty;
             [Key(1)] public List<Node> Children = new();
         }
 
         [MessagePackObject]
         public sealed class Text : Node
         {
-            [Key(0)] public string Id = string.Empty;
+            [Key(0)] [CultElementId] public string Id = string.Empty;
             [Key(1)] public string Content = string.Empty;
         }
 
         [MessagePackObject]
         public sealed class Use : Node
         {
-            [Key(0)] public string Id = string.Empty;
+            [Key(0)] [CultElementId] public string Id = string.Empty;
             [Key(1)] public Composition Composition = new();
             [Key(2)] public List<Node> Slots = new();
         }
@@ -104,7 +105,7 @@ namespace GameCult.Caching.Tests
         [MessagePackObject]
         public sealed class Image : Node
         {
-            [Key(0)] public string Id = string.Empty;
+            [Key(0)] [CultElementId] public string Id = string.Empty;
             [Key(1)] public string Uri = string.Empty;
             [Key(3)] public string Alt = string.Empty;
         }
@@ -117,17 +118,17 @@ namespace GameCult.Caching.Tests
             [Key(1)] public Node? Body;
         }
 
-        // Floor and Ceiling are unit arms at the ends of the Int32 key domain.
+        // Floor and Ceiling are id-only arms at the ends of the Int32 key domain.
         [Union(0, typeof(Pending)), Union(1, typeof(Completed)), Union(2, typeof(Denied)),
          Union(int.MinValue, typeof(Floor)), Union(int.MaxValue, typeof(Ceiling))]
         public abstract class Outcome { }
 
-        [MessagePackObject] public sealed class Pending : Outcome { [Key(0)] public string Message = string.Empty; }
-        [MessagePackObject] public sealed class Completed : Outcome { [Key(0)] public int SourceVersion; }
-        // A unit arm: written [2, []].
-        [MessagePackObject] public sealed class Denied : Outcome { }
-        [MessagePackObject] public sealed class Floor : Outcome { }
-        [MessagePackObject] public sealed class Ceiling : Outcome { }
+        [MessagePackObject] public sealed class Pending : Outcome { [Key(0)] public string Message = string.Empty; [Key(1)] [CultElementId] public string Id = string.Empty; }
+        [MessagePackObject] public sealed class Completed : Outcome { [Key(0)] public int SourceVersion; [Key(1)] [CultElementId] public string Id = string.Empty; }
+        // The arms of a list carry an id, so Denied, Floor and Ceiling are written [key, [id]], not as unit arms.
+        [MessagePackObject] public sealed class Denied : Outcome { [Key(0)] [CultElementId] public string Id = string.Empty; }
+        [MessagePackObject] public sealed class Floor : Outcome { [Key(0)] [CultElementId] public string Id = string.Empty; }
+        [MessagePackObject] public sealed class Ceiling : Outcome { [Key(0)] [CultElementId] public string Id = string.Empty; }
 
         // Item names Tool and Part under keys 1 and 2; CraftedItem, the inner union both derive from, names them under 0 and 1.
         [Union(0, typeof(Gem)), Union(1, typeof(Tool)), Union(2, typeof(Part))]
@@ -161,24 +162,24 @@ namespace GameCult.Caching.Tests
             Version = 3,
             Root = root ?? new Box
             {
-                Id = "root",
+                Id = "0000000000c0",
                 Children =
                 {
-                    new Text { Id = "t1", Content = "hello" },
+                    new Text { Id = "0000000000c1", Content = "hello" },
                     new Use
                     {
-                        Id = "u1",
+                        Id = "0000000000c2",
                         Composition = new Composition
                         {
                             Name = "comp",
-                            Body = new Box { Id = "inner", Children = { new Text { Id = "deep", Content = "x" }, new Image { Id = "img", Uri = "uri://a", Alt = "alt" } } }
+                            Body = new Box { Id = "0000000000d0", Children = { new Text { Id = "0000000000d1", Content = "x" }, new Image { Id = "0000000000d2", Uri = "uri://a", Alt = "alt" } } }
                         },
-                        Slots = { new Text { Id = "s1", Content = "slot" }, null!, new Box { Id = "b2" } }
+                        Slots = { new Text { Id = "0000000000e1", Content = "slot" }, null!, new Box { Id = "0000000000e2" } }
                     },
-                    new Image { Id = "i2", Uri = "uri://b", Alt = "" }
+                    new Image { Id = "0000000000c3", Uri = "uri://b", Alt = "" }
                 }
             },
-            Outcomes = { new Pending { Message = "wait" }, new Completed { SourceVersion = 7 }, new Denied() },
+            Outcomes = { new Pending { Message = "wait", Id = "0000000000a1" }, new Completed { SourceVersion = 7, Id = "0000000000a2" }, new Denied { Id = "0000000000a3" } },
             Part = new Tool { Name = "hammer", Uses = 12 },
             Crafted = new Part { Name = "gear", Count = 4 },
             Missing = null
@@ -254,13 +255,13 @@ namespace GameCult.Caching.Tests
         private static byte[] Surface(Emit? root = null, Emit? outcomes = null, Emit? crafted = null, Extra? extra = null, Emit? trailing = null)
         {
             extra ??= new Extra();
-            root ??= BoxArm("root", Slots(
-                TextArm("t1", "hello"),
-                ArmOf(2, Str("u1"),
-                    Plus(extra.Composition, Str("comp"), BoxArm("inner", Slots(TextArm("deep", "x"), ImageArm("img", "uri://a", "alt")))),
-                    Slots(TextArm("s1", "slot", extra.ListElement), Nil, BoxArm("b2", Slots()))),
-                ImageArm("i2", "uri://b", "")), extra.RootArm);
-            outcomes ??= Slots(ArmOf(0, Str("wait")), ArmOf(1, Num(7)), ArmOf(2));
+            root ??= BoxArm("0000000000c0", Slots(
+                TextArm("0000000000c1", "hello"),
+                ArmOf(2, Str("0000000000c2"),
+                    Plus(extra.Composition, Str("comp"), BoxArm("0000000000d0", Slots(TextArm("0000000000d1", "x"), ImageArm("0000000000d2", "uri://a", "alt")))),
+                    Slots(TextArm("0000000000e1", "slot", extra.ListElement), Nil, BoxArm("0000000000e2", Slots()))),
+                ImageArm("0000000000c3", "uri://b", "")), extra.RootArm);
+            outcomes ??= Slots(ArmOf(0, Str("wait"), Str("0000000000a1")), ArmOf(1, Num(7), Str("0000000000a2")), ArmOf(2, Str("0000000000a3")));
             crafted ??= ArmOf(1, Str("gear"), Num(4));
             var slots = new[] { Str("surface"), Num(3), root, outcomes, ArmOf(1, Str("hammer"), Num(12)), crafted, Nil };
             return Raw(Slots(trailing != null ? slots.Append(trailing).ToArray() : extra.Record ? slots.Append(ExtraSlot).ToArray() : slots));
@@ -281,9 +282,9 @@ namespace GameCult.Caching.Tests
             new Case("unknown-arm-field.msgpack", "refused", "Node", 3, "unknown-arm",
                 Surface(root: ArmOf(3, Str("r"), Str(Canary)))),
             new Case("unknown-arm-list.msgpack", "refused", "Outcome", 7, "unknown-arm",
-                Surface(outcomes: Slots(ArmOf(0, Str("wait")), ArmOf(7, Str(Canary))))),
+                Surface(outcomes: Slots(ArmOf(0, Str("wait"), Str("0000000000a1")), ArmOf(7, Str(Canary))))),
             new Case("unknown-arm-nested.msgpack", "refused", "Node", 9, "unknown-arm",
-                Surface(root: BoxArm("root", Slots(BoxArm("l1", Slots(BoxArm("l2", Slots(ArmOf(9, Str("deep"), Str(Canary)))))))))),
+                Surface(root: BoxArm("0000000000c0", Slots(BoxArm("0000000000d3", Slots(BoxArm("0000000000d4", Slots(ArmOf(9, Str("deep"), Str(Canary)))))))))),
             new Case("inner-union-outer-key.msgpack", "refused", "CraftedItem", 2, "unknown-arm",
                 Surface(crafted: ArmOf(2, Str("gear"), Num(4)))),
             new Case("arm-arity.msgpack", "refused", "Node", 1, "arity",
@@ -325,6 +326,41 @@ namespace GameCult.Caching.Tests
             var parts = new List<string>();
             for (var cause = exception; cause != null; cause = cause.InnerException) parts.Add(cause.Message);
             return string.Join(" <- ", parts);
+        }
+
+        // ---- unit arms: a union no list reaches, so its arms carry no element id and a member-less arm is a unit arm ----
+
+        [Union(0, typeof(Waiting)), Union(2, typeof(Denied2)), Union(int.MinValue, typeof(Floor2)), Union(int.MaxValue, typeof(Ceiling2))]
+        public abstract class UnitOutcome { }
+
+        [MessagePackObject] public sealed class Waiting : UnitOutcome { [Key(0)] public string Message = string.Empty; }
+        [MessagePackObject] public sealed class Denied2 : UnitOutcome { }
+        [MessagePackObject] public sealed class Floor2 : UnitOutcome { }
+        [MessagePackObject] public sealed class Ceiling2 : UnitOutcome { }
+
+        private static MessagePackSerializerOptions UnitOptions => CultDocumentMessagePackSerialization.OptionsFor(typeof(UnionSurface).Assembly);
+
+        // The reference writes a member-less arm as [key, []]; the other runtimes read these files and write the same bytes.
+        [Test]
+        public void UnitArmVectorsAreWhatTheReferenceWrites()
+        {
+            var arms = new (string File, UnitOutcome Value, int Key, string Name)[]
+            {
+                ("unit-arm-denied.msgpack", new Denied2(), 2, nameof(Denied2)),
+                ("unit-arm-floor.msgpack", new Floor2(), int.MinValue, nameof(Floor2)),
+                ("unit-arm-ceiling.msgpack", new Ceiling2(), int.MaxValue, nameof(Ceiling2)),
+            };
+            foreach (var (file, value, key, name) in arms)
+            {
+                var written = MessagePackSerializer.Serialize(value, UnitOptions);
+                Assert.That(Convert.ToHexString(written), Is.EqualTo(Convert.ToHexString(Raw(ArmOf(key)))), $"{name}: a unit arm is [key, []]");
+                Check(file, written);
+
+                var committed = Committed(file);
+                var decoded = MessagePackSerializer.Deserialize<UnitOutcome>(committed, UnitOptions);
+                Assert.That(decoded.GetType().Name, Is.EqualTo(name), file);
+                Assert.That(Convert.ToHexString(MessagePackSerializer.Serialize(decoded, UnitOptions)), Is.EqualTo(Convert.ToHexString(committed)), $"{file} re-encodes byte-identical");
+            }
         }
 
         // ---- tests ----
@@ -387,7 +423,7 @@ namespace GameCult.Caching.Tests
             var inner = (Box)use.Composition.Body!;
             Assert.Multiple(() =>
             {
-                Assert.That(value.Outcomes.OfType<Denied>().Count(), Is.EqualTo(1), "a unit arm");
+                Assert.That(value.Outcomes.OfType<Denied>().Count(), Is.EqualTo(1), "an id-only arm");
                 Assert.That(root.Children, Has.Count.GreaterThan(1), "a list of unions");
                 Assert.That(use.Slots.Any(s => s is Box) && use.Slots.Any(s => s is null), Is.True, "a list of unions holding a nested union arm and nil");
                 Assert.That(inner.Children.OfType<Image>().Count(), Is.EqualTo(1), "a union inside a record inside a union, four arms deep");
@@ -460,30 +496,30 @@ namespace GameCult.Caching.Tests
             Slots(slots)(ref w);
         };
 
-        private static Emit WithOutcome(Emit element) => Slots(ArmOf(0, Str("wait")), ArmOf(1, Num(7)), ArmOf(2), element);
+        private static Emit WithOutcome(Emit element) => Slots(ArmOf(0, Str("wait"), Str("0000000000a1")), ArmOf(1, Num(7), Str("0000000000a2")), ArmOf(2, Str("0000000000a3")), element);
 
-        private static Emit WrapChain(int wraps, Emit leaf) => wraps == 0 ? leaf : ArmOf(6, WrapChain(wraps - 1, leaf));
+        private static Emit WrapChain(int wraps, Emit leaf) => wraps == 0 ? leaf : ArmOf(6, WrapChain(wraps - 1, leaf), Str("0000000000b1"));
 
         private static Node WrapChainValue(int wraps, Node leaf)
         {
-            for (var i = 0; i < wraps; i++) leaf = new Wrap { Inner = leaf };
+            for (var i = 0; i < wraps; i++) leaf = new Wrap { Inner = leaf, Id = "0000000000b1" };
             return leaf;
         }
 
         // n arrays nested inside one another around a single string.
         private static Emit Nested(int n) => n == 1 ? Slots(Str(Canary)) : Slots(Nested(n - 1));
 
-        private static Emit AtLimitLeaf => BoxArm("leaf", Slots());
-        private static Emit PastLimitLeaf => TextArm("leaf", Canary);
+        private static Emit AtLimitLeaf => BoxArm("0000000000f0", Slots());
+        private static Emit PastLimitLeaf => TextArm("0000000000f0", Canary);
 
         private static IReadOnlyList<Case> BoundsCases() => new[]
         {
             new Case("arm-key-int32-min.msgpack", "accepted", "Outcome", int.MinValue, "arm-key-int32-min.msgpack",
-                Surface(outcomes: WithOutcome(ArmOf(int.MinValue)))),
+                Surface(outcomes: WithOutcome(ArmOf(int.MinValue, Str("0000000000a4"))))),
             new Case("arm-key-int32-max.msgpack", "accepted", "Outcome", int.MaxValue, "arm-key-int32-max.msgpack",
-                Surface(outcomes: WithOutcome(ArmOf(int.MaxValue)))),
+                Surface(outcomes: WithOutcome(ArmOf(int.MaxValue, Str("0000000000a5"))))),
             new Case("arm-key-wide-coding.msgpack", "accepted", "Outcome", int.MaxValue, "arm-key-int32-max.msgpack",
-                Surface(outcomes: WithOutcome(RawKey((ref MessagePackWriter w) => w.WriteUInt64(int.MaxValue))))),
+                Surface(outcomes: WithOutcome(RawKey((ref MessagePackWriter w) => w.WriteUInt64(int.MaxValue), Str("0000000000a5"))))),
             new Case("arm-key-above-int32.msgpack", "refused", "Outcome", null, "key-out-of-range",
                 Surface(outcomes: WithOutcome(RawKey((ref MessagePackWriter w) => w.Write(0x80000000u))))),
             new Case("arm-key-below-int32.msgpack", "refused", "Outcome", null, "key-out-of-range",
@@ -649,7 +685,7 @@ namespace GameCult.Caching.Tests
             var payload = Committed("depth-at-limit.msgpack");
             Assert.That(DepthOf(payload), Is.EqualTo(Limit), "the vector nests exactly the limit, counted independently");
             Assert.That(Convert.ToHexString(SerializeValue(Decode(payload))), Is.EqualTo(Convert.ToHexString(payload)), "read, then written again");
-            var built = Constructed(WrapChainValue(AtLimitWraps, new Box { Id = "leaf" }));
+            var built = Constructed(WrapChainValue(AtLimitWraps, new Box { Id = "0000000000f0" }));
             Assert.That(Convert.ToHexString(SerializeValue(built)), Is.EqualTo(Convert.ToHexString(payload)), "the constructed value writes the vector");
         }
 
@@ -662,7 +698,7 @@ namespace GameCult.Caching.Tests
             Assert.That(read, Does.Contain(typeof(UnionSurface).FullName).And.Contain($"the limit is {Limit}").And.Contain("refused on read").And.Not.Contain(Canary));
 
             byte[]? written = null;
-            var write = Chain(Refusal(() => written = SerializeValue(Constructed(WrapChainValue(PastLimitWraps, new Text { Id = "leaf", Content = Canary })))));
+            var write = Chain(Refusal(() => written = SerializeValue(Constructed(WrapChainValue(PastLimitWraps, new Text { Id = "0000000000f0", Content = Canary })))));
             Assert.That(written, Is.Null, "nothing is returned");
             Assert.That(write, Does.Contain(typeof(UnionSurface).FullName).And.Contain($"the limit is {Limit}").And.Contain("refused on write").And.Not.Contain(Canary));
 

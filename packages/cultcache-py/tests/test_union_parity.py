@@ -68,22 +68,51 @@ image = define_record_codec(
     ],
     type_name=_GOLDEN + "Image",
 )
-wrap = define_record_codec("Wrap", [database_entry_field("inner", 0, codec=_node)], type_name=_GOLDEN + "Wrap")
+wrap = define_record_codec(
+    "Wrap",
+    [database_entry_field("inner", 0, codec=_node), database_entry_field("id", 1, codec=t.string)],
+    type_name=_GOLDEN + "Wrap",
+)
 node = define_union(
     "Node",
     {0: ("Box", box), 1: ("Text", text), 2: ("Use", use), 5: ("Image", image), 6: ("Wrap", wrap)},
     type_name=_GOLDEN + "Node",
 )
+# The golden's Outcome: the arms of a list carry an element id, so Denied, Floor and Ceiling are one-slot records.
+_id_only = lambda name: define_record_codec(name, [database_entry_field("id", 0, codec=t.string)])  # noqa: E731
 outcome = define_union(
     "Outcome",
     {
+        0: (
+            "Pending",
+            define_record_codec(
+                "Pending",
+                [database_entry_field("message", 0, codec=t.string), database_entry_field("id", 1, codec=t.string)],
+            ),
+        ),
+        1: (
+            "Completed",
+            define_record_codec(
+                "Completed",
+                [database_entry_field("source_version", 0, codec=t.int32), database_entry_field("id", 1, codec=t.string)],
+            ),
+        ),
+        2: ("Denied", _id_only("Denied")),
+        -2147483648: ("Floor", _id_only("Floor")),
+        2147483647: ("Ceiling", _id_only("Ceiling")),
+    },
+    type_name=_GOLDEN + "Outcome",
+)
+# The codec's unit arms (no value, written [key, []]), kept apart from the golden: a document list's arms carry ids.
+unit_outcome = define_union(
+    "Outcome",
+    {
         0: ("Pending", define_record_codec("Pending", [database_entry_field("message", 0, codec=t.string)])),
-        1: ("Completed", define_record_codec("Completed", [database_entry_field("source_version", 0, codec=t.int32)])),
         2: ("Denied", None),
         -2147483648: ("Floor", None),
         2147483647: ("Ceiling", None),
     },
-    type_name=_GOLDEN + "Outcome",
+    type_name=_GOLDEN + "UnitOutcome",
 )
 tool = define_record_codec(
     "Tool",
@@ -121,41 +150,41 @@ def _surface_value() -> dict:
         "root": UnionArm(
             "Box",
             {
-                "id": "root",
+                "id": "0000000000c0",
                 "children": [
-                    UnionArm("Text", {"id": "t1", "content": "hello"}),
+                    UnionArm("Text", {"id": "0000000000c1", "content": "hello"}),
                     UnionArm(
                         "Use",
                         {
-                            "id": "u1",
+                            "id": "0000000000c2",
                             "composition": {
                                 "name": "comp",
                                 "body": UnionArm(
                                     "Box",
                                     {
-                                        "id": "inner",
+                                        "id": "0000000000d0",
                                         "children": [
-                                            UnionArm("Text", {"id": "deep", "content": "x"}),
-                                            UnionArm("Image", {"id": "img", "uri": "uri://a", "alt": "alt"}),
+                                            UnionArm("Text", {"id": "0000000000d1", "content": "x"}),
+                                            UnionArm("Image", {"id": "0000000000d2", "uri": "uri://a", "alt": "alt"}),
                                         ],
                                     },
                                 ),
                             },
                             "slots": [
-                                UnionArm("Text", {"id": "s1", "content": "slot"}),
+                                UnionArm("Text", {"id": "0000000000e1", "content": "slot"}),
                                 None,
-                                UnionArm("Box", {"id": "b2", "children": []}),
+                                UnionArm("Box", {"id": "0000000000e2", "children": []}),
                             ],
                         },
                     ),
-                    UnionArm("Image", {"id": "i2", "uri": "uri://b", "alt": ""}),
+                    UnionArm("Image", {"id": "0000000000c3", "uri": "uri://b", "alt": ""}),
                 ],
             },
         ),
         "outcomes": [
-            UnionArm("Pending", {"message": "wait"}),
-            UnionArm("Completed", {"source_version": 7}),
-            UnionArm("Denied"),
+            UnionArm("Pending", {"message": "wait", "id": "0000000000a1"}),
+            UnionArm("Completed", {"source_version": 7, "id": "0000000000a2"}),
+            UnionArm("Denied", {"id": "0000000000a3"}),
         ],
         "part": UnionArm("Tool", {"name": "hammer", "uses": 12}),
         "crafted": UnionArm("Part", {"name": "gear", "count": 4}),
@@ -256,12 +285,14 @@ class UnionCodecRuleTests(unittest.TestCase):
         )
 
     def test_unit_arm_is_written_with_empty_slots_and_reads_back(self) -> None:
-        self.assertEqual(outcome.encode(UnionArm("Denied")), [2, []])
-        self.assertEqual(outcome.decode([2, []]), UnionArm("Denied", None))
+        # The bytes are the C# reference's (tests/vectors/union-parity/unit-arm-denied.msgpack), not spelled here.
+        reference = _vector("unit-arm-denied.msgpack")
+        self.assertEqual(msgpack.packb(unit_outcome.encode(UnionArm("Denied"))), reference)
+        self.assertEqual(unit_outcome.decode(msgpack.unpackb(reference, raw=False)), UnionArm("Denied", None))
 
     def test_unit_arm_refuses_a_value_to_carry(self) -> None:
         with self.assertRaises(ValueError) as caught:
-            outcome.encode(UnionArm("Denied", {"message": self.CANARY}))
+            unit_outcome.encode(UnionArm("Denied", {"message": self.CANARY}))
         self.assertEqual(str(caught.exception), "Union 'Outcome' arm 2 is a unit arm and carries no value")
 
     def test_arm_keys_are_written_as_declared(self) -> None:
@@ -333,7 +364,7 @@ class UnionCodecRuleTests(unittest.TestCase):
         self.assertEqual(row.decode(encoded), {"id": "r", "cells": cells})
 
     def test_a_unit_arm_with_extra_slots_is_read_past(self) -> None:
-        self.assertEqual(outcome.decode([2, ["extra"]]), UnionArm("Denied"))
+        self.assertEqual(unit_outcome.decode([2, ["extra"]]), UnionArm("Denied"))
 
     def test_union_arms_are_immutable_hashable_values(self) -> None:
         arm = UnionArm("Denied")
@@ -478,7 +509,7 @@ CANARY = "CANARY-union-golden-4c2a"
 def _wrap_chain(wraps: int, leaf: UnionArm) -> UnionArm:
     value = leaf
     for _ in range(wraps):
-        value = UnionArm("Wrap", {"inner": value})
+        value = UnionArm("Wrap", {"inner": value, "id": "0000000000b1"})
     return value
 
 
@@ -521,9 +552,9 @@ class BoundsVectorTests(unittest.TestCase):
         self.assertEqual(counts, {"accepted": 4, "refused": 7, "read-only": 1})
 
     def test_the_value_at_the_limit_writes_the_vector_and_the_value_past_it_is_refused_on_write(self) -> None:
-        at_limit = {**_surface_value(), "root": _wrap_chain(126, UnionArm("Box", {"id": "leaf", "children": []}))}
+        at_limit = {**_surface_value(), "root": _wrap_chain(126, UnionArm("Box", {"id": "0000000000f0", "children": []}))}
         self.assertEqual(surface_document.encode_payload(at_limit), _vector("depth-at-limit.msgpack"))
-        past = {**_surface_value(), "root": _wrap_chain(127, UnionArm("Text", {"id": "leaf", "content": CANARY}))}
+        past = {**_surface_value(), "root": _wrap_chain(127, UnionArm("Text", {"id": "0000000000f0", "content": CANARY}))}
         with self.assertRaises(CultCachePayloadDepthError) as caught:
             surface_document.encode_payload(past)
         message = str(caught.exception)
@@ -533,7 +564,7 @@ class BoundsVectorTests(unittest.TestCase):
         self.assertNotIn(CANARY, message)
 
     def test_a_cache_put_of_the_value_past_the_limit_refuses_and_stores_nothing(self) -> None:
-        past = {**_surface_value(), "root": _wrap_chain(127, UnionArm("Box", {"id": "leaf", "children": []}))}
+        past = {**_surface_value(), "root": _wrap_chain(127, UnionArm("Box", {"id": "0000000000f0", "children": []}))}
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "store.cc"
             cache = (
@@ -709,8 +740,12 @@ class UnionDecodeBoundsTests(unittest.TestCase):
                 self.assertEqual(str(caught.exception), expected)
 
     def test_the_ends_of_the_int32_key_domain_are_unit_arms_that_read_and_write(self) -> None:
-        self.assertEqual(outcome.decode([-(2**31), []]), UnionArm("Floor"))
-        self.assertEqual(outcome.encode(UnionArm("Ceiling")), [2**31 - 1, []])
+        floor = _vector("unit-arm-floor.msgpack")
+        ceiling = _vector("unit-arm-ceiling.msgpack")
+        self.assertEqual(unit_outcome.decode(msgpack.unpackb(floor, raw=False)), UnionArm("Floor"))
+        self.assertEqual(msgpack.packb(unit_outcome.encode(UnionArm("Floor"))), floor)
+        self.assertEqual(unit_outcome.decode(msgpack.unpackb(ceiling, raw=False)), UnionArm("Ceiling"))
+        self.assertEqual(msgpack.packb(unit_outcome.encode(UnionArm("Ceiling"))), ceiling)
 
 
 if __name__ == "__main__":

@@ -2,26 +2,33 @@ import { decode } from "@msgpack/msgpack";
 
 export const STORE_FORMAT_VERSION = "cultcache.store.v1";
 
+/**
+ * A store that can hold element ids. A reader older than element ids refuses this header: it would skip the id slots
+ * of a nested element and rewrite the element without them. This runtime writes it back only for a store it read
+ * under it; it does not decide when a document carries ids.
+ */
+export const STORE_FORMAT_ELEMENT_IDS = "cultcache.store.v3";
+
+export type StoreFormat = typeof STORE_FORMAT_VERSION | typeof STORE_FORMAT_ELEMENT_IDS;
+
 const STORE_FORMAT_PREFIX = "cultcache.store.";
 const PERSISTED_RECORD_SLOTS = 4;
+const STORE_SLOTS = 3;
 
 /**
- * True for a v1 snapshot, false for anything that is not a CultCache store header (the legacy
- * envelope array). Any other `cultcache.store.*` header is refused by name.
+ * True for a decoded array that leads with a `cultcache.store.*` stamp, false for the legacy envelope array. It judges the
+ * shape only: the verdict on the stamp is {@link refuseUnreadStoreBytes}, which a reader calls on the bytes before it decodes,
+ * so the stamp of a decoded array it is given is one this runtime reads.
  */
-export function isV1Snapshot(decoded: unknown): decoded is unknown[] {
-  if (!Array.isArray(decoded) || typeof decoded[0] !== "string" || !decoded[0].startsWith(STORE_FORMAT_PREFIX)) {
-    return false;
-  }
-
-  refuseUnreadFormat(decoded[0]);
-  return true;
+export function isStoreSnapshot(decoded: unknown): decoded is [StoreFormat, ...unknown[]] {
+  return Array.isArray(decoded) && typeof decoded[0] === "string" && decoded[0].startsWith(STORE_FORMAT_PREFIX);
 }
 
 /**
- * Refuses a store whose header names a format this runtime does not read, judging the header
- * alone: the leading array's first element, when it is a complete string. Bytes with no such
- * header (a legacy array, an empty, truncated or garbled file) are not refused here.
+ * Refuses a store whose header names a format this runtime does not read, judging the header alone: the leading array's first
+ * element, when it is a complete string. The reader calls it before it decodes the body, so a newer store is refused by name
+ * whether or not its body is whole. Bytes with no such header (a legacy array, an empty, truncated or garbled file) are not
+ * refused here.
  */
 export function refuseUnreadStoreBytes(bytes: Uint8Array): void {
   const header = peekHeader(bytes);
@@ -30,17 +37,8 @@ export function refuseUnreadStoreBytes(bytes: Uint8Array): void {
   }
 }
 
-function refuseUnreadFormat(header: string): void {
-  if (header !== STORE_FORMAT_VERSION) {
-    throw new Error(
-      `CultCache store format ${describeHeader(header)} is not one this runtime reads; it reads "${STORE_FORMAT_VERSION}" only.`,
-    );
-  }
-}
-
-// The first element of a leading non-empty MessagePack array when it is a complete string;
-// anything else is undefined. The string is decoded by the decoder a read uses, so a stamp
-// gets one verdict from a read and from a whole write.
+// The first element of a leading non-empty MessagePack array when it is a complete string; anything else is undefined. The
+// string is decoded by the decoder a read uses, so a stamp gets one verdict from the peek and from the whole decode.
 function peekHeader(bytes: Uint8Array): string | undefined {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const lead = bytes[0];
@@ -62,6 +60,50 @@ function peekHeader(bytes: Uint8Array): string | undefined {
   if (bytes.length < offset + length) return undefined;
   const header = decode(bytes.subarray(start, offset + length));
   return typeof header === "string" ? header : undefined;
+}
+
+/** The one verdict on a stamp: this runtime reads v1 and v3, and any other `cultcache.store.*` header is refused by name. */
+function refuseUnreadFormat(header: string): void {
+  if (header !== STORE_FORMAT_VERSION && header !== STORE_FORMAT_ELEMENT_IDS) {
+    throw new Error(
+      `CultCache store format ${describeHeader(header)} is not one this runtime reads; it reads "${STORE_FORMAT_VERSION}" and "${STORE_FORMAT_ELEMENT_IDS}" only.`,
+    );
+  }
+}
+
+/**
+ * A write the catalog cannot describe: records of different types under one schema id, two arrived schemas that share an id and
+ * disagree on the schema name, or a record no chosen entry publishes. Nothing is written. It names the id, the names involved and
+ * a record key. A cache throws it too, with an empty record key, when a definition cannot register beside one it already holds,
+ * and when a record's schema id names no single registered definition.
+ */
+export class SchemaConflictError extends Error {
+  readonly schemaId: string;
+  readonly schemaNames: string[];
+  readonly recordKey: string;
+
+  constructor(schemaId: string, schemaNames: string[], recordKey: string, message?: string) {
+    super(message ?? `Schema id "${schemaId}" cannot describe record "${recordKey}": ${schemaNames.map((name) => `"${name}"`).join(", ")}.`);
+    this.name = "SchemaConflictError";
+    this.schemaId = schemaId;
+    this.schemaNames = schemaNames;
+    this.recordKey = recordKey;
+  }
+}
+
+/**
+ * A store file this runtime cannot read: not exactly one complete store (truncated, bytes after it, a missing or extra slot),
+ * a header or record it does not know, or a body it cannot decode. Open, flush and every rewrite refuse a file with this
+ * error, and a refused file is left as it was. `cause` is what the reader choked on.
+ */
+export class StoreUnreadableError extends Error {
+  readonly filePath: string;
+
+  constructor(filePath: string, cause: unknown) {
+    super(`CultCache store ${filePath} is not readable: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    this.name = "StoreUnreadableError";
+    this.filePath = filePath;
+  }
 }
 
 /**
@@ -100,5 +142,12 @@ export function requireV1RecordSlots(record: unknown[]): void {
       `CultCache record ${describeIdentity(record[0])} (schema ${describeIdentity(record[1])}) has ${record.length} slots, more than ` +
         `the ${PERSISTED_RECORD_SLOTS} of a ${STORE_FORMAT_VERSION} record, so this is not a valid store.`,
     );
+  }
+}
+
+/** Refuses a store array with more or fewer slots than the header, the schema catalog and the records; a header alone is not a store. */
+export function requireStoreSlots(decoded: unknown[]): void {
+  if (decoded.length !== STORE_SLOTS) {
+    throw new Error(`CultCache store has ${decoded.length} top-level slots; this runtime reads ${STORE_SLOTS} (header, schema catalog, records).`);
   }
 }

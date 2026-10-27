@@ -9,10 +9,13 @@ export {
   documentPayloadBytes,
   documentPayloadFromBytes,
   encodeDocumentPayload,
+  schemaIdentityOf,
+  type CultCacheSchemaIdentity,
 } from "./document";
 export { CultCachePayloadDepthError, MAX_PAYLOAD_DEPTH } from "./payload-depth";
 export type { DocumentPayload } from "./document";
-export { SingleFileMessagePackBackingStore } from "./single-file-messagepack-backing-store";
+export { SingleFileMessagePackBackingStore, readSingleFileStore, type SingleFileStoreRead } from "./single-file-messagepack-backing-store";
+export { SchemaConflictError, StoreUnreadableError } from "./store-format";
 export type {
   AnyCultCacheDocumentDefinition,
   CacheBackingStore,

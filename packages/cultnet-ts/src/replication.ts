@@ -1,15 +1,16 @@
 import type {
   AnyCultCacheDocumentDefinition,
   CultCache,
-  CultCacheDocumentDefinition,
   CultCacheDocumentValue,
   CultCacheEnvelope,
 } from "@gamecult/cultcache-ts";
 import {
+  SchemaConflictError,
   decodeDocumentPayload,
   documentPayloadBytes,
   documentPayloadFromBytes,
   encodeDocumentPayload,
+  schemaIdentityOf,
 } from "@gamecult/cultcache-ts";
 
 import {
@@ -42,7 +43,9 @@ export function defineCultNetDocumentBinding<
 
 export class CultNetDocumentRegistry {
   readonly #bindings = new Map<string, CultNetDocumentBinding>();
-  readonly #schemaBindings = new Map<string, CultNetDocumentBinding>();
+  // The binding that owns each schema id, and every binding listing an id as compatible, in registration order.
+  readonly #owners = new Map<string, CultNetDocumentBinding>();
+  readonly #listers = new Map<string, CultNetDocumentBinding[]>();
 
   constructor(bindings: Iterable<CultNetDocumentBinding> = []) {
     for (const binding of bindings) {
@@ -51,8 +54,32 @@ export class CultNetDocumentRegistry {
   }
 
   register(binding: CultNetDocumentBinding): this {
+    // One definition owns a type, a schema id and a schema name, derived as CultCache derives them. Another definition
+    // claiming any of them is refused, so a schema never resolves to two types.
+    const identity = schemaIdentityOf(binding.definition);
+    for (const holder of this.#bindings.values()) {
+      if (holder.definition === binding.definition) {
+        continue;
+      }
+      const held = schemaIdentityOf(holder.definition);
+      const claimed =
+        holder.definition.type === binding.definition.type ? `type "${binding.definition.type}"`
+        : held.schemaId === identity.schemaId ? `schema id "${identity.schemaId}"`
+        : held.schemaName === identity.schemaName ? `schema name "${identity.schemaName}"`
+        : undefined;
+      if (claimed) {
+        throw new SchemaConflictError(identity.schemaId, [held.schemaName, identity.schemaName], "",
+          `CultNet ${claimed} is already bound to type "${holder.definition.type}"; type "${binding.definition.type}" (schema id "${identity.schemaId}") cannot also be bound.`);
+      }
+    }
     this.#bindings.set(binding.definition.type, binding);
-    this.#schemaBindings.set(schemaIdForBinding(binding), binding);
+    this.#owners.set(identity.schemaId, binding);
+    for (const schemaId of identity.compatibleSchemaIds) {
+      const listers = this.#listers.get(schemaId) ?? [];
+      if (schemaId !== identity.schemaId && !listers.some(lister => lister.definition === binding.definition)) {
+        this.#listers.set(schemaId, [...listers, binding]);
+      }
+    }
     return this;
   }
 
@@ -60,16 +87,22 @@ export class CultNetDocumentRegistry {
     return this.#bindings.get(documentType);
   }
 
+  // The binding a record under this schema id belongs to: the id's owner, else the one binding that lists it as
+  // compatible. An id nothing declares resolves to nothing. An id that several bindings list and none owns is refused,
+  // as the cache refuses it, whatever order the bindings were registered in.
   getBySchemaId(schemaId: string): CultNetDocumentBinding | undefined {
-    const exact = this.#schemaBindings.get(schemaId);
-    if (exact) {
-      return exact;
+    const owner = this.#owners.get(schemaId);
+    if (owner) {
+      return owner;
     }
-
-    const requestedSchemaIds = new Set([schemaId]);
-    return this.#uniqueBindings().find(binding =>
-      schemaMatchesBinding(schemaIdForBinding(binding), binding, requestedSchemaIds),
-    );
+    const listers = this.#listers.get(schemaId) ?? [];
+    if (listers.length > 1) {
+      const types = listers.map(lister => lister.definition.type).sort();
+      throw new SchemaConflictError(schemaId, listers.map(lister => schemaIdentityOf(lister.definition).schemaName).sort(), "",
+        `CultNet schema id "${schemaId}" is owned by no bound type and declared compatible by several (${types.join(", ")}), ` +
+        "so it resolves to none. Bind the type that owns the id, or declare it on one type.");
+    }
+    return listers[0];
   }
 
   createDocumentPutMessage<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -169,7 +202,7 @@ export class CultNetDocumentRegistry {
       const binding = this.#requireBinding(envelope.type);
       const schemaId = schemaIdForEnvelope(envelope, binding);
 
-      if (requestedSchemaIds && !schemaMatchesBinding(schemaId, binding, requestedSchemaIds)) {
+      if (requestedSchemaIds && !answersTo(schemaId, binding, requestedSchemaIds)) {
         continue;
       }
 
@@ -206,7 +239,7 @@ export class CultNetDocumentRegistry {
       const binding = this.#requireBinding(envelope.type);
       const schemaId = schemaIdForEnvelope(envelope, binding);
 
-      if (requestedSchemaIds && !schemaMatchesBinding(schemaId, binding, requestedSchemaIds)) {
+      if (requestedSchemaIds && !answersTo(schemaId, binding, requestedSchemaIds)) {
         continue;
       }
 
@@ -274,16 +307,13 @@ export class CultNetDocumentRegistry {
     binding: CultNetDocumentBinding;
     envelope: CultCacheEnvelope;
   } {
-    const resolution = this.#resolveRawDocumentBinding(message.document);
-    const { binding } = resolution;
+    const binding = this.#requireSchemaBinding(message.document.schemaId);
     return {
       binding,
       envelope: {
         key: message.document.recordKey,
         type: binding.definition.type,
-        schemaId: resolution.preserveIncomingSchemaId
-          ? message.document.schemaId
-          : schemaIdForBinding(binding),
+        schemaId: schemaIdForBinding(binding),
         payload: documentPayloadFromBytes(new Uint8Array(documentPayloadBytes(message.document.payload))),
         storedAt: message.document.storedAt,
       },
@@ -334,35 +364,6 @@ export class CultNetDocumentRegistry {
     return binding;
   }
 
-  #resolveRawDocumentBinding(document: CultNetRawDocumentRecord): {
-    binding: CultNetDocumentBinding;
-    preserveIncomingSchemaId: boolean;
-  } {
-    const exact = this.getBySchemaId(document.schemaId);
-    if (exact) {
-      return { binding: exact, preserveIncomingSchemaId: true };
-    }
-
-    const payload = documentPayloadFromBytes(new Uint8Array(documentPayloadBytes(document.payload)));
-    for (const binding of this.#uniqueBindings()) {
-      try {
-        decodeDocumentPayload(binding.definition, payload);
-        return { binding, preserveIncomingSchemaId: false };
-      } catch {
-        // Keep looking; a foreign schema id is acceptable only when the payload validates locally.
-      }
-    }
-
-    throw new Error(`No CultNet document binding is registered for schema "${document.schemaId}".`);
-  }
-
-  #uniqueBindings(): CultNetDocumentBinding[] {
-    return [...new Set([
-      ...this.#schemaBindings.values(),
-      ...this.#bindings.values(),
-    ])];
-  }
-
   #createRawDocumentRecord(envelope: CultCacheEnvelope): CultNetRawDocumentRecord {
     const binding = this.#requireBinding(envelope.type);
     return {
@@ -376,43 +377,17 @@ export class CultNetDocumentRegistry {
 }
 
 function schemaIdForBinding(binding: CultNetDocumentBinding): string {
-  return binding.definition.schemaId ?? binding.definition.type;
+  return schemaIdentityOf(binding.definition).schemaId;
 }
 
-function schemaMatchesBinding(
+// A held record matches a snapshot filter when the filter names the id it carries or any id its binding answers to.
+function answersTo(
   schemaId: string,
   binding: CultNetDocumentBinding,
   requestedSchemaIds: Set<string>,
 ): boolean {
-  if (requestedSchemaIds.has(schemaId)) {
-    return true;
-  }
-
-  const definition = binding.definition;
-  if (definition.schemaId && requestedSchemaIds.has(definition.schemaId)) {
-    return true;
-  }
-  if (definition.schemaName && requestedSchemaIds.has(definition.schemaName)) {
-    return true;
-  }
-  if (definition.schemaVersion && requestedSchemaIds.has(definition.schemaVersion)) {
-    return true;
-  }
-  if (definition.compatibleSchemaIds?.some(candidate => requestedSchemaIds.has(candidate))) {
-    return true;
-  }
-
-  return Array.from(requestedSchemaIds)
-    .some(candidate => inferSchemaName(candidate) === definition.schemaName);
-}
-
-function inferSchemaName(schemaId: string): string | undefined {
-  const marker = schemaId.lastIndexOf(".v");
-  if (marker <= 0 || marker + 2 >= schemaId.length) {
-    return undefined;
-  }
-  const version = schemaId.slice(marker + 2);
-  return /^\d+$/u.test(version) ? schemaId.slice(0, marker) : undefined;
+  return requestedSchemaIds.has(schemaId)
+    || schemaIdentityOf(binding.definition).compatibleSchemaIds.some(candidate => requestedSchemaIds.has(candidate));
 }
 
 function schemaIdForEnvelope(

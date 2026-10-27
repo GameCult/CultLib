@@ -1316,6 +1316,7 @@ def witness_artifact_bundle_schema_json() -> str:
                 "required": ["role", "schemaId"],
                 "additionalProperties": False,
                 "properties": {
+                    "id": {"type": "string", "minLength": 1},
                     "role": {"type": "string", "minLength": 1},
                     "schemaId": {"type": "string", "minLength": 1},
                     "schemaVersion": {"type": "string", "minLength": 1},
@@ -1327,6 +1328,7 @@ def witness_artifact_bundle_schema_json() -> str:
                 "required": ["role", "uri", "mediaType"],
                 "additionalProperties": False,
                 "properties": {
+                    "id": {"type": "string", "minLength": 1},
                     "role": {"type": "string", "minLength": 1},
                     "uri": {"type": "string", "minLength": 1},
                     "mediaType": {"type": "string", "minLength": 1},
@@ -1340,6 +1342,7 @@ def witness_artifact_bundle_schema_json() -> str:
                 "required": ["stage", "startedAt", "completedAt", "latencyMs"],
                 "additionalProperties": False,
                 "properties": {
+                    "id": {"type": "string", "minLength": 1},
                     "stage": {"type": "string", "minLength": 1},
                     "startedAt": {"type": "string", "minLength": 1},
                     "completedAt": {"type": "string", "minLength": 1},

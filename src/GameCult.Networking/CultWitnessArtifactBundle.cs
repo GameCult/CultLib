@@ -104,6 +104,10 @@ namespace GameCult.Networking
     [MessagePackObject]
     public sealed class CultWitnessContractPin
     {
+        [Key(4)]
+        [CultElementId]
+        public string Id { get; set; } = string.Empty;
+
         /// <summary>
         /// Gets or sets the contract role inside the bundle.
         /// </summary>
@@ -135,6 +139,10 @@ namespace GameCult.Networking
     [MessagePackObject]
     public sealed class CultWitnessArtifactEntry
     {
+        [Key(6)]
+        [CultElementId]
+        public string Id { get; set; } = string.Empty;
+
         /// <summary>
         /// Gets or sets the artifact role inside the witness bundle.
         /// </summary>
@@ -178,6 +186,10 @@ namespace GameCult.Networking
     [MessagePackObject]
     public sealed class CultWitnessTimingEntry
     {
+        [Key(5)]
+        [CultElementId]
+        public string Id { get; set; } = string.Empty;
+
         /// <summary>
         /// Gets or sets the pipeline stage name.
         /// </summary>

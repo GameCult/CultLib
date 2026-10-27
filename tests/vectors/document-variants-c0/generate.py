@@ -6,8 +6,20 @@ at test time. Run: python generate.py  (needs msgpack).
   extra-slot-full-payload.msgpack v1 header, record item:anvil gains slot 4, payload stays full
   legacy-catalog-extra-slot.msgpack
                                   v1 header, catalog entry in the older layout (contentHash at slot
-                                  5), so CultMesh's legacy snapshot reader takes it, plus the
-                                  extra-slot record
+                                  5), plus the extra-slot record; no C# reader reads the older layout
+  legacy-catalog-plain.msgpack    v1 header, the older-layout catalog entry, the plain v1 records: refused by
+                                  every C# reader, CultMesh included
+  legacy-catalog-trailing.msgpack legacy-catalog-plain plus three bytes after the array
+  current-catalog-bad-canonical.msgpack
+  current-catalog-bad-members.msgpack
+  current-catalog-bad-compat.msgpack
+                                  v1 header, plain records, and the first catalog entry of the current layout with one slot
+                                  malformed (canonical schema json an int; members an int; a compatible id an int). Refused
+                                  by every C# reader, CultMesh included
+  current-catalog-bad-slot5-nil.msgpack
+  current-catalog-bad-slot5-int.msgpack
+                                  the same, with slot 5 (the compatible ids) nil or an integer: neither is a string, so neither is
+                                  the older layout
   v1-base.msgpack                 NOT generated here: written once by the Python runtime at CultLib
                                   69a21bb (SingleFileMessagePackBackingStore.push of alpha and
                                   beta, type vectors.item, before any C0 code existed)
@@ -38,6 +50,21 @@ write("extra-slot-full-payload.msgpack",
       [header, catalog, [anvil + [["item:bellows", []]]] + records[1:]])
 variant = ["item:anvil-big", anvil[1], anvil[2], b"", ["item:anvil", [[0, [[1, ""]], "", 99]]]]
 write("variant-v2.msgpack", ["cultcache.store.v2", catalog, records + [variant]])
-legacy_entry = [catalog[0][0], catalog[0][1], catalog[0][2], catalog[0][4], None, catalog[0][3], []]
+legacy = lambda entry: [entry[0], entry[1], entry[2], entry[4], None, entry[3], []]
+legacy_entry = legacy(catalog[0])
 write("legacy-catalog-extra-slot.msgpack",
       [header, [legacy_entry], [anvil + [["item:bellows", []]]]])
+write("legacy-catalog-plain.msgpack", [header, [legacy(entry) for entry in catalog], records])
+(here / "legacy-catalog-trailing.msgpack").write_bytes(
+    msgpack.packb([header, [legacy(entry) for entry in catalog], records], use_bin_type=True) + b"\x01\x02\x03")
+current = catalog[0]
+for name, entry in (
+    ("current-catalog-bad-canonical", current[:4] + [5]),
+    ("current-catalog-bad-members", current[:6] + [5]),
+    ("current-catalog-bad-compat", current[:5] + [[7]] + current[6:]),
+    ("current-catalog-bad-slot5-nil", current[:5] + [None] + current[6:]),
+    ("current-catalog-bad-slot5-int", current[:5] + [7] + current[6:]),
+):
+    # One catalog entry and the records that use it: the older-layout reader takes an entry's slot 5 for a string, so a second
+    # current-layout entry would make it refuse for that reason, not for the malformed slot under test.
+    write(name + ".msgpack", [header, [entry], [record for record in records if record[1] == current[0]]])

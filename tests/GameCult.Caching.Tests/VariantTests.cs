@@ -181,6 +181,14 @@ namespace GameCult.Caching.Tests
             var seen = a.Get<VariantGear>(BigKey)!;
 
             EditBase(b, gear => gear.Tags.Add("pierce"));
+            // Expect tests the variant's stored delta only, and it did not change, so the condition holds and the write goes on: the
+            // store holds a variant and moved, so it is refused and reloaded as a write conflict. It is not a mismatch (false).
+            Assert.Throws<CultWriteConflictException>(() => a.Commit(batch =>
+            {
+                batch.Expect(BigKey, seen);
+                batch.Upsert(typeof(VariantOther), new VariantOther { Name = "marker" }, new CultRecordKey("marker"));
+            }));
+            seen = a.Get<VariantGear>(BigKey)!;
             Assert.That(a.Commit(batch =>
             {
                 batch.Expect(BigKey, seen);
@@ -189,6 +197,7 @@ namespace GameCult.Caching.Tests
 
             a.PullAllBackingStoresAsync();
             seen = a.Get<VariantGear>(BigKey)!;
+            b.PullAllBackingStoresAsync();
             SeedBig(b, power: 26);
             Assert.That(a.Commit(batch =>
             {
@@ -665,34 +674,301 @@ namespace GameCult.Caching.Tests
             Assert.That(reopened.Get(other), Is.Not.Null);
         }
 
-        // ---- a variant sheds overrides its type lacks when it is flushed, as a plain record sheds the member ----
-
+        // A store holding a variant is written only from what its writer last read. Another writer adds a variant whose indexed value
+        // this cache's staged edit of its base now takes: the write is refused whole, the cache reloads what it refused and what moved,
+        // and the retry is judged by the cache's own rules.
         [Test]
-        public void AFlushShedsAnOverrideOfADroppedSlotSoALaterTypeReusingTheSlotDoesNotResurrectIt()
+        public void AWriteIntoAVariantStoreAnotherWriterChangedIsRefusedReloadedAndJudgedOnRetry([Values] bool viaCommit)
         {
-            var path = PathOf("drift.cc");
-            var wide = CultDocumentRegistry.ForTypes(new[] { typeof(DriftWide) });
-            using (var writer = Open(path, registry: wide))
+            var path = PathOf(viaCommit ? "judged-commit.cc" : "judged-flush.cc");
+            using var cache = Open(path);
+            SeedBase(cache);
+            using (var other = Open(path))
+                SeedBig(other);
+            var edited = Laser();
+            edited.Code = "laser big";
+            cache.UpsertAsync(typeof(VariantGear), edited, BaseKey).GetAwaiter().GetResult();
+            var before = File.ReadAllBytes(path);
+
+            var conflict = Assert.Throws<CultWriteConflictException>(() =>
             {
-                writer.Commit(batch =>
+                if (viaCommit)
+                    cache.Commit(batch => batch.Upsert(typeof(VariantGear), Other("n"), new CultRecordKey("n")));
+                else
+                    cache.FlushAllBackingStores();
+            })!;
+
+            Assert.That(conflict.RecordKeys, Does.Contain(BaseKey.Value));
+            Assert.That(conflict.ChangedKeys, Does.Contain(BigKey.Value));
+            Assert.That(cache.Get<VariantGear>(BaseKey)!.Code, Is.EqualTo("l1"), "the refused edit is not served");
+            Assert.That(cache.Get(BigKey), Is.Not.Null, "the moved record is loaded");
+            Assert.That(cache.IsDirty, Is.False);
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(before), "nothing was written");
+            Assert.That(Refused(() => cache.UpsertAsync(typeof(VariantGear), edited, BaseKey).GetAwaiter().GetResult()).Message,
+                Does.Contain(BigKey.Value), "the retry is judged by the cache's own index rule");
+        }
+
+        // A refused base removal leaves the cache serving the store, writable, and judging the next attempt itself.
+        [Test]
+        public void ARefusedBaseRemovalReloadsAndLeavesTheCacheWritable()
+        {
+            var path = PathOf("gear.cc");
+            var n = new CultRecordKey("n");
+            using var a = Open(path);
+            SeedBase(a);
+            using (var b = Open(path))
+                SeedBig(b);
+            a.Remove(BaseKey);
+
+            var conflict = Assert.Throws<CultWriteConflictException>(() => a.FlushAllBackingStores())!;
+
+            Assert.That(conflict.RecordKeys, Is.EqualTo(new[] { BaseKey.Value }));
+            Assert.That(conflict.ChangedKeys, Is.EqualTo(new[] { BigKey.Value }));
+            Assert.That(a.Get(BaseKey), Is.Not.Null);
+            Assert.That(a.Get(BigKey), Is.Not.Null);
+            Assert.That(a.IsDirty, Is.False);
+            Assert.DoesNotThrow(() => a.FlushAllBackingStores());
+            Assert.DoesNotThrow(() => a.Commit(batch => batch.Upsert(typeof(VariantGear), Named("n", "nn"), n)));
+            Assert.That(Refused(() => a.Remove(BaseKey)).Message, Does.Contain(BigKey.Value), "a base with variants is refused by this cache's own rule");
+
+            using var reopened = Open(path);
+            Assert.That(reopened.Get(n), Is.Not.Null);
+            Assert.That(reopened.Get(BigKey), Is.Not.Null);
+            Assert.That(reopened.Get(BaseKey), Is.Not.Null);
+        }
+
+        // A held record another writer changed is not trusted: the write is refused although this cache never staged it.
+        [Test]
+        public void AWriteIsRefusedWhenAnotherWriterChangedAVariantThisCacheHolds()
+        {
+            var path = PathOf("gear.cc");
+            using var a = Open(path);
+            SeedBase(a);
+            SeedBig(a);
+            using (var b = Open(path))
+                b.Commit(batch => batch.UpsertVariant(BigKey, BaseKey, new[]
                 {
-                    batch.Upsert(typeof(DriftWide), new DriftWide { Name = "drift", Power = 1, Wing = "base wing" }, new CultRecordKey("drift-base"));
-                    batch.UpsertVariant(new CultRecordKey("drift-variant"), new CultRecordKey("drift-base"), new[]
-                    {
-                        writer.Override<DriftWide>(nameof(DriftWide.Name), "drift variant"),
-                        writer.Override<DriftWide>(nameof(DriftWide.Wing), "stale wing")
-                    });
+                    b.Override<VariantGear>(nameof(VariantGear.Name), "laser big"),
+                    b.Override<VariantGear>(nameof(VariantGear.Power), 99),
+                    b.Override<VariantGear>(nameof(VariantGear.Code), "laser big")
+                }));
+            Assert.That(a.Get<VariantGear>(BigKey)!.Power, Is.EqualTo(25));
+
+            var conflict = Assert.Throws<CultWriteConflictException>(() =>
+                a.Commit(batch => batch.Upsert(typeof(VariantGear), Named("y", "yy"), new CultRecordKey("y"))))!;
+
+            Assert.That(conflict.ChangedKeys, Is.EqualTo(new[] { BigKey.Value }));
+            Assert.That(a.Get<VariantGear>(BigKey)!.Power, Is.EqualTo(99), "the cache serves the other writer's override after the refusal");
+        }
+
+        // A write that would add a variant is judged like one into a variant store: a plain store another writer changed refuses it.
+        [Test]
+        public void AVariantWrittenIntoAPlainStoreAnotherWriterChangedIsRefusedThenLandsOnRetry()
+        {
+            var path = PathOf("plain-then-variant.cc");
+            var z = new CultRecordKey("z");
+            using (var seed = Open(path))
+                SeedBase(seed);
+            using (var a = Open(path))
+            {
+                using (var b = Open(path))
+                    b.Commit(batch => batch.Upsert(typeof(VariantGear), Other("zc"), z));
+
+                var conflict = Assert.Throws<CultWriteConflictException>(() => SeedBig(a))!;
+
+                Assert.That(conflict.RecordKeys, Does.Contain(BigKey.Value));
+                Assert.That(conflict.ChangedKeys, Is.EqualTo(new[] { z.Value }));
+                Assert.That(a.Get(z), Is.Not.Null, "the refusal reloaded the record that moved");
+                Assert.DoesNotThrow(() => SeedBig(a));
+            }
+
+            using var reopened = Open(path);
+            Assert.That(reopened.Get(BigKey), Is.Not.Null);
+            Assert.That(reopened.Get(z), Is.Not.Null);
+        }
+
+        // A plain write copies another writer's record forward without reading it: this cache has still not read it, so a variant
+        // written next is refused.
+        [Test]
+        public void ARecordACachePlainWriteCopiedForwardIsStillUnreadWhenAVariantIsWrittenNext()
+        {
+            var path = PathOf("copied-unread.cc");
+            var z = new CultRecordKey("z");
+            using (var seed = Open(path))
+                SeedBase(seed);
+            using var a = Open(path);
+            using (var b = Open(path))
+                b.Commit(batch => batch.Upsert(typeof(VariantGear), Other("zc"), z));
+            a.Commit(batch => batch.Upsert(typeof(VariantGear), Other("yc"), new CultRecordKey("y")));
+
+            var conflict = Assert.Throws<CultWriteConflictException>(() => SeedBig(a))!;
+
+            Assert.That(conflict.ChangedKeys, Is.EqualTo(new[] { z.Value }));
+        }
+
+        // ---- a write copies what it did not stage, and re-encodes what it stages under the type's own id ----
+
+        private static readonly string DriftWideId = CultDocumentRegistry.ForTypes(new[] { typeof(DriftWide) }).GetRequired(typeof(DriftWide)).SchemaId;
+
+        // The same schema name as Wide, a later version that lists Wide's id as compatible and has no Wing.
+        private static readonly Type DriftDeclared = EmittedDocumentTypes.Emit(
+            "DriftDeclared",
+            "tests.variant_drift",
+            "tests.variant_drift.v4",
+            new[] { new EmittedDocumentTypes.Field("Name", typeof(string), 0, IsName: true), new EmittedDocumentTypes.Field("Power", typeof(int), 1) },
+            new[] { DriftWideId });
+
+        private static readonly CultRecordKey DriftBase = new("drift-base");
+        private static readonly CultRecordKey DriftVariant = new("drift-variant");
+
+        private static CultPersistedStoreSnapshot ReadStore(string path) =>
+            CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+
+        private void SeedDrift(string path)
+        {
+            using var writer = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftWide) }));
+            writer.Commit(batch =>
+            {
+                batch.Upsert(typeof(DriftWide), new DriftWide { Name = "drift", Power = 1, Wing = "base wing" }, DriftBase);
+                batch.UpsertVariant(DriftVariant, DriftBase, new[]
+                {
+                    writer.Override<DriftWide>(nameof(DriftWide.Name), "drift variant"),
+                    writer.Override<DriftWide>(nameof(DriftWide.Wing), "stale wing")
+                });
+            });
+        }
+
+        // Narrow reads Wide's records through the schema name and neither owns nor declares Wide's id. A write of another record
+        // copies them as Wide stored them: bytes, id, storedAt, the override of the slot Narrow lacks, and the entry that publishes
+        // Wide's id.
+        [Test]
+        public void AWriteOfAnotherRecordLeavesAVariantItsTypeHasNotDeclaredAsStored([Values] bool viaFlush)
+        {
+            var path = PathOf(viaFlush ? "drift-untouched-flush.cc" : "drift-untouched-commit.cc");
+            SeedDrift(path);
+            var before = ReadStore(path);
+            var wideEntryBefore = StoreSlices.CatalogEntry(path, DriftWideId);
+
+            using (var narrow = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftNarrow) })))
+            {
+                Assert.That(narrow.Get<DriftNarrow>(DriftVariant)!.Name, Is.EqualTo("drift variant"), "Narrow reads the variant");
+                var other = new CultRecordKey("other");
+                if (viaFlush)
+                {
+                    narrow.UpsertAsync(typeof(DriftNarrow), new DriftNarrow { Name = "other" }, other).GetAwaiter().GetResult();
+                    narrow.FlushAllBackingStores();
+                }
+                else
+                    narrow.Commit(batch => batch.Upsert(typeof(DriftNarrow), new DriftNarrow { Name = "other" }, other));
+            }
+
+            var after = ReadStore(path);
+            foreach (var key in new[] { DriftBase.Value, DriftVariant.Value })
+            {
+                var was = before.Records.Single(record => record.Key == key);
+                var is_ = after.Records.Single(record => record.Key == key);
+                Assert.That((is_.SchemaId, is_.StoredAt, is_.Payload), Is.EqualTo((was.SchemaId, was.StoredAt, was.Payload)), key);
+            }
+
+            Assert.That(OverriddenSlotsOn(path, DriftVariant.Value).OrderBy(slot => slot), Is.EqualTo(new[] { 0, 2 }), "the dropped slot's override is still stored");
+            Assert.That(StoreSlices.CatalogEntry(path, DriftWideId),
+                Is.EqualTo(wideEntryBefore));
+        }
+
+        // A type that lists Wide's id as compatible owns Wide's records: staging one writes it under the type's own id, at a later
+        // storedAt, without the member the type dropped, so a later type reusing that slot does not resurrect it.
+        [Test]
+        public void AStagedWriteOfADeclaredCompatibleRecordIsReEncodedUnderTheTypesOwnIdAndShedsTheDroppedSlot()
+        {
+            var path = PathOf("drift-declared.cc");
+            SeedDrift(path);
+            var wideBase = ReadStore(path).Records.Single(record => record.Key == DriftBase.Value);
+            var ownId = CultDocumentRegistry.ForTypes(new[] { DriftDeclared }).GetRequired(DriftDeclared).SchemaId;
+
+            using (var declared = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { DriftDeclared })))
+            {
+                declared.Commit(batch =>
+                {
+                    batch.Upsert(DriftDeclared, declared.Get(DriftBase)!, DriftBase);
+                    batch.UpsertVariant(DriftVariant, DriftBase, new[] { declared.Override(DriftDeclared, "Name", "drift variant") });
                 });
             }
 
-            using (var narrow = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftNarrow) })))
-                narrow.BackingStores[0].PushAll();
-
-            Assert.That(OverriddenSlotsOn(path, "drift-variant"), Is.EqualTo(new[] { 0 }), "the dropped slot's override is gone from the flushed record");
+            var written = ReadStore(path);
+            Assert.That(written.Records.Select(record => record.SchemaId), Is.All.EqualTo(ownId));
+            Assert.That(string.CompareOrdinal(written.Records.Single(record => record.Key == DriftBase.Value).StoredAt, wideBase.StoredAt), Is.GreaterThan(0));
+            Assert.That(OverriddenSlotsOn(path, DriftVariant.Value), Is.EqualTo(new[] { 0 }), "the dropped slot's override is gone from the written record");
 
             using var reused = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftReused) }));
-            Assert.That(reused.Get<DriftReused>(new CultRecordKey("drift-base"))!.Colour, Is.Empty);
-            Assert.That(reused.Get<DriftReused>(new CultRecordKey("drift-variant"))!.Colour, Is.Empty, "the variant inherits its base's colour, not the old wing");
+            Assert.That(reused.Get<DriftReused>(DriftBase)!.Colour, Is.Empty);
+            Assert.That(reused.Get<DriftReused>(DriftVariant)!.Colour, Is.Empty, "the variant inherits its base's colour, not the old wing");
+        }
+
+        public enum UndeclaredWrite
+        {
+            UpsertBase,
+            UpsertVariant,
+            FlattenVariant,
+            RemoveBase,
+            RemoveVariant
+        }
+
+        // Narrow reads Wide's records through the schema name and does not list Wide's id, so they are read-only to it: a staged write,
+        // flatten or removal of either is refused typed, and the store keeps them as Wide stored them, the dropped slot's override too.
+        [Test]
+        public void AnUndeclaredDroppedSlotRecordThatIsWrittenIsRefused([Values] UndeclaredWrite write)
+        {
+            var path = PathOf("drift-undeclared-" + write + ".cc");
+            SeedDrift(path);
+            var before = File.ReadAllBytes(path);
+
+            using (var narrow = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftNarrow) })))
+            {
+                var key = write is UndeclaredWrite.UpsertBase or UndeclaredWrite.RemoveBase ? DriftBase : DriftVariant;
+                var refusal = Assert.Throws<CultSchemaConflictException>(() =>
+                {
+                    switch (write)
+                    {
+                        case UndeclaredWrite.UpsertBase:
+                            narrow.Commit(batch => batch.Upsert(typeof(DriftNarrow), new DriftNarrow { Name = "changed" }, DriftBase));
+                            break;
+                        case UndeclaredWrite.UpsertVariant:
+                            narrow.Commit(batch => batch.UpsertVariant(DriftVariant, DriftBase, new[] { narrow.Override<DriftNarrow>(nameof(DriftNarrow.Name), "changed") }));
+                            break;
+                        case UndeclaredWrite.FlattenVariant:
+                            narrow.FlattenAsync(DriftVariant).GetAwaiter().GetResult();
+                            break;
+                        case UndeclaredWrite.RemoveBase:
+                            narrow.Commit(batch => batch.Remove(DriftBase));
+                            break;
+                        case UndeclaredWrite.RemoveVariant:
+                            narrow.Commit(batch => batch.Remove(DriftVariant));
+                            break;
+                    }
+                })!;
+                Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((key.Value, DriftWideId)));
+                narrow.FlushAllBackingStores();
+            }
+
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(before));
+            Assert.That(OverriddenSlotsOn(path, DriftVariant.Value).OrderBy(slot => slot), Is.EqualTo(new[] { 0, 2 }));
+        }
+
+        // Only the read-only key is read-only: a variant of a read-only base, written at a new key, is a write of the variant alone and lands.
+        [Test]
+        public void AVariantOfAReadOnlyBaseLands()
+        {
+            var path = PathOf("drift-read-only-base.cc");
+            SeedDrift(path);
+            var fresh = new CultRecordKey("fresh-variant");
+            var narrowRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(DriftNarrow) });
+
+            using (var narrow = Open(path, registry: narrowRegistry))
+                narrow.Commit(batch => batch.UpsertVariant(fresh, DriftBase, new[] { narrow.Override<DriftNarrow>(nameof(DriftNarrow.Name), "fresh") }));
+
+            using var reopened = Open(path, registry: narrowRegistry);
+            Assert.That(reopened.Get<DriftNarrow>(fresh)!.Name, Is.EqualTo("fresh"));
+            Assert.That(ReadStore(path).Records.Single(record => record.Key == DriftBase.Value).SchemaId, Is.EqualTo(DriftWideId));
         }
 
         [Test]
@@ -742,7 +1018,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void AnOverrideOfASlotTheTypeNeverHadIsReportedOnLoadAndShedOnTheNextFlush()
+        public void AnOverrideOfASlotTheTypeNeverHadIsReportedOnEveryLoadAndStaysStoredUntilTheVariantIsWritten()
         {
             var path = WriteStore(PlainGear("hand-base"), OverridingRecord("hand-variant", "hand-base",
                 CultVariantOverride.Set(99, new byte[] { 0x01 }),
@@ -757,10 +1033,19 @@ namespace GameCult.Caching.Tests
                 cache.BackingStores[0].PushAll();
             }
 
-            Assert.That(OverriddenSlotsOn(path, "hand-variant").OrderBy(slot => slot), Is.EqualTo(new[] { 0, 2 }));
-            using var reopened = Open(path);
-            Assert.That(reopened.BackingStores[0].LastSchemaMigrationReports.SelectMany(report => report.IgnoredExtraSlots), Is.Empty);
-            Assert.That(reopened.Get<VariantGear>(new CultRecordKey("hand-variant"))!.Name, Is.EqualTo("hand variant"));
+            Assert.That(OverriddenSlotsOn(path, "hand-variant").OrderBy(slot => slot), Is.EqualTo(new[] { 0, 2, 99 }), "a flush that staged nothing copies the variant as stored");
+            using (var reopened = Open(path))
+            {
+                Assert.That(reopened.BackingStores[0].LastSchemaMigrationReports.SelectMany(report => report.IgnoredExtraSlots), Is.EqualTo(new[] { 99 }));
+                Assert.That(reopened.Get<VariantGear>(new CultRecordKey("hand-variant"))!.Name, Is.EqualTo("hand variant"));
+                reopened.Commit(batch => batch.UpsertVariant(new CultRecordKey("hand-variant"), new CultRecordKey("hand-base"), new[]
+                {
+                    reopened.Override<VariantGear>(nameof(VariantGear.Name), "hand variant"),
+                    reopened.Override<VariantGear>(nameof(VariantGear.Code), "hand-code")
+                }));
+            }
+
+            Assert.That(OverriddenSlotsOn(path, "hand-variant").OrderBy(slot => slot), Is.EqualTo(new[] { 0, 2 }), "a write of the variant stores only what it was given");
         }
 
         private static int[] OverriddenSlotsOn(string path, string key) =>
@@ -904,12 +1189,16 @@ namespace GameCult.Caching.Tests
                     a.Override<VariantGear>(nameof(VariantGear.Code), "shared")
                 }));
 
-                var refused = Refused(() => b.Commit(batch =>
+                void Write() => b.Commit(batch =>
                 {
                     batch.Expect(other, null);
                     batch.Upsert(typeof(VariantGear), Named("other", "shared"), other);
-                }));
-                Assert.That(refused.Message, Does.Contain(other.Value).And.Contain(BigKey.Value).And.Contain("code").And.Contain("shared"));
+                });
+
+                var conflict = Assert.Throws<CultWriteConflictException>(Write)!;
+                Assert.That(conflict.ChangedKeys, Does.Contain(BigKey.Value));
+                var refused = Refused(Write);
+                Assert.That(refused.Message, Does.Contain(other.Value).And.Contain(BigKey.Value).And.Contain("code").And.Contain("shared"), "the retry is judged by Resolve");
                 Assert.That(b.Get(other), Is.Null, "nothing landed in memory");
             }
 
@@ -931,12 +1220,16 @@ namespace GameCult.Caching.Tests
                 var seen = b.Get<VariantGear>(BaseKey)!;
                 SeedBig(a);
 
-                var refused = Refused(() => b.Commit(batch =>
+                void Write() => b.Commit(batch =>
                 {
                     batch.Expect(BaseKey, seen);
                     batch.Remove(BaseKey);
-                }));
-                Assert.That(refused.Message, Does.Contain(BaseKey.Value).And.Contain(BigKey.Value));
+                });
+
+                var conflict = Assert.Throws<CultWriteConflictException>(Write)!;
+                Assert.That(conflict.ChangedKeys, Does.Contain(BigKey.Value));
+                var refused = Refused(Write);
+                Assert.That(refused.Message, Does.Contain(BaseKey.Value).And.Contain(BigKey.Value), "the retry is judged by Resolve");
                 Assert.That(b.Get(BaseKey), Is.Not.Null, "nothing landed in memory");
             }
 
@@ -963,7 +1256,7 @@ namespace GameCult.Caching.Tests
                 using (var w = Open(path))
                     Assert.That(w.Commit(batch => batch.Upsert(typeof(VariantGear), Named("x", "l1"), BaseKey)), Is.True);
 
-                var refused = Refused(() => a.Commit(batch =>
+                var refused = Assert.Throws<CultWriteConflictException>(() => a.Commit(batch =>
                 {
                     batch.Expect(other, a.Get(other));
                     batch.UpsertVariant(BigKey, BaseKey, new[]
@@ -971,8 +1264,9 @@ namespace GameCult.Caching.Tests
                         a.Override<VariantGear>(nameof(VariantGear.Name), "x"),
                         a.Override<VariantGear>(nameof(VariantGear.Code), "big")
                     });
-                }));
-                Assert.That(refused.Message, Does.Contain(BigKey.Value).And.Contain(BaseKey.Value).And.Contain("x"));
+                }))!;
+                Assert.That(refused.Message, Does.Contain(BigKey.Value));
+                Assert.That(refused.ChangedKeys, Is.EqualTo(new[] { BaseKey.Value }), "the refusal names the base another writer renamed");
             }
 
             using var reopened = Open(path, readOnly: true);
@@ -980,7 +1274,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void AConditionalCommitThatIsSoundOnTheMergedSetStillLands()
+        public void AConditionalCommitThatIsSoundOntoAVariantStoreAnotherWriterChangedIsRefusedThenLandsOnRetry()
         {
             var path = PathOf("gear.cc");
             var other = new CultRecordKey("other");
@@ -991,11 +1285,15 @@ namespace GameCult.Caching.Tests
             using (var b = Open(path))
             {
                 SeedBig(a);
-                Assert.That(b.Commit(batch =>
+                bool Write() => b.Commit(batch =>
                 {
                     batch.Expect(other, null);
                     batch.Upsert(typeof(VariantGear), Named("other", "fine"), other);
-                }), Is.True);
+                });
+
+                Assert.Throws<CultWriteConflictException>(() => Write());
+                Assert.That(b.Get(BigKey), Is.Not.Null, "the refusal reloaded the other writer's variant");
+                Assert.That(Write(), Is.True);
             }
 
             using var reopened = Open(path);
@@ -1111,7 +1409,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void AVariantAnotherWriterLandedIsStillJudgedWhenThisCacheHoldsNoVariant()
+        public void AVariantAnotherWriterLandedIsRefusedAsChangedWhenThisCacheHoldsNoVariant()
         {
             var path = PathOf("gear.cc");
             var other = new CultRecordKey("other");
@@ -1122,7 +1420,7 @@ namespace GameCult.Caching.Tests
             using (var b = Open(path))
             {
                 VariantOnCode(a, "shared");
-                Refused(() => b.Commit(batch =>
+                Assert.Throws<CultWriteConflictException>(() => b.Commit(batch =>
                 {
                     batch.Expect(other, null);
                     batch.Upsert(typeof(VariantGear), Named("other", "shared"), other);
@@ -1374,7 +1672,7 @@ namespace GameCult.Caching.Tests
         public void AVariantRecordUnderAV1HeaderIsRefusedNamingTheRecord()
         {
             var path = WriteStore(CultPersistedStoreSnapshot.FormatV1, PlainGear("hand-base"), VariantGearRecord("hand-variant", "hand-base"));
-            var error = Assert.Throws<NotSupportedException>(() => Open(path).Dispose())!;
+            var error = Assert.Throws<CultStoreUnreadableException>(() => Open(path).Dispose())!;
             Assert.That(error.Message, Does.Contain("hand-variant").And.Contain("cultcache.store.v2"));
         }
 
@@ -1382,7 +1680,7 @@ namespace GameCult.Caching.Tests
         public void AVariantRecordWithAPayloadIsRefusedNamingTheRecord()
         {
             var path = WriteStore(PlainGear("hand-base"), VariantGearRecord("hand-variant", "hand-base", payload: new byte[] { 0x90 }));
-            var error = Assert.Throws<NotSupportedException>(() => Open(path).Dispose())!;
+            var error = Assert.Throws<CultStoreUnreadableException>(() => Open(path).Dispose())!;
             Assert.That(error.Message, Does.Contain("hand-variant").And.Contain("payload"));
         }
 
@@ -1390,7 +1688,7 @@ namespace GameCult.Caching.Tests
         public void AnOverrideWithAnUnknownOpIsRefusedNamingTheRecord()
         {
             var path = WriteStore(PlainGear("hand-base"), VariantGearRecord("hand-variant", "hand-base", op: (CultOverrideOp)7));
-            var error = Assert.Throws<NotSupportedException>(() => Open(path).Dispose())!;
+            var error = Assert.Throws<CultStoreUnreadableException>(() => Open(path).Dispose())!;
             Assert.That(error.Message, Does.Contain("hand-variant").And.Contain("op 7"));
         }
 

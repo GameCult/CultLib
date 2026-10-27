@@ -80,6 +80,10 @@ namespace GameCult.Mesh
     [MessagePackObject]
     public sealed class CultMeshEntityPrefabComponent
     {
+        [Key(2)]
+        [CultElementId]
+        public string Id { get; set; } = string.Empty;
+
         /// <summary>Portable component kind or runtime adapter type.</summary>
         [Key(0)]
         public string Type { get; set; } = string.Empty;
@@ -95,6 +99,10 @@ namespace GameCult.Mesh
     [MessagePackObject]
     public sealed class CultMeshEntityPrefabAssetRef
     {
+        [Key(6)]
+        [CultElementId]
+        public string Id { get; set; } = string.Empty;
+
         /// <summary>Stable source asset id inside the prefab package.</summary>
         [Key(0)]
         public string AssetId { get; set; } = string.Empty;
@@ -126,6 +134,10 @@ namespace GameCult.Mesh
     [MessagePackObject]
     public sealed class CultMeshEntityPrefabNode
     {
+        [Key(10)]
+        [CultElementId]
+        public string Id { get; set; } = string.Empty;
+
         /// <summary>Stable node id inside the package.</summary>
         [Key(0)]
         public string NodeId { get; set; } = string.Empty;

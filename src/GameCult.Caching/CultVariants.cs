@@ -28,6 +28,24 @@ namespace GameCult.Caching
 
         // (document payload, slot and encoded value pairs)
         public Func<byte[], IReadOnlyList<KeyValuePair<int, byte[]>>, byte[]> Overlay { get; }
+
+        /// <summary>
+        /// Decodes a document payload read from a store file, as a cache load decodes it: the ids a load mints are minted from the key
+        /// and their path, so every reader of one store mints the same ids, and a payload a cache write would refuse is refused here too.
+        /// It reads no file and holds no state.
+        /// </summary>
+        /// <typeparam name="TDocument">The registered document type.</typeparam>
+        /// <param name="key">The record key the payload was stored under.</param>
+        /// <param name="payload">The record's payload.</param>
+        /// <exception cref="CultElementIdException">The payload holds an element id or list a cache load refuses.</exception>
+        public TDocument DecodeDocument<TDocument>(CultRecordKey key, byte[] payload)
+            where TDocument : class
+        {
+            if (payload == null) throw new ArgumentNullException(nameof(payload));
+            var document = (TDocument)Deserialize(typeof(TDocument), typeof(TDocument), payload)!;
+            CultElementIds.Plan(typeof(TDocument), document, key.Value, deterministic: true).Apply();
+            return document;
+        }
     }
 
     public enum CultOverrideOp

@@ -15,13 +15,12 @@ import {
   documentPayloadFromBytes,
   encodeDocumentPayload,
 } from "@gamecult/cultcache-ts";
-import type { CacheBackingStore, CultCacheEnvelope } from "@gamecult/cultcache-ts";
 import {
   CultNetDocumentRegistry,
   defineCultNetDocumentBinding,
   type CultNetPeer,
 } from "cultnet-ts";
-import { CultMesh, cultMeshDocumentFromSingleFile, cultMeshDocumentFromStore, type CultMeshRudpDocumentPut } from "../src/index";
+import { CultMesh, cultMeshDocumentFromSingleFile, type CultMeshRudpDocumentPut } from "../src/index";
 
 // A document written in the reference's positional shape, and a plain map document beside it. Every mesh reader of a
 // payload reads it the way the cache does, so both read through the mesh.
@@ -47,15 +46,6 @@ const codecReceipt = defineDocumentType({
   }, "Tests.CodecReceipt"),
 });
 
-// The same record under another schema id: the store holds it as codec_note, so it is found by parsing, not by id.
-const codecNoteAlias = defineDocumentType({
-  type: "cultmesh.codec_note_alias",
-  schemaId: "cultmesh.codec_note_alias.v0",
-  schema: z.object({ noteId: z.string(), body: z.string() }),
-  name: "noteId",
-  codec: codecNote.codec,
-});
-
 const plainNote = defineDocumentType({
   type: "cultmesh.plain_note",
   schemaId: "cultmesh.plain_note.v0",
@@ -73,17 +63,6 @@ test("the mesh reads a stored codec document as the cache does, and a plain docu
   await plainNode.put(plainNote, "n2", { noteId: "n2", body: "map" });
 
   assert.deepEqual(await cultMeshDocumentFromSingleFile(codecPath, codecNote).latest(), { noteId: "n1", body: "positional" });
-  assert.deepEqual(await cultMeshDocumentFromSingleFile(codecPath, codecNoteAlias).latest(), { noteId: "n1", body: "positional" });
-  // A store holding a plain record and a codec record, the alias found by parsing takes the codec one whichever the
-  // single-file store (which sorts records by key) puts first: the probe has to refuse the plain record, not meet it
-  // second.
-  for (const [plainKey, codecKey] of [["a-plain", "z-codec"], ["z-plain", "a-codec"]] as const) {
-    const bothPath = join(dir, `both-${plainKey}.ccmp`);
-    const bothNode = await CultMesh.startNode(bothPath, { documents: [plainNote, codecNote] });
-    await bothNode.put(plainNote, plainKey, { noteId: plainKey, body: "map" });
-    await bothNode.put(codecNote, codecKey, { noteId: codecKey, body: "positional" });
-    assert.deepEqual(await cultMeshDocumentFromSingleFile(bothPath, codecNoteAlias).latest(), { noteId: codecKey, body: "positional" });
-  }
   assert.deepEqual(await cultMeshDocumentFromSingleFile(plainPath, plainNote).latest(), { noteId: "n2", body: "map" });
 });
 
@@ -92,10 +71,6 @@ test("the mesh syncs a codec document from a peer snapshot and returns a codec r
   const dir = await mkdtemp(join(tmpdir(), "cultmesh-ts-codec-sync-"));
   const source = await CultMesh.startNode(join(dir, "source.ccmp"), { documents: [codecNote, plainNote] });
   await source.put(codecNote, "n1", { noteId: "n1", body: "synced positional" });
-  // Two records at one key, in two shapes: a peer snapshot handle for the alias schema (which neither holds) accepts the
-  // one that parses as the codec.
-  await source.put(plainNote, "n3", { noteId: "n3", body: "map" });
-  await source.put(codecNote, "n3", { noteId: "n3", body: "positional" });
   const target = await CultMesh.startNode(join(dir, "target.ccmp"), { documents: [codecNote] });
   const commandBinding = defineCultNetDocumentBinding({ definition: codecNote });
   const plainBinding = defineCultNetDocumentBinding({ definition: plainNote });
@@ -117,17 +92,11 @@ test("the mesh syncs a codec document from a peer snapshot and returns a codec r
     peer = await CultMesh.createRudpPeer("cultmesh-ts-codec-client", connectionId, `rudp://127.0.0.1:${server.bind.port}`, {
       resendDelayMs: 25, resendPollMs: 5, connectTimeoutMs: 1_000,
     });
-    // The accepts probe reads the snapshot's payload as the codec: a plain decode would reject every codec snapshot.
     const synced = await target.syncDocumentFromPeerSnapshot(peer, codecNote, "n1", { timeoutMs: 1_000 });
     assert.deepEqual(synced, { noteId: "n1", body: "synced positional" });
     assert.deepEqual(target.getRequired(codecNote, "n1"), { noteId: "n1", body: "synced positional" });
-    // A peer snapshot handle reads the same way, and accepts the snapshot by parsing it as the codec.
+    // A peer snapshot handle reads the same way.
     assert.deepEqual(await CultMesh.documentFromPeerSnapshot(peer, codecNote, "n1", { timeoutMs: 1_000 }).latest(), { noteId: "n1", body: "synced positional" });
-
-    assert.deepEqual(
-      await CultMesh.documentFromPeerSnapshot(peer, codecNoteAlias, "n3", { timeoutMs: 1_000 }).latest(),
-      { noteId: "n3", body: "positional" },
-    );
 
     const receipt = await CultMesh.publishRudpDocumentAndWaitForReceipt(
       "cultmesh-ts-codec-receipt", connectionId, `rudp://127.0.0.1:${server.bind.port}`,
@@ -190,27 +159,6 @@ test("a RUDP put naming a schema the server has no definition for reaches the ha
     peer?.close();
     server.close();
   }
-});
-
-test("a store read takes the record the catalog matches to the schema and the definition parses, not the first that merely parses", async () => {
-  const target = defineDocumentType({ type: "cultmesh.pick", schemaId: "cultmesh.pick.v1", schema: z.object({ n: z.number() }) });
-  const lenient = defineDocumentType({ type: "cultmesh.pick", schemaId: "cultmesh.pick.v1", schema: { parse: (value: unknown) => value } });
-  const entry = (schemaId: string, compatibleSchemaIds?: readonly string[]) => ({
-    schemaId, schemaName: schemaId, schemaVersion: `${schemaId}.v1`, contentHash: "h", canonicalSchemaJson: "{}", compatibleSchemaIds,
-  });
-  const envelope = (key: string, schemaId: string, value: unknown, compatibleSchemaIds?: readonly string[]): CultCacheEnvelope => ({
-    key, type: "cultmesh.pick", schemaId, storedAt: "2026-10-11T00:00:00.000Z",
-    payload: encodeDocumentPayload(lenient, value), catalogEntry: entry(schemaId, compatibleSchemaIds),
-  });
-  // None carries the definition's own schema id, so the exact-id find misses. The first parses and is foreign; the
-  // second is matched by the catalog and does not parse; the third is matched and parses.
-  const records = [
-    envelope("a", "foreign.v1", { n: 1 }),
-    envelope("b", "alias-bad.v1", { n: "x" }, ["cultmesh.pick.v1"]),
-    envelope("c", "alias-good.v1", { n: 2 }, ["cultmesh.pick.v1"]),
-  ];
-  const store: CacheBackingStore = { pullAll: async () => records, push: async () => undefined, delete: async () => undefined };
-  assert.deepEqual(await cultMeshDocumentFromStore(store, target).latest(), { n: 2 });
 });
 
 // A payload nested past the limit: MAX_PAYLOAD_DEPTH + 1 one-element arrays around a nil.

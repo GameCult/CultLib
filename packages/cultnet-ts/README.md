@@ -143,7 +143,9 @@ imports no `node:` module, so a browser bundle can take it.
 - The decoder reads what MessagePack-CSharp reads and refuses what it refuses:
   nil in a string, tag or metadata slot is `null` and is written back as nil,
   a missing trailing slot takes the reference's default, extra slots and trailing
-  bytes are skipped, a float-encoded integer is refused, and invalid UTF-8
+  bytes are skipped (a chunk reference's fifth slot is its element id, a string
+  or nil, `""` when absent; `packContent` writes the decimal offset as the id, as the
+  reference does), a float-encoded integer is refused, and invalid UTF-8
   decodes to U+FFFD. A nil `chunks` is refused, as the reference's
   `ValidateManifest` refuses it. `content-acceptance-vectors.json` is the
   reference's own verdict on each of those shapes.

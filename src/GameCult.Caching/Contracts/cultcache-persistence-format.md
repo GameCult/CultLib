@@ -46,23 +46,71 @@ store. The store commits the batch as one durable step. Nothing in the batch is
 visible, to the committing flow or to observers, until the store has accepted
 it; a failed commit changes nothing on disk or in memory.
 
-A batch may carry conditions: per-record `(schemaId, storedAt)` identity, or
-the whole store unchanged since it was last loaded. Conditions are evaluated
+A batch may carry conditions: per-record version, or the whole store unchanged
+since it was last loaded. A record's version is the SHA-256 of the exact bytes the
+record is stored as: in a single file the record's own slice of the file, the array
+`[key, schemaId, storedAt, payload(, variant)]` exactly as the file holds it, in
+whatever legal MessagePack encoding its writer chose (never a re-encoding of the
+decoded record); in a directory store the page the manifest indexes. A record being
+written has the version of the bytes it is written as. It names the schema id and
+storedAt as well as the payload. storedAt is metadata and decides no condition.
+Conditions are evaluated
 under the store's exclusive lock against what is durably on disk. A failed
 condition is a lost race, not an error: the commit reports it and writes
 nothing.
 
-**Conditional commit is the only safe multi-process write.** A plain flush and
-an unconditional commit are last-writer-wins and write the same bytes: a single
-file is replaced by the writer's whole view, a directory manifest takes the
-writer's staged keys over the current manifest. An unconditional commit also
-persists writes staged earlier and leaves the store clean. Processes sharing a
-store must all use conditional commit.
+**A flush, a commit and a single-file document write apply a write set.** Under
+the store's exclusive lock the writer reads what is durably in the store now,
+applies only what it staged (writes and removals) and, for a commit, its batch,
+and replaces the store with the result. Every other record, and every catalog
+entry the result references, is copied forward as stored: a record's exact bytes
+and a catalog entry's exact bytes, unknown fields included, so a copied record
+keeps its version. No type interprets a copied record: a write may hash another
+record's bytes to compare versions, and reads its header (key, schema id, variant
+slot), but never decodes its payload.
+A record is encoded from the object the writer hands in, and every other record is copied as the store holds it. The
+store that read a file owns that file's bytes: for each stored record, its exact slice of the file and the SHA-256 of that
+slice, which is the record's version; likewise each catalog entry's slice. A decoded record or snapshot object carries no
+bytes, so an object a caller edited in place is never mistaken for what the file holds. Consequently a record the writer
+staged is re-encoded canonically and has the version of its new encoding, even when its content is unchanged, and a
+record nobody staged keeps its bytes and its version for as long as no writer stages it. The public snapshot and record
+serializers encode every record from its fields.
+A record written over one the store holds gets a storedAt later than the one it
+replaces. A document changed in place and not staged is not written.
+
+**In a store that holds no variant**, a plain flush and an unconditional commit
+write the same bytes and are last-writer-wins only per staged key. An
+unconditional commit also persists writes staged earlier and leaves the store
+clean. Conditional commit is how such a writer learns that another writer moved
+the keys it depends on.
+
+**A store that holds a variant, or would after the write, is written only from
+what its writer last read.** A variant resolves against other records (its base
+chain, and the index values it shares the store with). So before writing, the
+writer compares every record's version with the version it last read
+or wrote. If any record moved, appeared or disappeared, the whole write is
+refused with the typed write conflict, naming the keys it would have written and
+the keys that moved, and nothing is written. A writer that has read nothing,
+such as CultMesh's single-file document write, never writes into a store holding
+a variant.
+
+**A refused write reloads what it refused.** A refusal (a foreign record at a
+key the write names, or a write conflict) reloads the durable view of every
+refused and moved key into the cache, as a pull would, and only then forgets the
+staged changes at those keys. The cache then serves what the store holds, and a
+retry is judged against that. If the reload is itself refused (the store holds a
+record this cache cannot load), nothing changes and the refusal carries that
+cause. A writer refuses a file whose header it cannot read (truncated, or a
+format it does not read) and leaves the file as it was. C# applies this to
+single-file stores, directory stores and CultMesh's single-file document writes;
+Rust, TypeScript and Python rewrite the store from their own copy until their
+parity cuts land.
 
 A store that fails to hydrate on open (corrupt bytes, unresolvable schema)
 makes the open throw and is left byte-identical; it is never silently
 overwritten. Within one process the lock order is the cache's gate, then the
-store's file lock; a store's I/O blocks its cache's readers.
+store's gate, then the file lock; nothing under a store's gate enters a cache's
+gate. A store's I/O blocks its cache's readers.
 
 C# implements batch and conditional commit (`CultCache.Commit`, `TryCommit`,
 `CultCacheBatch`). Rust implements both. TypeScript and Python implement
@@ -115,6 +163,87 @@ These are store-level bookkeeping fields, not per-record domain metadata.
 
 The store must embed a catalog entry for every schema referenced by the records
 it contains.
+
+A reader never recovers a schema from a record's payload: a record whose schema id the
+catalog does not publish (by id or as a compatible id) makes the store unreadable, whatever
+the payload's first field says. The catalog is the store's own description of itself.
+
+A writer keeps the same invariant: every record it writes carries a schema id that some catalog
+entry it writes publishes, as that entry's id or as one of its compatible ids. A cache stamps a
+record it puts with its registered schema's id, and a record it loads under an id its type owns or
+declares compatible (see below for one it does not). The cache is the only owner of that stamp: a store writer never
+changes the identity of a record it did not receive from its caller, so a record another writer
+changed since this cache read it is written back as that writer left it.
+
+A schema type declares the older ids its records may sit under: `CultDocumentAttribute.CompatibleSchemaIds`
+(C#), `compatibleSchemaIds` (TypeScript, Python). The registered catalog entry lists them after its own id, and
+the cache restamps a record loaded under one to the type's own id, so the next write of that record carries the
+registered id. A record another writer left under a declared id, and that a commit does not rewrite, stays under it
+and the registered entry publishes it. Without the declaration such a record is read-only to the cache (see
+ownership by declaration, below). Rust has no such declaration.
+
+A cache resolves a record to a local type by the record's schema id: the registered type that owns
+the id, else one that lists it as compatible. The name the catalog entry carries is metadata. It
+names a local type only when no local type has the id, and then only to read with: a record so
+resolved is read-only (below). That serves a store written by a runtime whose schema ids this one
+cannot know (a Rust type's schema id is its entry type). A schema renamed under a stable id
+therefore opens in every runtime that holds the id.
+
+**A cache owns a record when it declares the record's schema id, or when the type that reads it reads
+it whole.** A type declares an id by registering it or listing it compatible. A type reads a record
+whole when the catalog entry that publishes the id has the same content hash as the type's entry, or
+compares compatible with it and leaves no persisted slot unread. An owned record is writable: a write,
+relabel or removal is accepted and the write stores it under the writing type's own id (restamp on
+write; only a record the cache writes is restamped, the rest is copied forward as stored). A record
+stored under any other id that a type can read, through the catalog's schema name or an entry listing a
+local id, only by dropping persisted slots is loaded read-only: Get and queries serve it, a write of
+another record copies it as stored, and a staged write or removal of it (upsert, variant upsert,
+flatten, remove, commit) is refused with the typed schema conflict before anything is staged.
+Declaring its id compatible on any registered type makes it writable and is the consent to the loss:
+the next write stores it under the writing type's own id and sheds the slots.
+
+The rule is checked again where the write lands, under the store's lock: a write or removal at a key
+whose durable record is not owned, because another writer rewrote it after this cache
+loaded, is refused typed, and the record is reloaded as the store holds it, read-only when a type can
+read it. This holds for every write through the store, the store's own `Push`, `Delete` and
+`CommitBatch` included. A CultMesh single-file write (`WriteDocument`, `WriteRecord`, or `PushAll` on an unattached store) asks the same rule: it owns the ids its
+written entries declare (their own ids and the ids they list compatible) and an id whose publishing entry its claimant reads whole (no persisted
+slot unread). The claimant is picked by the one precedence over the written entries and the call's registry, a written entry being the only
+description of its schema id (the registry's type for that id is never asked), and the record is owned only when the claimant is a written
+entry. A registry adds claimants and declares nothing, so it only adds refusals; with none the written entries are the only claimants. Refused:
+a record another registered type claims, under that type's current id or an old one it lists; a record whose stored entry lists another
+registered type's id ahead of the written one's, whatever name the stored entry carries; a record two registered types list compatible or two
+registered versions of the written schema could read; a record the picked written entry reads only by dropping persisted slots; and the
+removal of any stored record by a call that writes no entry. A registry-less `WriteDocument` reads `CultDocumentRegistry.Shared`. It is
+refused the same way otherwise.
+
+A record that resolves to no local type is a foreign record, for example one of a type this build does not
+have, or one renamed under a new schema name without declaring its old id. A store never destroys or relabels it: the store carries it
+byte for byte under its own id and its own catalog entry, lists it as foreign (`CacheBackingStore.ForeignRecords`
+in C#), and the cache never holds it. Writes of other records proceed and copy it forward as the file holds it. A write that would replace or remove it is refused with the typed schema conflict
+naming its key and id, and nothing is written. A removal of a key the cache does not hold removes nothing and is free; the store judges the key at its next flush or commit, under its lock, with the keys that write writes, and refuses the write if it holds a record there under an undeclared id, also when that record arrived after the load. A commit judges such a key in every writable store its cache attaches, each under its own lock: the stores it does not write first, then the store it writes, and a refusal in any of them writes nothing. A judged key is never removed. A read-only store answers at the removal, from its last load. The refused keys are reloaded as the store holds them (a foreign record is not held, and is listed as foreign from then on, so its next write is refused before staging), and their staged changes are forgotten. A write that carries a record forward keeps a marked header marked. Declaring its id on a type claims it at the next load.
+
+A reader resolves a record's schema id to the entry that owns it, that entry's own `schemaId`, and
+only when no entry owns the id to an entry that lists it as a compatible id (the first such entry
+in catalog order).
+
+A writer derives the catalog from the records it writes, and from nothing else. For each distinct
+schema id a record carries it chooses exactly one entry that publishes it. For an id the write stages
+a record under, that is the entry the writer registered or passed, and a rename or a stale content hash
+takes the descriptor's name, hash, members and compatible ids as they are. For every other id it is
+the durable entry that owns the id, else one that lists it as compatible, carried as its exact bytes,
+unknown trailing fields included. A registered entry never publishes an id the write stages nothing
+under. Entries are written as chosen, deduplicated by own id, with
+no union of compatible ids and no dependence on the order records arrive in; an entry no record needs
+is not written. A write is refused, and the store left as it was, when two entries of one tier share
+an own id and disagree on the schema name, when records of different types share a schema id, when a
+write would change which type an existing record resolves to (the schema names of the records already
+in the store and of the records written differ), or when a record's id is published by no chosen entry.
+The retyping refusal has one exception, a rename: when the entries of both the existing records and
+the written ones own the id, the registered descriptor wins. (A C# cache stamps every record it
+writes with its descriptor's own id, so the retyping refusal cannot arise there.) Each runtime refuses with one typed error naming the id, the
+schema names and a record key: `CultSchemaConflictException` (C#), `SchemaConflictError`
+(Rust, TypeScript, Python).
 
 This is not decorative paperwork. It is what allows another CultCache
 implementation to inspect an old store, resolve the schema for each record, and
@@ -212,10 +341,46 @@ Example:
 The payload is the domain object only. It does not repeat the key, schema id,
 or stored timestamp.
 
-Under `cultcache.store.v1` a record has exactly these four slots. A reader refuses any
-`cultcache.store.*` header it does not know and any record with more slots than its
-header allows, naming the version or the record's key and schema id. It never skips a
-slot it does not understand.
+Under `cultcache.store.v1` and `cultcache.store.v3` a record has exactly these four slots.
+A reader refuses any `cultcache.store.*` header it does not know and any record with more
+slots than its header allows, naming the version or the record's key and schema id. It
+never skips a slot it does not understand.
+
+The headers are `v1` (no variant, no element ids), `v2` (holds a variant) and `v3` (holds
+an element id, variants or not). A single-file store declares `v3` when any record it
+holds carries an element id: a non-empty `[CultElementId]` value in a record's document,
+or in a variant's override values. A store that cannot read a variant's override values
+(no codec attached) counts the variant as holding one. An element id is an ordinary keyed
+string in the payload, so only a reader with the record's type can tell; a C# write
+decides for the records it encodes and, while the header it found is unmarked, for every
+plain record it copies forward that its registry can read, decoding the bytes the file
+holds under the store's lock. A copied record it cannot read, and a raw CultMesh payload,
+decide nothing. A write that copies any record forward
+therefore keeps a `v3` header it found. Only a write that encodes every record the store
+will hold decides by content, and drops to `v1` (or `v2` with a variant) when none holds
+an id. A directory store's manifest says
+`cultcache.store.v5.directory-content-addressed-pages` under the same rule, and `v4`
+otherwise.
+
+A single-file store is exactly one MessagePack array of three slots: the header, the schema
+catalog and the records. Every runtime refuses a file that is truncated, has bytes after the
+array (a second store appended included), is not an array, has fewer or more than three slots
+(a header alone included), whose first slot is not a header it reads, or whose catalog or
+records it cannot decode (a record with more slots than its header allows, a variant record
+it does not read). A runtime never skips a slot it does not understand. It refuses on open
+and on rewrite alike, because the rewrite asks the same full reader as the open. Only nothing at the path is a missing
+file, and a missing file and an empty array are an empty store; a zero-byte file is not a store and is refused as unreadable.
+In C#, a link whose target is gone and a directory at the path are I/O errors, never an empty store. Within a runtime, every
+reader and writer of a single-file store shares that one reader, lock and replace (in C#, CultMesh's single-file document
+helpers included), and a catalog entry has one layout. A flush or a commit replaces a file only when the
+runtime's own reader opens it, so one verdict covers open, flush and commit, and a file the
+runtime cannot read is left as it is. Each runtime refuses with one typed error:
+`CultStoreUnreadableException` (C#), `CultCacheStoreUnreadable{path, kind}` (Rust, its kind
+telling an undecodable store from an unsupported format), `StoreUnreadableError` (TypeScript,
+Python), with the underlying cause attached. Rust, TypeScript and Python also open the legacy envelope
+array (an array of `key`/`type`/`payload`/`storedAt` maps) and replace it; C# has no legacy
+reader and refuses it. The shared byte vectors and each runtime's verdict are
+`tests/vectors/document-variants-c2a/readability/manifest.txt`.
 
 A record's payload nests at most 256 MessagePack containers. Every array and map
 counts, whether a reader decodes it or skips past it, and the outermost array is
@@ -243,16 +408,72 @@ fifth slot:
   `elementId` is `""` unless the step enters an object-list element. `value` is the
   member's own MessagePack encoding, inline. A top-level Set has one step and `id` `""`;
   a reader that resolves only that shape refuses the others, naming the variant.
-- A store holding at least one variant declares `cultcache.store.v2`; a store holding
-  none declares `cultcache.store.v1` and is byte-identical to what a runtime without
-  variants writes. A `v1` header over a variant record is refused.
+- A store holding at least one variant declares `cultcache.store.v2` (`v3` when it holds an
+  element id); a store holding none declares `cultcache.store.v1` (or `v3`) and is
+  byte-identical to what a runtime without variants writes. A `v1` header over a variant
+  record is refused.
 - A variant's resolved document is derived in memory when the cache admits the record
   or any record on its base chain, and is never written back. A plain write at a
   variant's key is refused; `Flatten` replaces a variant with a plain record holding its
   resolved document.
-- The C# runtime resolves variants. Every other runtime refuses a `v2` store by name.
+- The C# runtime resolves variants. Every other runtime refuses a `v2` store by name, and
+  refuses a variant record inside a `v3` store by its record key.
   CultMesh single-file reads, the directory store and CultNet refuse a variant record by
   name until each has its own cut.
+
+## Element Ids
+
+Every object that sits in a list, array or dictionary value of a shape the element-id walk
+owns carries an id: one string member with an integer `[Key]` and `[CultElementId]`. The
+owned shapes are arrays, `IEnumerable<T>` classes and interfaces, `IDictionary<,>` and
+`IReadOnlyDictionary<,>` values, and `[MessagePackObject]` or `[Union]` types with integer
+keys (a keyed struct included), read through the members MessagePack writes. Union subtypes
+are included. The id identifies the element inside its list, so an override can name it (a
+path step is `[slot, elementId]`) and a base edit that reorders or inserts elements
+retargets nothing.
+
+Any other shape is one whole value. Its elements carry no element ids: a `[CultElementId]`
+member inside it is a plain string, never minted or checked and never counted for `v3`. A
+variant replaces it whole (operator, 2026-10-16).
+
+- A random id is 12 lowercase hex characters. A derived id
+  (`[CultElementId(nameof(Source))]`, for content-addressed elements) is the
+  invariant-culture text of its source member, which must be non-empty; it needs no
+  other format. An id is unique within its list.
+- A write mints random ids for unset elements, including inside variant override
+  values, and refuses a duplicate, a malformed random id or an empty derived source. A
+  load refuses the same things, naming the record, the list and the id. A record
+  written before ids existed loads, and its ids are minted from SHA-256 of the record
+  key and the element's path, so every reader mints the same ids; they reach disk with
+  the record's next write, or `CultCache.MintElementIds()`.
+- A store that holds an id declares the `v3` header (above), so a reader older than ids
+  refuses it instead of skipping the id slot and rewriting the elements without ids.
+  A C# write also marks the store when a record it copies forward holds an id, judged
+  from the file's bytes at the write (above). TypeScript,
+  Python and Rust read `v3` and keep a `v3` header they found when they rewrite a
+  store; they carry ids and do not decide when a document carries them.
+- An object list's elements are written by their `[Key]` layout, because the id is a
+  keyed member of the element. Value lists are replaced whole: a list of a non-keyed
+  class or struct, or of primitives. So is a list of keyed structs, since a struct is a
+  value and never an element, but an object list inside a keyed struct is walked like any
+  other. The walk follows declared member types: a member declared `object` is untyped on
+  disk, and a subclass's extra members under a non-union base-typed member are not written,
+  so neither is walked. Whole values are `ImmutableArray<T>`, `ArraySegment<T>`,
+  `Memory<T>`, `KeyValuePair`, tuples, `Lazy<T>`, a class or struct without
+  `[MessagePackObject]`, a `[DataContract]` type, a string-keyed type, a type or member
+  declaring `[MessagePackFormatter]`, and a non-public member of a type without
+  `AllowPrivate`. The members read are an integer `[Key]` with no `[IgnoreMember]`: a
+  public field or a property whose getter is public, or any visibility up the base chain
+  under the most derived `[MessagePackObject(AllowPrivate = true)]` declaration. An id member
+  needs a setter MessagePack calls (public or `init`; any under `AllowPrivate`), so the id
+  MessagePack writes is read back. Still refused: a bad id member (missing, duplicate, not
+  a string, no integer `[Key]`, `[MessagePackFormatter]` on it, one MessagePack does not
+  write or cannot assign, a key shared with another member, a bad derived source), a
+  concrete union arm that is not keyed, a keyed type that is also a collection
+  (`ICollection<T>`, `IList`, `IDictionary`: MessagePack writes it as a collection, so C#
+  refuses it at the first encode or decode when it is on the path to an object list), a
+  type MessagePack has no formatter for, and a formatter resolver that claims a type on the
+  path. A formatter MessagePack's source generator emits is not refused.
 
 ## Canonical Semantic Schema Hash
 
@@ -408,8 +629,12 @@ The v1 concurrent single-file policy is:
 2. Writers take an exclusive sidecar lock derived from the `.cc` path.
 3. Writers re-read the current snapshot after taking the lock.
 4. Writers using conditional commit evaluate their conditions against the
-   latest snapshot and write nothing if one fails. A plain flush and an
-   unconditional commit compare nothing and are last-writer-wins.
+   latest snapshot and write nothing if one fails. In a store with no variant, a
+   plain flush and an unconditional commit compare nothing: they apply their
+   staged writes onto the current snapshot, last-writer-wins per staged key. A
+   write into a store that holds or would hold a variant compares every record's
+   version with what the writer last read, and is refused if any moved. One whose
+   header they cannot read is refused untouched.
 5. Writers write a temp file, flush it, atomically replace the `.cc` file, and
    release the lock.
 

@@ -165,10 +165,31 @@ namespace GameCult.Networking
         }
 
         /// <summary>
-        /// Registers a document binding.
+        /// Registers a document binding. One binding owns a document type and a schema id: a binding claiming a type or a schema
+        /// id another binding already holds is refused with <see cref="CultSchemaConflictException"/>, naming the new binding's
+        /// schema id and both document types, and nothing is bound. Binding a type to the schema id it already holds replaces
+        /// that binding.
         /// </summary>
         public CultNetDocumentRegistry Register(CultNetDocumentBinding binding)
         {
+            var holder =
+                _bindingsByType.TryGetValue(binding.DocumentType, out var sameType) &&
+                !string.Equals(sameType.SchemaId, binding.SchemaId, StringComparison.Ordinal)
+                    ? sameType
+                    : _bindingsBySchemaId.TryGetValue(binding.SchemaId, out var sameSchema) &&
+                      sameSchema.DocumentType != binding.DocumentType
+                        ? sameSchema
+                        : null;
+            if (holder != null)
+            {
+                throw new CultSchemaConflictException(
+                    $"CultNet schema id \"{holder.SchemaId}\" is already bound to type \"{holder.DocumentType.FullName}\"; " +
+                    $"type \"{binding.DocumentType.FullName}\" (schema id \"{binding.SchemaId}\") cannot also be bound.",
+                    binding.SchemaId,
+                    new[] { holder.DocumentType.FullName ?? holder.DocumentType.Name, binding.DocumentType.FullName ?? binding.DocumentType.Name },
+                    string.Empty);
+            }
+
             _bindingsBySchemaId[binding.SchemaId] = binding;
             _bindingsByType[binding.DocumentType] = binding;
             return this;

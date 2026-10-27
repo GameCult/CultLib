@@ -62,7 +62,7 @@ macro_rules! cultmesh_documents {
                             $schema_version.to_string(),
                             $schema_version.to_string(),
                         ),
-                    );
+                    )?;
                 )*
                 Ok(())
             }

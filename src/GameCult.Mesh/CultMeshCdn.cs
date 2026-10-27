@@ -87,6 +87,11 @@ namespace GameCult.Mesh
         /// <summary>CultCache record key for the referenced chunk document.</summary>
         [Key(3)]
         public string RecordKey { get; set; } = string.Empty;
+
+        /// <summary>Element id: the decimal text of <see cref="Offset"/>, which is unique within a manifest and never random.</summary>
+        [Key(4)]
+        [CultElementId(nameof(Offset))]
+        public string Id { get; set; } = string.Empty;
     }
 
     /// <summary>
@@ -266,7 +271,8 @@ namespace GameCult.Mesh
                     ChunkHash = chunkHash,
                     Offset = offset,
                     SizeBytes = count,
-                    RecordKey = CultMeshCdnArtifactChunk.CreateRecordKey(chunk).Value
+                    RecordKey = CultMeshCdnArtifactChunk.CreateRecordKey(chunk).Value,
+                    Id = offset.ToString(CultureInfo.InvariantCulture)
                 });
             }
 
@@ -285,7 +291,8 @@ namespace GameCult.Mesh
                     ChunkHash = chunkHash,
                     Offset = 0,
                     SizeBytes = 0,
-                    RecordKey = CultMeshCdnArtifactChunk.CreateRecordKey(chunk).Value
+                    RecordKey = CultMeshCdnArtifactChunk.CreateRecordKey(chunk).Value,
+                    Id = "0"
                 });
             }
 

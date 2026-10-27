@@ -1,11 +1,9 @@
 using System;
-using System.Buffers;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
-using MessagePack;
 
 namespace GameCult.Mesh
 {
@@ -96,14 +94,9 @@ namespace GameCult.Mesh
         {
             if (document == null) throw new ArgumentNullException(nameof(document));
 
-            var resolvedRegistry = registry ?? CultDocumentRegistry.Shared;
-            var descriptor = resolvedRegistry.GetRequired<TDocument>();
-            WriteSingleFileDocumentPayload(
-                path,
-                key,
-                descriptor.ToCatalogEntry(),
-                storedAt,
-                CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TDocument)));
+            if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value must be non-empty.", nameof(path));
+            // The store decides element ids, the header and the copy of every other record, as a cache write does.
+            StoreAt(path).WriteDocument(key, document, storedAt, registry);
         }
 
         /// <summary>
@@ -118,7 +111,8 @@ namespace GameCult.Mesh
             var resolvedRegistry = registry ?? CultDocumentRegistry.Shared;
             var descriptor = resolvedRegistry.GetRequired<TDocument>();
             var payload = ReadSingleFileDocumentPayload(path, key, descriptor.SchemaId);
-            return (TDocument)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(TDocument), payload);
+            // A load refuses what a write refuses, and mints the ids a cache load of the same file would mint.
+            return CultCacheMessagePack.CreateCodec(resolvedRegistry).DecodeDocument<TDocument>(key, payload);
         }
 
         /// <summary>
@@ -132,7 +126,7 @@ namespace GameCult.Mesh
             byte[] payload)
         {
             if (schema == null) throw new ArgumentNullException(nameof(schema));
-            WriteSingleFileDocumentPayload(path, key, schema.ToCatalogEntry(payload), storedAt, payload);
+            WriteSingleFileDocumentPayload(path, key, schema.ToCatalogEntry(payload), storedAt, payload, holdsIds: null, registry: null);
         }
 
         /// <summary>
@@ -146,7 +140,7 @@ namespace GameCult.Mesh
             if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value must be non-empty.", nameof(path));
             if (string.IsNullOrWhiteSpace(expectedSchemaId)) throw new ArgumentException("Value must be non-empty.", nameof(expectedSchemaId));
 
-            var snapshot = ReadSingleFileSnapshot(path);
+            var snapshot = StoreAt(path).ReadStoreSnapshot() ?? throw new FileNotFoundException($"CultCache document '{path}' does not exist.", path);
             var record = snapshot.Records.SingleOrDefault(candidate => string.Equals(candidate.Key, key.Value, StringComparison.Ordinal))
                 ?? throw new InvalidDataException($"CultCache document '{path}' does not contain record '{key.Value}'.");
 
@@ -177,7 +171,7 @@ namespace GameCult.Mesh
             if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value must be non-empty.", nameof(path));
             if (string.IsNullOrWhiteSpace(expectedSchemaId)) throw new ArgumentException("Value must be non-empty.", nameof(expectedSchemaId));
 
-            var snapshot = ReadSingleFileSnapshot(path);
+            var snapshot = StoreAt(path).ReadStoreSnapshot() ?? throw new FileNotFoundException($"CultCache document '{path}' does not exist.", path);
             if (snapshot.Records.Length != 1)
             {
                 throw new InvalidDataException(
@@ -214,7 +208,9 @@ namespace GameCult.Mesh
             CultRecordKey key,
             CultSchemaCatalogEntry catalogEntry,
             string? storedAt,
-            byte[] payload)
+            byte[] payload,
+            bool? holdsIds,
+            CultDocumentRegistry? registry)
         {
             if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value must be non-empty.", nameof(path));
             if (catalogEntry == null) throw new ArgumentNullException(nameof(catalogEntry));
@@ -222,155 +218,31 @@ namespace GameCult.Mesh
                 throw new ArgumentException("Catalog entry must include a schema id.", nameof(catalogEntry));
 
             payload ??= Array.Empty<byte>();
-            var snapshot = new CultPersistedStoreSnapshot
-            {
-                SchemaCatalog = new[] { catalogEntry },
-                Records = new[]
+            // The write replaces this one key and copies every other record and catalog entry forward as the store holds them, under
+            // the store's lock. A typed write sees its document, so its ids decide the header; a raw payload is opaque (holdsIds null),
+            // so a file already marked stays marked. A typed write attaches the registry its payload was encoded with, so the write
+            // decides for copied records that registry can read; a raw payload attaches none and decides nothing. A store this runtime
+            // cannot read refuses the write instead of being overwritten.
+            StoreAt(path).WriteRecord(
+                new CultPersistedRecord
                 {
-                    new CultPersistedRecord
-                    {
-                        Key = key.Value,
-                        SchemaId = catalogEntry.SchemaId,
-                        StoredAt = string.IsNullOrWhiteSpace(storedAt) ? DateTimeOffset.UtcNow.ToString("O") : storedAt!,
-                        Payload = payload
-                    }
-                }
-            };
-
-            var directory = Path.GetDirectoryName(path);
-            if (!string.IsNullOrWhiteSpace(directory))
-                Directory.CreateDirectory(directory);
-
-            // The write replaces the file, so it first reads what it would replace, under the lock a CultCache single-file
-            // store takes (<path>.lock): a store this runtime cannot read (a newer format, or damage) or one holding any
-            // record but this key is refused, never overwritten.
-            using (AcquireStoreLock(path))
-            {
-                RefuseToReplaceAStoreHoldingMore(path, key);
-                WriteFileAtomically(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
-            }
+                    Key = key.Value,
+                    SchemaId = catalogEntry.SchemaId,
+                    StoredAt = string.IsNullOrWhiteSpace(storedAt) ? DateTimeOffset.UtcNow.ToString("O") : storedAt!,
+                    Payload = payload
+                },
+                catalogEntry,
+                holdsIds,
+                registry);
         }
 
-        private static void RefuseToReplaceAStoreHoldingMore(string path, CultRecordKey key)
-        {
-            if (!File.Exists(path) || new FileInfo(path).Length == 0)
-                return;
-
-            var existing = ReadSingleFileSnapshot(path);
-            var other = existing.Records.FirstOrDefault(record =>
-                record.Variant != null || !string.Equals(record.Key, key.Value, StringComparison.Ordinal));
-            if (other != null)
-                throw new InvalidOperationException(
-                    $"CultCache document '{path}' holds record '{other.Key}' besides '{key.Value}'; a CultMesh single-file write " +
-                    "replaces the whole file and would drop it. Write through a CultCache store instead.");
-        }
-
-        private static FileStream AcquireStoreLock(string path)
-        {
-            var lockPath = path + ".lock";
-            var started = System.Diagnostics.Stopwatch.StartNew();
-            while (true)
-            {
-                try
-                {
-                    return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, bufferSize: 1);
-                }
-                catch (IOException) when (started.Elapsed < TimeSpan.FromSeconds(30))
-                {
-                    System.Threading.Thread.Sleep(10);
-                }
-            }
-        }
-
-        private static CultPersistedStoreSnapshot ReadSingleFileSnapshot(string path)
-        {
-            var bytes = File.ReadAllBytes(path);
-            CultPersistedStoreSnapshot snapshot;
-            try
-            {
-                snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes, CultDocumentMessagePackSerialization.RequireReadableSingleFileStamp);
-            }
-            catch (Exception ex) when (ex is MessagePackSerializationException or InvalidOperationException)
-            {
-                snapshot = ReadLegacySingleFileSnapshot(bytes);
-            }
-
-            CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot);
-            return snapshot;
-        }
-
-        private static CultPersistedStoreSnapshot ReadLegacySingleFileSnapshot(byte[] bytes)
-        {
-            var reader = new MessagePackReader(bytes);
-            var fieldCount = reader.ReadArrayHeader();
-            var snapshot = new CultPersistedStoreSnapshot();
-            if (fieldCount > 0)
-                snapshot.FormatVersion = reader.ReadString()
-                    ?? throw new NotSupportedException("Store snapshot declares no format version.");
-
-            if (fieldCount > 1)
-            {
-                var catalogCount = reader.ReadArrayHeader();
-                snapshot.SchemaCatalog = new CultSchemaCatalogEntry[catalogCount];
-                for (var index = 0; index < catalogCount; index++)
-                    snapshot.SchemaCatalog[index] = ReadLegacySchemaCatalogEntry(ref reader);
-            }
-
-            if (fieldCount > 2)
-            {
-                var recordCount = reader.ReadArrayHeader();
-                snapshot.Records = new CultPersistedRecord[recordCount];
-                for (var index = 0; index < recordCount; index++)
-                    snapshot.Records[index] = CultDocumentMessagePackSerialization.ReadPersistedRecord(ref reader);
-            }
-
-            for (var index = 3; index < fieldCount; index++)
-                reader.Skip();
-
-            return snapshot;
-        }
-
-        private static CultSchemaCatalogEntry ReadLegacySchemaCatalogEntry(ref MessagePackReader reader)
-        {
-            var fieldCount = reader.ReadArrayHeader();
-            var entry = new CultSchemaCatalogEntry();
-            if (fieldCount > 0) entry.SchemaId = reader.ReadString() ?? string.Empty;
-            if (fieldCount > 1) entry.SchemaName = reader.ReadString() ?? string.Empty;
-            if (fieldCount > 2) entry.SchemaVersion = reader.ReadString() ?? string.Empty;
-            if (fieldCount > 3) entry.CanonicalSchemaJson = reader.ReadString() ?? string.Empty;
-            if (fieldCount > 4) reader.Skip();
-            if (fieldCount > 5) entry.ContentHash = reader.ReadString() ?? string.Empty;
-            if (fieldCount > 6)
-            {
-                var memberCount = reader.ReadArrayHeader();
-                for (var index = 0; index < memberCount; index++)
-                    reader.Skip();
-            }
-
-            for (var index = 7; index < fieldCount; index++)
-                reader.Skip();
-
-            entry.CompatibleSchemaIds = string.IsNullOrWhiteSpace(entry.SchemaId)
-                ? Array.Empty<string>()
-                : new[] { entry.SchemaId };
-            entry.Members = Array.Empty<CultSchemaMemberCatalogEntry>();
-            return entry;
-        }
+        private static SingleFileMessagePackBackingStore StoreAt(string path) => new SingleFileMessagePackBackingStore(path);
 
         private static bool PublishesSchema(CultSchemaCatalogEntry[] catalog, string schemaId)
         {
             return catalog.Any(entry =>
                 string.Equals(entry.SchemaId, schemaId, StringComparison.Ordinal) ||
                 entry.CompatibleSchemaIds.Any(candidate => string.Equals(candidate, schemaId, StringComparison.Ordinal)));
-        }
-
-        private static void WriteFileAtomically(string path, byte[] bytes)
-        {
-            var tempPath = path + ".tmp";
-            File.WriteAllBytes(tempPath, bytes);
-            if (File.Exists(path))
-                File.Delete(path);
-            File.Move(tempPath, path);
         }
     }
 }

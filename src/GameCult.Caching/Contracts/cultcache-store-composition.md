@@ -81,9 +81,8 @@ which route wrote it.
   after subscribing with a `Sequence` at or below the read is already in the
   document and is dropped. CultMesh cache-record mirrors (`ObserveAsync`,
   `ReactiveAsync`, and `RefreshAsync` on both) do this.
-- Not stale-protected: schema-alias handles (`AsSchemaAlias`) get no
-  `Sequence`; removals do not advance a mirror's applied `Sequence`, and the
-  mirrors do not surface removals.
+- Not stale-protected: removals do not advance a mirror's applied `Sequence`,
+  and the mirrors do not surface removals.
 - `AddJournal` registers an ordered admission journal, for audit, replication or
   a derived index. The cache calls each journal under its gate, right after an
   admission is applied and before that admission is published, once per
@@ -127,10 +126,39 @@ which route wrote it.
 
 ## Locking
 
-- One lock order: the cache's gate, then the store's lock. A store attached to a
-  cache takes that cache's gate as its own lock, so a store's load callback into
-  the cache cannot take the two out of order. A store must not call `Loaded`
-  while holding its own lock outside the cache's hold.
+- One lock order: the cache's gate, then the store's gate, then the file lock. A
+  store's gate may be taken inside a cache's gate (the attach; a journal writing
+  a cacheless file), never the reverse. What the code enforces, at run time and
+  by `InvalidOperationException`: a thread holds at most one store's gate;
+  while it holds a store's gate it enters no cache gate it does not already
+  hold, reads included; a cacheless write made while the thread already holds
+  that store's gate is refused; and a cache's hold (a write, a flush, an attach)
+  entered inside another cache's hold is refused. What it does not enforce: a cache
+  read made inside another cache's hold takes that cache's gate without a
+  check, so two threads each holding one cache and reading the other can
+  deadlock. That is open as `variants:follow_up:cross-cache-read-lock-order`;
+  until it lands, a journal or a getter must not read a second cache. User code
+  a cacheless call or an attach runs under the store's gate (a document's
+  getter, a constructor while a copied record is read) is the way into the
+  refused cases.
+- One owner picks the gate a store call holds. A store attached to a cache takes
+  that cache's gate as its own lock, so a store's load callback into the cache
+  cannot take the two out of order; a cacheless store takes its own gate. The
+  store reads which one applies, takes it, and checks the answer again under it:
+  `Cache` is written only by the attach, holding both gates: it publishes `Cache`
+  before its pull and takes it back in the same hold if the pull fails. Another
+  thread's unlocked guess may read the tentative cache, but none runs a body
+  against it: the guess is checked under that cache's gate, which the attach
+  holds, and fails once the pull retracts it. Under the store's gate `Cache` is
+  settled, and a settled cache never changes, because nothing detaches. A call
+  takes at most three gates: the guessed cache's, the store's, the settled
+  cache's. The pull reads the registry the attach lent, not `Cache`; a variant it
+  loads carries no codec, and the cache resolves it with its own. During an
+  attach the store is attached, so a journal the pull runs that calls the store
+  is refused as it would be afterwards; a cacheless write that finds a cache
+  published, during an attach or after it, is refused with the same text. A
+  store must not call `Loaded` while holding its own lock outside the cache's
+  hold.
 - A journal runs under the cache's gate, so a slow journal slows every writer of
   that cache. It must not enter the cache, and must not wait for anything that
   needs the cache or its gate: another thread's write, a lock a writer holds.
@@ -140,8 +168,6 @@ which route wrote it.
   CultNet journal, under the cache's gate: it must not call the cache or wait
   for a thread that does. A store that writes its own cache throws through the
   journal's reentry guard, and the admission stands.
-- A thread holds one cache's gate at a time: entering a cache's hold inside
-  another cache's hold throws.
 - A store doing I/O on behalf of its cache (pull, flush, commit) holds the gate,
   so that cache's readers wait for the I/O. The file lock (`<path>.lock` or the
   directory commit lease) is always taken inside the gate and released before a
@@ -223,26 +249,12 @@ against what is durably on disk at that moment:
   constrained; unrelated concurrent writes do not fail the commit. Passing any
   instance other than the one the cache holds throws.
 - `ExpectUnchanged()`: the store's persisted record set must equal what this
-  cache last loaded from it, compared as the ordered list of
-  `(key, schemaId, storedAt)`. Any insert, delete or replace fails it.
+  cache last loaded from it, compared as the ordered list of `(key, version)`.
+  Any insert, delete or replace fails it.
 
-Record identity for conditions is `(schemaId, storedAt)`, where `schemaId` is
-the id the record is persisted under (the internal `CultStoredDocument.PersistedSchemaId`),
-not the one this cache decodes it as. A value change mints a `storedAt`
-strictly later than the record it replaces; writers bump a minted timestamp by
-one tick when it is not later. An entry loaded under compatible schema drift
-keeps its persisted id until its store rewrites it; a store records each
-record its completed write rewrote with the internal instance method
-`CacheBackingStore.MarkWritten` (the shipped stores call it; it is not part of
-the public API), which refuses an entry that is not the one
-the store holds in its own `Entries` at that key. That guards against a store
-marking by mistake an entry it never held; a store that writes another copy
-into its own `Entries` and then marks it is trusted to have rewritten that
-record, so a mark is the store's own claim. A store that does not mark leaves
-the entry's `Expect` failing closed until the next pull. A whole-file flush or
-unconditional commit rewrites every record under the writer's current schema
-and keeps its `storedAt`, so another cache's `Expect` on a drifted record it
-read before that rewrite fails until it re-reads the store.
+Record identity for conditions is the record's version, the SHA-256 of its stored
+bytes (cultcache-persistence-format.md). Any write that changes a record changes
+its version, whatever storedAt it carries.
 
 - A failed condition is a lost race, not an error: `Commit` returns false and
   nothing is written, changed in memory, or published. `TryCommit` makes one
@@ -268,17 +280,33 @@ read before that rewrite fails until it re-reads the store.
   match its content address, at most five times; a pull that has not settled
   by then throws.
 
-**A plain flush and an unconditional commit are last-writer-wins: per file for
-single-file stores, per key for directory stores.** Both run
-under the same lock, so two writers never interleave bytes, but they compare
-nothing. Only a conditional commit (`Expect` or `ExpectUnchanged`) protects
-against another writer; processes sharing a store must all use it.
+**In a store holding no variant, a plain flush and an unconditional commit are
+last-writer-wins per staged key, in both store kinds.** Both run under the same lock, so two writers never
+interleave bytes, but they compare nothing. Only a conditional commit
+(`Expect` or `ExpectUnchanged`) tells a writer another writer moved the keys it
+depends on. A writer wins only over a file it can read: a single-file store
+refuses to replace a file whose header it cannot read, and leaves it as it was.
 
-- A single-file store writes this cache's whole view of the file: a record
-  another writer added since this cache last pulled is gone.
-- A directory store writes this cache's staged keys onto the current manifest:
-  another writer's unrelated keys survive, a key both wrote holds the last
-  write.
+- A single-file store and a directory store apply this cache's staged writes and
+  removals onto what the store holds now: another writer's unrelated records
+  survive as stored, a key both wrote holds the last write.
+- In both store kinds, a write or removal at a key whose durable record is under
+  an id the writer does not declare is refused with the typed schema conflict
+  before anything is written, and that record is reloaded as the store holds
+  it: dropped when foreign, held read-only when a type reads it
+  (cultcache-persistence-format.md, ownership by declaration).
+- A removal of a key the cache does not hold travels as a check-only key: a
+  commit carries it in the request, a flush stages it, and either store kind
+  judges it under its lock with the keys it writes, never removing it. Every
+  writable store judges a batch's checks under its own lock: the stores the
+  batch does not commit through first (`JudgeChecks`), the home last. A batch
+  that only checks keys writes no file. `ExpectUnchanged` compares the foreign
+  records a store carries at the versions it read them; a store kind lists a
+  foreign record through `Foreign` with the version it read.
+- A single-file store holding a variant (the directory store refuses variants)
+  is written only from what its writer last read. A record that moved refuses
+  the whole write with the typed write conflict, and the refused and moved keys
+  are reloaded (cultcache-persistence-format.md).
 - An unconditional commit writes exactly what a flush of the same staged state
   plus the batch would write. It also persists any single writes staged earlier
   in that store, and leaves the store clean.
@@ -301,6 +329,25 @@ and Rust's open fails rather than waits while a C# writer holds the lock
   for `X` that `Doc<X>` needs is declared in `Doc`'s assembly.
 - An assembly that declares nothing, and the store envelope, use the base
   options.
+- A resolver may not claim a type a document's element lists pass through: the list's
+  element types, the types and members on the way to them, and the collection types
+  the walk passes (`List<T>`, `T[]`, a collection class, a dictionary on the way).
+  Those are written by their `[Key]` layout so each element's id reaches disk, and the
+  codec refuses the document on first encode or decode, naming the resolver and the
+  type. The formatter `StandardResolver` or `StandardResolverAllowPrivate` hands out for a
+  type does not claim it: the extra non-public members the `AllowPrivate` formatter writes
+  are whole values the walk does not own. A type or member declaring
+  `[MessagePackFormatter]` is a whole value off the path, the supported way to give a type its
+  own formatter. A value list (`List<float2>`, a list of a non-keyed class) is not on the
+  path, so a resolver may claim it.
+- The codec also checks, for every type on that path, that `StandardResolver` does not write it
+  against the walk. A type read by key may not be written by the generic collection resolver
+  (a `[MessagePackObject]` class that is also an `ICollection<T>` or dictionary); it is
+  refused on first encode or decode, naming the type. Any other formatter, such as one
+  MessagePack's source generator emits, passes: the walk decides which types carry ids and
+  the door only verifies. It also refuses, typed, a type MessagePack cannot build a formatter
+  for (it throws, or `StandardResolver` returns none), and a resolver that throws while asked
+  about one.
 - Deserialization runs under untrusted-data security. `CultRecordRef<T>` is a
   permitted dictionary key, compared by its key string.
 
@@ -326,6 +373,37 @@ integer pair `[int, int]`. No ext types, no maps, no names. The persisted member
 type name is the CLR full name, the same rule as `System.Int32`. A reader in
 another runtime needs only the component count and primitive type. CultMath has
 no serialization; a CultMath encoding, if added, uses this shape.
+
+## Cacheless single-file access
+
+A single-file store file can be read and written without a cache, through public members of `SingleFileBackingStore` (for
+example `SingleFileMessagePackBackingStore`): `ReadStoreSnapshot()`, `WriteRecord(record, catalogEntry, holdsIds, registry)`,
+and `WriteDocument<T>(key, document, storedAt, registry)`. Decoding a stored payload needs no file, so it is on the codec, not the store:
+`CultCodec.DecodeDocument<T>(key, payload)` (`CultCacheMessagePack.CreateCodec(registry)` makes the codec).
+
+- `ReadStoreSnapshot()` reads the file once, under the store's gate (or its cache's gate when attached, validated after it is taken), and returns the durable snapshot (records, schema catalog,
+  format stamp), or null when nothing is at the path. It throws `CultStoreUnreadableException` for a file the reader refuses.
+- `WriteRecord` writes one record under the store's lock: the record replaces the one at its key, every other record and catalog
+  entry is copied forward as stored, and the file is replaced atomically. It takes a payload the caller already encoded, so a
+  payload it cannot read leaves the header as the file has it (`holdsIds` null).
+- `WriteDocument<T>` writes one typed document as a cache write does: it plans element ids, encodes the document as `T` (the type
+  its schema id and ids are taken from; a derived instance is stored as `T`) with the registry, and stores it as `WriteRecord`
+  does. A failed write gives the minted ids back.
+- `CultCodec.DecodeDocument<T>` decodes a payload read from the store as a cache load does: it mints the ids a load mints and
+  refuses what a cache load refuses. It reads no file and holds no state.
+
+The `registry` argument of `WriteRecord` and `WriteDocument` serves that one call: the store attaches it under its gate for the call
+and keeps none, so the same call decides the same header on a fresh instance and on one that has served other calls.
+
+They share everything with a cache's store and nothing is re-implemented beside it: one reader (the stamp is judged before the
+body, and a file the reader refuses is refused by a read and by a write alike), the store's lock, the atomic replace, and the
+header rule (`holdsIds` true marks a v3 store; false leaves it as the rule decides; null, for a payload the caller cannot read,
+keeps whatever the file already says). Ownership by declaration binds a cacheless write too: a record at the key under a schema id
+the written catalog entry does not own or list as compatible is refused with `CultSchemaConflictException`, and the file is left as
+it was. Element-id planning (`CultElementIds`) is internal to the library: a caller never plans or marks ids, the store does. A store
+attached to a cache refuses `WriteRecord` and `WriteDocument` (write through the cache, whose staged writes land through the
+same private write) with `InvalidOperationException`. CultMesh's single-file document helpers (`CultMesh.WriteSingleFileDocument`,
+`ReadSingleFileDocument` and their payload forms) are built on these members and nothing else of the store.
 
 ## Runtime status
 

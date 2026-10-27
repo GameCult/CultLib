@@ -15,7 +15,9 @@ namespace GameCult.Caching.MessagePack;
 // A small hot manifest indexes the store; each record lives in one cold content-addressed page.
 public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 {
-    private const string IndexedFormatVersion = "cultcache.store.v4.directory-content-addressed-pages";
+    // The two manifest headers; the shared header decision names them.
+    private static readonly string IndexedFormatVersion = HeaderFor(holdsIds: false, existingHeader: null, wholeStore: true, directoryStore: true);
+    private static readonly string IndexedFormatVersionWithIds = HeaderFor(holdsIds: true, existingHeader: null, wholeStore: true, directoryStore: true);
     // An unleased load that has not settled after this many attempts throws.
     private const int UnleasedLoadAttempts = 5;
     private readonly FileInfo _manifestFile;
@@ -23,7 +25,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     private readonly ConcurrentDictionary<string, bool> _dirtyKeys = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _deletedKeys = new(StringComparer.Ordinal);
     private readonly HashSet<string> _hydratedKeys = new(StringComparer.Ordinal);
-    private CultSchemaCatalogEntry[] _durableCatalog = Array.Empty<CultSchemaCatalogEntry>();
 
     public DirectoryMessagePackBackingStore(string manifestPath, string? recordDirectoryPath = null, bool readOnly = false)
         : base(readOnly)
@@ -62,18 +63,19 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
         var reports = new List<CultSchemaMigrationReport>();
         var loaded = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
-        CultSchemaCatalogEntry[] catalog;
+        var foreign = new List<CultForeignRecord>();
         for (var attempt = 1; ; attempt++)
         {
             loaded.Clear();
             reports.Clear();
+            foreign.Clear();
             // Only pages named by the manifest read under the lease are loaded; orphaned pages are never loaded. With no
             // lock to lease (none created yet, or a store copied without it) a writer may commit mid-load, so an unleased
             // load stands only if its manifest is still current; if the manifest moved it reloads, under the lease the
             // writer created. A page that fails under an unmoved manifest is corruption, not a race.
             using var lease = AcquireCommitLease(wait: true, create: false);
             var manifestBytes = ReadManifestBytes();
-            var manifest = ParseManifest(manifestBytes);
+            var (manifest, _) = ParseManifest(manifestBytes);
             Trace($"manifest records={manifest.Records.Length}");
             try
             {
@@ -83,10 +85,10 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                     manifest.Records.OrderBy(record => record.Key, StringComparer.Ordinal).ToArray(),
                     manifest.SchemaCatalog,
                     loaded,
-                    reports);
+                    reports,
+                    foreign);
                 if (lease != null || !ManifestMoved(manifestBytes))
                 {
-                    catalog = manifest.SchemaCatalog;
                     Trace($"indexed-pages loaded={loaded.Count}");
                     break;
                 }
@@ -109,8 +111,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         var arrived = loaded
             .Where(pair => !Staged(pair.Key) &&
                            (!Entries.TryGetValue(pair.Key, out var existing) ||
-                            existing.StoredAt != pair.Value.StoredAt ||
-                            existing.PersistedSchemaId != pair.Value.PersistedSchemaId))
+                            !SameStoredIdentity(existing.StoredVersion, pair.Value.StoredVersion)))
             .Select(pair => pair.Value)
             .ToArray();
         var departed = _hydratedKeys
@@ -121,7 +122,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             Loaded?.Invoke(arrived, departed);
 
         // Adopted only once the cache admitted the load; a refused load leaves the store's durable view untouched.
-        _durableCatalog = catalog;
         foreach (var stored in departed)
             Entries.TryRemove(stored.Key.Value, out _);
         _hydratedKeys.RemoveWhere(key => !loaded.ContainsKey(key) && !Staged(key));
@@ -131,6 +131,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             _hydratedKeys.Add(key);
 
         SetLastSchemaMigrationReports(reports);
+        SetForeignRecords(foreign);
         IsDirty = !_dirtyKeys.IsEmpty || !_deletedKeys.IsEmpty;
         Trace("publish");
     }
@@ -179,9 +180,18 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             using var commitLease = AcquireCommitLease(wait, create: true);
             if (commitLease == null)
                 return CultCommitOutcome.Contended;
-            var manifest = ReadManifest();
-            if (!request.ConditionsHold(manifest.Records, Entries.Values))
+            var (manifest, catalogBytes) = ReadManifest();
+            if (request.HasConditions && !request.ConditionsHold(
+                    manifest.Records.ToDictionary(record => record.Key, record => VersionOf(record.Payload), StringComparer.Ordinal), Entries.Values, ForeignRecords))
                 return CultCommitOutcome.Mismatch;
+
+            RefuseUndeclaredOnDisk(manifest, request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).Concat(request.Checks).Concat(StagedKeys));
+            if (request.Upserts.Count == 0 && request.Deletes.Count == 0 && !IsDirty)
+            {
+                // Nothing to write: the batch only judged keys it does not hold.
+                MarkFlushSucceeded();
+                return CultCommitOutcome.Committed;
+            }
 
             var previousEntries = Entries.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
             var previousDirtyKeys = _dirtyKeys.Keys.ToArray();
@@ -202,7 +212,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                     _deletedKeys.TryRemove(entry.Key.Value, out _);
                 }
                 IsDirty = true;
-                WriteGeneration(manifest);
+                WriteGeneration(manifest, catalogBytes);
                 return CultCommitOutcome.Committed;
             }
             catch
@@ -227,20 +237,81 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         ThrowIfReadOnly();
         Held(() =>
         {
-            if (!IsDirty)
+            if (!IsDirty && StagedChecks.Count == 0)
                 return;
 
             Directory.CreateDirectory(_manifestFile.DirectoryName!);
             using var commitLease = AcquireCommitLease(wait: true, create: true);
-            WriteGeneration(ReadManifest());
+            var (manifest, catalogBytes) = ReadManifest();
+            RefuseUndeclaredOnDisk(manifest, StagedKeys);
+            if (IsDirty)
+                WriteGeneration(manifest, catalogBytes);
+            else
+                MarkFlushSucceeded();
         });
     }
 
+    // Every key the next flush or commit judges: the staged writes and removals, and the staged checks.
+    private IEnumerable<string> StagedKeys => _deletedKeys.Keys.Concat(_dirtyKeys.Keys).Concat(StagedChecks);
+
+    // A writable store judges a removal of a key its cache does not hold at its next flush or commit, under the commit lease
+    // (StageChecks); a read-only store has neither, so it answers from its view and never creates the lease.
+    protected internal override void RefuseRemovalOfUndeclared(IReadOnlyCollection<string> keys)
+    {
+        if (IsReadOnly)
+            base.RefuseRemovalOfUndeclared(keys);
+        else
+            StageChecks(keys);
+    }
+
+    // A read-only store answers a batch's checks from its view and never creates the lease; a writable one reads the manifest
+    // under the commit lease.
+    protected internal override CultCommitOutcome JudgeChecks(IReadOnlyCollection<string> keys, bool wait)
+    {
+        if (IsReadOnly)
+            return base.JudgeChecks(keys, wait);
+        return Held(() =>
+        {
+            using var commitLease = AcquireCommitLease(wait, create: true);
+            if (commitLease == null)
+                return CultCommitOutcome.Contended;
+            RefuseUndeclaredOnDisk(ReadManifest().Snapshot, keys);
+            return CultCommitOutcome.Committed;
+        });
+    }
+
+    // A manifest record no registered type claims, listed at the version its index record names.
+    private CultForeignRecord? ForeignAt(CultPersistedRecord record, IReadOnlyCollection<CultSchemaCatalogEntry> catalog) =>
+        Foreign(record, catalog, VersionOf(record.Payload));
+
+    // The manifest's other records stay as they are, foreign and read-only ones included; a write that would replace or remove a
+    // record the manifest holds that the writer does not own is refused before any page is written, by the one rule every
+    // store shares (CacheBackingStore.RefuseUndeclaredOnDisk). The refused records reload as a pull loads them.
+    private void RefuseUndeclaredOnDisk(CultPersistedStoreSnapshot currentManifest, IEnumerable<string> written)
+    {
+        CultPersistedRecord? HeldAt(string key) =>
+            currentManifest.Records.FirstOrDefault(record => string.Equals(record.Key, key, StringComparison.Ordinal));
+        RefuseUndeclaredOnDisk(
+            written,
+            key => HeldAt(key) is { } held ? Undeclared(held, currentManifest.SchemaCatalog, Registry.Owns) : null,
+            key => HeldAt(key) is { } held && Foreign(held, currentManifest.SchemaCatalog, VersionOf(held.Payload)) == null
+                ? LoadPage(held, currentManifest.SchemaCatalog, out _, out _)
+                : null,
+            key => HeldAt(key) is { } held ? ForeignAt(held, currentManifest.SchemaCatalog) : null,
+            key =>
+            {
+                _dirtyKeys.TryRemove(key, out _);
+                _deletedKeys.TryRemove(key, out _);
+                IsDirty = !_dirtyKeys.IsEmpty || !_deletedKeys.IsEmpty;
+            });
+    }
+
     // Runs under the commit lease: pages first, then the manifest that names them.
-    private void WriteGeneration(CultPersistedStoreSnapshot currentManifest)
+    private void WriteGeneration(CultPersistedStoreSnapshot currentManifest, IReadOnlyDictionary<CultSchemaCatalogEntry, byte[]> catalogBytes)
     {
         Directory.CreateDirectory(_recordDirectory.FullName);
         var currentIndex = currentManifest.Records.ToDictionary(record => record.Key, record => record, StringComparer.Ordinal);
+        var replaced = currentManifest.Records.ToDictionary(record => record.Key, record => record.StoredAt, StringComparer.Ordinal);
         foreach (var key in _deletedKeys.Keys)
             currentIndex.Remove(key);
         foreach (var key in _dirtyKeys.Keys)
@@ -249,21 +320,9 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 currentIndex[key] = ToIndexRecord(stored);
         }
 
-        var catalogCandidates = currentManifest.SchemaCatalog
-            .Concat(_durableCatalog)
-            .Concat(Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()))
-            .GroupBy(entry => entry.SchemaId, StringComparer.Ordinal)
-            .Select(group => group.Last())
-            .ToArray();
-        var usedSchemaIds = currentIndex.Values.Select(record => record.SchemaId).ToHashSet(StringComparer.Ordinal);
-        var targetCatalog = catalogCandidates
-            .Where(entry => usedSchemaIds.Contains(entry.SchemaId))
-            .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
-            .ToArray();
         var keysToWrite = _dirtyKeys.Keys
             .OrderBy(value => value, StringComparer.Ordinal)
             .ToArray();
-        var written = new List<CultStoredDocument>(keysToWrite.Length);
         foreach (var key in keysToWrite)
         {
             if (!Entries.TryGetValue(key, out var stored))
@@ -271,6 +330,9 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 continue;
             }
 
+            // A record this write replaces is stored later than it: the one re-mint every store kind shares (StoredAtOver).
+            if (replaced.TryGetValue(key, out var replacedAt))
+                stored.StoredAt = StoredAtOver(stored.StoredAt, replacedAt);
             var record = ToPersistedRecord(stored, document =>
                 CultDocumentMessagePackSerialization.SerializeUntyped(
                     document,
@@ -278,45 +340,76 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                     Registry));
             var pagePayload = CultDocumentMessagePackSerialization.SerializePersistedRecord(record);
             var indexRecord = ToContentAddressedIndexRecord(record, pagePayload);
+            stored.StoredVersion = VersionOf(indexRecord.Payload);
+            stored.StoredSchemaId = stored.Descriptor.SchemaId;
             currentIndex[key] = indexRecord;
             WriteFileAtomically(
                 ContentAddressedRecordPath(indexRecord),
                 pagePayload);
-            written.Add(stored);
         }
 
-        WriteManifest(targetCatalog, currentIndex.Values
+        // The catalog and the header follow the shared write rules: the registered entry publishes only the ids this write put a record
+        // under, every other record and entry stays as the manifest holds it.
+        var written = keysToWrite.Where(key => Entries.ContainsKey(key)).ToHashSet(StringComparer.Ordinal);
+        var targetCatalog = CultSchemaCatalogEntry.Derive(
+                currentIndex.Values,
+                written.Select(key => Entries[key].Descriptor).Distinct().Select(descriptor => descriptor.ToCatalogEntry()).ToArray(),
+                currentManifest.SchemaCatalog)
+            .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
+            .ThenBy(entry => entry.SchemaId, StringComparer.Ordinal)
+            .ToArray();
+
+        var holdsIds = written.ToDictionary(key => key, key => Entries[key].HoldsIds, StringComparer.Ordinal);
+        var header = HeaderForWrite(
+            currentManifest.FormatVersion,
+            holdsIds.Values.Select(holds => (bool?)holds).ToArray(),
+            copiesAny: currentIndex.Values.Any(record => !written.Contains(record.Key)),
+            copiedHoldIds: false, // only C# writes a directory store, and it marks by content
+            directoryStore: true,
+            holdsVariants: false);
+        WriteManifest(targetCatalog, catalogBytes, currentIndex.Values
             .OrderBy(record => record.Key, StringComparer.Ordinal)
-            .ToArray());
-        // The manifest names the new pages: each was written under its own descriptor.
-        foreach (var stored in written)
-            MarkWritten(stored);
+            .ToArray(), header);
 
         DeleteUnreferencedRecordPages(currentIndex.Values);
 
-        _durableCatalog = targetCatalog;
         _dirtyKeys.Clear();
         _deletedKeys.Clear();
         MarkFlushSucceeded();
     }
 
-    private void WriteManifest(CultSchemaCatalogEntry[] catalog, CultPersistedRecord[] index)
-    {
-        var manifest = new CultPersistedStoreSnapshot
-        {
-            FormatVersion = IndexedFormatVersion,
-            SchemaCatalog = catalog,
-            Records = index
-        };
-        WriteFileAtomically(_manifestFile.FullName, CultDocumentMessagePackSerialization.SerializeSnapshot(manifest));
-    }
+    // The index records are this store's own and are encoded from their fields; a catalog entry the manifest already held is written
+    // as the slice it held, one the writer built is encoded.
+    private void WriteManifest(
+        CultSchemaCatalogEntry[] catalog,
+        IReadOnlyDictionary<CultSchemaCatalogEntry, byte[]> catalogBytes,
+        CultPersistedRecord[] index,
+        string header) =>
+        WriteFileAtomically(
+            _manifestFile.FullName,
+            CultDocumentMessagePackSerialization.SerializeStore(
+                header,
+                catalog.Select(entry => catalogBytes.TryGetValue(entry, out var held) ? held : CultDocumentMessagePackSerialization.SerializeCatalogEntry(entry)).ToArray(),
+                index.Select(CultDocumentMessagePackSerialization.SerializePersistedRecord).ToArray()));
 
     private void LoadRecordPages(
         CultPersistedRecord[] records,
         IReadOnlyCollection<CultSchemaCatalogEntry> catalogEntries,
         Dictionary<string, CultStoredDocument> loaded,
-        List<CultSchemaMigrationReport> reports)
+        List<CultSchemaMigrationReport> reports,
+        List<CultForeignRecord> foreign)
     {
+        // A record no registered type claims stays as the manifest names it: its page is never read, and a commit keeps it.
+        var claimed = new List<CultPersistedRecord>(records.Length);
+        foreach (var metadata in records)
+        {
+            if (ForeignAt(metadata, catalogEntries) is { } carried)
+                foreign.Add(carried);
+            else
+                claimed.Add(metadata);
+        }
+
+        records = claimed.ToArray();
         var tracePages = string.Equals(
             Environment.GetEnvironmentVariable("CULTCACHE_TRACE_STARTUP_PHASES"),
             "1",
@@ -342,16 +435,10 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             index =>
             {
                 var started = tracePages ? Stopwatch.GetTimestamp() : 0L;
-                var metadata = records[index];
-                var record = ReadPersistedRecordPage(metadata, out var pagePayload);
-                storedRecords[index] = ToStoredDocument(
-                    record,
-                    catalogEntries,
-                    (type, payload) => CultDocumentMessagePackSerialization.DeserializeUntyped(type, payload, Registry),
-                    out recordReports[index]);
+                storedRecords[index] = LoadPage(records[index], catalogEntries, out recordReports[index], out var pageLength);
                 if (tracePages)
                 {
-                    pageBytes[index] = pagePayload.LongLength;
+                    pageBytes[index] = pageLength;
                     pageElapsedTicks[index] = Stopwatch.GetTimestamp() - started;
                 }
             });
@@ -409,7 +496,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         Payload = HashPayload(pagePayload)
     };
 
-    private CultPersistedStoreSnapshot ReadManifest() => ParseManifest(ReadManifestBytes());
+    private (CultPersistedStoreSnapshot Snapshot, Dictionary<CultSchemaCatalogEntry, byte[]> CatalogBytes) ReadManifest() => ParseManifest(ReadManifestBytes());
 
     private byte[]? ReadManifestBytes() => File.Exists(_manifestFile.FullName) ? ReadAllBytesShared(_manifestFile.FullName) : null;
 
@@ -435,37 +522,51 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     private InvalidOperationException Unsettled(Exception? last) => new(
         $"Directory store {_manifestFile.FullName} changed under every one of {UnleasedLoadAttempts} unlocked loads; it did not settle.", last);
 
-    // A missing manifest is an empty store. An existing manifest in any other format is refused.
-    private CultPersistedStoreSnapshot ParseManifest(byte[]? manifestBytes)
+    // A missing manifest is an empty store. An existing manifest in any other format is refused. Beside the snapshot, the bytes the
+    // manifest held for each catalog entry, by the entry this read produced: the slices a write carries forward.
+    private (CultPersistedStoreSnapshot Snapshot, Dictionary<CultSchemaCatalogEntry, byte[]> CatalogBytes) ParseManifest(byte[]? manifestBytes)
     {
         if (manifestBytes == null)
         {
-            return new CultPersistedStoreSnapshot
+            return (new CultPersistedStoreSnapshot
             {
                 FormatVersion = IndexedFormatVersion,
                 SchemaCatalog = Array.Empty<CultSchemaCatalogEntry>(),
                 Records = Array.Empty<CultPersistedRecord>()
-            };
+            }, new Dictionary<CultSchemaCatalogEntry, byte[]>());
         }
 
-        // The stamp is judged before the manifest body is parsed, so a store stamped newer is refused whatever its body.
-        return CultDocumentMessagePackSerialization.DeserializeSnapshot(manifestBytes, RequireReadableStamp);
+        // The stamp is judged before the manifest body is parsed, so a store stamped newer is refused whatever its body. Every
+        // write path parses the manifest under its commit lease before it writes a page or the manifest, so a store another
+        // process has since stamped newer is refused there too, untouched.
+        (CultPersistedStoreSnapshot Snapshot, byte[][] CatalogBytes, byte[][] RecordBytes) read;
+        try
+        {
+            read = CultDocumentMessagePackSerialization.ReadStore(manifestBytes, RequireReadableStamp);
+        }
+        catch (CultStoreUnreadableException ex) when (ex.Path == null)
+        {
+            throw new CultStoreUnreadableException(ex.Message, _manifestFile.FullName, ex.InnerException);
+        }
+
+        var snapshot = read.Snapshot;
+        // An array with no stamp claims no directory format: it parses to the default v1 without the callback above ever seeing a stamp.
+        RequireReadableStamp(snapshot.FormatVersion);
+        var catalogBytes = new Dictionary<CultSchemaCatalogEntry, byte[]>();
+        for (var index = 0; index < snapshot.SchemaCatalog.Length; index++)
+            catalogBytes[snapshot.SchemaCatalog[index]] = read.CatalogBytes[index];
+        return (snapshot, catalogBytes);
     }
 
+    // The one verdict on a directory manifest's stamp: this runtime reads v4 and v5.
     private void RequireReadableStamp(string stamp)
     {
-        if (CultPersistedStoreSnapshot.FormatNumber(stamp) is int number && number > 4)
+        if (!string.Equals(stamp, IndexedFormatVersion, StringComparison.Ordinal) &&
+            !string.Equals(stamp, IndexedFormatVersionWithIds, StringComparison.Ordinal))
         {
-            // Every write path parses the manifest under its commit lease before it writes a page or the manifest, so a
-            // store another process has since stamped newer is refused here, untouched.
-            throw new NotSupportedException(
-                $"Directory store {_manifestFile.FullName} is {stamp}, a newer format than this runtime reads ({IndexedFormatVersion}).");
-        }
-
-        if (!string.Equals(stamp, IndexedFormatVersion, StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException(
-                $"Directory store {_manifestFile.FullName} is {stamp}; only {IndexedFormatVersion} is readable.");
+            throw new CultStoreUnreadableException(
+                $"Directory store {_manifestFile.FullName} is {CultDocumentMessagePackSerialization.DescribeHeader(stamp)}; only {IndexedFormatVersion} and {IndexedFormatVersionWithIds} are readable.",
+                _manifestFile.FullName);
         }
     }
 
@@ -505,6 +606,26 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 // Cleanup is best effort and never changes the committed generation.
             }
         }
+    }
+
+    // One record as a load decodes it, from the page its manifest record names: a pull's pages and a refusal's reload.
+    private CultStoredDocument LoadPage(
+        CultPersistedRecord metadata,
+        IReadOnlyCollection<CultSchemaCatalogEntry> catalog,
+        out CultSchemaMigrationReport report,
+        out long pageLength)
+    {
+        var record = ReadPersistedRecordPage(metadata, out var pagePayload);
+        pageLength = pagePayload.LongLength;
+        var stored = ToStoredDocument(
+            record,
+            VersionOf(metadata.Payload),
+            catalog,
+            (type, payload) => CultDocumentMessagePackSerialization.DeserializeUntyped(type, payload, Registry),
+            out report);
+        // The manifest is this store's record of what is on disk: the stored id and the version a commit condition compares with.
+        stored.StoredSchemaId = metadata.SchemaId;
+        return stored;
     }
 
     private CultPersistedRecord ReadPersistedRecordPage(CultPersistedRecord metadata, out byte[] pagePayload)

@@ -600,6 +600,7 @@ namespace GameCult.Networking.Tests
                 "selection.fixture.guard_probe",
                 "selection.fixture.guard_probe.v1",
                 "selection.fixture.guard_probe.v1",
+                Array.Empty<string>(),
                 "sha256:guard-probe",
                 "{}",
                 false,

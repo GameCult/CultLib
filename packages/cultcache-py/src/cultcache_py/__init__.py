@@ -17,7 +17,7 @@ from .documents import (
     define_union,
 )
 from .leaves import SlotCodec
-from .stores import JsonLinesBackingStore, SingleFileMessagePackBackingStore
+from .stores import JsonLinesBackingStore, SchemaConflictError, SingleFileMessagePackBackingStore, StoreUnreadableError
 
 __all__ = [
     "BackingStore",
@@ -32,8 +32,10 @@ __all__ = [
     "JsonLinesBackingStore",
     "MAX_PAYLOAD_DEPTH",
     "MAX_SLOT_KEY",
+    "SchemaConflictError",
     "SingleFileMessagePackBackingStore",
     "SlotCodec",
+    "StoreUnreadableError",
     "UnionArm",
     "leaves",
     "database_entry_field",

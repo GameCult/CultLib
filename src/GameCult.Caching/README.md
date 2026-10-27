@@ -188,6 +188,40 @@ for (var row = 0; row < table.Count; row++)
 cache-owned physical table for hot loops and diagnostics; it is not a second
 domain model callers have to maintain.
 
+## Element ids
+
+A document type that holds a list of objects gives every object type in that list
+(union arms included) a string member marked `[CultElementId]`, next to its
+`[Key]`. The id is what lets a variant override one list element instead of the
+whole list. Lists of strings, numbers and other non-object values need none.
+
+The rule covers the shapes the id walk owns: arrays, `IEnumerable<T>` classes and
+interfaces, dictionary values, and integer-keyed `[MessagePackObject]` and `[Union]`
+types. Any other holder is one whole value: `ImmutableArray<T>`, `ArraySegment<T>`,
+`Memory<T>`, `KeyValuePair`, tuples, `Lazy<T>`, a class without `[MessagePackObject]`,
+a `[DataContract]` or string-keyed type, and a type or member declaring
+`[MessagePackFormatter]`. Its elements carry no element ids: a `[CultElementId]`
+member inside it is a plain string, never minted or checked, and a variant can only
+replace the holder whole.
+
+```csharp
+[MessagePackObject]
+public sealed class Line
+{
+    [Key(0)] [CultElementId] public string Id = string.Empty;
+    [Key(1)] public string Text = string.Empty;
+}
+```
+
+Leave `Id` empty and the cache mints a random id when the record is written. An
+id you set yourself must be exactly 12 lowercase hex characters
+(`0123456789ab`); anything else is refused with a `CultElementIdException`.
+
+For readable ids, derive them: `[CultElementId(nameof(Name))]` makes an unset id
+the text of that member (a string or number on the same type, unique within its
+list), and a derived id may be any text. A readable name set by hand on a
+non-derived list id is refused; the same member outside a list is unconstrained.
+
 ## Persistence discipline
 
 Persistence stays manual by default. Mutations mark the cache and attached

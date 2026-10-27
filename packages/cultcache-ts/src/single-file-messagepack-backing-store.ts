@@ -1,13 +1,13 @@
-import { lstat, mkdir, readFile } from "node:fs/promises";
+import { lstatSync, readFileSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { decode, encode } from "@msgpack/msgpack";
 import { z } from "zod";
 
 import { documentPayloadBytes, documentPayloadFromBytes } from "./document";
-import { checkPayloadDepth } from "./payload-depth";
 import { commitStoreFile, withStoreWriteLock } from "./store-file";
-import { STORE_FORMAT_VERSION, isV1Snapshot, refuseUnreadStoreBytes, requireV1RecordSlots } from "./store-format";
+import { STORE_FORMAT_VERSION, SchemaConflictError, type StoreFormat, StoreUnreadableError, isStoreSnapshot, refuseUnreadStoreBytes, requireStoreSlots, requireV1RecordSlots } from "./store-format";
 import type {
   CacheBackingStore,
   CultCacheEnvelope,
@@ -39,114 +39,87 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
 
   #writeQueue: Promise<void> = Promise.resolve();
 
+  // The header this store read; a rewrite keeps it, so a store that holds element ids never sheds its marker.
+  #format: StoreFormat = STORE_FORMAT_VERSION;
+
   constructor(filePath: string) {
     this.filePath = resolve(filePath);
   }
 
   async pullAll(): Promise<CultCacheEnvelope[]> {
-    const { envelopes, healLegacy } = await this.#readDisk();
-    if (healLegacy) {
+    // The disk decides the header: a file that is gone or legacy is not marked.
+    this.#format = STORE_FORMAT_VERSION;
+    const disk = this.#readDisk();
+    this.#format = disk.format;
+    if (disk.repairedLegacyPayload) {
       // The heal decides from its own read, taken under the store lock.
       await this.#enqueue(async () => {
-        const again = await this.#readDisk();
-        if (again.healLegacy) {
-          await this.#writeAll(again.envelopes);
+        const again = this.#readDisk();
+        this.#format = again.format;
+        if (again.repairedLegacyPayload) {
+          await this.#writeAll([], again.envelopes);
         }
       });
     }
 
-    return envelopes;
-  }
-
-  async #readDisk(): Promise<{ envelopes: CultCacheEnvelope[]; healLegacy: boolean }> {
-    // An empty file is not a store, since no CultCache writer leaves one, so it is
-    // decoded and refused. Only a read that finds nothing at the path is an empty store.
-    const data = await readStore(this.filePath);
-    if (data === undefined) {
-      return { envelopes: [], healLegacy: false };
-    }
-
-    const decoded = decode(data);
-    const snapshot = decodeSnapshot(decoded);
-    if (snapshot) {
-      const envelopes = snapshot.records.map((record) => {
-        const catalogEntry = resolveCatalogEntryForRecord(record, snapshot.catalogBySchemaId);
-        if (!catalogEntry) {
-          throw new Error(`CultCache persisted record "${record.key}" references missing schema id "${record.schemaId}".`);
-        }
-
-        return {
-          key: record.key,
-          type: catalogEntry.schemaName,
-          schemaId: record.schemaId,
-          catalogEntry,
-          payload: documentPayloadFromBytes(record.payload),
-          storedAt: record.storedAt,
-        };
-      });
-      return { envelopes, healLegacy: false };
-    }
-
-    const legacy = decodeLegacyEnvelopeArray(decoded);
-    if (legacy) {
-      let repairedLegacyPayload = false;
-      const normalized = legacy.map((entry) => {
-        const payload = normalizePayload(entry.payload);
-        if (payload !== entry.payload) {
-          repairedLegacyPayload = true;
-        }
-
-        return {
-          ...entry,
-          payload,
-        };
-      });
-      const parsed: CultCacheEnvelope[] = envelopeArraySchema.parse(normalized).map((entry) => ({
-        ...entry,
-        payload: documentPayloadFromBytes(entry.payload),
-      }));
-
-      return { envelopes: parsed, healLegacy: repairedLegacyPayload };
-    }
-
-    throw new Error(`CultCache file ${this.filePath} is not a recognized CultCache MessagePack store.`);
+    return disk.envelopes;
   }
 
   async push(entry: CultCacheEnvelope): Promise<void> {
     await this.#enqueue(async () => {
-      const existing = (await this.#readDisk()).envelopes;
+      const disk = this.#readDisk();
+      this.#format = disk.format;
+      const existing = disk.envelopes;
       const filtered = existing.filter(
         (candidate) => !(candidate.type === entry.type && candidate.key === entry.key),
       );
-      filtered.push(entry);
-      await this.#writeAll(filtered);
+      await this.#writeAll([entry], filtered);
     });
   }
 
   async delete(entry: CultCacheEnvelope): Promise<void> {
     await this.#enqueue(async () => {
-      const existing = (await this.#readDisk()).envelopes;
+      const disk = this.#readDisk();
+      this.#format = disk.format;
+      const existing = disk.envelopes;
       const filtered = existing.filter(
         (candidate) => !(candidate.type === entry.type && candidate.key === entry.key),
       );
-      await this.#writeAll(filtered);
+      await this.#writeAll([], filtered);
     });
   }
 
   async pushAll(entries: CultCacheEnvelope[], options: PushAllOptions = {}): Promise<void> {
     await this.#enqueue(async () => {
-      // A whole write of a file it cannot read proceeds as before (a dangling link is
-      // replaced, R3); only a stamp it can read is judged.
-      const data = options.soft ? await readStore(this.filePath) : await readStore(this.filePath).catch(() => undefined);
-      if (data !== undefined) {
-        if (options.soft) {
+      // A flush of the whole store writes the header the file on disk carries, read now: a file marked for element ids
+      // stays marked, and one that is not (or is gone or legacy) is written unmarked. The file is read by the same
+      // reader as `pullAll`, so one it would refuse (not exactly one store, a variant, a body it cannot decode) is refused
+      // and left as it is. A soft flush asks that reader too: nothing at the path is written, a store is left alone.
+      try {
+        const disk = this.#readDisk();
+        if (options.soft && !disk.absent) {
           return;
         }
-        refuseUnreadStoreBytes(data);
+
+        this.#format = disk.format;
+      } catch (error) {
+        // Only a dangling link reaches here with ENOENT: it holds no store, so a whole-store flush has no header to keep and
+        // replaces the link (R3 pins this). A soft flush does not replace what it cannot read, and every merging writer
+        // has already refused the link when it read the current entries.
+        if (options.soft || (error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw error;
+        }
+
+        this.#format = STORE_FORMAT_VERSION;
       }
 
-      await this.#writeAll(entries);
+      await this.#writeAll(entries, []);
     });
+  }
+
+  // The one reader of the store file, asked by open, push, delete and flush alike; see readSingleFileStore.
+  #readDisk(): SingleFileStoreRead {
+    return readSingleFileStore(this.filePath);
   }
 
   async #enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -167,29 +140,54 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
     return result;
   }
 
-  async #writeAll(entries: CultCacheEnvelope[]): Promise<void> {
+  async #writeAll(supplied: CultCacheEnvelope[], arrived: CultCacheEnvelope[]): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
 
-    await commitStoreFile(this.filePath, encode(encodeSnapshot(entries)));
+    await commitStoreFile(this.filePath, encode(encodeSnapshot(supplied, arrived, this.#format)));
   }
 }
 
 /**
- * Reads a store file, or returns undefined when nothing is at its path. A dangling symbolic
- * link is something: reading it as empty would let the writer rename a file over the link
- * and move the store off its volume. Any other failure to reach the file is thrown.
+ * The one reader of a CultCache single-file store, for this package's store and for any consumer that must read a
+ * store file (an authority bundle, say) rather than decode it itself. A path with nothing at it is an absent, empty,
+ * unmarked store. A dangling symbolic link is something: reading it as empty would let a writer rename a file over
+ * the link and move the store off its volume, so it throws with code ENOENT, as does any other failure to reach the
+ * file. A zero-byte file is not a store and, like anything that does not decode completely, throws StoreUnreadableError.
+ * The read is synchronous so a consumer that loads authority at start-up needs no second reader to stay synchronous.
  */
-async function readStore(path: string): Promise<Uint8Array | undefined> {
+export function readSingleFileStore(path: string): SingleFileStoreRead {
+  const data = readStoreBytes(path);
+  if (data === undefined) {
+    return { absent: true, format: STORE_FORMAT_VERSION, envelopes: [], repairedLegacyPayload: false };
+  }
+
   try {
-    return await readFile(path);
+    return { absent: false, ...decodeStoreFile(data) };
+  } catch (error) {
+    throw new StoreUnreadableError(path, error);
+  }
+}
+
+/**
+ * The bytes at `path`, or undefined when nothing is there. Nothing is there only when both looks agree: the read found no
+ * file and the follow-up lstat found no entry. Every other outcome is an error, because the path may have changed
+ * between the two calls (a link in a parent swapped for a file, a store created or removed): an lstat failure other than
+ * ENOENT is thrown as it is, and an entry the lstat does find, a dangling link or one that appeared since the read, is
+ * thrown with code ENOENT rather than read as an empty store. `lstat` is a seam so a test can stage the second look;
+ * this module exports the function for that test, and the package index does not.
+ */
+export function readStoreBytes(path: string, lstat: (path: string) => { isSymbolicLink(): boolean } = lstatSync): Uint8Array | undefined {
+  try {
+    return readFileSync(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       throw error;
     }
   }
 
+  let entry: { isSymbolicLink(): boolean };
   try {
-    await lstat(path);
+    entry = lstat(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return undefined;
@@ -198,7 +196,8 @@ async function readStore(path: string): Promise<Uint8Array | undefined> {
     throw error;
   }
 
-  throw Object.assign(new Error(`CultCache store ${path} is a symbolic link whose target does not exist.`), { code: "ENOENT" });
+  const what = entry.isSymbolicLink() ? "is a symbolic link whose target does not exist" : "appeared while it was being read";
+  throw Object.assign(new Error(`CultCache store ${path} ${what}.`), { code: "ENOENT" });
 }
 
 type PersistedRecord = {
@@ -209,13 +208,19 @@ type PersistedRecord = {
 };
 
 type DecodedSnapshot = {
+  format: StoreFormat;
   catalogBySchemaId: Map<string, CultCacheSchemaCatalogEntry>;
   records: PersistedRecord[];
 };
 
-function encodeSnapshot(entries: CultCacheEnvelope[]): unknown[] {
-  const catalog = [...catalogEntriesFor(entries).values()]
-    .sort((left, right) => compareOrdinal(left.schemaName, right.schemaName));
+function encodeSnapshot(supplied: CultCacheEnvelope[], arrived: CultCacheEnvelope[], format: StoreFormat): unknown[] {
+  const replaced = new Set(supplied.map((entry) => `${entry.type}::${entry.key}`));
+  const kept = arrived.filter((entry) => !replaced.has(`${entry.type}::${entry.key}`));
+  const entries = [...kept, ...supplied];
+  const catalog = catalogEntriesFor([
+    ...kept.map((envelope) => ({ envelope, registered: false })),
+    ...supplied.map((envelope) => ({ envelope, registered: true })),
+  ]).sort((left, right) => compareOrdinal(left.schemaName, right.schemaName) || compareOrdinal(left.schemaId, right.schemaId));
   const records = [...entries]
     .sort((left, right) => compareOrdinal(left.key, right.key))
     .map((entry) => [
@@ -226,34 +231,134 @@ function encodeSnapshot(entries: CultCacheEnvelope[]): unknown[] {
     ]);
 
   return [
-    STORE_FORMAT_VERSION,
+    format,
     catalog.map(encodeCatalogEntry),
     records,
   ];
 }
 
-function catalogEntriesFor(entries: CultCacheEnvelope[]): Map<string, CultCacheSchemaCatalogEntry> {
-  const catalog = new Map<string, CultCacheSchemaCatalogEntry>();
-  for (const entry of entries) {
-    const schemaId = schemaIdForEnvelope(entry);
-    if (!catalog.has(schemaId)) {
-      catalog.set(schemaId, entry.catalogEntry ?? {
+// The catalog a write leaves, derived from the records being written and nothing else. For each schema id a record carries, one
+// entry that publishes it: the entry that owns the id (a registered one, else one that arrived with the records), else one that
+// lists it as compatible (registered first). Entries are written as chosen, never merged; a registered entry wins over an arrived
+// one with the same own id. Records of different types under one id, two arrived entries with the same own id and different schema
+// names, or a record no chosen entry publishes, refuse the write. An envelope the caller supplied is registered; one read back
+// from the file is arrived.
+function catalogEntriesFor(
+  records: Array<{ envelope: CultCacheEnvelope; registered: boolean }>,
+): CultCacheSchemaCatalogEntry[] {
+  const entries: Array<{ entry: CultCacheSchemaCatalogEntry; registered: boolean }> = [];
+  const byId = new Map<string, CultCacheEnvelope[]>();
+  const tiers = new Map<string, Array<{ envelope: CultCacheEnvelope; registered: boolean; entry: CultCacheSchemaCatalogEntry }>>();
+  for (const { envelope, registered } of records) {
+    const schemaId = schemaIdForEnvelope(envelope);
+    const supplied = envelope.catalogEntry;
+    const publishes =
+      supplied !== undefined && (supplied.schemaId === schemaId || (supplied.compatibleSchemaIds ?? []).includes(schemaId));
+    const entry = publishes && supplied ? supplied : defaultEntryFor(envelope);
+    entries.push({ entry, registered });
+    byId.set(schemaId, [...(byId.get(schemaId) ?? []), envelope]);
+    tiers.set(schemaId, [...(tiers.get(schemaId) ?? []), { envelope, registered, entry }]);
+  }
+
+  const lists = (entry: CultCacheSchemaCatalogEntry, schemaId: string): boolean =>
+    (entry.compatibleSchemaIds ?? [entry.schemaId]).includes(schemaId);
+  const chosen = new Map<string, { entry: CultCacheSchemaCatalogEntry; registered: boolean }>();
+  for (const schemaId of [...byId.keys()].sort(compareOrdinal)) {
+    const carrying = byId.get(schemaId)!;
+    const recordKey = carrying.map((envelope) => envelope.key).sort(compareOrdinal)[0]!;
+    // Records of one tier under one id are one type. Across tiers the id keeps the type its records resolve to, so a write may
+    // not retype records that are already there: unless the entries of both tiers own the id, which is a rename of the schema
+    // under a stable id, and the registered descriptor wins. A read-back record's type is its schema's name, so tiers compare
+    // the names of the entries that publish the id.
+    const carried = tiers.get(schemaId)!;
+    for (const tier of [true, false]) {
+      const types = [...new Set(carried.filter((candidate) => candidate.registered === tier).map((candidate) => candidate.envelope.type))].sort(
+        compareOrdinal,
+      );
+      if (types.length > 1) {
+        throw new SchemaConflictError(schemaId, types, recordKey);
+      }
+    }
+
+    const tierNames = (tier: boolean): string[] => [
+      ...new Set(carried.filter((candidate) => candidate.registered === tier).map((candidate) => candidate.entry.schemaName)),
+    ];
+    const ownedBy = (tier: boolean): boolean =>
+      carried.some((candidate) => candidate.registered === tier && candidate.entry.schemaId === schemaId);
+    const [registeredName, arrivedName] = [tierNames(true)[0], tierNames(false)[0]];
+    if (registeredName !== undefined && arrivedName !== undefined && registeredName !== arrivedName && !(ownedBy(true) && ownedBy(false))) {
+      throw new SchemaConflictError(schemaId, [registeredName, arrivedName].sort(compareOrdinal), recordKey);
+    }
+
+    const ownRegistered = canonical(entries.filter((candidate) => candidate.registered && candidate.entry.schemaId === schemaId))[0];
+    const ownArrived = canonical(entries.filter((candidate) => !candidate.registered && candidate.entry.schemaId === schemaId));
+    // Entries of one tier that share an own id must be one schema; a registered entry settles a disagreement among arrived ones.
+    const ownRegisteredAll = canonical(entries.filter((candidate) => candidate.registered && candidate.entry.schemaId === schemaId));
+    const names = [
+      ...new Set((ownRegisteredAll.length > 0 ? ownRegisteredAll : ownArrived).map((candidate) => candidate.entry.schemaName)),
+    ].sort(compareOrdinal);
+    if (names.length > 1) {
+      throw new SchemaConflictError(schemaId, names, recordKey);
+    }
+
+    let pick: { entry: CultCacheSchemaCatalogEntry; registered: boolean } | undefined;
+    if (ownRegistered !== undefined) {
+      pick = ownRegistered;
+    } else if (ownArrived.length > 0) {
+      pick = ownArrived[0];
+    } else {
+      pick =
+        canonical(entries.filter((candidate) => candidate.registered && lists(candidate.entry, schemaId)))[0] ??
+        canonical(entries.filter((candidate) => !candidate.registered && lists(candidate.entry, schemaId)))[0];
+    }
+
+    if (pick === undefined) {
+      continue;
+    }
+
+    const prior = chosen.get(pick.entry.schemaId);
+    if (prior !== undefined && prior.registered && !pick.registered) {
+      continue;
+    }
+
+    chosen.set(pick.entry.schemaId, pick);
+  }
+
+  for (const [schemaId, carrying] of byId) {
+    if (![...chosen.values()].some(({ entry }) => entry.schemaId === schemaId || lists(entry, schemaId))) {
+      throw new SchemaConflictError(
         schemaId,
-        schemaName: entry.type,
-        schemaVersion: `${entry.type}.v1`,
-        contentHash: schemaId,
-        canonicalSchemaJson: JSON.stringify({
-          schemaName: entry.type,
-          schemaVersion: `${entry.type}.v1`,
-          members: [],
-        }),
-        compatibleSchemaIds: [schemaId],
-        members: [],
-      });
+        [...chosen.values()].map(({ entry }) => entry.schemaName).sort(compareOrdinal),
+        carrying.map((envelope) => envelope.key).sort(compareOrdinal)[0]!,
+      );
     }
   }
 
-  return catalog;
+  return [...chosen.values()].map(({ entry }) => entry);
+}
+
+// Entries that tie, in one fixed order, so the catalog does not depend on the order they arrive in.
+function canonical<T extends { entry: CultCacheSchemaCatalogEntry }>(candidates: T[]): T[] {
+  const key = (candidate: T): string =>
+    [candidate.entry.schemaName, candidate.entry.contentHash ?? "", (candidate.entry.compatibleSchemaIds ?? []).join(",")].join("\u0000");
+  return [...candidates].sort((left, right) => compareOrdinal(key(left), key(right)));
+}
+
+function defaultEntryFor(entry: CultCacheEnvelope): CultCacheSchemaCatalogEntry {
+  const schemaId = schemaIdForEnvelope(entry);
+  return {
+    schemaId,
+    schemaName: entry.type,
+    schemaVersion: `${entry.type}.v1`,
+    contentHash: schemaId,
+    canonicalSchemaJson: JSON.stringify({
+      schemaName: entry.type,
+      schemaVersion: `${entry.type}.v1`,
+      members: [],
+    }),
+    compatibleSchemaIds: [schemaId],
+    members: [],
+  };
 }
 
 function schemaIdForEnvelope(entry: CultCacheEnvelope): string {
@@ -285,82 +390,89 @@ function encodeCatalogMember(member: CultCacheSchemaCatalogMember): unknown[] {
   ];
 }
 
+export type SingleFileStoreRead = {
+  // True when nothing is at the path; the other fields then describe an empty unmarked store.
+  absent: boolean;
+  format: StoreFormat;
+  envelopes: CultCacheEnvelope[];
+  // A legacy file whose payloads were not bytes: reading it repairs them, and the store rewrites the file.
+  repairedLegacyPayload: boolean;
+};
+
+function decodeStoreFile(data: Uint8Array): Omit<SingleFileStoreRead, "absent"> {
+  // The stamp is judged before the body is decoded, as Rust's store_header does: a newer store is refused by name.
+  refuseUnreadStoreBytes(data);
+  const decoded = decode(data);
+  const snapshot = decodeSnapshot(decoded);
+  if (snapshot) {
+    const envelopes = snapshot.records.map((record): CultCacheEnvelope => {
+      const catalogEntry = snapshot.catalogBySchemaId.get(record.schemaId);
+      if (!catalogEntry) {
+        throw new Error(`CultCache persisted record "${record.key}" references missing schema id "${record.schemaId}".`);
+      }
+
+      return {
+        key: record.key,
+        type: catalogEntry.schemaName,
+        schemaId: record.schemaId,
+        catalogEntry,
+        payload: documentPayloadFromBytes(record.payload),
+        storedAt: record.storedAt,
+      };
+    });
+    return { format: snapshot.format, envelopes, repairedLegacyPayload: false };
+  }
+
+  const legacy = decodeLegacyEnvelopeArray(decoded);
+  if (!legacy) {
+    throw new Error("CultCache file is not a recognized CultCache MessagePack store.");
+  }
+
+  let repairedLegacyPayload = false;
+  const normalized = legacy.map((entry) => {
+    const payload = normalizePayload(entry.payload);
+    if (payload !== entry.payload) {
+      repairedLegacyPayload = true;
+    }
+
+    return {
+      ...entry,
+      payload,
+    };
+  });
+  return { format: STORE_FORMAT_VERSION, envelopes: envelopeArraySchema.parse(normalized).map((entry) => ({ ...entry, payload: documentPayloadFromBytes(entry.payload) })) as CultCacheEnvelope[], repairedLegacyPayload };
+}
+
 function decodeSnapshot(decoded: unknown): DecodedSnapshot | undefined {
-  if (!isV1Snapshot(decoded)) {
+  if (!isStoreSnapshot(decoded)) {
     return undefined;
   }
 
+  requireStoreSlots(decoded);
   const catalogRaw = decoded[1];
   const recordsRaw = decoded[2];
   if (!Array.isArray(catalogRaw) || !Array.isArray(recordsRaw)) {
     throw new Error("CultCache v1 snapshot must contain a schema catalog and record array.");
   }
 
+  // A schema id names the entry that has it as its own id; only an id no entry owns names the entry that lists it as compatible.
+  const catalogEntries = catalogRaw.map(decodeCatalogEntry);
   const catalogBySchemaId = new Map<string, CultCacheSchemaCatalogEntry>();
-  for (const entry of catalogRaw) {
-    const catalogEntry = decodeCatalogEntry(entry);
-    catalogBySchemaId.set(catalogEntry.schemaId, catalogEntry);
+  for (const catalogEntry of catalogEntries) {
+    if (!catalogBySchemaId.has(catalogEntry.schemaId)) {
+      catalogBySchemaId.set(catalogEntry.schemaId, catalogEntry);
+    }
+  }
+  for (const catalogEntry of catalogEntries) {
     for (const compatibleSchemaId of catalogEntry.compatibleSchemaIds ?? []) {
-      catalogBySchemaId.set(compatibleSchemaId, catalogEntry);
+      if (!catalogBySchemaId.has(compatibleSchemaId)) {
+        catalogBySchemaId.set(compatibleSchemaId, catalogEntry);
+      }
     }
   }
 
   const records = recordsRaw.map(decodeRecord);
-  return { catalogBySchemaId, records };
-}
-
-function resolveCatalogEntryForRecord(
-  record: PersistedRecord,
-  catalogBySchemaId: Map<string, CultCacheSchemaCatalogEntry>,
-): CultCacheSchemaCatalogEntry | undefined {
-  const existing = catalogBySchemaId.get(record.schemaId);
-  if (existing) {
-    return existing;
-  }
-
-  const schemaVersion = inferSchemaVersionFromPayload(record.payload);
-  if (!schemaVersion) {
-    return undefined;
-  }
-
-  const schemaName = inferSchemaName(schemaVersion);
-  if (!schemaName) {
-    return undefined;
-  }
-
-  return {
-    schemaId: record.schemaId,
-    schemaName,
-    schemaVersion,
-    contentHash: record.schemaId,
-    canonicalSchemaJson: "",
-    compatibleSchemaIds: [],
-    members: [],
-  };
-}
-
-function inferSchemaVersionFromPayload(payload: Uint8Array): string | undefined {
-  try {
-    checkPayloadDepth(payload);
-    const decoded = decode(payload);
-    if (Array.isArray(decoded) && typeof decoded[0] === "string") {
-      return decoded[0];
-    }
-
-    if (isObject(decoded)) {
-      const schemaVersion = decoded.schemaVersion ?? decoded.schema_version;
-      return typeof schemaVersion === "string" ? schemaVersion : undefined;
-    }
-
-    return undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function inferSchemaName(schemaVersion: string): string | undefined {
-  const match = /^(.*)\.v\d+$/.exec(schemaVersion);
-  return match?.[1];
+  return { format: decoded[0], catalogBySchemaId, records };
 }
 
 function decodeCatalogEntry(value: unknown): CultCacheSchemaCatalogEntry {

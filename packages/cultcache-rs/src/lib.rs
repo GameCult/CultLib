@@ -464,6 +464,11 @@ impl<'de> serde::Deserialize<'de> for PersistedRecord {
 
 const STORE_FORMAT_V1: &str = "cultcache.store.v1";
 
+/// A store that can hold element ids. A reader older than element ids refuses this header: it would skip the id
+/// slots of a nested element and rewrite the element without them. This runtime writes it back only for a file it
+/// found under it; it does not decide when a document carries ids.
+const STORE_FORMAT_ELEMENT_IDS: &str = "cultcache.store.v3";
+
 /// Opens every refusal CultCache raises about one persisted record. The decoder's own
 /// messages can quote the bytes; these name only the record's key and schema id.
 const RECORD_REFUSAL: &str = "CultCache record ";
@@ -687,16 +692,25 @@ const DECODE_STACK_SEGMENT: usize = 2 * 1024 * 1024;
 /// ```
 pub const MAX_RECORD_INLINE_BYTES: usize = 16 * 1024;
 
-/// The one grown decoder of stored bytes: the outer stack check, then `serde_stacker` re-checks at
-/// every container serde's impls descend through, skipped values included. No nesting bound is applied here; [`decode_payload`] walks first.
-fn decode_grown<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::result::Result<T, rmp_serde::decode::Error> {
+/// The one grown setup for every decode of stored bytes: the outer stack check, then `serde_stacker`
+/// re-checks at every container serde's impls descend through, skipped values included. `body` runs on the grown stack with the
+/// grown deserializer over `reader`, so a caller that must read `reader`'s position afterwards (the store header) still can.
+fn grown<R, T>(
+    reader: &mut rmp_serde::Deserializer<R>,
+    body: impl FnOnce(serde_stacker::Deserializer<&mut rmp_serde::Deserializer<R>>) -> T,
+) -> T {
     stacker::maybe_grow(DECODE_RED_ZONE, DECODE_STACK_SEGMENT, || {
-        let mut reader = rmp_serde::Deserializer::from_read_ref(bytes);
-        let mut grown = serde_stacker::Deserializer::new(&mut reader);
+        let mut grown = serde_stacker::Deserializer::new(reader);
         grown.red_zone = DECODE_RED_ZONE;
         grown.stack_size = DECODE_STACK_SEGMENT;
-        T::deserialize(grown)
+        body(grown)
     })
+}
+
+/// The one grown decoder of a value from stored bytes. No nesting bound is applied here; [`decode_payload`] walks first.
+fn decode_grown<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::result::Result<T, rmp_serde::decode::Error> {
+    let mut reader = rmp_serde::Deserializer::from_read_ref(bytes);
+    grown(&mut reader, |grown| T::deserialize(grown))
 }
 
 /// The one decode of a document payload: the nesting bound first, then [`decode_grown`], whose
@@ -774,16 +788,97 @@ fn describe_serde_message(message: &str) -> String {
     }
 }
 
-/// The store header string, or `None` when the bytes do not open with an array whose
-/// first slot is a string (the legacy envelope array starts with a map). Only the
-/// leading bytes are read, so a store cut short after its header still names its format.
-fn store_header(bytes: &[u8]) -> Option<String> {
-    let mut offset = 0usize;
-    if read_array_header(bytes, &mut offset)? == 0 {
-        return None;
-    }
-    read_string(bytes, &mut offset)
+/// What one pass over a file's bytes learned about its header. `first` is the leading slot when it is a MessagePack
+/// string (`str`, never `bin`, as in every other runtime), and `None` when the bytes do not open with an array whose first
+/// slot is a string (a legacy envelope array candidate). `whole` is the proof that the bytes are exactly one complete
+/// MessagePack array: a truncated store or bytes after the array fail it, and are never taken for a legacy file. A store cut
+/// short after its header string still names its format, so `first` survives a failed `whole` and a newer store is refused
+/// as unsupported, not as damaged.
+struct StoreHeader {
+    first: Option<String>,
+    whole: Result<()>,
 }
+
+/// The one reader of a store file's header. Nothing else classifies leading bytes.
+fn store_header(bytes: &[u8]) -> StoreHeader {
+    /// A string slot and only a string: MessagePack `bin` is not a header.
+    fn text<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<String, D::Error> {
+        struct TextVisitor;
+        impl serde::de::Visitor<'_> for TextVisitor {
+            type Value = String;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a MessagePack string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<String, E> {
+                Ok(value.to_string())
+            }
+        }
+        deserializer.deserialize_any(TextVisitor)
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum FirstSlot {
+        Text(#[serde(deserialize_with = "text")] String),
+        Other(serde::de::IgnoredAny),
+    }
+
+    struct HeaderVisitor<'a>(&'a mut Option<String>);
+    impl<'de> serde::de::Visitor<'de> for HeaderVisitor<'_> {
+        type Value = ();
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an array whose first slot may be the store header")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<(), A::Error> {
+            if let Some(FirstSlot::Text(header)) = seq.next_element::<FirstSlot>()? {
+                *self.0 = Some(header);
+            }
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(())
+        }
+    }
+
+    let mut first = None;
+    let mut cursor = std::io::Cursor::new(bytes);
+    // Walked on the grown stack, as every other decode of stored bytes is: a store may nest values deeper than the thread allows.
+    let walked = {
+        let mut reader = rmp_serde::Deserializer::new(&mut cursor);
+        grown(&mut reader, |grown| serde::Deserializer::deserialize_seq(grown, HeaderVisitor(&mut first)))
+    };
+    let after = bytes.len() - cursor.position() as usize;
+    let whole = walked
+        .map_err(|error| opaque_decode_error(error).context("the store is not one complete MessagePack array"))
+        .and_then(|()| {
+            ensure!(after == 0, "the store has {after} bytes after its MessagePack array");
+            Ok(())
+        });
+    StoreHeader { first, whole }
+}
+
+/// A write the catalog cannot describe: records of different types under one schema id. This writer derives one entry per carried
+/// schema id from its records, so that is its only conflict. Nothing is written. It names the id, the two names and a record key.
+#[derive(Debug)]
+pub struct SchemaConflictError {
+    pub schema_id: String,
+    pub schema_names: Vec<String>,
+    pub record_key: String,
+}
+
+impl std::fmt::Display for SchemaConflictError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "schema id {:?} cannot describe record {:?}: {:?}",
+            self.schema_id, self.record_key, self.schema_names
+        )
+    }
+}
+
+impl std::error::Error for SchemaConflictError {}
 
 /// A single-file store whose bytes were read and not accepted. It sits in the error
 /// chain of every such read, so a consumer tells it apart with
@@ -872,6 +967,8 @@ impl std::error::Error for CultCacheStoreWriteFailed {}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PushAllOptions {
+    /// Seed the store only where nothing is: a single-file flush writes when nothing is at the path, leaves a store it can
+    /// read byte for byte, and refuses what its reader refuses (a dangling link included), as a plain flush refuses.
     pub soft: bool,
 }
 
@@ -1243,43 +1340,45 @@ impl SingleFileMessagePackBackingStore {
     }
 
     fn read_all_unlocked(&self) -> Result<Vec<CultCacheEnvelope>> {
-        // Only a store that is not there is empty. A file that is there and empty is
-        // not a store (no writer leaves one), and any other failure to reach the file,
-        // such as a symlink loop, a file where a directory should be, or no permission,
-        // stays an io::Error: reading it as empty would let a writer replace a store it
-        // never saw.
-        // A dangling symbolic link is something at the path, not nothing: reading it as
-        // empty would let the writer rename a file over the link and move the store off
-        // the volume the link pointed to.
+        Ok(self.read_store_unlocked()?.envelopes)
+    }
+
+    /// The one reader of the store file: open, every rewrite and the read-only snapshot ask it, so they agree on which
+    /// files are stores. Only a file that is not there is an empty store. A file that is there and empty is not a store
+    /// (no writer leaves one), and any other failure to reach the file, such as a symlink loop, a file where a directory
+    /// should be, or no permission, stays an io::Error: reading it as empty would let a writer replace a store it never
+    /// saw. A dangling symbolic link is something at the path, not nothing, for the same reason. Anything else must decode
+    /// completely, as exactly one store or one legacy envelope array; bytes this runtime cannot read are refused with
+    /// [`CultCacheStoreUnreadable`], so a rewrite never overwrites what it cannot see.
+    fn read_store_unlocked(&self) -> Result<DiskStore> {
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && is_absent(&self.path)? => {
-                return Ok(Vec::new());
+                return Ok(DiskStore::absent());
             }
             Err(error) => {
                 return Err(anyhow::Error::new(error)
                     .context(format!("failed to read {}", self.path.display())));
             }
         };
-        self.refuse_unread_format(&bytes)?;
-        if store_header(&bytes).as_deref() == Some(STORE_FORMAT_V1) {
-            decode_store_snapshot(&bytes)
-                .map_err(|error| self.unreadable(CultCacheStoreUnreadableKind::Undecodable, error))
-        } else {
-            decode_grown(&bytes)
-                .context("failed to decode legacy CultCache envelope array")
-                .map_err(|error| self.unreadable(CultCacheStoreUnreadableKind::Undecodable, error))
-        }
+        let head = store_header(&bytes);
+        self.refuse_unread_format(head.first.as_deref())?;
+        head.whole
+            .and_then(|()| decode_store_file(&bytes, head.first.as_deref()))
+            .map_err(|error| self.unreadable(CultCacheStoreUnreadableKind::Undecodable, error))
     }
 
-    // The stamp rule, owned once for the reader and the whole-store writer: a
-    // cultcache.store.* header other than v1 is a format this runtime does not read. Only
-    // the header is judged, so a newer store cut short is still a newer store.
-    fn refuse_unread_format(&self, bytes: &[u8]) -> Result<()> {
-        match store_header(bytes) {
-            Some(header) if header != STORE_FORMAT_V1 && header.starts_with("cultcache.store.") => Err(self.unreadable(
+    // The one owner of the stamp rule, asked only by the one reader: a cultcache.store.* header this runtime does not read
+    // (it reads v1 and v3) is refused by name, judged from the header alone, so a newer store cut short is still a newer
+    // store. Every write over a file asks that reader first, so a whole-store write judges a stamp as a read does.
+    fn refuse_unread_format(&self, header: Option<&str>) -> Result<()> {
+        match header {
+            Some(header) if header.starts_with("cultcache.store.") && readable_store_format(header).is_none() => Err(self.unreadable(
                 CultCacheStoreUnreadableKind::UnsupportedFormat,
-                anyhow!("its header is {}; this runtime reads {STORE_FORMAT_V1:?} only", describe_header(&header)),
+                anyhow!(
+                    "its header is {}; this runtime reads {STORE_FORMAT_V1:?} and {STORE_FORMAT_ELEMENT_IDS:?} only",
+                    describe_header(header)
+                ),
             )),
             _ => Ok(()),
         }
@@ -1312,7 +1411,18 @@ impl SingleFileMessagePackBackingStore {
             path: self.path.clone(),
             kind,
         };
-        let bytes = encode_store_snapshot(entries)
+        // The header a rewrite writes is the one the file on disk carries: a file marked for element ids stays marked (the
+        // payloads this store passes through may hold ids), one that is gone or legacy is written v1. The file is read by
+        // the same reader as an open, so a store this runtime cannot read completely, a variant included, is refused
+        // and never overwritten.
+        let disk = match self.read_store_unlocked() {
+            // A dangling link holds no store, so a whole-file replace has no header to keep and replaces the link (R3 pins
+            // this). The only NotFound the reader returns is that one: a merging writer has already refused it when it
+            // read the current entries.
+            Err(error) if io_not_found(&error) => DiskStore::absent(),
+            other => other?,
+        };
+        let bytes = encode_store_snapshot(entries, &disk)
             .and_then(|snapshot| rmp_serde::to_vec(&snapshot).context("failed to encode MessagePack"))
             .map_err(|error| error.context(failed(CultCacheStoreWriteFailedKind::Rejected)))?;
         self.replace_unlocked(&bytes)
@@ -1581,13 +1691,14 @@ impl CacheBackingStore for SingleFileMessagePackBackingStore {
         })
     }
 
-    fn push_all(&mut self, entries: &[CultCacheEnvelope], _options: PushAllOptions) -> Result<()> {
+    fn push_all(&mut self, entries: &[CultCacheEnvelope], options: PushAllOptions) -> Result<()> {
         self.with_exclusive_lock(|| {
-            // A file it cannot read is written as before (a dangling link is replaced, R3; a
-            // directory is a typed write failure); only a stamp it can read is judged.
-            if let Ok(bytes) = fs::read(&self.path) {
-                self.refuse_unread_format(&bytes)?;
+            // A soft flush asks the one reader: nothing at the path is written, a store it reads is left alone, and anything
+            // the reader refuses (an unreadable file, a dangling link) is refused here as it is for open.
+            if options.soft && !self.read_store_unlocked()?.absent {
+                return Ok(());
             }
+
             let mut entries = entries.to_vec();
             entries.sort_by_key(entry_id);
             self.write_all_unlocked(&entries)
@@ -2667,6 +2778,7 @@ impl CultCache {
                 let Some(canonical_type) = resolve_registered_type(
                     &known_types,
                     &schema_name_definitions,
+                    entry.schema_id.as_deref(),
                     &entry.r#type,
                 ) else {
                     return Err(anyhow!(
@@ -3102,40 +3214,68 @@ fn now_utc_second() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-fn encode_store_snapshot(entries: &[CultCacheEnvelope]) -> Result<PersistedStoreSnapshot> {
-    let mut schema_types = BTreeMap::<String, String>::new();
+/// The catalog names each schema id once. An entry the file already holds is arrived, and its type is its schema's name;
+/// one the caller supplies is registered. Records of one tier under one id are one type. Across tiers a write may not
+/// retype what the file holds, unless the registered type owns the id (a registered type's id is its entry type): that is
+/// a rename under a stable id, and the registered type names the id.
+fn encode_store_snapshot(entries: &[CultCacheEnvelope], disk: &DiskStore) -> Result<PersistedStoreSnapshot> {
+    let arrived: BTreeMap<(String, String), &CultCacheEnvelope> = disk.envelopes.iter().map(|entry| (entry_id(entry), entry)).collect();
+    // Per schema id and tier: the type its records carry, and the key of the record that named it.
+    let mut schema_types = BTreeMap::<(String, bool), (String, String)>::new();
     for entry in entries {
         let schema_id = entry
             .schema_id
             .clone()
             .unwrap_or_else(|| entry.r#type.clone());
-        if let Some(existing_type) = schema_types.insert(schema_id.clone(), entry.r#type.clone()) {
-            ensure!(
-                existing_type == entry.r#type,
-                "CultCache schema {schema_id:?} cannot identify both {existing_type:?} and {:?}",
-                entry.r#type
-            );
+        let registered = arrived.get(&entry_id(entry)) != Some(&entry);
+        if let Some((existing_type, _)) = schema_types.insert((schema_id.clone(), registered), (entry.r#type.clone(), entry.key.clone())) {
+            if existing_type != entry.r#type {
+                return Err(anyhow::Error::new(SchemaConflictError {
+                    schema_id,
+                    schema_names: vec![existing_type, entry.r#type.clone()],
+                    record_key: entry.key.clone(),
+                }));
+            }
         }
     }
 
-    let catalog = schema_types
-        .into_iter()
-        .map(|(schema_id, document_type)| {
-            PersistedSchemaCatalogEntry(
-                schema_id.clone(),
-                document_type,
-                format!("{schema_id}.v1"),
-                schema_id.clone(),
-                format!(
-                    "{{\"schemaName\":\"{}\",\"schemaVersion\":\"{}.v1\",\"members\":[]}}",
-                    escape_json_string(&schema_id),
-                    escape_json_string(&schema_id)
-                ),
-                vec![schema_id],
-                Vec::new(),
-            )
-        })
+    let mut named = BTreeMap::<String, String>::new();
+    for ((schema_id, registered), (document_type, key)) in schema_types {
+        if !registered {
+            named.insert(schema_id, document_type);
+        } else if let Some(arrived_type) = named.insert(schema_id.clone(), document_type.clone())
+            && arrived_type != document_type
+            && schema_id != document_type
+        {
+            return Err(anyhow::Error::new(SchemaConflictError {
+                schema_id,
+                schema_names: vec![arrived_type, document_type],
+                record_key: key,
+            }));
+        }
+    }
+    // An entry the file holds for an id is written back as the file holds it: this runtime keeps no description of another
+    // runtime's schema, so it never replaces one. It describes an id itself only when the file has no entry for it, or when a
+    // registered type owns the id under another name (a rename, where the registered type names the id).
+    let owned: BTreeSet<&str> = entries
+        .iter()
+        .filter(|entry| entry.schema_id.as_deref().is_none_or(|schema_id| schema_id == entry.r#type))
+        .map(|entry| entry.r#type.as_str())
         .collect();
+    let mut catalog = BTreeMap::<String, PersistedSchemaCatalogEntry>::new();
+    for (schema_id, document_type) in named {
+        let held = disk
+            .catalog
+            .iter()
+            .find(|entry| entry.0 == schema_id)
+            .or_else(|| disk.catalog.iter().find(|entry| entry.5.contains(&schema_id)))
+            .filter(|entry| !owned.contains(schema_id.as_str()) || entry.1 == document_type);
+        let entry = match held {
+            Some(entry) => entry.clone(),
+            None => described(&schema_id, document_type),
+        };
+        catalog.entry(entry.0.clone()).or_insert(entry);
+    }
     let records = entries
         .iter()
         .map(|entry| {
@@ -3152,51 +3292,101 @@ fn encode_store_snapshot(entries: &[CultCacheEnvelope]) -> Result<PersistedStore
         .collect();
 
     Ok(PersistedStoreSnapshot(
-        STORE_FORMAT_V1.to_string(),
-        catalog,
+        disk.format.to_string(),
+        catalog.into_values().collect(),
         records,
     ))
 }
 
-/// Decodes a store whose header the caller has already read as [`STORE_FORMAT_V1`].
-fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
+/// The entry this runtime writes for a schema id it describes itself: its entry type is the id and the schema's name.
+fn described(schema_id: &str, document_type: String) -> PersistedSchemaCatalogEntry {
+    PersistedSchemaCatalogEntry(
+        schema_id.to_string(),
+        document_type,
+        format!("{schema_id}.v1"),
+        schema_id.to_string(),
+        format!(
+            "{{\"schemaName\":\"{}\",\"schemaVersion\":\"{}.v1\",\"members\":[]}}",
+            escape_json_string(schema_id),
+            escape_json_string(schema_id)
+        ),
+        vec![schema_id.to_string()],
+        Vec::new(),
+    )
+}
+
+fn readable_store_format(header: &str) -> Option<&'static str> {
+    match header {
+        STORE_FORMAT_V1 => Some(STORE_FORMAT_V1),
+        STORE_FORMAT_ELEMENT_IDS => Some(STORE_FORMAT_ELEMENT_IDS),
+        _ => None,
+    }
+}
+
+/// One store file's bytes, decoded: the header it carries (the one a rewrite keeps) and its envelopes. `header` is
+/// [`store_header`]'s first slot and the bytes are already proven one complete array. An array whose first slot is not a
+/// store header is the legacy envelope array.
+fn decode_store_file(bytes: &[u8], header: Option<&str>) -> Result<DiskStore> {
+    match header {
+        Some(header) => {
+            let format = readable_store_format(header)
+                .ok_or_else(|| anyhow!("the first slot is not a store header this runtime reads"))?;
+            let (envelopes, catalog) = decode_store_snapshot(bytes)?;
+            Ok(DiskStore { absent: false, format, envelopes, catalog })
+        }
+        None => Ok(DiskStore { absent: false, format: STORE_FORMAT_V1, envelopes: decode_legacy_envelopes(bytes)?, catalog: Vec::new() }),
+    }
+}
+
+/// What a store file holds, as its one reader decoded it: the header a rewrite keeps, its envelopes, and the catalog entries it
+/// publishes them by, which a rewrite lays back for the ids they name.
+struct DiskStore {
+    /// Nothing was at the path; the other fields describe an empty v1 store.
+    absent: bool,
+    format: &'static str,
+    envelopes: Vec<CultCacheEnvelope>,
+    catalog: Vec<PersistedSchemaCatalogEntry>,
+}
+
+impl DiskStore {
+    /// A file that is gone, or a dangling link a whole-file replace is about to replace: an empty v1 store.
+    fn absent() -> Self {
+        Self { absent: true, format: STORE_FORMAT_V1, envelopes: Vec::new(), catalog: Vec::new() }
+    }
+}
+
+/// The legacy envelope array: an array of envelope maps. Its acceptance is the one verdict on an array whose first slot
+/// is not a store header, for reading it and for replacing it.
+fn decode_legacy_envelopes(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
+    decode_grown(bytes).context("failed to decode legacy CultCache envelope array")
+}
+
+/// Decodes a store whose header the caller has already read as a readable one: its envelopes and its catalog.
+fn decode_store_snapshot(bytes: &[u8]) -> Result<(Vec<CultCacheEnvelope>, Vec<PersistedSchemaCatalogEntry>)> {
     let snapshot: PersistedStoreSnapshot =
         decode_grown(bytes).context("failed to decode CultCache v1 snapshot")?;
 
-    let catalog = snapshot
-        .1
-        .into_iter()
-        .map(|entry| (entry.0, entry.1))
-        .collect::<BTreeMap<_, _>>();
-    snapshot
+    // A schema id names the entry that has it as its own id; only an id no entry owns names the entry that lists it as compatible.
+    let mut catalog = BTreeMap::<String, String>::new();
+    for entry in &snapshot.1 {
+        catalog.entry(entry.0.clone()).or_insert_with(|| entry.1.clone());
+    }
+    for entry in &snapshot.1 {
+        for compatible in &entry.5 {
+            catalog.entry(compatible.clone()).or_insert_with(|| entry.1.clone());
+        }
+    }
+    let envelopes = snapshot
         .2
         .into_iter()
         .map(|record| {
             let r#type = match catalog.get(&record.1) {
                 Some(schema_name) => schema_name.clone(),
-                None => {
-                    // A record can outlive its catalog entry when another runtime
-                    // wrote it, or when the record is older than the catalog it
-                    // was stamped against. The payload is a MessagePack array
-                    // whose first field is the schema version, so the type can be
-                    // recovered from the record itself rather than failing the
-                    // whole snapshot.
-                    let schema_version =
-                        infer_schema_version_from_payload(&record.3).ok_or_else(|| {
-                            anyhow!(
-                                "CultCache record {:?} references missing schema {:?}",
-                                record.0,
-                                record.1
-                            )
-                        })?;
-                    infer_schema_name(&schema_version).ok_or_else(|| {
-                        anyhow!(
-                            "CultCache record {:?} references missing schema {:?}",
-                            record.0,
-                            record.1
-                        )
-                    })?
-                }
+                None => bail!(
+                    "CultCache record {:?} references schema {:?}, which the store's catalog does not publish",
+                    record.0,
+                    record.1
+                ),
             };
             Ok(CultCacheEnvelope {
                 key: record.0,
@@ -3206,84 +3396,30 @@ fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
                 schema_id: Some(record.1),
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    Ok((envelopes, snapshot.1))
 }
 
-/// A record recovered from its payload carries a schema name, while the
-/// registry is keyed by entry type. Accept either, so a snapshot whose catalog
-/// entry is gone still resolves to the registered definition.
+/// A record resolves by its schema id: a registered type's id is its entry type. The name its catalog carries is metadata,
+/// and names a type only when the id names none: the registry is keyed by entry type, and a store from a runtime with other
+/// schema ids can be read by the type or schema name it carries.
 fn resolve_registered_type(
     known_types: &BTreeSet<String>,
     schema_name_definitions: &BTreeMap<String, String>,
+    schema_id: Option<&str>,
     persisted_type: &str,
 ) -> Option<String> {
+    if let Some(schema_id) = schema_id
+        && known_types.contains(schema_id)
+    {
+        return Some(schema_id.to_string());
+    }
+
     if known_types.contains(persisted_type) {
         return Some(persisted_type.to_string());
     }
 
     schema_name_definitions.get(persisted_type).cloned()
-}
-
-fn infer_schema_version_from_payload(payload: &[u8]) -> Option<String> {
-    let mut offset = 0usize;
-    read_array_header(payload, &mut offset)?;
-    read_string(payload, &mut offset)
-}
-
-fn read_array_header(payload: &[u8], offset: &mut usize) -> Option<u32> {
-    let marker = *payload.get(*offset)?;
-    *offset += 1;
-    match marker {
-        0x90..=0x9f => Some((marker & 0x0f) as u32),
-        0xdc => {
-            let bytes = payload.get(*offset..(*offset + 2))?;
-            *offset += 2;
-            Some(u16::from_be_bytes([bytes[0], bytes[1]]) as u32)
-        }
-        0xdd => {
-            let bytes = payload.get(*offset..(*offset + 4))?;
-            *offset += 4;
-            Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-        }
-        _ => None,
-    }
-}
-
-fn read_string(payload: &[u8], offset: &mut usize) -> Option<String> {
-    let marker = *payload.get(*offset)?;
-    *offset += 1;
-    let length = match marker {
-        0xa0..=0xbf => (marker & 0x1f) as usize,
-        0xd9 => {
-            let length = *payload.get(*offset)? as usize;
-            *offset += 1;
-            length
-        }
-        0xda => {
-            let bytes = payload.get(*offset..(*offset + 2))?;
-            *offset += 2;
-            u16::from_be_bytes([bytes[0], bytes[1]]) as usize
-        }
-        0xdb => {
-            let bytes = payload.get(*offset..(*offset + 4))?;
-            *offset += 4;
-            u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize
-        }
-        _ => return None,
-    };
-
-    let bytes = payload.get(*offset..(*offset + length))?;
-    std::str::from_utf8(bytes).ok().map(str::to_string)
-}
-
-fn infer_schema_name(schema_version: &str) -> Option<String> {
-    let marker = schema_version.rfind(".v")?;
-    let version = schema_version.get((marker + 2)..)?;
-    if marker == 0 || version.is_empty() || !version.bytes().all(|value| value.is_ascii_digit()) {
-        return None;
-    }
-
-    Some(schema_version[..marker].to_string())
 }
 
 fn escape_json_string(value: &str) -> String {
@@ -3327,6 +3463,12 @@ fn release_lock<T>(lock: File, result: Result<T>) -> Result<T> {
         injected_write_fault(WriteStep::Unlock).and_then(|()| fs2::FileExt::unlock(&lock));
     drop(lock);
     result
+}
+
+fn io_not_found(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound))
 }
 
 /// True only when nothing is at `path`; a symbolic link, dangling or not, is something.
@@ -3379,7 +3521,7 @@ fn remove_abandoned_staging_files(destination: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn replace_file_atomically(staged: &Path, destination: &Path) -> Result<()> {
-    fs::rename(staged, destination).with_context(|| {
+    injected_write_fault(WriteStep::Rename).and_then(|()| fs::rename(staged, destination)).with_context(|| {
         format!(
             "failed to atomically replace {} with {}",
             destination.display(),
@@ -3394,6 +3536,8 @@ fn replace_file_atomically(staged: &Path, destination: &Path) -> Result<()> {
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
+
+    injected_write_fault(WriteStep::Rename).context("failed to atomically replace the store")?;
 
     let staged_wide = staged
         .as_os_str()
@@ -3495,6 +3639,7 @@ fn sync_parent_directory(path: &Path) -> Result<()> {
 #[allow(dead_code)]
 enum WriteStep {
     StagingSync,
+    Rename,
     DirectorySync,
     Unlock,
 }
@@ -5033,7 +5178,7 @@ mod tests {
     }
 
     #[test]
-    fn messagepack_store_recovers_schema_stamped_records_missing_catalog_entries() -> Result<()> {
+    fn messagepack_store_refuses_a_record_whose_schema_the_catalog_does_not_publish() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let store_path = temp.path().join("missing-catalog.msgpack");
         let expected = SchemaStamped {
@@ -5041,8 +5186,7 @@ mod tests {
             name: "schema-stamped".to_string(),
             value: "still readable".to_string(),
         };
-        // An empty catalog with a stale schema id is what a record written by
-        // another runtime, or one older than its catalog, looks like on disk.
+        // An empty catalog with a stale schema id.
         let snapshot = PersistedStoreSnapshot(
             "cultcache.store.v1".to_string(),
             Vec::new(),
@@ -5058,15 +5202,9 @@ mod tests {
         let mut cache = CultCache::new();
         cache.register_entry_type::<SchemaStamped>()?;
         cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
-        cache.pull_all_backing_stores()?;
-
-        assert_eq!(cache.get_required::<SchemaStamped>("record-1")?, expected);
-        assert_eq!(
-            cache
-                .get_required_envelope::<SchemaStamped>("record-1")?
-                .schema_id,
-            Some("sha256:stale-schema-id-from-cold-record".to_string())
-        );
+        // The payload opens with a schema version, and the catalog is the store's own description: no recovery.
+        let error = cache.pull_all_backing_stores().unwrap_err();
+        assert!(error.downcast_ref::<CultCacheStoreUnreadable>().is_some(), "{error:#}");
         Ok(())
     }
 
@@ -5350,6 +5488,243 @@ mod tests {
         Ok(())
     }
 
+    // The element-id marker: tests/vectors/document-variants-c2a/v3-base.msgpack is v1-base with its header replaced.
+    fn header_after_rewrite(vector: &str) -> Result<String> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.msgpack");
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/vectors")
+            .join(vector);
+        std::fs::copy(source, &path)?;
+        let mut store = SingleFileMessagePackBackingStore::new(&path);
+        let envelopes = store.pull_all()?;
+        let keys: Vec<_> = envelopes.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(keys, vec!["alpha", "beta"]);
+        store.push(&envelopes[0])?;
+        Ok(store_header(&std::fs::read(&path)?).first.expect("a store header"))
+    }
+
+    #[test]
+    fn a_v3_element_id_store_reads_and_a_rewrite_keeps_the_marker() -> Result<()> {
+        assert_eq!(
+            header_after_rewrite("document-variants-c2a/v3-base.msgpack")?,
+            "cultcache.store.v3"
+        );
+        Ok(())
+    }
+
+    // A whole-store flush reads the header the file carries first: one it cannot read refuses, and the file is untouched.
+    #[test]
+    fn push_all_refuses_a_store_whose_header_it_cannot_read_and_leaves_it_untouched() -> Result<()> {
+        for vector in [
+            "document-variants-c0/unknown-header.msgpack",
+            "document-variants-c0/variant-v2.msgpack",
+            "document-variants-c1/variant-store.msgpack",
+        ] {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.msgpack");
+            let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/vectors").join(vector);
+            std::fs::copy(source, &path)?;
+            let before = std::fs::read(&path)?;
+            let mut store = SingleFileMessagePackBackingStore::new(&path);
+            let error = store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default()).unwrap_err();
+            assert_eq!(unreadable_kind(&error), Some(CultCacheStoreUnreadableKind::UnsupportedFormat), "{vector}: {error:#}");
+            assert_eq!(std::fs::read(&path)?, before, "{vector} was rewritten");
+        }
+        Ok(())
+    }
+
+    // The header is read by the one snapshot reader, whatever string encoding carries it.
+    #[test]
+    fn push_all_refuses_a_header_it_cannot_read_however_the_string_is_encoded() -> Result<()> {
+        let long = format!("cultcache.store.v9.{}", "x".repeat(90));
+        let mut str16 = vec![0x93, 0xda, 0x00, 18];
+        str16.extend_from_slice(b"cultcache.store.v9");
+        str16.extend_from_slice(&[0x90, 0x90]);
+        let mut str8 = vec![0x93, 0xd9, long.len() as u8];
+        str8.extend_from_slice(long.as_bytes());
+        str8.extend_from_slice(&[0x90, 0x90]);
+        for (name, bytes) in [("str16", str16), ("str8 over 90 bytes", str8)] {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.msgpack");
+            std::fs::write(&path, &bytes)?;
+            let mut store = SingleFileMessagePackBackingStore::new(&path);
+            let error = store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default()).unwrap_err();
+            assert_eq!(unreadable_kind(&error), Some(CultCacheStoreUnreadableKind::UnsupportedFormat), "{name}: {error:#}");
+            assert_eq!(std::fs::read(&path)?, bytes, "{name} was rewritten");
+        }
+        Ok(())
+    }
+
+
+    // A file is replaced by a rewrite exactly when this runtime's own reader opens it: one verdict per file, asked by open,
+    // push_all and push alike. The bytes and every runtime's verdict are tests/vectors/document-variants-c2a/readability.
+    // A refusal is a CultCacheStoreUnreadable, and a replaced file carries the header its old content decides.
+    #[test]
+    fn a_file_is_replaced_exactly_when_it_reads() -> Result<()> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/vectors/document-variants-c2a/readability");
+        let manifest = std::fs::read_to_string(root.join("manifest.txt"))?;
+        let mut listed = Vec::new();
+        for line in manifest.lines().filter(|line| !line.is_empty() && !line.starts_with('#')) {
+            let cells: Vec<&str> = line.split_whitespace().collect();
+            let (vector, reads) = (cells[0], cells[2] == "reads");
+            if !vector.starts_with("..") {
+                listed.push(vector.to_string());
+            }
+            let bytes = std::fs::read(root.join(vector))?;
+            // A v3 store keeps its marker through a rewrite; every other file that reads is written v1.
+            let header = if vector.contains("v3") { "cultcache.store.v3" } else { STORE_FORMAT_V1 };
+            for operation in ["open", "soft_push_all", "push_all", "push"] {
+                let temp = tempfile::tempdir()?;
+                let path = temp.path().join("store.msgpack");
+                std::fs::write(&path, &bytes)?;
+                let mut store = SingleFileMessagePackBackingStore::new(&path);
+                let outcome = match operation {
+                    "open" => store.pull_all().map(|_| ()),
+                    "soft_push_all" => store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions { soft: true }),
+                    "push_all" => store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default()),
+                    _ => store.push(&snapshot_envelope("x", b"one")),
+                };
+                let what = format!("{vector} {operation}");
+                assert_eq!(outcome.is_ok(), reads, "{what}: {outcome:?}");
+                if operation == "soft_push_all" && reads {
+                    // A soft flush leaves a store it reads byte for byte.
+                    assert_eq!(std::fs::read(&path)?, bytes, "{what} rewrote a store it reads");
+                    continue;
+                }
+                if !reads {
+                    let error = outcome.unwrap_err();
+                    let expected = if vector == "header-v9.bin" {
+                        CultCacheStoreUnreadableKind::UnsupportedFormat
+                    } else {
+                        CultCacheStoreUnreadableKind::Undecodable
+                    };
+                    assert_eq!(unreadable_kind(&error), Some(expected), "{what}: {error:#}");
+                    assert!(io_error_in(&error).is_none(), "{what}: a refusal is not an I/O failure: {error:#}");
+                    assert_eq!(std::fs::read(&path)?, bytes, "{what} rewrote a file it cannot read");
+                } else if operation != "open" {
+                    assert_eq!(store_header(&std::fs::read(&path)?).first.as_deref(), Some(header), "{what}");
+                    assert!(store.pull_all()?.iter().any(|entry| entry.key == "x"), "{what}");
+                }
+            }
+        }
+        // Every vector in the folder has a manifest row.
+        let mut files: Vec<String> = std::fs::read_dir(&root)?
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| name.ends_with(".bin"))
+            .collect();
+        files.sort();
+        listed.sort();
+        assert_eq!(listed, files);
+        Ok(())
+    }
+
+    // An id one entry owns and a later entry lists as compatible names the entry that owns it.
+    #[test]
+    fn an_id_an_entry_owns_names_that_entry_not_one_that_lists_it_as_compatible() -> Result<()> {
+        for vector in ["own-id-over-compatible-v3.bin", "compatible-before-owner-v3.bin"] {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.msgpack");
+            std::fs::copy(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/vectors/document-variants-c2a/readability")
+                    .join(vector),
+                &path,
+            )?;
+            let envelopes = SingleFileMessagePackBackingStore::new(&path).pull_all()?;
+            assert_eq!(envelopes.len(), 2, "{vector}");
+            assert!(envelopes.iter().all(|envelope| envelope.r#type == "vectors.item"), "{vector}: {envelopes:?}");
+        }
+        Ok(())
+    }
+
+    // Records of different types under one schema id cannot be described by one catalog entry: the write is refused, typed, in
+    // either order, and the file is left as it was. A rename with a stable id (same type name in the new schema) writes fine.
+    #[test]
+    fn records_of_different_types_under_one_schema_id_refuse_the_write_typed() -> Result<()> {
+        let record = |key: &str, r#type: &str| CultCacheEnvelope {
+            key: key.into(),
+            r#type: r#type.into(),
+            payload: b"one".to_vec(),
+            stored_at: "2026-09-30T00:00:00Z".into(),
+            schema_id: Some("tests.x".into()),
+        };
+        for order in [vec![record("a", "tests.n"), record("b", "tests.m")], vec![record("b", "tests.m"), record("a", "tests.n")]] {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.msgpack");
+            let mut store = SingleFileMessagePackBackingStore::new(&path);
+            let error = store.push_all(&order, PushAllOptions::default()).unwrap_err();
+            let conflict = error.downcast_ref::<SchemaConflictError>().unwrap_or_else(|| panic!("{error:#}"));
+            assert_eq!(conflict.schema_id, "tests.x");
+            let mut names = conflict.schema_names.clone();
+            names.sort();
+            assert_eq!(names, vec!["tests.m".to_string(), "tests.n".to_string()]);
+            assert!(conflict.record_key == "a" || conflict.record_key == "b");
+            assert!(!path.exists(), "nothing is written");
+        }
+        Ok(())
+    }
+
+    // Another runtime's catalog entry survives this runtime's writes: a write of any record lays back, byte for byte, the entry the
+    // file holds for an id this runtime does not own. This one carries what a C# writer publishes (a version, a content hash,
+    // canonical JSON, members), none of which this runtime could describe. Whole-store writes and single pushes alike.
+    #[test]
+    fn a_write_lays_back_the_catalog_entry_the_file_holds_for_an_id_it_does_not_own() -> Result<()> {
+        let held = PersistedSchemaCatalogEntry(
+            "sha256:csharp".into(),
+            "tests.note".into(),
+            "tests.note_v7".into(),
+            "sha256:content".into(),
+            "{\"schemaName\":\"tests.note\"}".into(),
+            vec!["sha256:csharp".into()],
+            vec![PersistedSchemaCatalogMember(0, "Title".into(), "System.String".into(), false, false, None, true, Some("title".into()))],
+        );
+        let own = CultCacheEnvelope {
+            key: "b".into(),
+            r#type: "tests.other".into(),
+            payload: b"two".to_vec(),
+            stored_at: "2026-09-30T00:00:00Z".into(),
+            schema_id: Some("tests.other".into()),
+        };
+        // An older entry that lists the id: the entry that owns the id is the one laid back.
+        let lister = PersistedSchemaCatalogEntry(
+            "sha256:older".into(),
+            "tests.note".into(),
+            "tests.note_v6".into(),
+            "sha256:older".into(),
+            String::new(),
+            vec!["sha256:older".into(), "sha256:csharp".into()],
+            Vec::new(),
+        );
+        for whole_store in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.msgpack");
+            let record = PersistedRecord("a".into(), "sha256:csharp".into(), "2026-09-30T00:00:00Z".into(), b"one".to_vec());
+            std::fs::write(
+                &path,
+                rmp_serde::to_vec(&PersistedStoreSnapshot("cultcache.store.v1".into(), vec![lister.clone(), held.clone()], vec![record]))?,
+            )?;
+            let mut store = SingleFileMessagePackBackingStore::new(&path);
+            if whole_store {
+                // As a Rust cache holds it after a pull: under the registered type that reads the schema by name.
+                let mut entries = store.pull_all()?;
+                for entry in &mut entries {
+                    entry.r#type = "tests.rust_note".into();
+                }
+                entries.push(own.clone());
+                store.push_all(&entries, PushAllOptions::default())?;
+            } else {
+                store.push(&own)?;
+            }
+
+            let written: PersistedStoreSnapshot = rmp_serde::from_slice(&std::fs::read(&path)?)?;
+            let entry = written.1.iter().find(|entry| entry.0 == "sha256:csharp").expect("the entry for the id is written");
+            assert_eq!(rmp_serde::to_vec(entry)?, rmp_serde::to_vec(&held)?, "whole store: {whole_store}");
+            assert!(written.1.iter().any(|entry| entry.0 == "tests.other"), "its own id is described");
+        }
+        Ok(())
+    }
+
     // Store read and write faults: what a consumer can tell apart, and what a failed
     // write leaves on disk.
 
@@ -5453,41 +5828,6 @@ mod tests {
         assert_eq!(fs::read(&path)?, truncated);
         Ok(())
     }
-
-    #[test]
-    fn push_all_refuses_a_store_in_a_format_this_runtime_does_not_read_and_leaves_it() -> Result<()> {
-        let vector = fs::read(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/vectors/document-variants-c2a/v3-base.msgpack"),
-        )?;
-        let entry = CultCacheEnvelope {
-            key: "probe".into(),
-            r#type: "probe".into(),
-            payload: vec![0x80],
-            stored_at: "2026-10-22T00:00:00Z".into(),
-            schema_id: None,
-        };
-        // A newer store whole, and cut short after its header: the header alone is judged.
-        for bytes in [&vector[..], &vector[..vector.len() / 2]] {
-            let temp = tempfile::tempdir()?;
-            let path = temp.path().join("store.msgpack");
-            fs::write(&path, bytes)?;
-            let error = SingleFileMessagePackBackingStore::new(&path)
-                .push_all(std::slice::from_ref(&entry), PushAllOptions::default())
-                .unwrap_err();
-            assert_eq!(unreadable_kind(&error), Some(CultCacheStoreUnreadableKind::UnsupportedFormat), "{error:#}");
-            assert!(format!("{error:#}").contains("cultcache.store.v3"), "{error:#}");
-            assert_eq!(fs::read(&path)?, bytes);
-        }
-        // A file with no readable stamp is not a newer store: a whole write still heals it.
-        let temp = tempfile::tempdir()?;
-        let path = temp.path().join("store.msgpack");
-        fs::write(&path, [0x93u8, 0xa0])?;
-        let mut store = SingleFileMessagePackBackingStore::new(&path);
-        store.push_all(std::slice::from_ref(&entry), PushAllOptions::default())?;
-        assert_eq!(store.pull_all()?.len(), 1);
-        Ok(())
-    }
-
 
     #[test]
     fn a_store_that_cannot_be_read_is_an_io_error_and_never_unreadable() -> Result<()> {
@@ -5658,6 +5998,141 @@ mod tests {
         Ok(())
     }
 
+    fn store_file(path: &std::path::Path, catalog: &[(&str, &str)], records: &[(&str, &str, Vec<u8>)]) -> Result<()> {
+        let snapshot = PersistedStoreSnapshot(
+            "cultcache.store.v1".to_string(),
+            catalog
+                .iter()
+                .map(|(id, name)| {
+                    PersistedSchemaCatalogEntry(
+                        id.to_string(),
+                        name.to_string(),
+                        format!("{name}.v1"),
+                        id.to_string(),
+                        String::new(),
+                        vec![id.to_string()],
+                        Vec::new(),
+                    )
+                })
+                .collect(),
+            records
+                .iter()
+                .map(|(key, id, payload)| {
+                    PersistedRecord(key.to_string(), id.to_string(), "2026-09-30T00:00:00Z".to_string(), payload.clone())
+                })
+                .collect(),
+        );
+        std::fs::write(path, rmp_serde::to_vec(&snapshot)?)?;
+        Ok(())
+    }
+
+    // A schema renamed under a stable id: a registered type owns its id (its id is its entry type), so a write of it onto a file
+    // whose entry carries the old name is not a conflict. Every record under the id, the file's and the write's, is then described
+    // by the registered name. A write of another type under that id retypes what the file holds, and is refused.
+    #[test]
+    fn a_schema_renamed_under_a_stable_id_is_written_under_the_registered_name() -> Result<()> {
+        let envelope = |r#type: &str, schema_id: &str| CultCacheEnvelope {
+            key: "b".into(),
+            r#type: r#type.into(),
+            payload: b"two".to_vec(),
+            stored_at: "2026-09-30T00:00:00Z".into(),
+            schema_id: Some(schema_id.into()),
+        };
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.msgpack");
+        store_file(&path, &[("t.s", "t.old")], &[("a", "t.s", b"one".to_vec())])?;
+        SingleFileMessagePackBackingStore::new(&path).push(&envelope("t.s", "t.s"))?;
+
+        let mut envelopes = SingleFileMessagePackBackingStore::new(&path).pull_all()?;
+        envelopes.sort_by(|left, right| left.key.cmp(&right.key));
+        assert_eq!(
+            envelopes.iter().map(|entry| (entry.key.as_str(), entry.r#type.as_str())).collect::<Vec<_>>(),
+            vec![("a", "t.s"), ("b", "t.s")]
+        );
+
+        store_file(&path, &[("t.s", "t.old")], &[("a", "t.s", b"one".to_vec())])?;
+        let before = std::fs::read(&path)?;
+        let error = SingleFileMessagePackBackingStore::new(&path).push(&envelope("t.new", "t.s")).unwrap_err();
+        let conflict = error.downcast_ref::<SchemaConflictError>().unwrap_or_else(|| panic!("{error:#}"));
+        assert_eq!(conflict.schema_id, "t.s");
+        assert_eq!(conflict.record_key, "b");
+        assert_eq!(std::fs::read(&path)?, before, "the file is left as it was");
+        Ok(())
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+    #[cultcache(type = "tests.stable", schema = "tests.old_name")]
+    struct StableId {
+        #[cultcache(key = 0)]
+        name: String,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+    #[cultcache(type = "tests.other", schema = "tests.other_name")]
+    struct OtherId {
+        #[cultcache(key = 0)]
+        name: String,
+    }
+
+    // A record resolves to a registered type by its schema id, never by the name its catalog entry carries: a schema renamed under a
+    // stable id opens, and an id that names one type is not overruled by a name that names another.
+    #[test]
+    fn a_schema_renamed_under_a_stable_id_opens_by_its_id() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.msgpack");
+        store_file(&path, &[("tests.stable", "tests.renamed")], &[("a", "tests.stable", rmp_serde::to_vec(&StableId { name: "a".into() })?)])?;
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<StableId>()?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+        cache.pull_all_backing_stores()?;
+        assert_eq!(cache.get_required::<StableId>("a")?.name, "a");
+        Ok(())
+    }
+
+    #[test]
+    fn a_schema_id_that_names_one_type_is_not_overruled_by_a_name_that_names_another() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.msgpack");
+        // The entry that publishes the id carries the other type's name.
+        store_file(&path, &[("tests.other", "tests.stable")], &[("k", "tests.other", rmp_serde::to_vec(&OtherId { name: "k".into() })?)])?;
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<StableId>()?;
+        cache.register_entry_type::<OtherId>()?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+        cache.pull_all_backing_stores()?;
+        assert_eq!(cache.get_required::<OtherId>("k")?.name, "k");
+        assert!(cache.get::<StableId>("k")?.is_none());
+        Ok(())
+    }
+
+    // A store cut short is refused whatever its version, and left as it is.
+    #[test]
+    fn a_truncated_v1_or_v2_store_is_refused_on_open_and_rewrite() -> Result<()> {
+        for vector in [
+            "document-variants-c0/v1-base.msgpack",
+            "document-variants-c0/variant-v2.msgpack",
+            "document-variants-c1/variant-store.msgpack",
+        ] {
+            let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/vectors").join(vector);
+            let whole = std::fs::read(source)?;
+            let cut = &whole[..whole.len() - 1];
+            for operation in ["open", "push_all"] {
+                let temp = tempfile::tempdir()?;
+                let path = temp.path().join("store.msgpack");
+                std::fs::write(&path, cut)?;
+                let mut store = SingleFileMessagePackBackingStore::new(&path);
+                let outcome = match operation {
+                    "open" => store.pull_all().map(|_| ()),
+                    _ => store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default()),
+                };
+                let error = outcome.expect_err(&format!("{vector} {operation}"));
+                assert!(unreadable_kind(&error).is_some(), "{vector} {operation}: {error:#}");
+                assert_eq!(std::fs::read(&path)?, cut, "{vector} {operation} rewrote a truncated store");
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn refusals_say_what_was_found_without_blaming_variants() {
         let unsupported = format!("{:#}", pull_vector("unknown-header.msgpack").unwrap_err());
@@ -5673,11 +6148,10 @@ mod tests {
         assert!(!invalid.contains("runtime that"), "{invalid}");
     }
 
-    /// The store path is a directory, so the staging file is written and synced and
-    /// then cannot be renamed over it: a failure after the write, reached without
-    /// permissions.
+    /// The store path is a directory, so the one reader cannot reach a store there: the write stops at the read, as an
+    /// I/O error and not a write failure, before any staging file exists.
     #[test]
-    fn a_write_that_fails_at_the_rename_leaves_no_staging_file() -> Result<()> {
+    fn a_write_over_a_directory_stops_at_the_read_and_leaves_no_staging_file() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("store.cc");
         fs::create_dir(&path)?;
@@ -5687,7 +6161,7 @@ mod tests {
         let error = store
             .push_all(&[snapshot_envelope("alpha", b"1")], PushAllOptions::default())
             .unwrap_err();
-        assert!(format!("{error:#}").contains("failed to atomically replace"), "{error:#}");
+        assert!(io_error_in(&error).is_some() && write_failure_kind(&error).is_none(), "{error:#}");
 
         let staging: Vec<_> = fs::read_dir(temp.path())?
             .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
@@ -5737,6 +6211,15 @@ mod tests {
     }
 
     #[test]
+    fn a_rewrite_of_a_v1_store_stays_v1() -> Result<()> {
+        assert_eq!(
+            header_after_rewrite("document-variants-c0/v1-base.msgpack")?,
+            "cultcache.store.v1"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn a_header_is_echoed_only_in_the_known_shape() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("store.cc");
@@ -5746,6 +6229,8 @@ mod tests {
             ("cultcache.store.SECRET-HEADER", false),
             ("cultcache.store.v12SECRET", false),
             ("cultcache.store.v", false),
+            // Digits are ASCII only: Arabic-Indic digits are not the known shape.
+            ("cultcache.store.v١٢", false),
         ] {
             let mut bytes = vec![0x93];
             bytes.extend(fixstr(header));
@@ -5754,6 +6239,9 @@ mod tests {
             let error = store.pull_all().unwrap_err();
             let text = format!("{error:#}");
             assert_eq!(unreadable_kind(&error), Some(CultCacheStoreUnreadableKind::UnsupportedFormat), "{text}");
+            // The refusal names every format this runtime reads.
+            assert!(text.contains("\"cultcache.store.v1\""), "{text}");
+            assert!(text.contains("\"cultcache.store.v3\""), "{text}");
             if echoed {
                 assert!(text.contains(&format!("\"{header}\"")), "{text}");
             } else {
@@ -5781,6 +6269,21 @@ mod tests {
             let error = result.expect_err("a dangling link must not read as an empty store");
             assert!(io_error_in(&error).is_some(), "{error:#}");
             assert_eq!(unreadable_kind(&error), None, "{error:#}");
+        }
+        // Every merging writer refuses on its own read, so none can replace the link.
+        let mut writer = SingleFileMessagePackBackingStore::new(&path);
+        let delta = snapshot_envelope("delta", b"4");
+        let writes = [
+            writer.push(&delta),
+            writer.delete(&delta),
+            writer.insert_entry_if_absent(delta.clone()).map(|_| ()),
+            writer.compare_and_swap_batch(&[], vec![delta.clone()]).map(|_| ()),
+            writer.append_if_snapshot_unchanged(&[], vec![delta.clone()]).map(|_| ()),
+        ];
+        for (index, result) in writes.into_iter().enumerate() {
+            let error = result.expect_err("a merging write through a dangling link must refuse");
+            assert!(io_error_in(&error).is_some(), "write {index}: {error:#}");
+            assert_eq!(write_failure_kind(&error), None, "write {index}: {error:#}");
         }
         assert!(fs::symlink_metadata(&path)?.file_type().is_symlink());
         assert!(!target.exists());
@@ -5817,15 +6320,43 @@ mod tests {
         assert_eq!(fs::read(&path)?, before);
         assert_eq!(fs::read_dir(temp.path())?.count(), 2, "only the store and its lock remain");
 
-        // The rename fails when the store path is a directory.
+        // A store path that is a directory is refused at the read: an I/O error, not a write failure.
         let blocked = temp.path().join("blocked.cc");
         fs::create_dir(&blocked)?;
         let mut blocked_store = SingleFileMessagePackBackingStore::new(&blocked);
         let error = blocked_store
             .push_all(&[snapshot_envelope("alpha", b"1")], PushAllOptions::default())
             .unwrap_err();
-        assert_eq!(write_failure_kind(&error), Some(CultCacheStoreWriteFailedKind::NotReplaced), "{error:#}");
+        assert!(io_error_in(&error).is_some() && write_failure_kind(&error).is_none(), "{error:#}");
         assert!(fs::metadata(&blocked)?.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn a_write_whose_rename_fails_is_not_replaced_and_leaves_no_staging_file() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        let (mut store, before) = written_store(&path)?;
+        let replacement = [snapshot_envelope("delta", b"4")];
+
+        let error = with_write_fault(WriteStep::Rename, || {
+            store.compare_exchange_snapshot(&store.pull_all().unwrap(), &replacement)
+        })
+        .expect_err("a rename that failed is not a write that landed");
+        assert_eq!(write_failure_kind(&error), Some(CultCacheStoreWriteFailedKind::NotReplaced), "{error:#}");
+        assert!(io_error_in(&error).is_some(), "{error:#}");
+        assert_eq!(fs::read(&path)?, before, "the store is as it was");
+        assert_eq!(fs::read_dir(temp.path())?.count(), 2, "only the store and its lock remain: no staging file");
+
+        let error = with_write_fault(WriteStep::Rename, || store.push(&replacement[0]))
+            .expect_err("a push whose rename failed is not a push that landed");
+        assert_eq!(write_failure_kind(&error), Some(CultCacheStoreWriteFailedKind::NotReplaced), "{error:#}");
+        assert_eq!(fs::read(&path)?, before);
+        assert_eq!(fs::read_dir(temp.path())?.count(), 2, "only the store and its lock remain: no staging file");
+
+        // The failure left nothing behind that stops the next write.
+        store.push(&replacement[0])?;
+        assert!(store.pull_all()?.contains(&replacement[0]));
         Ok(())
     }
 
@@ -5908,6 +6439,34 @@ mod tests {
         SingleFileMessagePackBackingStore::new(&link).push(&snapshot_envelope("b", b"2"))?;
         assert!(fs::symlink_metadata(&link)?.file_type().is_file(), "the link was replaced by a regular file");
         assert_eq!(fs::read(&target)?, before, "the store the link pointed to is unchanged");
+        Ok(())
+    }
+
+    // The two cases the vectors cannot hold: nothing at the path is written, and a dangling link is refused and left as it is.
+    #[test]
+    fn a_soft_push_all_writes_where_nothing_is_and_refuses_a_dangling_link() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        SingleFileMessagePackBackingStore::new(&path).push_all(&[snapshot_envelope("a", b"1")], PushAllOptions { soft: true })?;
+        let seeded = fs::read(&path)?;
+        let mut store = SingleFileMessagePackBackingStore::new(&path);
+        assert_eq!(store.pull_all()?.len(), 1);
+        store.push_all(&[snapshot_envelope("b", b"2")], PushAllOptions { soft: true })?;
+        assert_eq!(fs::read(&path)?, seeded, "a soft flush over a store it reads wrote");
+
+        #[cfg(unix)]
+        {
+            let volume = temp.path().join("volume");
+            fs::create_dir(&volume)?;
+            let link = temp.path().join("dangling.cc");
+            std::os::unix::fs::symlink(volume.join("store.cc"), &link)?;
+            let error = SingleFileMessagePackBackingStore::new(&link)
+                .push_all(&[snapshot_envelope("a", b"1")], PushAllOptions { soft: true })
+                .unwrap_err();
+            assert!(io_not_found(&error), "{error:#}");
+            assert!(fs::symlink_metadata(&link)?.file_type().is_symlink(), "the link was replaced");
+            assert_eq!(fs::read_dir(&volume)?.count(), 0, "nothing reached the link's volume");
+        }
         Ok(())
     }
 

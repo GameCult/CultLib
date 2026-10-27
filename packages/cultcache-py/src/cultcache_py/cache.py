@@ -7,6 +7,7 @@ from typing import Any, Callable, Generic, TypeVar
 
 from .backing_store import BackingStore, CultCacheEnvelope
 from .documents import DocumentDefinition, extract_value
+from .stores import SchemaConflictError
 
 T = TypeVar("T")
 F = TypeVar("F", bound=Callable[..., Any])
@@ -138,11 +139,28 @@ class CultCache:
         self._register_document_type(document)
 
     def _register_document_type(self, document: DocumentDefinition[Any]) -> None:
+        # Every registration refusal is a SchemaConflictError naming the new document's schema id and both schema names.
+        entry = document.catalog_entry()
+        schema_name = entry.schema_name
+
+        def refuse(registered: DocumentDefinition[Any], what: str) -> SchemaConflictError:
+            return SchemaConflictError(
+                entry.schema_id,
+                [registered.catalog_entry().schema_name, schema_name],
+                "",
+                message=f"{what} is already registered to document type {registered.type!r} and cannot also be claimed by "
+                f"{document.type!r}.",
+            )
+
         if document.type in self._state.documents:
-            raise CultCacheError(f"Document type already registered: {document.type}")
-        schema_name = document.catalog_entry().schema_name
+            raise refuse(self._state.documents[document.type], f"Document type {document.type!r}")
         if schema_name in self._state.documents_by_schema_name:
-            raise CultCacheError(f"Document schema name already registered: {schema_name}")
+            raise refuse(self._state.documents_by_schema_name[schema_name], f"Schema name {schema_name!r}")
+        # One document owns each schema id. Others may list it as compatible beside its owner: a record under the id resolves to
+        # its owner, and to a lister only when nothing owns it. Neither depends on the order documents were registered in.
+        for registered in self._state.documents.values():
+            if registered.catalog_entry().schema_id == entry.schema_id:
+                raise refuse(registered, f"Schema id {entry.schema_id!r}")
         name_extractors = dict(self._state.name_extractors)
         index_extractors = {type: dict(indexes) for type, indexes in self._state.index_extractors.items()}
         if document.name is not None:
@@ -280,6 +298,7 @@ class CultCache:
                     if envelope.key != GLOBAL_KEY:
                         loaded_legacy_global_keys[envelope.type] = envelope.key
                         envelope = replace(envelope, key=GLOBAL_KEY)
+                envelope = self._stamped(document, envelope)
                 value = document.decode_payload(envelope.payload)
                 loaded_values.setdefault(envelope.type, {})[envelope.key] = value
                 loaded_envelopes.setdefault(envelope.type, {})[envelope.key] = envelope
@@ -372,6 +391,7 @@ class CultCache:
     def put_envelope(self, document: DocumentDefinition[T], envelope: CultCacheEnvelope) -> T:
         self._assert_registered(document)
         self._check_envelope(document, envelope)
+        envelope = self._stamped(document, envelope)
         value = document.decode_payload(envelope.payload)
         self._write(document, [(envelope, value)], batch=False)
         return value
@@ -380,11 +400,20 @@ class CultCache:
     def put_envelopes(self, document: DocumentDefinition[T], envelopes: list[CultCacheEnvelope]) -> list[T]:
         self._assert_registered(document)
         values: list[T] = []
+        stamped: list[CultCacheEnvelope] = []
         for envelope in envelopes:
             self._check_envelope(document, envelope)
+            stamped.append(self._stamped(document, envelope))
             values.append(document.decode_payload(envelope.payload))
-        self._write(document, list(zip(envelopes, values)), batch=True)
+        self._write(document, list(zip(stamped, values)), batch=True)
         return values
+
+    @staticmethod
+    def _stamped(document: DocumentDefinition[Any], envelope: CultCacheEnvelope) -> CultCacheEnvelope:
+        """The record under its registered schema's id, whatever id the envelope arrived under, so the catalog entry a store
+        writes is the one its schema id names."""
+        entry = document.catalog_entry()
+        return replace(envelope, schema_id=entry.schema_id, catalog_entry=entry)
 
     @staticmethod
     def _check_envelope(document: DocumentDefinition[Any], envelope: CultCacheEnvelope) -> None:
@@ -581,6 +610,27 @@ class CultCache:
             raise CultCacheError(f"Document type is not global: {document.type}")
 
     def _resolve_document_for_envelope(self, envelope: CultCacheEnvelope) -> DocumentDefinition[Any] | None:
+        """A record resolves by its schema id: the document that owns the id, else the one document that lists it as compatible.
+        Several listers and no owner name no single document, and the record is refused. The name its catalog carries is
+        metadata; it names a document only when the id names none (a store from a runtime whose schema ids this one cannot
+        know)."""
+        if envelope.schema_id:
+            entries = [(document, document.catalog_entry()) for document in self._state.documents.values()]
+            for document, entry in entries:
+                if entry.schema_id == envelope.schema_id:
+                    return document
+            listers = [document for document, entry in entries if envelope.schema_id in entry.compatible_schema_ids]
+            if len(listers) > 1:
+                raise SchemaConflictError(
+                    envelope.schema_id,
+                    sorted(document.catalog_entry().schema_name for document in listers),
+                    envelope.key,
+                    message=f"Schema id {envelope.schema_id!r} of record {envelope.key!r} is owned by no registered document and "
+                    f"declared compatible by several ({', '.join(sorted(document.type for document in listers))}), so it resolves "
+                    "to none. Register the document that owns the id, or declare it on one document.",
+                )
+            if listers:
+                return listers[0]
         document = self._state.documents.get(envelope.type)
         if document is not None:
             return document

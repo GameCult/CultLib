@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -37,11 +38,23 @@ public static class CultDocumentMessagePackSerialization
     private const int SchemaCatalogMemberFieldCount = 8;
     private const int StoreSnapshotFieldCount = 3;
 
-    public static readonly MessagePackSerializerOptions Options = Compose(Array.Empty<IFormatterResolver>());
+    private static readonly (MessagePackSerializerOptions Options, IFormatterResolver[] Ahead) Plain = Compose(Array.Empty<IFormatterResolver>());
 
-    private static readonly ConcurrentDictionary<Assembly, MessagePackSerializerOptions> AssemblyOptions = new();
+    public static readonly MessagePackSerializerOptions Options = Plain.Options;
 
-    public static MessagePackSerializerOptions OptionsFor(Assembly documentAssembly)
+    // Per assembly: the options a document type's bytes are written with, and the resolvers composed ahead of
+    // StandardResolver, the ones that can claim a type before its [Key] layout does.
+    private static readonly ConcurrentDictionary<Assembly, (MessagePackSerializerOptions Options, IFormatterResolver[] Ahead)> AssemblyOptions = new();
+
+    // Per document type: why its element ids cannot reach disk under the composed resolvers, or null. Types and resolvers
+    // are fixed for the process, so this is a cache of a pure answer.
+    private static readonly ConcurrentDictionary<Type, string?> DocumentProblems = new();
+
+    private static readonly MethodInfo GetFormatterMethod = typeof(IFormatterResolver).GetMethod(nameof(IFormatterResolver.GetFormatter))!;
+
+    public static MessagePackSerializerOptions OptionsFor(Assembly documentAssembly) => ComposedFor(documentAssembly).Options;
+
+    private static (MessagePackSerializerOptions Options, IFormatterResolver[] Ahead) ComposedFor(Assembly documentAssembly)
     {
         if (documentAssembly == null) throw new ArgumentNullException(nameof(documentAssembly));
         return AssemblyOptions.GetOrAdd(documentAssembly, static assembly =>
@@ -49,19 +62,118 @@ public static class CultDocumentMessagePackSerialization
             var resolvers = assembly.GetCustomAttributes<CultCacheFormatterResolverAttribute>()
                 .Select(attribute => CreateResolver(attribute.ResolverType))
                 .ToArray();
-            return resolvers.Length == 0 ? Options : Compose(resolvers);
+            return resolvers.Length == 0 ? Plain : Compose(resolvers);
         });
     }
 
-    private static MessagePackSerializerOptions Compose(IFormatterResolver[] consumerResolvers)
+    // The options a document's bytes are written and read with. A document's list elements carry their ids by their [Key]
+    // layout, so a resolver ahead of StandardResolver that formats a type on the way to those lists would write them
+    // without the id: refused here, once per document type, on every encode and decode path.
+    internal static MessagePackSerializerOptions OptionsForDocument(Type documentType)
+    {
+        if (documentType == null) throw new ArgumentNullException(nameof(documentType));
+        var (options, ahead) = ComposedFor(documentType.Assembly);
+        var problem = DocumentProblems.GetOrAdd(documentType, type => ResolverClaim(type, ahead));
+        return problem == null ? options : throw new InvalidOperationException(problem);
+    }
+
+    private static string? ResolverClaim(Type documentType, IFormatterResolver[] ahead)
+    {
+        foreach (var type in CultElementIds.Inspect(documentType).IdPath)
+        {
+            var generic = GetFormatterMethod.MakeGenericMethod(type);
+            // A resolver that hands back MessagePack's own formatter for the type writes its [Key] layout: that is no claim, and the
+            // composite stops there, so no later resolver is asked. StandardResolverAllowPrivate's formatter writes the same layout
+            // plus non-public [Key] members; those extra members are whole values the walk does not own, so it claims nothing
+            // either.
+            object? standard;
+            try
+            {
+                standard = generic.Invoke(StandardResolver.Instance, null);
+            }
+            catch (Exception exception)
+            {
+                return CannotBuild(documentType, type, (exception.InnerException ?? exception).Message);
+            }
+
+            if (standard == null)
+                return CannotBuild(documentType, type, "StandardResolver has no formatter for it");
+
+            if (WrittenAsCollection(type, generic, standard))
+                return $"Cult document {documentType.Name}: MessagePack writes {type.Name} as a collection, but the element-id walk reads it by its [Key] layout, so element ids would be lost or invented. A [MessagePackObject] type that is also a collection (ICollection<T>, IList, IDictionary) is written as a collection; make it one or the other. Or declare [MessagePackFormatter] on the type or member, which makes it one whole value with no element ids.";
+
+            var allowPrivateAsked = false;
+            object? allowPrivate = null;
+            foreach (var resolver in ahead)
+            {
+                object? formatter;
+                try
+                {
+                    formatter = generic.Invoke(resolver, null);
+                }
+                catch (Exception exception)
+                {
+                    return $"Cult document {documentType.Name}: formatter resolver {resolver.GetType().FullName} failed to build a formatter for {type.Name}, which is on the path to a list whose elements carry ids ({(exception.InnerException ?? exception).Message}); a resolver may not throw for such a type.";
+                }
+
+                if (formatter == null)
+                    continue;
+                if (ReferenceEquals(formatter, standard))
+                    break;
+                if (!allowPrivateAsked)
+                {
+                    allowPrivateAsked = true;
+                    try
+                    {
+                        allowPrivate = generic.Invoke(StandardResolverAllowPrivate.Instance, null);
+                    }
+                    catch (Exception)
+                    {
+                        allowPrivate = null;
+                    }
+                }
+
+                if (allowPrivate != null && ReferenceEquals(formatter, allowPrivate))
+                    break;
+                return $"Cult document {documentType.Name}: formatter resolver {resolver.GetType().FullName} formats {type.Name}, which is on the path to a list whose elements carry ids, so its element ids would never reach disk. A resolver may not claim such a type; write it by its [Key] layout, keep it out of the document's lists, or declare [MessagePackFormatter] on the type or member, which makes it one whole value with no element ids.";
+            }
+        }
+
+        return null;
+    }
+
+    private static string CannotBuild(Type documentType, Type type, string reason) =>
+        $"Cult document {documentType.Name}: MessagePack cannot build a formatter for {type.Name}, which is on the path to a list whose elements carry ids ({reason}).";
+
+    // The door verifies the walk and never decides ownership. It refuses a proven mismatch: a type the walk reads by key
+    // (an owner) whose StandardResolver formatter is the very instance the generic resolver's singleton hands out (a keyed
+    // ICollection<T> or dictionary). Union types walk as owners and the immutable and builtin resolvers claim only framework
+    // types, so neither can contradict. Any other formatter, a source-generated one among them, passes.
+    private static bool WrittenAsCollection(Type type, MethodInfo generic, object? standard) =>
+        CultElementIds.WalksAsOwner(type) && ReferenceEquals(Formatter(DynamicGenericResolver.Instance, generic), standard);
+
+    private static object? Formatter(IFormatterResolver resolver, MethodInfo generic)
+    {
+        try
+        {
+            return generic.Invoke(resolver, null);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static (MessagePackSerializerOptions Options, IFormatterResolver[] Ahead) Compose(IFormatterResolver[] consumerResolvers)
     {
         // The guard goes first and wraps whatever formatter the rest of the composite would hand out, so a consumer
         // resolver still encodes an arm while the key check runs.
-        var inner = CompositeResolver.Create(
-            consumerResolvers.Append(CultDocumentResolver.Instance).Append(CultMathResolver.Instance).Append(CultMathExprResolver.Instance).Append(StandardResolver.Instance).ToArray());
-        return MessagePackSerializerOptions.Standard
+        var ahead = consumerResolvers.Append(CultDocumentResolver.Instance).Append(CultMathResolver.Instance).Append(CultMathExprResolver.Instance).ToArray();
+        var inner = CompositeResolver.Create(ahead.Append(StandardResolver.Instance).ToArray());
+        var options = MessagePackSerializerOptions.Standard
             .WithResolver(CompositeResolver.Create(new CultUnionGuard(inner), inner))
             .WithSecurity(CultMessagePackSecurity.Instance);
+        return (options, ahead);
     }
 
     private static IFormatterResolver CreateResolver(Type resolverType)
@@ -83,7 +195,7 @@ public static class CultDocumentMessagePackSerialization
     {
         if (registry == null) throw new ArgumentNullException(nameof(registry));
         if (value != null) registry.GetRequired(type);
-        var payload = MessagePackSerializer.Serialize(type, value, OptionsFor(type.Assembly));
+        var payload = MessagePackSerializer.Serialize(type, value, OptionsForDocument(type));
         CultPayloadDepth.Check(payload, type, PayloadDirection.Write);
         return payload;
     }
@@ -98,7 +210,7 @@ public static class CultDocumentMessagePackSerialization
         if (registry == null) throw new ArgumentNullException(nameof(registry));
         registry.GetRequired(type);
         CultPayloadDepth.Check(payload, type, PayloadDirection.Read);
-        return MessagePackSerializer.Deserialize(type, payload, OptionsFor(type.Assembly))
+        return MessagePackSerializer.Deserialize(type, payload, OptionsForDocument(type))
             ?? throw new InvalidOperationException($"MessagePack returned null for Cult document type {type.FullName}.");
     }
 
@@ -133,7 +245,7 @@ public static class CultDocumentMessagePackSerialization
             elements[slot] = value;
         }
 
-        var buffer = new ArrayBufferWriter<byte>();
+        var buffer = new global::System.Buffers.ArrayBufferWriter<byte>();
         var writer = new MessagePackWriter(buffer);
         writer.WriteArrayHeader(elements.Count);
         foreach (var element in elements)
@@ -160,22 +272,35 @@ public static class CultDocumentMessagePackSerialization
         return ReadPersistedRecord(ref reader);
     }
 
-    public static byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot)
+    /// <summary>
+    /// Encodes the snapshot: every catalog entry and record from its fields, so what a caller edited is what is written.
+    /// </summary>
+    public static byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot) =>
+        SerializeStore(
+            snapshot.FormatVersion,
+            snapshot.SchemaCatalog.Select(SerializeCatalogEntry).ToArray(),
+            snapshot.Records.Select(SerializePersistedRecord).ToArray());
+
+    // A store file from its parts, each already encoded: what a store carries forward is the bytes its file held, what it writes is
+    // an encoding of the object.
+    internal static byte[] SerializeStore(string formatVersion, IReadOnlyList<byte[]> catalogEntries, IReadOnlyList<byte[]> records)
     {
+        if (formatVersion == null)
+            throw new ArgumentException("A store is written under a format version; the snapshot carries none.", nameof(formatVersion));
         var buffer = new global::System.Buffers.ArrayBufferWriter<byte>();
         var writer = new MessagePackWriter(buffer);
         writer.WriteArrayHeader(StoreSnapshotFieldCount);
-        writer.Write(snapshot.FormatVersion);
-        writer.WriteArrayHeader(snapshot.SchemaCatalog.Length);
-        foreach (var entry in snapshot.SchemaCatalog)
+        writer.Write(formatVersion);
+        writer.WriteArrayHeader(catalogEntries.Count);
+        foreach (var entry in catalogEntries)
         {
-            WriteSchemaCatalogEntry(ref writer, entry);
+            writer.WriteRaw(new ReadOnlySpan<byte>(entry));
         }
 
-        writer.WriteArrayHeader(snapshot.Records.Length);
-        foreach (var record in snapshot.Records)
+        writer.WriteArrayHeader(records.Count);
+        foreach (var record in records)
         {
-            WritePersistedRecord(ref writer, record);
+            writer.WriteRaw(new ReadOnlySpan<byte>(record));
         }
 
         writer.Flush();
@@ -183,57 +308,136 @@ public static class CultDocumentMessagePackSerialization
     }
 
     /// <summary>
-    /// Parses a store snapshot whose format stamp is a string, of any version. It refuses a nil or binary stamp
-    /// (1.0.61 read a nil stamp as v1). A store reading its own file checks the stamp against the formats it reads,
-    /// before the body is parsed.
+    /// Reads a store file: exactly one complete MessagePack array of three slots (header, schema catalog, records), or an empty
+    /// array, which is an empty store. A truncated file, bytes after the array, a value that is not an array, a first slot that
+    /// is not a header string, a store with fewer or more slots, a record whose schema the catalog does not publish, or a body
+    /// that does not decode are refused with
+    /// <see cref="CultStoreUnreadableException"/>, so a reader never takes part of a file for the whole and never skips a slot
+    /// it does not understand. The rewriting paths use this same reader as their verdict on whether a file may be replaced.
     /// </summary>
-    public static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload) =>
-        DeserializeSnapshot(payload, _ => { });
+    public static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload) => ReadStore(payload).Snapshot;
 
-
-    // The stamp decides readability and the body never does: requireReadable runs on slot 0 before anything else is parsed.
-    internal static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload, Action<string> requireReadable)
+    // The reader behind DeserializeSnapshot, and beside the snapshot the exact bytes the file held for each catalog entry and each
+    // record (parallel to the snapshot's arrays). The snapshot's objects hold no bytes: a store that carries entries forward keeps
+    // these slices itself. The stamp decides readability and the body never does: requireReadable, when a store passes its rule,
+    // runs on slot 0 before the catalog or any record is parsed; the public parser passes none and reads any stamp.
+    internal static (CultPersistedStoreSnapshot Snapshot, byte[][] CatalogBytes, byte[][] RecordBytes) ReadStore(
+        byte[] payload,
+        Action<string>? requireReadable = null)
     {
-        var reader = new MessagePackReader(payload);
-        var fieldCount = reader.ReadArrayHeader();
-        var snapshot = new CultPersistedStoreSnapshot();
-
-        if (fieldCount > 0)
+        try
         {
-            // A stamp encoded as binary is not one this runtime wrote or reads; it is refused here, not parsed as damage.
-            if (reader.NextMessagePackType == MessagePackType.Binary)
-                throw new NotSupportedException("Store snapshot declares its format version as binary; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + " and " + CultPersistedStoreSnapshot.FormatV2 + " as strings.");
-            snapshot.FormatVersion = reader.ReadString()
-                ?? throw new NotSupportedException("Store snapshot declares no format version; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + " and " + CultPersistedStoreSnapshot.FormatV2 + ".");
-            requireReadable(snapshot.FormatVersion);
-        }
+            // The stamp is judged from the leading bytes alone, so a body that will not parse can never make a newer store look
+            // like damage.
+            JudgeStamp(payload, requireReadable);
+            RequireOneArray(payload);
+            var reader = new MessagePackReader(payload);
+            var fieldCount = reader.ReadArrayHeader();
+            if (fieldCount != 0 && fieldCount != StoreSnapshotFieldCount)
+            {
+                throw new CultStoreUnreadableException(
+                    $"The store has {fieldCount} top-level slots; this runtime reads {StoreSnapshotFieldCount} (header, schema catalog, records) or none.");
+            }
 
-        if (fieldCount > 1)
-        {
+            var snapshot = new CultPersistedStoreSnapshot();
+            if (fieldCount == 0)
+                return (snapshot, Array.Empty<byte[]>(), Array.Empty<byte[]>());
+
+            snapshot.FormatVersion = reader.ReadString()!;
+
             var catalogCount = reader.ReadArrayHeader();
             snapshot.SchemaCatalog = new CultSchemaCatalogEntry[catalogCount];
+            var catalogBytes = new byte[catalogCount][];
             for (var index = 0; index < catalogCount; index++)
             {
+                var start = reader.Position;
                 snapshot.SchemaCatalog[index] = ReadSchemaCatalogEntry(ref reader);
+                catalogBytes[index] = reader.Sequence.Slice(start, reader.Position).ToArray();
             }
-        }
 
-        if (fieldCount > 2)
-        {
             var recordCount = reader.ReadArrayHeader();
             snapshot.Records = new CultPersistedRecord[recordCount];
+            var recordBytes = new byte[recordCount][];
             for (var index = 0; index < recordCount; index++)
             {
+                var start = reader.Position;
                 snapshot.Records[index] = ReadPersistedRecord(ref reader);
+                recordBytes[index] = reader.Sequence.Slice(start, reader.Position).ToArray();
             }
-        }
 
-        for (var index = StoreSnapshotFieldCount; index < fieldCount; index++)
+            RequirePublishedSchemas(snapshot);
+            return (snapshot, catalogBytes, recordBytes);
+        }
+        catch (CultStoreUnreadableException)
         {
-            reader.Skip();
+            throw;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            throw new CultStoreUnreadableException(ex.Message, innerException: ex);
+        }
+    }
+
+    // A record whose schema the store's catalog does not publish cannot be read by any runtime that has only the file.
+    private static void RequirePublishedSchemas(CultPersistedStoreSnapshot snapshot)
+    {
+        var published = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var entry in snapshot.SchemaCatalog)
+        {
+            published.Add(entry.SchemaId);
+            foreach (var compatible in entry.CompatibleSchemaIds)
+                published.Add(compatible);
         }
 
-        return snapshot;
+        var unpublished = snapshot.Records.FirstOrDefault(record => !published.Contains(record.SchemaId));
+        if (unpublished != null)
+        {
+            throw new CultStoreUnreadableException(
+                $"Record '{unpublished.Key}' names schema '{unpublished.SchemaId}', which the store's schema catalog does not publish.");
+        }
+    }
+
+    // Slot 0 of a non-empty store, read before anything after it: a binary or nil stamp is refused as such, and a string stamp is
+    // judged by the caller's rule when it passes one. Bytes that do not open with an array and a string are left to the full read.
+    private static void JudgeStamp(byte[] payload, Action<string>? requireReadable)
+    {
+        string? stamp;
+        try
+        {
+            var reader = new MessagePackReader(payload);
+            if (reader.NextMessagePackType != MessagePackType.Array || reader.ReadArrayHeader() == 0)
+                return;
+            if (reader.NextMessagePackType == MessagePackType.Binary)
+                throw new CultStoreUnreadableException("Store snapshot declares its format version as binary; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + ", " + CultPersistedStoreSnapshot.FormatV2 + " and " + CultPersistedStoreSnapshot.FormatV3 + " as strings.");
+            if (reader.TryReadNil())
+                throw new CultStoreUnreadableException("Store snapshot declares no format version; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + ", " + CultPersistedStoreSnapshot.FormatV2 + " and " + CultPersistedStoreSnapshot.FormatV3 + ".");
+            stamp = reader.NextMessagePackType == MessagePackType.String ? reader.ReadString() : null;
+        }
+        catch (Exception ex) when (ex is EndOfStreamException or MessagePackSerializationException or InvalidOperationException)
+        {
+            return;
+        }
+
+        if (stamp != null)
+            requireReadable?.Invoke(stamp);
+    }
+
+    private static void RequireOneArray(byte[] bytes)
+    {
+        var whole = new MessagePackReader(bytes);
+        try
+        {
+            if (whole.NextMessagePackType != MessagePackType.Array)
+                throw new CultStoreUnreadableException($"The store is a MessagePack {whole.NextMessagePackType}, not an array.");
+            whole.Skip();
+        }
+        catch (Exception ex) when (ex is EndOfStreamException or MessagePackSerializationException or InvalidOperationException)
+        {
+            throw new CultStoreUnreadableException("The store is not one complete MessagePack array.", innerException: ex);
+        }
+
+        if (!whole.End)
+            throw new CultStoreUnreadableException("The store has bytes after its MessagePack array.");
     }
 
     /// <summary>Refuses a single-file snapshot this runtime cannot read, naming the format or record it found.</summary>
@@ -242,37 +446,49 @@ public static class CultDocumentMessagePackSerialization
         var version = snapshot.FormatVersion;
         RequireReadableSingleFileStamp(version);
 
-        // Only a v2 store may hold a variant: a v1 header over a variant record is a store no reader could trust.
+        // Only a v2 or v3 store may hold a variant: a v1 header over a variant record is a store no reader could trust.
         if (string.Equals(version, CultPersistedStoreSnapshot.FormatV1, StringComparison.Ordinal))
         {
             var variant = snapshot.Records.FirstOrDefault(record => record.Variant != null);
             if (variant != null)
             {
-                throw new NotSupportedException(
-                    $"Record '{variant.Key}' (schema '{variant.SchemaId}') is a variant but the store declares {version}; variants need {CultPersistedStoreSnapshot.FormatV2}.");
+                throw new CultStoreUnreadableException(
+                    $"Record '{variant.Key}' (schema '{variant.SchemaId}') is a variant but the store declares {version}; variants need {CultPersistedStoreSnapshot.FormatV2} or {CultPersistedStoreSnapshot.FormatV3}.");
             }
         }
     }
 
+    // The one verdict on a single-file store's stamp, judged on slot 0 before the body is parsed: this runtime reads v1, v2 and v3.
     internal static void RequireReadableSingleFileStamp(string version)
     {
         if (!string.Equals(version, CultPersistedStoreSnapshot.FormatV1, StringComparison.Ordinal) &&
-            !string.Equals(version, CultPersistedStoreSnapshot.FormatV2, StringComparison.Ordinal))
+            !string.Equals(version, CultPersistedStoreSnapshot.FormatV2, StringComparison.Ordinal) &&
+            !string.Equals(version, CultPersistedStoreSnapshot.FormatV3, StringComparison.Ordinal))
         {
-            throw new NotSupportedException(
-                $"Store format {DescribeHeader(version)} is not readable; this runtime reads {CultPersistedStoreSnapshot.FormatV1} and {CultPersistedStoreSnapshot.FormatV2}.");
+            throw new CultStoreUnreadableException(
+                $"Store format {DescribeHeader(version)} is not readable; this runtime reads {CultPersistedStoreSnapshot.FormatV1}, {CultPersistedStoreSnapshot.FormatV2} and {CultPersistedStoreSnapshot.FormatV3}.");
         }
     }
 
     // A store header as a refusal may show it: echoed in the shape cultcache.store.v<digits>, and otherwise described
     // only by its length, since the bytes are the store's.
-    private static string DescribeHeader(string header)
+    internal static string DescribeHeader(string header)
     {
         const string prefix = "cultcache.store.v";
-        var version = header.StartsWith(prefix, StringComparison.Ordinal) ? header.Substring(prefix.Length) : "";
-        return version.Length > 0 && version.All(character => character >= '0' && character <= '9')
-            ? header
-            : $"an unrecognised cultcache.store.* header of {System.Text.Encoding.UTF8.GetByteCount(header)} bytes";
+        if (header.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            var end = prefix.Length;
+            while (end < header.Length && header[end] >= '0' && header[end] <= '9')
+                end++;
+            var digits = end - prefix.Length;
+            if (digits is > 0 and <= 6 && (end == header.Length || header[end] == '.'))
+            {
+                var named = header.Substring(0, end);
+                return end == header.Length ? named : $"{named} with a suffix of {System.Text.Encoding.UTF8.GetByteCount(header) - end} bytes";
+            }
+        }
+
+        return $"an unrecognised cultcache.store.* header of {System.Text.Encoding.UTF8.GetByteCount(header)} bytes";
     }
 
     private static void WritePersistedRecord(ref MessagePackWriter writer, CultPersistedRecord record)
@@ -401,6 +617,15 @@ public static class CultDocumentMessagePackSerialization
         }
 
         return record;
+    }
+
+    internal static byte[] SerializeCatalogEntry(CultSchemaCatalogEntry entry)
+    {
+        var buffer = new global::System.Buffers.ArrayBufferWriter<byte>();
+        var writer = new MessagePackWriter(buffer);
+        WriteSchemaCatalogEntry(ref writer, entry);
+        writer.Flush();
+        return buffer.WrittenSpan.ToArray();
     }
 
     private static void WriteSchemaCatalogEntry(ref MessagePackWriter writer, CultSchemaCatalogEntry entry)
@@ -555,21 +780,31 @@ public class SingleFileMessagePackBackingStore : SingleFileBackingStore
     {
     }
 
-    protected override byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot)
+    protected override byte[] SerializeStore(string formatVersion, IReadOnlyList<byte[]> catalogEntries, IReadOnlyList<byte[]> records)
     {
-        return CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot);
+        return CultDocumentMessagePackSerialization.SerializeStore(formatVersion, catalogEntries, records);
     }
 
-    protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data)
+    protected override byte[] SerializeRecord(CultPersistedRecord record)
     {
-        var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(data, CultDocumentMessagePackSerialization.RequireReadableSingleFileStamp);
-        CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot);
-        return snapshot;
+        return CultDocumentMessagePackSerialization.SerializePersistedRecord(record);
     }
 
-    protected override byte[] SerializePayload(object document)
+    protected override byte[] SerializeCatalogEntry(CultSchemaCatalogEntry entry)
     {
-        return CultDocumentMessagePackSerialization.SerializeUntyped(document, document.GetType(), Registry);
+        return CultDocumentMessagePackSerialization.SerializeCatalogEntry(entry);
+    }
+
+    protected override (CultPersistedStoreSnapshot Snapshot, byte[][] CatalogBytes, byte[][] RecordBytes) ReadStore(byte[] data)
+    {
+        var store = CultDocumentMessagePackSerialization.ReadStore(data, CultDocumentMessagePackSerialization.RequireReadableSingleFileStamp);
+        CultDocumentMessagePackSerialization.RequireSingleFileFormat(store.Snapshot);
+        return store;
+    }
+
+    protected override byte[] SerializePayload(object document, Type documentType)
+    {
+        return CultDocumentMessagePackSerialization.SerializeUntyped(document, documentType, Registry);
     }
 
     protected override object DeserializePayload(Type documentType, byte[] payload)

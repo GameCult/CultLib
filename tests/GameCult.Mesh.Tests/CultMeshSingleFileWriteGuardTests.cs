@@ -9,8 +9,9 @@ using NUnit.Framework;
 
 namespace GameCult.Mesh.Tests;
 
-// A CultMesh single-file write replaces the whole file, so it must read what it replaces first. A store stamped with a
-// newer format version, one it cannot read, or one holding a record the write would drop is refused and left byte-identical.
+// A CultMesh single-file write goes through the cache's single-file store: it reads the file under the store lock, applies its
+// one record, and keeps every other record. A store stamped with a newer format version or one it cannot read is refused and
+// left byte-identical.
 public sealed class CultMeshSingleFileWriteGuardTests
 {
     private static readonly CultMeshSingleFileDocumentSchema Schema = new("sha256:guard", "guard.item", "1");
@@ -34,7 +35,7 @@ public sealed class CultMeshSingleFileWriteGuardTests
     private void Write(string key, byte payload) =>
         CultMesh.WriteSingleFileDocumentPayload(_path, new CultRecordKey(key), Schema, null, new[] { payload });
 
-    [TestCase("cultcache.store.v3")]
+    [TestCase("cultcache.store.v4")]
     [TestCase("cultcache.store.v9")]
     public void WriteRefusesAStoreStampedWithANewerFormat(string newer)
     {
@@ -44,7 +45,7 @@ public sealed class CultMeshSingleFileWriteGuardTests
         File.WriteAllBytes(_path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
         var before = File.ReadAllBytes(_path);
 
-        var error = Assert.Throws<NotSupportedException>(() => Write("item:a", 2))!;
+        var error = Assert.Throws<CultStoreUnreadableException>(() => Write("item:a", 2))!;
 
         error.Message.Should().Contain(newer);
         File.ReadAllBytes(_path).Should().Equal(before);
@@ -61,16 +62,18 @@ public sealed class CultMeshSingleFileWriteGuardTests
         File.ReadAllBytes(_path).Should().Equal(garbage);
     }
 
+    // Another writer's record, under a schema this write does not touch, is still in the file after the write.
     [Test]
-    public void WriteRefusesToDropAnotherRecord()
+    public void WriteKeepsAnotherWritersRecord()
     {
+        var other = new CultMeshSingleFileDocumentSchema("sha256:other", "other.item", "1");
         Write("item:a", 1);
-        var before = File.ReadAllBytes(_path);
+        CultMesh.WriteSingleFileDocumentPayload(_path, new CultRecordKey("item:b"), other, null, new byte[] { 7 });
 
-        var error = Assert.Throws<InvalidOperationException>(() => Write("item:b", 2))!;
+        Write("item:a", 2);
 
-        error.Message.Should().Contain("item:a");
-        File.ReadAllBytes(_path).Should().Equal(before);
+        CultMesh.ReadSingleFileDocumentPayload(_path, new CultRecordKey("item:a"), Schema.SchemaId).Should().Equal(2);
+        CultMesh.ReadSingleFileDocumentPayload(_path, new CultRecordKey("item:b"), other.SchemaId).Should().Equal(7);
     }
 
     [Test]
@@ -112,7 +115,7 @@ public sealed class CultMeshSingleFileWriteGuardTests
         File.WriteAllBytes(_path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
         var before = File.ReadAllBytes(_path);
 
-        Assert.Throws<InvalidOperationException>(() => Write("item:a", 2));
+        Assert.Throws<CultWriteConflictException>(() => Write("item:a", 2));
 
         File.ReadAllBytes(_path).Should().Equal(before);
     }

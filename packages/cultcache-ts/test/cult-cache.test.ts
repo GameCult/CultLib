@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { exec, execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { access, lstat, mkdir, mkdtemp, readdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve, delimiter } from "node:path";
 import { test } from "node:test";
@@ -14,9 +14,9 @@ import { z } from "zod";
 import { CultCache } from "../src/cult-cache";
 import { inspectCultCacheBytes } from "../src/cult-cache-inspector";
 import { defineDocumentRegistry, defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "../src/document";
-import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
-import { refuseUnreadStoreBytes } from "../src/store-format";
-import type { CacheBackingStore, CultCacheEnvelope, CultCacheSchema } from "../src/types";
+import { SingleFileMessagePackBackingStore, readStoreBytes } from "../src/single-file-messagepack-backing-store";
+import { SchemaConflictError, StoreUnreadableError, refuseUnreadStoreBytes } from "../src/store-format";
+import type { AnyCultCacheDocumentDefinition, CacheBackingStore, CultCacheEnvelope, CultCacheSchema } from "../src/types";
 
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
@@ -461,7 +461,7 @@ test("SingleFileMessagePackBackingStore reads CultCache v1 snapshots by schema i
   assert.equal(cache.getRequiredEnvelope(noteDocument, "record-1").schemaId, "schema-1");
 });
 
-test("SingleFileMessagePackBackingStore recovers schema-stamped records missing catalog entries", async () => {
+test("SingleFileMessagePackBackingStore refuses a record whose schema the catalog does not publish, whatever its payload opens with", async () => {
   const stampedDocument = defineDocumentType({
     type: "runtime-policy",
     schema: z.tuple([
@@ -501,16 +501,7 @@ test("SingleFileMessagePackBackingStore recovers schema-stamped records missing 
     .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
     .build();
 
-  await cache.pullAllBackingStores();
-  assert.deepEqual(cache.getRequired(stampedDocument, "record-1"), [
-    "tests.schema_stamped_entry.v1",
-    "schema-stamped",
-    "still readable",
-  ]);
-  assert.equal(
-    cache.getRequiredEnvelope(stampedDocument, "record-1").schemaId,
-    "sha256:stale-schema-id-from-cold-record",
-  );
+  await assert.rejects(() => cache.pullAllBackingStores(), StoreUnreadableError);
 });
 
 test("SingleFileMessagePackBackingStore heals legacy envelopes whose payload was persisted as an object", async () => {
@@ -1194,6 +1185,250 @@ test("CultCache v1 MessagePack stores are readable across TS, Rust, C#, and Pyth
   }
 });
 
+// Records and catalog entries a runtime does not own survive its writes. C# writes a store and each other runtime writes its own
+// note into it: C# reads its note back, and its record and catalog entry are as C# wrote them. C# then writes again, and the other
+// runtime's record and catalog entry are as that runtime wrote them. Identity is compared on the decoded MessagePack values, every
+// slot of the entry and of its members included.
+test("A runtime's writes lay back another runtime's records and catalog entries unchanged", async () => {
+  await buildInteropPeers();
+  const tempDir = await mkdtemp(join(tmpdir(), "cultcache-lay-back-"));
+  const csharpWrite = (file: string, runtimeId: string) =>
+    runJsonCommand("csharp-write", dotnetCommand, [csharpInteropDll, "write", "--file", file, "--runtime-id", runtimeId], cultLibRoot);
+  const others = [
+    {
+      name: "rust",
+      write: (file: string) => runJsonCommand("rust-write", rustInteropBinary, ["write", "--file", file, "--runtime-id", "rust-writer"], cultcacheRsRoot),
+    },
+    { name: "ts", write: (file: string) => writeTsInteropStore(file, "ts-writer") },
+    {
+      name: "python",
+      write: (file: string) => runJsonCommand("python-write", pythonCommand, [
+        "-m", "cultcache_py.interop", "write", "--file", file, "--runtime-id", "python-writer",
+      ], cultcachePyRoot, { PYTHONPATH: cultcachePySrc }),
+    },
+  ];
+  const stored = async (file: string, key: string) => {
+    const [, catalog, records] = decode(await readFile(file)) as [string, unknown[][], unknown[][]];
+    const record = records.find((candidate) => candidate[0] === key);
+    assert.ok(record, `${file} holds no record ${key}`);
+    const entry = catalog.find((candidate) => candidate[0] === record[1]);
+    assert.ok(entry, `${file} publishes no entry owning ${String(record[1])}`);
+    return { record, entry };
+  };
+
+  for (const other of others) {
+    const file = join(tempDir, `${other.name}.cc`);
+    await csharpWrite(file, "csharp-writer");
+    const csharp = await stored(file, "note:csharp-writer");
+
+    const written = await other.write(file);
+    assert.deepEqual(await stored(file, "note:csharp-writer"), csharp, `${other.name} rewrote the C# record or its catalog entry`);
+    const read = await runJsonCommand("csharp-read", dotnetCommand, [csharpInteropDll, "read", "--file", file], cultLibRoot);
+    assert.ok(read.documentId === "note:csharp-writer" || read.documentId === written.documentId, `C# failed to read after ${other.name}`);
+    const theirs = await stored(file, written.documentId);
+    assert.notEqual(theirs.record[1], csharp.record[1], `${other.name} writes under its own id`);
+
+    await csharpWrite(file, "csharp-again");
+    assert.deepEqual(await stored(file, written.documentId), theirs, `C# rewrote the ${other.name} record or its catalog entry`);
+    assert.deepEqual(await stored(file, "note:csharp-writer"), csharp);
+  }
+});
+
+// A schema renamed under a stable id: the record's schema id names its type, and the name its catalog entry now carries is metadata.
+// A reader that resolved the record by that name would not find its type, so every runtime that can hold the stable id opens it. The
+// C# reader is not among them: its schema ids are content hashes, which this file does not carry.
+test("CultCache v1 stores stay readable across TS, Rust and Python when a schema is renamed under a stable id", async () => {
+  await buildInteropPeers();
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-rename-interop-")), "renamed.msgpack");
+  const written = await writeTsInteropStore(file, "ts-before-rename");
+  await new SingleFileMessagePackBackingStore(file).push({
+    key: "note:ts-after-rename",
+    type: "cultcache.interop-note.renamed",
+    schemaId: interopNoteDocument.schemaId,
+    catalogEntry: {
+      schemaId: interopNoteDocument.schemaId!,
+      schemaName: "cultcache.interop-note.renamed",
+      schemaVersion: interopNoteDocument.schemaVersion!,
+      contentHash: "renamed",
+      canonicalSchemaJson: interopNoteDocument.canonicalSchemaJson!,
+      compatibleSchemaIds: [interopNoteDocument.schemaId!],
+      members: interopNoteDocument.members,
+    },
+    storedAt: new Date().toISOString(),
+    payload: documentPayloadFromBytes(encode([
+      written.schemaVersion,
+      "note:ts-after-rename",
+      "ts-after-rename",
+      "ts wrote a note under the renamed schema",
+      "The v1 store format is the contract.",
+      ["interop"],
+    ])),
+  });
+  const catalog = decode(await readFile(file)) as unknown[][];
+  assert.deepEqual((catalog[1] as unknown[][]).map((entry) => [entry[0], entry[1]]), [["cultcache.interop-note", "cultcache.interop-note.renamed"]]);
+
+  const readers = [
+    { name: "ts", read: async () => readTsInteropStore(file) },
+    { name: "rust", read: async () => runJsonCommand("rust-read", rustInteropBinary, ["read", "--file", file], cultcacheRsRoot) },
+    {
+      name: "python",
+      read: async () =>
+        runJsonCommand("python-read", pythonCommand, ["-m", "cultcache_py.interop", "read", "--file", file], cultcachePyRoot, {
+          PYTHONPATH: cultcachePySrc,
+        }),
+    },
+  ];
+  for (const reader of readers) {
+    const read = await reader.read();
+    assert.ok(
+      ["note:ts-before-rename", "note:ts-after-rename"].includes(read.documentId),
+      `${reader.name} opened the renamed store and read a note (${read.documentId})`,
+    );
+    assert.equal(read.body, "The v1 store format is the contract.");
+  }
+});
+
+// A record TS wrote under an older schema id and another schema name. The C# note type declares that id compatible, so C# opens the
+// record, stamps it with its own id when it writes it back, and every runtime opens the result.
+test("A C# type that declares a compatible schema id opens a TypeScript record under it and rewrites it under its own id", async () => {
+  await buildInteropPeers();
+  const legacyId = "cultcache.interop-note.legacy-id";
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-compat-interop-")), "legacy.msgpack");
+  await new SingleFileMessagePackBackingStore(file).push({
+    key: "note:ts-legacy",
+    type: "cultcache.interop-note.legacy",
+    schemaId: legacyId,
+    catalogEntry: {
+      schemaId: legacyId,
+      schemaName: "cultcache.interop-note.legacy",
+      schemaVersion: interopNoteDocument.schemaVersion!,
+      contentHash: "legacy",
+      canonicalSchemaJson: interopNoteDocument.canonicalSchemaJson!,
+      compatibleSchemaIds: [legacyId],
+      members: interopNoteDocument.members,
+    },
+    storedAt: new Date().toISOString(),
+    payload: documentPayloadFromBytes(encode([
+      "cultcache.interop_note.v1",
+      "note:ts-legacy",
+      "ts-legacy",
+      "ts wrote a note under an older schema id",
+      "The v1 store format is the contract.",
+      ["interop"],
+    ])),
+  });
+  const before = decode(await readFile(file)) as unknown[][];
+  assert.equal((before[2] as unknown[][])[0]![1], legacyId);
+
+  const rewritten = await runJsonCommand("csharp-rewrite", dotnetCommand, [csharpInteropDll, "rewrite", "--file", file], cultLibRoot);
+  assert.equal(rewritten.documentId, "note:ts-legacy");
+  const after = decode(await readFile(file)) as unknown[][];
+  const stampedId = (after[2] as unknown[][])[0]![1] as string;
+  assert.notEqual(stampedId, legacyId, "the rewrite stamped the record with the registered id");
+  const entry = (after[1] as unknown[][]).find((candidate) => candidate[0] === stampedId) as unknown[];
+  assert.ok(entry, "the catalog publishes the id the record now carries");
+  assert.ok((entry[5] as string[]).includes(legacyId), "the registered entry still lists the older id");
+
+  const readers = [
+    { name: "csharp", read: async () => runJsonCommand("csharp-read", dotnetCommand, [csharpInteropDll, "read", "--file", file], cultLibRoot) },
+    { name: "ts", read: async () => readTsInteropStore(file) },
+    { name: "rust", read: async () => runJsonCommand("rust-read", rustInteropBinary, ["read", "--file", file], cultcacheRsRoot) },
+    {
+      name: "python",
+      read: async () =>
+        runJsonCommand("python-read", pythonCommand, ["-m", "cultcache_py.interop", "read", "--file", file], cultcachePyRoot, {
+          PYTHONPATH: cultcachePySrc,
+        }),
+    },
+  ];
+  for (const reader of readers) {
+    const read = await reader.read();
+    assert.equal(read.documentId, "note:ts-legacy", `${reader.name} opened the rewritten store`);
+    assert.equal(read.body, "The v1 store format is the contract.");
+  }
+});
+
+test("CultCache element ids cross C#, TypeScript, Python and Rust as ordinary members", async () => {
+  await buildInteropPeers();
+  const tempDir = await mkdtemp(join(tmpdir(), "cultcache-deck-"));
+  const file = join(tempDir, "deck.cc");
+  const written = await runJsonCommand("csharp-write-deck", dotnetCommand, [
+    csharpInteropDll, "write-deck", "--file", file,
+  ], cultLibRoot);
+  assert.equal(written.ids.length, 3);
+  assert.equal(new Set(written.ids).size, 3, "two look-alike marks got distinct ids");
+  for (const id of written.ids) assert.match(id, /^[0-9a-f]{12}$/u);
+
+  // TypeScript: the id is slot 1 of each mark, read from the raw payload.
+  const store = decode(await readFile(file)) as any[];
+  const payload = decode(store[2][0][3]) as any[];
+  assert.deepEqual(payload[1].map((mark: any[]) => mark[1]), written.ids);
+
+  // Python and Rust read the same store.
+  const python = await runJsonCommand("python-deck", pythonCommand, [
+    "-c",
+    "import msgpack,json,sys;s=msgpack.unpackb(open(sys.argv[1],'rb').read(),raw=False);p=msgpack.unpackb(s[2][0][3],raw=False);print(json.dumps({'ids':[m[1] for m in p[1]]}))",
+    file,
+  ], cultcachePyRoot);
+  assert.deepEqual(python.ids, written.ids);
+  const rust = await runJsonCommand("rust-read-deck", rustInteropBinary, ["read-deck", "--file", file], cultcacheRsRoot);
+  assert.deepEqual(rust.ids, written.ids);
+
+  // TypeScript writes the ids; C# keeps them.
+  const tsIds = ["a00000000001", "a00000000002", "a00000000003"];
+  store[2][0][3] = encode(["deck:csharp", [["twin", tsIds[0]], ["twin", tsIds[1]], ["other", tsIds[2]]]]);
+  const tsFile = join(tempDir, "ts-deck.cc");
+  await writeFile(tsFile, encode(store));
+  const back = await runJsonCommand("csharp-read-deck", dotnetCommand, [
+    csharpInteropDll, "read-deck", "--file", tsFile,
+  ], cultLibRoot);
+  assert.deepEqual(back.ids, tsIds);
+});
+
+// A C# record edited in place is written as edited, however the consumer reached it: a decoded snapshot record's payload bytes, a
+// variant override's value bytes, a collection element or a nested object of the document the cache holds. Rust and Python read the
+// edit through their own readers; the variant and the nested object are read by decoding the file with Python's msgpack.
+test("C# writes an edit made in place, and Rust and Python read the new value", async () => {
+  await buildInteropPeers();
+  const tempDir = await mkdtemp(join(tmpdir(), "cultcache-edit-in-place-"));
+  const csharp = (name: string, args: string[]) => runJsonCommand(name, dotnetCommand, [csharpInteropDll, ...args], cultLibRoot);
+  const edit = (file: string, kind: string) => csharp(`csharp-edit-${kind}`, ["edit-in-place", "--file", file, "--kind", kind]);
+  const readers = (file: string) => [
+    runJsonCommand("rust-read", rustInteropBinary, ["read", "--file", file], cultcacheRsRoot),
+    runJsonCommand("python-read", pythonCommand, ["-m", "cultcache_py.interop", "read", "--file", file], cultcachePyRoot, { PYTHONPATH: cultcachePySrc }),
+  ];
+  const dump = (file: string) => runJsonCommand("python-dump", pythonCommand, [
+    "-c",
+    "import msgpack,json,sys\n"
+      + "s=msgpack.unpackb(open(sys.argv[1],'rb').read(),raw=False)\n"
+      + "print(json.dumps([{'key':r[0],'overrides':[o[3] for o in r[4][1]]} if len(r)>4 else {'key':r[0],'payload':msgpack.unpackb(r[3],raw=False)} for r in s[2]]))",
+    file,
+  ], cultcachePyRoot);
+
+  const payload = join(tempDir, "payload.cc");
+  await csharp("csharp-write", ["write", "--file", payload, "--runtime-id", "csharp-writer"]);
+  await edit(payload, "payload");
+  for (const read of await Promise.all(readers(payload))) assert.equal(read.title, "csharp-writer WROTE a CultCache note");
+
+  const collection = join(tempDir, "collection.cc");
+  await csharp("csharp-write", ["write", "--file", collection, "--runtime-id", "csharp-writer"]);
+  await edit(collection, "collection");
+  for (const read of await Promise.all(readers(collection))) assert.deepEqual(read.tags, ["EDITED", "csharp", "interop"]);
+
+  const override = join(tempDir, "override.cc");
+  await csharp("csharp-write", ["write", "--file", override, "--runtime-id", "csharp-writer"]);
+  await edit(override, "override");
+  const variant = (await dump(override)).find((record: any) => record.key === "note:variant");
+  assert.deepEqual(variant.overrides, ["note:variant", "VARIANT title"]);
+
+  const object = join(tempDir, "object.cc");
+  await csharp("csharp-write-deck", ["write-deck", "--file", object]);
+  await edit(object, "object");
+  const deck = (await dump(object)).find((record: any) => record.key === "deck:csharp");
+  assert.equal(deck.payload[1][0][0], "EDITED");
+  assert.equal(deck.payload[1][1][0], "twin", "the neighbouring mark is untouched");
+});
+
 test("CultCache interop reader accepts missing compatible trailing slots and rejects mismatched slots", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "cultcache-interop-"));
   const compatible = join(tempDir, "compatible.msgpack");
@@ -1236,40 +1471,386 @@ test("CultCache inspector decodes v1 store catalog and record payloads from byte
   ]);
 });
 
-test("CultCache inspector recovers schema-stamped records missing catalog entries", async () => {
+test("CultCache inspector refuses a record whose schema the catalog does not publish, and a store of the wrong slot count", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "cultcache-inspector-"));
-  const file = join(tempDir, "missing-catalog.cc");
+  const record = [
+    "record-1",
+    "sha256:stale-schema-id-from-cold-record",
+    "2026-06-25T12:00:00Z",
+    encode(["tests.schema_stamped_entry.v1", "schema-stamped", "still readable"]),
+  ];
 
+  assert.throws(
+    () => inspectCultCacheBytes("missing-catalog.cc", encode(["cultcache.store.v1", [], [record]])),
+    /references missing schema id/u,
+  );
+  assert.throws(() => inspectCultCacheBytes("header-only.cc", encode(["cultcache.store.v1"])), /top-level slots/u);
+  assert.throws(
+    () => inspectCultCacheBytes("extra-slot.cc", encode(["cultcache.store.v1", [], [], 0])),
+    /top-level slots/u,
+  );
+  await rm(tempDir, { recursive: true, force: true });
+});
+
+// A record written under an id its schema only lists as compatible is stamped with the registered id, and the store the write
+// leaves opens and takes the next write. The envelope carries a catalog entry under the foreign id, as a replicated one does.
+const foreignIdDocument = defineDocumentType({
+  type: "tests.foreign-id",
+  schema: z.object({ name: z.string() }),
+  schemaId: "tests.foreign-id.current",
+  schemaName: "tests.foreign-id",
+  schemaVersion: "tests.foreign_id.v1",
+  compatibleSchemaIds: ["tests.foreign-id.current", "tests.foreign-id.older"],
+});
+
+async function reopenForeignIdStore(file: string): Promise<CultCache> {
+  const cache = CultCache.builder()
+    .withDocumentType(foreignIdDocument)
+    .withGenericStore(new SingleFileMessagePackBackingStore(file))
+    .build();
+  await cache.pullAllBackingStores();
+  return cache;
+}
+
+function schemaIdsOf(bytes: Uint8Array): { record: string; catalog: string[] } {
+  const decoded = decode(bytes) as [string, unknown[][], unknown[][]];
+  return { record: decoded[2][0]![1] as string, catalog: decoded[1].map((entry) => entry[0] as string) };
+}
+
+test("putEnvelope under a compatible schema id writes a store that reopens and takes the next write", async () => {
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-foreign-id-")), "store.msgpack");
+  const cache = await reopenForeignIdStore(file);
+  const seed = await cache.put(foreignIdDocument, "seed", { name: "seed" });
+  const payload = cache.getRequiredEnvelope(foreignIdDocument, "seed").payload;
+
+  await cache.putEnvelope(foreignIdDocument, {
+    key: "foreign",
+    type: "tests.foreign-id",
+    schemaId: "tests.foreign-id.older",
+    payload,
+    storedAt: "2026-09-30T00:00:00.0000000Z",
+    catalogEntry: {
+      schemaId: "tests.foreign-id.older",
+      schemaName: "tests.foreign-id",
+      schemaVersion: "tests.foreign_id.v1",
+      contentHash: "tests.foreign-id.older",
+      canonicalSchemaJson: "",
+      compatibleSchemaIds: ["tests.foreign-id.older"],
+      members: [],
+    },
+  });
+
+  const ids = schemaIdsOf(await readFile(file));
+  assert.deepEqual(ids, { record: "tests.foreign-id.current", catalog: ["tests.foreign-id.current"] });
+  const reopened = await reopenForeignIdStore(file);
+  assert.deepEqual(reopened.getRequired(foreignIdDocument, "foreign"), seed);
+  await reopened.put(foreignIdDocument, "next", { name: "next" });
+  assert.deepEqual((await reopenForeignIdStore(file)).getRequired(foreignIdDocument, "next"), { name: "next" });
+});
+
+test("the store publishes a record's schema id even when the envelope's catalog entry does not", async () => {
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-store-publishes-")), "store.msgpack");
+  const store = new SingleFileMessagePackBackingStore(file);
+  await store.push({
+    key: "k",
+    type: "tests.store-publishes",
+    schemaId: "tests.store-publishes.record",
+    payload: documentPayloadFromBytes(encode({ name: "k" })),
+    storedAt: "2026-09-30T00:00:00.0000000Z",
+    catalogEntry: {
+      schemaId: "tests.store-publishes.other",
+      schemaName: "tests.store-publishes",
+      schemaVersion: "tests.store_publishes.v1",
+      contentHash: "tests.store-publishes.other",
+      canonicalSchemaJson: "",
+      compatibleSchemaIds: ["tests.store-publishes.other"],
+      members: [],
+    },
+  });
+  assert.deepEqual(schemaIdsOf(await readFile(file)), { record: "tests.store-publishes.record", catalog: ["tests.store-publishes.record"] });
+  assert.equal((await new SingleFileMessagePackBackingStore(file).pullAll()).length, 1);
+});
+
+// The catalog a write leaves is derived from its records: one entry per carried id, chosen and never merged, the same whatever order
+// the records arrive in. A registered (supplied) entry wins over an arrived (read back) entry with the same own id.
+const writerEntry = (schemaId: string, schemaName: string, contentHash: string, compatibleSchemaIds: string[]) => ({
+  schemaId,
+  schemaName,
+  schemaVersion: `${schemaName}.v1`,
+  contentHash,
+  canonicalSchemaJson: "",
+  compatibleSchemaIds,
+  members: [],
+});
+const writerRecord = (key: string, type: string, schemaId: string, catalogEntry?: ReturnType<typeof writerEntry>) => ({
+  key,
+  type,
+  schemaId,
+  payload: documentPayloadFromBytes(encode({ key })),
+  storedAt: "2026-09-30T00:00:00.0000000Z",
+  ...(catalogEntry ? { catalogEntry } : {}),
+});
+const rawCatalogEntry = (entry: ReturnType<typeof writerEntry>) => [
+  entry.schemaId,
+  entry.schemaName,
+  entry.schemaVersion,
+  entry.contentHash,
+  entry.canonicalSchemaJson,
+  entry.compatibleSchemaIds,
+  [],
+];
+const catalogOf = async (file: string): Promise<unknown[][]> =>
+  (decode(await readFile(file)) as [string, unknown[][], unknown[][]])[1];
+
+test("a registered entry is written as it is, over the arrived entries with the same own id, in either order", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-registered-wins-"));
+  const stale1 = writerEntry("tests.x", "tests.n", "a-stale-1", ["tests.x", "old"]);
+  const stale2 = writerEntry("tests.x", "tests.n", "a-stale-2", ["tests.x"]);
+  const registered = writerRecord("a", "tests.n", "tests.x", writerEntry("tests.x", "tests.n", "fresh", ["tests.x"]));
+
+  for (const [name, entries] of [["12", [stale1, stale2]], ["21", [stale2, stale1]]] as const) {
+    const file = join(dir, `${name}.msgpack`);
+    await writeFile(
+      file,
+      encode(["cultcache.store.v1", entries.map(rawCatalogEntry), [["b", "tests.x", "2026-09-30T00:00:00.0000000Z", encode({ b: 1 })]]]),
+    );
+    await new SingleFileMessagePackBackingStore(file).push(registered);
+    const catalog = await catalogOf(file);
+    assert.equal(catalog.length, 1, name);
+    assert.equal(catalog[0]![3], "fresh", `${name}: the registered entry's hash is written`);
+    assert.deepEqual(catalog[0]![5], ["tests.x"], `${name}: written as chosen, no union with the arrived entries' ids`);
+  }
+});
+
+test("a rename with a stable schema id: a whole-view write names the registered schema", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-rename-"));
+  const file = join(dir, "rename.msgpack");
+  await writeFile(
+    file,
+    encode(["cultcache.store.v1", [rawCatalogEntry(writerEntry("tests.x", "tests.old", "stale", ["tests.x"]))], [["a", "tests.x", "2026-09-30T00:00:00.0000000Z", encode({ a: 1 })]]]),
+  );
+  await new SingleFileMessagePackBackingStore(file).pushAll([writerRecord("a", "tests.new", "tests.x", writerEntry("tests.x", "tests.new", "fresh", ["tests.x"]))]);
+  assert.deepEqual((await catalogOf(file)).map((entry) => [entry[1], entry[3]]), [["tests.new", "fresh"]]);
+});
+
+test("two entries of one tier that share an own id and disagree on the schema name refuse the write, typed", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-disagree-"));
+  const first = writerRecord("b", "tests.first", "tests.x", writerEntry("tests.x", "tests.first", "h1", ["tests.x"]));
+  const second = writerRecord("a", "tests.first", "tests.x", writerEntry("tests.x", "tests.second", "h2", ["tests.x"]));
+  for (const [name, order] of [["fs", [first, second]], ["sf", [second, first]]] as const) {
+    const file = join(dir, `${name}.msgpack`);
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(file).pushAll([...order]),
+      (error) =>
+        error instanceof SchemaConflictError &&
+        error.schemaId === "tests.x" &&
+        error.recordKey === "a" &&
+        [...error.schemaNames].sort().join() === "tests.first,tests.second",
+      name,
+    );
+  }
+});
+
+test("records of different types under one schema id refuse the write, typed, and no record changes type", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-retype-"));
+  const a = writerRecord("a", "tests.n", "tests.y", writerEntry("tests.x", "tests.n", "h1", ["tests.x", "tests.y"]));
+  const b = writerRecord("b", "tests.m", "tests.y", writerEntry("tests.y", "tests.m", "h2", ["tests.y"]));
+
+  for (const [name, order] of [["ab", [a, b]], ["ba", [b, a]]] as const) {
+    const file = join(dir, `${name}.msgpack`);
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(file).pushAll([...order]),
+      (error) => error instanceof SchemaConflictError && error.schemaId === "tests.y" && error.schemaNames.join() === "tests.m,tests.n",
+      name,
+    );
+  }
+});
+
+test("an entry that owns an id is chosen over one that lists it, and an entry no record needs is not written", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-own-first-"));
+  const owner = writerRecord("a", "tests.n", "tests.y", writerEntry("tests.y", "tests.n", "h1", ["tests.y"]));
+  const lister = writerRecord("b", "tests.n", "tests.x", writerEntry("tests.x", "tests.n", "h2", ["tests.x", "tests.y"]));
+  const onlyOwner = join(dir, "own.msgpack");
+  await new SingleFileMessagePackBackingStore(onlyOwner).pushAll([owner]);
+  assert.deepEqual((await catalogOf(onlyOwner)).map((entry) => entry[0]), ["tests.y"]);
+
+  // The lister carried only its own id: its list of y is not needed, and the owner's entry publishes y.
+  for (const [name, order] of [["lo", [lister, owner]], ["ol", [owner, lister]]] as const) {
+    const file = join(dir, `${name}.msgpack`);
+    await new SingleFileMessagePackBackingStore(file).pushAll([...order]);
+    const catalog = await catalogOf(file);
+    assert.deepEqual(catalog.map((entry) => [entry[0], entry[5]]).sort(), [["tests.x", ["tests.x", "tests.y"]], ["tests.y", ["tests.y"]]], name);
+  }
+});
+
+test("entries of one tier that tie are taken in one fixed order, and a registered entry that lists an id is chosen over an arrived one", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-tie-"));
+  // The content hash orders them against the order their compatible ids would give: h1 sorts first, its list sorts last.
+  const one = writerRecord("a", "tests.n", "tests.x", writerEntry("tests.x", "tests.n", "h2", ["tests.x"]));
+  const two = writerRecord("b", "tests.n", "tests.x", writerEntry("tests.x", "tests.n", "h1", ["tests.x", "tests.y"]));
+  for (const [name, order] of [["12", [one, two]], ["21", [two, one]]] as const) {
+    const file = join(dir, `${name}.msgpack`);
+    await new SingleFileMessagePackBackingStore(file).pushAll([...order]);
+    assert.deepEqual((await catalogOf(file)).map((entry) => entry[3]), ["h1"], name);
+  }
+
+  // z sits under old, which the arrived entry (id x) lists; the supplied entry (id r) lists it too: the registered one publishes it.
+  const file = join(dir, "lister.msgpack");
   await writeFile(
     file,
     encode([
       "cultcache.store.v1",
-      [],
-      [
-        [
-          "record-1",
-          "sha256:stale-schema-id-from-cold-record",
-          "2026-06-25T12:00:00Z",
-          encode([
-            "tests.schema_stamped_entry.v1",
-            "schema-stamped",
-            "still readable",
-          ]),
-        ],
-      ],
+      [rawCatalogEntry(writerEntry("tests.x", "tests.n", "stale", ["tests.x", "old"]))],
+      [["z", "old", "2026-09-30T00:00:00.0000000Z", encode({ z: 1 })]],
+    ]),
+  );
+  await new SingleFileMessagePackBackingStore(file).push(writerRecord("a", "tests.n", "tests.r", writerEntry("tests.r", "tests.n", "fresh", ["tests.r", "old"])));
+  assert.deepEqual((await catalogOf(file)).map((entry) => entry[0]), ["tests.r"]);
+});
+
+// A registered entry that owns an id keeps it against an arrived entry that owns it too and lists the id another record sits under,
+// whichever of the two ids sorts first: the arrived entry's list is not merged in, so the record under the listed id is published by
+// no chosen entry.
+for (const [ownId, listedId] of [["tests.a", "tests.b"], ["tests.b", "tests.a"]] as const) {
+  test(`an arrived entry that owns a registered id does not replace it nor publish what it lists (${ownId})`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cultcache-guard-"));
+    const file = join(dir, "guard.msgpack");
+    await writeFile(
+      file,
+      encode([
+        "cultcache.store.v1",
+        [rawCatalogEntry(writerEntry(ownId, "tests.arrived", "stale", [ownId, listedId]))],
+        [["k2", listedId, "2026-09-30T00:00:00.0000000Z", encode({ k: 2 })]],
+      ]),
+    );
+    const before = await readFile(file);
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(file).push(writerRecord("k1", "tests.registered", ownId, writerEntry(ownId, "tests.registered", "fresh", [ownId]))),
+      (error) => error instanceof SchemaConflictError && error.schemaId === listedId && error.recordKey === "k2",
+    );
+    assert.ok(before.equals(await readFile(file)), "the file is left as it was");
+  });
+}
+
+// Ids are taken in sorted order, so which entry survives, and so which id the refusal names, does not depend on the order the records
+// arrive in.
+test("the refusal names the same id whatever order the records arrive in", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-sorted-"));
+  const one = writerRecord("r1", "tests.n", "tests.y", writerEntry("tests.x", "tests.n", "h1", ["tests.x", "tests.y"]));
+  const two = writerRecord("r2", "tests.n", "tests.z", writerEntry("tests.x", "tests.n", "h2", ["tests.x", "tests.z"]));
+  for (const [name, order] of [["yz", [one, two]], ["zy", [two, one]]] as const) {
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(join(dir, `${name}.msgpack`)).pushAll([...order]),
+      (error) => error instanceof SchemaConflictError && error.schemaId === "tests.y" && error.recordKey === "r1",
+      name,
+    );
+  }
+});
+
+// A write may not retype records already in the file: across tiers the id keeps the type its records resolve to, unless the entries of
+// both tiers own it, which is a rename under a stable id and the registered descriptor wins.
+test("a write that would change the type an existing record resolves to refuses, typed, and leaves the file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-cross-tier-"));
+  const at = "2026-09-30T00:00:00.0000000Z";
+  const cases = [
+    {
+      name: "registered entry lists the id, arrived entry owns it",
+      catalog: writerEntry("tests.x", "tests.arrived", "h1", ["tests.x"]),
+      registered: writerRecord("a", "tests.registered", "tests.x", writerEntry("tests.r", "tests.registered", "h2", ["tests.r", "tests.x"])),
+    },
+    {
+      name: "registered entry owns the id, arrived entry lists it",
+      catalog: writerEntry("tests.r", "tests.arrived", "h1", ["tests.r", "tests.x"]),
+      registered: writerRecord("a", "tests.registered", "tests.x", writerEntry("tests.x", "tests.registered", "h2", ["tests.x"])),
+    },
+  ];
+  for (const { name, catalog, registered } of cases) {
+    const file = join(dir, `${name}.msgpack`);
+    await writeFile(file, encode(["cultcache.store.v1", [rawCatalogEntry(catalog)], [["z", "tests.x", at, encode({ z: 1 })]]]));
+    const before = await readFile(file);
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(file).push(registered),
+      (error) =>
+        error instanceof SchemaConflictError &&
+        error.schemaId === "tests.x" &&
+        [...error.schemaNames].sort().join() === "tests.arrived,tests.registered",
+      name,
+    );
+    assert.ok(before.equals(await readFile(file)), `${name}: the file is left as it was`);
+  }
+
+  // The same registered record renames the schema when both tiers own the id: it writes, and the reader finds every record.
+  const file = join(dir, "rename.msgpack");
+  await writeFile(file, encode(["cultcache.store.v1", [rawCatalogEntry(writerEntry("tests.x", "tests.arrived", "h1", ["tests.x"]))], [["z", "tests.x", at, encode({ z: 1 })]]]));
+  await new SingleFileMessagePackBackingStore(file).push(writerRecord("a", "tests.registered", "tests.x", writerEntry("tests.x", "tests.registered", "h2", ["tests.x"])));
+  assert.deepEqual((await catalogOf(file)).map((entry) => [entry[0], entry[1]]), [["tests.x", "tests.registered"]]);
+  assert.equal((await new SingleFileMessagePackBackingStore(file).pullAll()).length, 2);
+});
+
+test("a record no chosen entry publishes refuses the write, typed, and leaves the file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-orphan-"));
+  const file = join(dir, "orphan.msgpack");
+  // z sits under old, which only the arrived entry (id x) lists; the supplied entry owns x and does not.
+  await writeFile(
+    file,
+    encode([
+      "cultcache.store.v1",
+      [rawCatalogEntry(writerEntry("tests.x", "tests.legacy", "stale", ["tests.x", "old"]))],
+      [["z", "old", "2026-09-30T00:00:00.0000000Z", encode({ z: 1 })]],
+    ]),
+  );
+  const before = await readFile(file);
+  await assert.rejects(
+    () => new SingleFileMessagePackBackingStore(file).push(writerRecord("a", "tests.legacy", "tests.x", writerEntry("tests.x", "tests.legacy", "fresh", ["tests.x"]))),
+    (error) => error instanceof SchemaConflictError && error.schemaId === "old" && error.recordKey === "z",
+  );
+  assert.ok(before.equals(await readFile(file)), "the file is left as it was");
+});
+
+test("an id an entry owns names that entry, not one that lists it as compatible", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-own-id-"));
+  for (const vector of ["own-id-over-compatible-v3.bin", "compatible-before-owner-v3.bin"]) {
+    const file = await copyVector(dir, join(c2aVectors, "readability", vector), "own.msgpack");
+    const envelopes = await new SingleFileMessagePackBackingStore(file).pullAll();
+    assert.deepEqual(envelopes.map((envelope) => envelope.type), ["vectors.item", "vectors.item"], vector);
+    const inspection = inspectCultCacheBytes("own.msgpack", await readFile(file));
+    assert.deepEqual(inspection.records.map((record) => record.schemaName), ["vectors.item", "vectors.item"], vector);
+  }
+});
+
+// The inspector reads what the reader reads: a record under an id its catalog lists only as compatible is inspected.
+test("CultCache inspector reads a record whose schema the catalog publishes only as a compatible id", async () => {
+  const bytes = await readFile(join(c2aVectors, "readability", "compatible-id-only-v3.bin"));
+  const inspection = inspectCultCacheBytes("compatible.msgpack", bytes);
+  assert.deepEqual(inspection.records.map((record) => record.schemaName), ["vectors.item", "vectors.item"]);
+});
+
+test("a record loaded under a compatible schema id is written back under the id its catalog entry carries", async () => {
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-foreign-id-")), "store.msgpack");
+  const payload = encode({ name: "old" });
+  await writeFile(
+    file,
+    encode([
+      "cultcache.store.v1",
+      [[
+        "tests.foreign-id.current",
+        "tests.foreign-id",
+        "tests.foreign_id.v1",
+        "tests.foreign-id.current",
+        "",
+        ["tests.foreign-id.current", "tests.foreign-id.older"],
+        [],
+      ]],
+      [["old", "tests.foreign-id.older", "2026-09-30T00:00:00.0000000Z", payload]],
     ]),
   );
 
-  const inspection = inspectCultCacheBytes(file, await readFile(file));
-  assert.equal(inspection.catalog.length, 1);
-  assert.equal(inspection.catalog[0]?.schemaId, "sha256:stale-schema-id-from-cold-record");
-  assert.equal(inspection.catalog[0]?.schemaName, "tests.schema_stamped_entry");
-  assert.equal(inspection.records[0]?.schemaName, "tests.schema_stamped_entry");
-  assert.deepEqual(inspection.records[0]?.payloadPreview, [
-    "tests.schema_stamped_entry.v1",
-    "schema-stamped",
-    "still readable",
-  ]);
+  const cache = await reopenForeignIdStore(file);
+  assert.equal(cache.getRequiredEnvelope(foreignIdDocument, "old").schemaId, "tests.foreign-id.current");
+  await cache.put(foreignIdDocument, "next", { name: "next" });
+  const reopened = await reopenForeignIdStore(file);
+  assert.deepEqual(reopened.getRequired(foreignIdDocument, "old"), { name: "old" });
+  assert.deepEqual(reopened.getRequired(foreignIdDocument, "next"), { name: "next" });
 });
 
 interface InteropNote {
@@ -1482,20 +2063,24 @@ test("SingleFileMessagePackBackingStore refusals say what was found without blam
   );
 });
 
-test("pushAll refuses a store in a format this runtime does not read and leaves it byte-identical", async () => {
-  const vector = await readFile(resolve(cultLibRoot, "tests", "vectors", "document-variants-c2a", "v3-base.msgpack"));
-  const envelope = { key: "probe", type: "probe", payload: documentPayloadFromBytes(new Uint8Array([0x80])), storedAt: "2026-10-22T00:00:00Z" };
-  for (const bytes of [vector, vector.subarray(0, Math.floor(vector.length / 2))]) {
-    const file = join(await mkdtemp(join(tmpdir(), "cultcache-pushall-v3-")), "store.msgpack");
-    await writeFile(file, bytes);
-    await assert.rejects(() => new SingleFileMessagePackBackingStore(file).pushAll([envelope]), /cultcache\.store\.v3/u);
-    assert.equal(Buffer.compare(await readFile(file), bytes), 0);
+test("SingleFileMessagePackBackingStore refusal says what was found and names every format it reads", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-refusal-"));
+  const file = join(dir, "store.cc");
+  const reads = 'it reads "cultcache.store.v1" and "cultcache.store.v3" only.';
+  for (const [header, found] of [
+    ["cultcache.store.v12", '"cultcache.store.v12"'],
+    ["cultcache.store.SECRET", "an unrecognised cultcache.store.* header of 22 bytes"],
+    ["cultcache.store.v", "an unrecognised cultcache.store.* header of 17 bytes"],
+    // Digits are ASCII only: two Arabic-Indic digits are four bytes and are not the known shape.
+    ["cultcache.store.v١٢", "an unrecognised cultcache.store.* header of 21 bytes"],
+  ] as const) {
+    await writeFile(file, encode([header, [], []]));
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(file).pullAll(),
+      (error: Error) => error.message.includes(`CultCache store format ${found} is not one this runtime reads; ${reads}`),
+      header,
+    );
   }
-  const healed = join(await mkdtemp(join(tmpdir(), "cultcache-pushall-heal-")), "store.msgpack");
-  await writeFile(healed, new Uint8Array([0x93, 0xa0]));
-  const store = new SingleFileMessagePackBackingStore(healed);
-  await store.pushAll([envelope]);
-  assert.equal((await store.pullAll()).length, 1);
 });
 
 function headerRefused(bytes: Uint8Array): boolean {
@@ -1523,42 +2108,37 @@ test("a store's header is judged from its first bytes, in every MessagePack arra
   const leads = [[0x91], [0x9f], [0xdc, 0x00, 0x01], [0xdc, 0x01, 0x00], [0xdd, 0x00, 0x00, 0x00, 0x01], [0xdd, 0x00, 0x01, 0x00, 0x00]];
   for (const lead of leads) {
     for (const form of ["fix", "8", "16", "32"] as const) {
-      const v3 = storeStart(lead, "cultcache.store.v3", form);
-      assert.equal(headerRefused(v3), true, `${lead} ${form} v3`);
-      assert.equal(headerRefused(v3.subarray(0, v3.length - 1)), false, `${lead} ${form} v3 one byte short`);
+      const v4 = storeStart(lead, "cultcache.store.v4", form);
+      assert.equal(headerRefused(v4), true, `${lead} ${form} v4`);
+      assert.equal(headerRefused(v4.subarray(0, v4.length - 1)), false, `${lead} ${form} v4 one byte short`);
       assert.equal(headerRefused(storeStart(lead, "cultcache.store.v1", form)), false, `${lead} ${form} v1`);
-      assert.equal(headerRefused(storeStart(lead, "other.store.v3", form)), false, `${lead} ${form} other`);
+      assert.equal(headerRefused(storeStart(lead, "cultcache.store.v3", form)), false, `${lead} ${form} v3`);
+      assert.equal(headerRefused(storeStart(lead, "other.store.v4", form)), false, `${lead} ${form} other`);
       assert.equal(headerRefused(storeStart(lead, "", form)), false, `${lead} ${form} empty`);
     }
   }
   // The longest fixstr, and a string long enough to need str16.
-  assert.equal(headerRefused(storeStart([0x91], `cultcache.store.v3${"x".repeat(13)}`, "fix")), true);
-  assert.equal(headerRefused(storeStart([0x91], `cultcache.store.v3${"x".repeat(300)}`, "16")), true);
-  assert.equal(headerRefused(storeStart([0x91], `cultcache.store.v3${"x".repeat(300)}`, "32")), true);
-  // A view into a larger buffer is read from its own start.
-  const padded = new Uint8Array([9, 9, ...storeStart([0x91], "cultcache.store.v3", "fix")]);
-  assert.equal(headerRefused(padded.subarray(2)), true);
-});
-
-test("a stamp followed by bytes that are not UTF-8 gets the verdict a read gives", async () => {
-  const stamp = [...Buffer.from("cultcache.store.v3", "utf8")];
-  const forms = { fixstr: [0x91, 0xb3, ...stamp, 0xff], str8: [0x91, 0xd9, 19, ...stamp, 0xff] };
-  const envelope = { key: "probe", type: "probe", payload: documentPayloadFromBytes(new Uint8Array([0x80])), storedAt: "2026-10-22T00:00:00Z" };
-  for (const [name, bytes] of Object.entries(forms)) {
-    const file = join(await mkdtemp(join(tmpdir(), "cultcache-stamp-")), "store.msgpack");
-    await writeFile(file, new Uint8Array(bytes));
-    const store = new SingleFileMessagePackBackingStore(file);
-    await assert.rejects(() => store.pullAll(), /not one this runtime reads/u, `${name} read`);
-    await assert.rejects(() => store.pushAll([envelope]), /not one this runtime reads/u, `${name} pushAll`);
-    assert.deepEqual([...(await readFile(file))], bytes, `${name} left as it was`);
+  assert.equal(headerRefused(storeStart([0x91], `cultcache.store.v4${"x".repeat(13)}`, "fix")), true);
+  assert.equal(headerRefused(storeStart([0x91], `cultcache.store.v4${"x".repeat(300)}`, "16")), true);
+  assert.equal(headerRefused(storeStart([0x91], `cultcache.store.v4${"x".repeat(300)}`, "32")), true);
+  // A view into a larger buffer is read from its own start, in every form that reads a length through the DataView.
+  for (const lead of leads) {
+    for (const form of ["fix", "8", "16", "32"] as const) {
+      const padded = new Uint8Array([7, 7, 7, ...storeStart(lead, "cultcache.store.v4", form)]);
+      assert.equal(padded.subarray(3).byteOffset, 3);
+      assert.equal(headerRefused(padded.subarray(3)), true, `${lead} ${form} v4 at a byte offset`);
+    }
   }
+  // The stamp is judged as written: a stamp with a space is not the stamp this runtime reads, and not one it ignores.
+  assert.equal(headerRefused(storeStart([0x91], "cultcache.store.v3 ", "fix")), true, "a v3 stamp with a trailing space is a header this runtime does not read");
+  assert.equal(headerRefused(storeStart([0x91], " cultcache.store.v4", "fix")), false, "a leading space makes it no cultcache.store.* header");
 });
 
 test("bytes with no readable store stamp are not refused", () => {
-  const stamp = [...Buffer.from("cultcache.store.v3", "utf8")];
+  const stamp = [...Buffer.from("cultcache.store.v4", "utf8")];
   const cases: Record<string, number[]> = {
     empty: [],
-    "empty array": [0x90],
+    "empty array": [0x90, 0xb2, ...stamp],
     "empty array16": [0xdc, 0x00, 0x00, 0xb2, ...stamp],
     "empty array32": [0xdd, 0x00, 0x00, 0x00, 0x00, 0xb2, ...stamp],
     "array16 cut before its count": [0xdc, 0x00],
@@ -1567,9 +2147,6 @@ test("bytes with no readable store stamp are not refused", () => {
     "first element is not a string": [0x92, 0x01, 0xb2, ...stamp],
     "a bare string": [0xb2, ...stamp],
     "a map": [0x81, 0xb2, ...stamp],
-    "a map whose bytes read as an array32 count": [0x81, 0x00, 0x00, 0x00, 0x01, 0xb2, ...stamp],
-    "a small integer before a stamp-looking body": [0x91, 0x12, ...stamp],
-    "a uint32 before a stamp-looking body": [0x91, 0xce, 0x00, 0x00, 0x00, 0x12, ...stamp],
     "str8 cut before its length": [0x91, 0xd9],
     "str16 cut before its length": [0x91, 0xda, 0x00],
     "str32 cut before its length": [0x91, 0xdb, 0x00, 0x00, 0x00],
@@ -1579,13 +2156,51 @@ test("bytes with no readable store stamp are not refused", () => {
   }
 });
 
-test("pushAll leaves a store in a newer format alone when soft, and replaces a store it reads", async () => {
+test("a newer store is refused by name whatever its body: truncated, undecodable or trailing, by a read, a whole write and the inspector", async () => {
+  const envelope = { key: "probe", type: "probe", payload: documentPayloadFromBytes(new Uint8Array([0x80])), storedAt: "2026-10-22T00:00:00Z" };
+  const whole = encode(["cultcache.store.v4", [], [["k", "s", "t", new Uint8Array([0x90])]]]);
+  const bodies: Record<string, Uint8Array> = {
+    truncated: whole.subarray(0, whole.length - 3),
+    "header only": whole.subarray(0, 20),
+    undecodable: Uint8Array.of(...whole.subarray(0, 20), 0xc1),
+    trailing: Uint8Array.of(...whole, 0xff),
+    whole,
+  };
+  for (const [name, bytes] of Object.entries(bodies)) {
+    const file = join(await mkdtemp(join(tmpdir(), "cultcache-newer-")), "store.msgpack");
+    await writeFile(file, bytes);
+    const store = new SingleFileMessagePackBackingStore(file);
+    await assert.rejects(() => store.pullAll(), /not one this runtime reads/u, `${name} read`);
+    await assert.rejects(() => store.pushAll([envelope]), /not one this runtime reads/u, `${name} pushAll`);
+    await assert.rejects(() => store.pushAll([envelope], { soft: true }), /not one this runtime reads/u, `${name} soft pushAll`);
+    assert.throws(() => inspectCultCacheBytes(file, bytes), /not one this runtime reads/u, `${name} inspect`);
+    assert.deepEqual([...(await readFile(file))], [...bytes], `${name} left as it was`);
+  }
+});
+
+test("a stamp this runtime reads, followed by bytes that are not UTF-8, gets the same refusal from a read and from a whole write", async () => {
+  const envelope = { key: "probe", type: "probe", payload: documentPayloadFromBytes(new Uint8Array([0x80])), storedAt: "2026-10-22T00:00:00Z" };
+  for (const header of ["cultcache.store.v1", "cultcache.store.v3"]) {
+    const stamp = [...Buffer.from(header, "utf8")];
+    const forms = { fixstr: [0x91, 0xa0 | (stamp.length + 1), ...stamp, 0xff], str8: [0x91, 0xd9, stamp.length + 1, ...stamp, 0xff] };
+    for (const [name, bytes] of Object.entries(forms)) {
+      const file = join(await mkdtemp(join(tmpdir(), "cultcache-stamp-")), "store.msgpack");
+      await writeFile(file, new Uint8Array(bytes));
+      const store = new SingleFileMessagePackBackingStore(file);
+      await assert.rejects(() => store.pullAll(), /not one this runtime reads/u, `${header} ${name} read`);
+      await assert.rejects(() => store.pushAll([envelope]), /not one this runtime reads/u, `${header} ${name} pushAll`);
+      assert.deepEqual([...(await readFile(file))], bytes, `${header} ${name} left as it was`);
+    }
+  }
+});
+
+test("pushAll leaves a store it reads alone when soft, and replaces one it reads otherwise", async () => {
   const vector = await readFile(resolve(cultLibRoot, "tests", "vectors", "document-variants-c2a", "v3-base.msgpack"));
   const envelope = { key: "probe", type: "probe", payload: documentPayloadFromBytes(new Uint8Array([0x80])), storedAt: "2026-10-22T00:00:00Z" };
-  const newer = join(await mkdtemp(join(tmpdir(), "cultcache-pushall-soft-")), "store.msgpack");
-  await writeFile(newer, vector);
-  await new SingleFileMessagePackBackingStore(newer).pushAll([envelope], { soft: true });
-  assert.equal(Buffer.compare(await readFile(newer), vector), 0);
+  const existing = join(await mkdtemp(join(tmpdir(), "cultcache-pushall-soft-")), "store.msgpack");
+  await writeFile(existing, vector);
+  await new SingleFileMessagePackBackingStore(existing).pushAll([envelope], { soft: true });
+  assert.equal(Buffer.compare(await readFile(existing), vector), 0);
 
   const own = join(await mkdtemp(join(tmpdir(), "cultcache-pushall-own-")), "store.msgpack");
   const store = new SingleFileMessagePackBackingStore(own);
@@ -1608,6 +2223,66 @@ test("SingleFileMessagePackBackingStore reads only a missing store as empty", as
   const legacyEmpty = join(dir, "legacy-empty.cc");
   await writeFile(legacyEmpty, Uint8Array.of(0x90));
   assert.deepEqual(await new SingleFileMessagePackBackingStore(legacyEmpty).pullAll(), []);
+});
+
+test("reading a store that is not there writes nothing, and a read of a store that is readable does not rewrite it", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-read-writes-nothing-"));
+  const missing = join(dir, "store.cc");
+  assert.deepEqual(await new SingleFileMessagePackBackingStore(missing).pullAll(), []);
+  assert.equal(existsSync(missing), false);
+  assert.deepEqual(await readdir(dir), []);
+
+  const written = join(dir, "written.cc");
+  const envelope = { key: "k", type: "t", payload: documentPayloadFromBytes(Uint8Array.of(0x90)), storedAt: "2026-09-30T00:00:00Z" };
+  await new SingleFileMessagePackBackingStore(written).push(envelope);
+  const before = await readFile(written);
+  await new SingleFileMessagePackBackingStore(written).pullAll();
+  assert.deepEqual(await readFile(written), before);
+});
+
+test("a soft pushAll writes where nothing is, leaves a readable store alone, and refuses what the reader refuses", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-soft-"));
+  const envelope = { key: "k", type: "t", payload: documentPayloadFromBytes(Uint8Array.of(0x90)), storedAt: "2026-09-30T00:00:00Z" };
+  const other = { key: "other", type: "t", payload: documentPayloadFromBytes(Uint8Array.of(0x91, 0x01)), storedAt: "2026-09-30T00:00:00Z" };
+
+  // Absent: the soft write seeds the store.
+  const absent = join(dir, "absent.cc");
+  await new SingleFileMessagePackBackingStore(absent).pushAll([envelope], { soft: true });
+  assert.deepEqual((await new SingleFileMessagePackBackingStore(absent).pullAll()).map((entry) => entry.key), ["k"]);
+
+  // Readable: the soft write is skipped, byte for byte.
+  const seeded = await readFile(absent);
+  await new SingleFileMessagePackBackingStore(absent).pushAll([other], { soft: true });
+  assert.deepEqual(await readFile(absent), seeded);
+
+  // Unreadable: refused, as pullAll refuses it, and the file is left exactly as it was.
+  const refused: Array<[string, Uint8Array]> = [
+    ["zero-byte", new Uint8Array()],
+    ["unknown-format", encode(["cultcache.store.v9", [], []])],
+    ["bin-header", Uint8Array.of(0x93, 0xc4, 0x01, 0x76, 0x90, 0x90)],
+    ["truncated", seeded.subarray(0, seeded.length - 1)],
+    ["garbage", Uint8Array.of(0xc1)],
+  ];
+  for (const [name, bytes] of refused) {
+    const file = join(dir, `${name}.cc`);
+    await writeFile(file, bytes);
+    await assert.rejects(() => new SingleFileMessagePackBackingStore(file).pullAll(), StoreUnreadableError, name);
+    await assert.rejects(() => new SingleFileMessagePackBackingStore(file).pushAll([other], { soft: true }), StoreUnreadableError, name);
+    assert.deepEqual(await readFile(file), Buffer.from(bytes), name);
+  }
+});
+
+test("a header that does not start at the store prefix is not echoed whole, though it ends like a version", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-forged-header-"));
+  const file = join(dir, "store.cc");
+  for (const header of ["cultcache.store.SECRETcultcache.store.v9", "cultcache.store.\ncultcache.store.v9", "SECRETcultcache.store.v9"]) {
+    await writeFile(file, encode([header, [], []]));
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(file).pullAll(),
+      (error: Error) => error instanceof StoreUnreadableError && !error.message.includes("SECRET") && !error.message.includes(header),
+      header,
+    );
+  }
 });
 
 test("SingleFileMessagePackBackingStore reports a store it cannot reach as an I/O error", { skip: process.platform === "win32" }, async () => {
@@ -1658,11 +2333,37 @@ test("SingleFileMessagePackBackingStore refuses a dangling symlink at its path a
   await symlink(join(volume, "store.cc"), file);
   const store = new SingleFileMessagePackBackingStore(file);
   const envelope = { key: "k", type: "t", payload: documentPayloadFromBytes(Uint8Array.of(0x90)), storedAt: "2026-09-30T00:00:00Z" };
-  await assert.rejects(() => store.pullAll(), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+  await assert.rejects(
+    () => store.pullAll(),
+    (error: NodeJS.ErrnoException) => error.code === "ENOENT" && error.message.includes("symbolic link") && error.message.includes(file),
+  );
   await assert.rejects(() => store.push(envelope), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
   await assert.rejects(() => store.pushAll([envelope], { soft: true }), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
   assert.ok((await lstat(file)).isSymbolicLink());
   assert.deepEqual(await readdir(volume), []);
+});
+
+// The second look of the read, staged: nothing is at the path only when the read and the lstat both find nothing. A path
+// that changed between them (a link in a parent swapped for a file, a store that appeared) is never an empty store.
+test("readStoreBytes reports nothing at the path only when the lstat finds nothing too", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-second-look-"));
+  const file = join(dir, "store.cc");
+  const failing = (code: string) => () => {
+    throw Object.assign(new Error(code), { code });
+  };
+  assert.equal(readStoreBytes(file, failing("ENOENT")), undefined);
+  for (const code of ["ENOTDIR", "EACCES", "ELOOP"]) {
+    assert.throws(() => readStoreBytes(file, failing(code)), (error: NodeJS.ErrnoException) => error.code === code, code);
+  }
+
+  assert.throws(
+    () => readStoreBytes(file, () => ({ isSymbolicLink: () => true })),
+    (error: NodeJS.ErrnoException) => error.code === "ENOENT" && error.message.includes("symbolic link"),
+  );
+  assert.throws(
+    () => readStoreBytes(file, () => ({ isSymbolicLink: () => false })),
+    (error: NodeJS.ErrnoException) => error.code === "ENOENT" && error.message.includes("appeared while it was being read"),
+  );
 });
 
 test("SingleFileMessagePackBackingStore record refusal names only a string key", async () => {
@@ -1720,6 +2421,242 @@ test("a v1 store written at the base commit still reads byte for byte", async ()
   assert.deepEqual(envelopes.map((entry) => [entry.key, entry.type]), [["alpha", "vectors.item"], ["beta", "vectors.item"]]);
   assert.deepEqual([...documentPayloadBytes(envelopes[0]!.payload)], [0x92, 0xa5, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x01]);
   assert.deepEqual([...documentPayloadBytes(envelopes[1]!.payload)], [0x92, 0xa4, 0x62, 0x65, 0x74, 0x61, 0x02]);
+});
+
+// The element-id marker: tests/vectors/document-variants-c2a/v3-base.msgpack is v1-base with its header replaced.
+const c2aVectors = resolve(cultLibRoot, "tests", "vectors", "document-variants-c2a");
+
+async function copyVector(directory: string, source: string, name: string): Promise<string> {
+  const file = join(directory, name);
+  await writeFile(file, await readFile(source));
+  return file;
+}
+
+test("SingleFileMessagePackBackingStore pushAll applies the header the file on disk carries", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-v3-pushall-"));
+  const header = async (file: string) => (decode(await readFile(file)) as unknown[])[0];
+
+  // A store that never read the file still keeps a marked file marked.
+  const v3 = await copyVector(dir, join(c2aVectors, "v3-base.msgpack"), "v3.msgpack");
+  const envelopes = await new SingleFileMessagePackBackingStore(v3).pullAll();
+  await new SingleFileMessagePackBackingStore(v3).pushAll(envelopes);
+  assert.equal(await header(v3), "cultcache.store.v3");
+
+  // A store that read a marked file, whose file is then gone, writes unmarked: the disk decides, not the last read.
+  const reader = new SingleFileMessagePackBackingStore(v3);
+  await reader.pullAll();
+  await rm(v3);
+  await reader.pushAll(envelopes);
+  assert.equal(await header(v3), "cultcache.store.v1");
+
+  const v1 = await copyVector(dir, join(variantVectors, "v1-base.msgpack"), "v1.msgpack");
+  await new SingleFileMessagePackBackingStore(v1).pushAll(envelopes);
+  assert.equal(await header(v1), "cultcache.store.v1");
+});
+
+test("SingleFileMessagePackBackingStore push after a read of a marked file that is gone writes v1", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-v3-gone-"));
+  const v3 = await copyVector(dir, join(c2aVectors, "v3-base.msgpack"), "v3.msgpack");
+  const store = new SingleFileMessagePackBackingStore(v3);
+  const envelopes = await store.pullAll();
+  await rm(v3);
+  await store.push(envelopes[0]!);
+  assert.equal((decode(await readFile(v3)) as unknown[])[0], "cultcache.store.v1");
+});
+
+test("SingleFileMessagePackBackingStore reads a v3 element-id store and a rewrite keeps the marker", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-v3-"));
+  const v3 = await copyVector(dir, join(c2aVectors, "v3-base.msgpack"), "v3.msgpack");
+  const store = new SingleFileMessagePackBackingStore(v3);
+  const envelopes = await store.pullAll();
+  assert.deepEqual(envelopes.map((entry) => entry.key), ["alpha", "beta"]);
+  assert.deepEqual([...documentPayloadBytes(envelopes[0]!.payload)], [0x92, 0xa5, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x01]);
+  await store.push({ ...envelopes[0]!, storedAt: "2026-09-30T00:00:00.0000000Z" });
+  assert.equal((decode(await readFile(v3)) as unknown[])[0], "cultcache.store.v3");
+
+  // A v1 store stays v1: the marker is carried, never invented.
+  const v1 = await copyVector(dir, join(variantVectors, "v1-base.msgpack"), "v1.msgpack");
+  const plain = new SingleFileMessagePackBackingStore(v1);
+  const plainEnvelopes = await plain.pullAll();
+  await plain.push({ ...plainEnvelopes[0]!, storedAt: "2026-09-30T00:00:00.0000000Z" });
+  assert.equal((decode(await readFile(v1)) as unknown[])[0], "cultcache.store.v1");
+
+  const inspection = inspectCultCacheBytes("v3.msgpack", await readFile(join(c2aVectors, "v3-base.msgpack")));
+  assert.equal(inspection.format, "cultcache.store.v3");
+});
+
+test("SingleFileMessagePackBackingStore pushAll refuses a store whose header it cannot read and leaves the file untouched", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-pushall-refused-"));
+  const envelopes = await new SingleFileMessagePackBackingStore(
+    await copyVector(dir, join(c2aVectors, "v3-base.msgpack"), "seed.msgpack"),
+  ).pullAll();
+  for (const vector of [
+    join(variantVectors, "unknown-header.msgpack"),
+    join(variantVectors, "variant-v2.msgpack"),
+    resolve(cultLibRoot, "tests", "vectors", "document-variants-c1", "variant-store.msgpack"),
+  ]) {
+    const file = await copyVector(dir, vector, "store.msgpack");
+    const before = await readFile(file);
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(file).pushAll(envelopes),
+      (error) => error instanceof StoreUnreadableError && /is not readable/u.test(error.message),
+      vector,
+    );
+    assert.deepEqual(await readFile(file), before, `${vector} was rewritten`);
+  }
+});
+
+// A file is replaced by a rewrite exactly when this runtime's own reader opens it: one verdict per file, asked by pullAll,
+// pushAll, soft pushAll, push and delete alike; a soft flush leaves the files that read as they are. The bytes and every runtime's verdict: tests/vectors/document-variants-c2a/readability.
+test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", async () => {
+  const root = join(c2aVectors, "readability");
+  const rows = (await readFile(join(root, "manifest.txt"), "utf8"))
+    .split(/\r?\n/u)
+    .filter((line) => line.length > 0 && !line.startsWith("#"))
+    .map((line) => line.split(/\s+/u));
+  // Every vector in the folder has a manifest row.
+  const listed = rows.map(([vector]) => vector!).filter((vector) => !vector.startsWith("..")).sort();
+  assert.deepEqual((await readdir(root)).filter((name) => name.endsWith(".bin")).sort(), listed);
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-readability-"));
+  const seed = await copyVector(dir, join(c2aVectors, "v3-base.msgpack"), "seed.msgpack");
+  const envelopes = await new SingleFileMessagePackBackingStore(seed).pullAll();
+  for (const [vector, , , typescript] of rows) {
+    const reads = typescript === "reads";
+    const bytes = await readFile(join(root, vector));
+    for (const operation of ["pullAll", "softPushAll", "pushAll", "push", "delete"] as const) {
+      const file = join(dir, `${vector.replace(/[^a-z0-9.-]/giu, "_")}.${operation}.msgpack`);
+      await writeFile(file, bytes);
+      const store = new SingleFileMessagePackBackingStore(file);
+      const run = () =>
+        operation === "pullAll"
+          ? store.pullAll()
+          : operation === "softPushAll"
+            ? store.pushAll(envelopes, { soft: true })
+            : operation === "pushAll"
+              ? store.pushAll(envelopes)
+              : operation === "push"
+                ? store.push(envelopes[0]!)
+                : store.delete(envelopes[0]!);
+      if (reads) {
+        await run();
+        if (operation === "pullAll") {
+          continue;
+        }
+
+        // A soft flush leaves a store it reads byte for byte: nothing is written where something is.
+        if (operation === "softPushAll") {
+          assert.ok(bytes.equals(await readFile(file)), `${vector} ${operation} rewrote a store it reads`);
+          continue;
+        }
+
+        // The replaced file is a store: it carries the header its old content decides (a v3 store keeps its marker, all else
+        // is v1), and it holds what the operation wrote.
+        assert.equal((decode(await readFile(file)) as unknown[])[0], vector.includes("v3") ? "cultcache.store.v3" : "cultcache.store.v1", `${vector} ${operation}`);
+        const keys = (await new SingleFileMessagePackBackingStore(file).pullAll()).map((entry) => entry.key);
+        if (operation === "pushAll") {
+          assert.deepEqual(keys, envelopes.map((entry) => entry.key).sort(), `${vector} ${operation}`);
+        } else if (operation === "push") {
+          assert.ok(keys.includes(envelopes[0]!.key), `${vector} ${operation}`);
+        } else {
+          assert.ok(!keys.includes(envelopes[0]!.key), `${vector} ${operation}`);
+        }
+      } else {
+        await assert.rejects(
+          run,
+          (error) => error instanceof StoreUnreadableError && error.cause !== undefined,
+          `${vector} ${operation}`,
+        );
+        assert.ok(bytes.equals(await readFile(file)), `${vector} ${operation} rewrote a file it cannot read`);
+      }
+    }
+  }
+});
+
+// Owner beats lister: a definition that owns an id and one that lists it as compatible register together in either order. A record
+// under the id is the owner's, and a lister's only when nothing owns it; two listers and no owner name no single definition.
+const ownsId = defineDocumentType({ type: "tests.owns", schema: z.object({ name: z.string() }), schemaId: "id.owned", schemaName: "tests.owns" });
+const listsId = defineDocumentType({
+  type: "tests.lists",
+  schema: z.object({ name: z.string() }),
+  schemaId: "id.lister",
+  schemaName: "tests.lists",
+  compatibleSchemaIds: ["id.owned"],
+});
+const alsoListsId = defineDocumentType({
+  type: "tests.also-lists",
+  schema: z.object({ name: z.string() }),
+  schemaId: "id.also-lister",
+  schemaName: "tests.also-lists",
+  compatibleSchemaIds: ["id.owned"],
+});
+
+async function storeUnder(records: [string, string][]): Promise<string> {
+  const seed = CultCache.builder().withDocumentType(ownsId).build();
+  await seed.put(ownsId, "seed", { name: "n" });
+  const payload = seed.getRequiredEnvelope(ownsId, "seed").payload;
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-owner-lister-")), "store.msgpack");
+  const ids = [...new Set(records.map(([, schemaId]) => schemaId))];
+  await writeFile(file, encode(["cultcache.store.v1",
+    ids.map((schemaId) => [schemaId, schemaId, `${schemaId}.v1`, schemaId, "", [schemaId], []]),
+    records.map(([key, schemaId]) => [key, schemaId, "2026-09-30T00:00:00.0000000Z", payload])]));
+  return file;
+}
+
+async function openWith(file: string, ...definitions: AnyCultCacheDocumentDefinition[]): Promise<CultCache> {
+  let builder = CultCache.builder();
+  for (const definition of definitions) builder = builder.withDocumentType(definition);
+  const cache = builder.withGenericStore(new SingleFileMessagePackBackingStore(file)).build();
+  await cache.pullAllBackingStores();
+  return cache;
+}
+
+test("a definition listing an id registers beside the one owning it in either order, and the owner wins", async () => {
+  const file = await storeUnder([["o", "id.owned"], ["l", "id.lister"]]);
+  for (const order of [[ownsId, listsId], [listsId, ownsId]]) {
+    const cache = await openWith(file, ...order);
+    assert.deepEqual(cache.getRequired(ownsId, "o"), { name: "n" });
+    assert.equal(cache.get(listsId, "o"), undefined);
+    assert.deepEqual(cache.getRequired(listsId, "l"), { name: "n" });
+  }
+  const listerOnly = await openWith(await storeUnder([["o", "id.owned"]]), listsId);
+  assert.deepEqual(listerOnly.getRequired(listsId, "o"), { name: "n" });
+});
+
+test("two definitions listing one id register, and a record under it needs its owner", async () => {
+  const file = await storeUnder([["k", "id.owned"]]);
+  for (const listers of [[listsId, alsoListsId], [alsoListsId, listsId]]) {
+    await assert.rejects(openWith(file, ...listers), (error: unknown) => {
+      assert.ok(error instanceof SchemaConflictError);
+      assert.equal(error.schemaId, "id.owned");
+      assert.equal(error.recordKey, "k");
+      assert.deepEqual(error.schemaNames, ["tests.also-lists", "tests.lists"]);
+      return true;
+    });
+    for (const order of [[...listers, ownsId], [ownsId, ...listers]]) {
+      assert.deepEqual((await openWith(file, ...order)).getRequired(ownsId, "k"), { name: "n" });
+    }
+  }
+});
+
+test("every registration refusal is a SchemaConflictError naming the id and both schema names", () => {
+  const sameId = defineDocumentType({ type: "tests.owns-too", schema: z.object({ name: z.string() }), schemaId: "id.owned", schemaName: "tests.owns-too" });
+  const sameName = defineDocumentType({ type: "tests.named-too", schema: z.object({ name: z.string() }), schemaId: "id.other", schemaName: "tests.owns" });
+  const sameType = defineDocumentType({ type: "tests.owns", schema: z.object({ name: z.string() }), schemaId: "id.third", schemaName: "tests.third" });
+  for (const [claimant, schemaId, names] of [
+    [sameId, "id.owned", ["tests.owns", "tests.owns-too"]],
+    [sameName, "id.other", ["tests.owns", "tests.owns"]],
+    [sameType, "id.third", ["tests.owns", "tests.third"]],
+  ] as const) {
+    for (const order of [[ownsId, claimant], [claimant, ownsId]]) {
+      assert.throws(() => CultCache.builder().withDocumentType(order[0]).withDocumentType(order[1]).build(), (error: unknown) => {
+        assert.ok(error instanceof SchemaConflictError, String(error));
+        const first = order[0] === ownsId;
+        assert.equal(error.schemaId, first ? schemaId : ownsId.schemaId);
+        assert.deepEqual(error.schemaNames, first ? names : [...names].reverse());
+        return true;
+      });
+    }
+  }
 });
 
 // ---------------------------------------------------------------------------------------------

@@ -59,6 +59,7 @@
       ],
       "additionalProperties": false,
       "properties": {
+        "id": { "type": "string", "minLength": 1 },
         "role": { "type": "string", "minLength": 1 },
         "schemaId": { "type": "string", "minLength": 1 },
         "schemaVersion": { "type": "string", "minLength": 1 },
@@ -74,6 +75,7 @@
       ],
       "additionalProperties": false,
       "properties": {
+        "id": { "type": "string", "minLength": 1 },
         "role": { "type": "string", "minLength": 1 },
         "uri": { "type": "string", "minLength": 1 },
         "mediaType": { "type": "string", "minLength": 1 },
@@ -92,6 +94,7 @@
       ],
       "additionalProperties": false,
       "properties": {
+        "id": { "type": "string", "minLength": 1 },
         "stage": { "type": "string", "minLength": 1 },
         "startedAt": { "type": "string", "minLength": 1 },
         "completedAt": { "type": "string", "minLength": 1 },

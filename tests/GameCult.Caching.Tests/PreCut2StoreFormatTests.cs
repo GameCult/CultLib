@@ -108,7 +108,7 @@ namespace GameCult.Caching.Tests
                 using var cache = new CultCache();
                 var error = Assert.Catch(() => cache.AddBackingStore(new SingleFileMessagePackBackingStore(file)));
                 Assert.That(error, Is.Not.Null);
-                Assert.That(error!.ToString(), Does.Contain(nameof(NotSupportedException)));
+                Assert.That(error, Is.TypeOf<CultStoreUnreadableException>());
                 return error.ToString();
             }
             finally
@@ -123,10 +123,21 @@ namespace GameCult.Caching.Tests
             Assert.That(Refusal("unknown-header.msgpack"), Does.Contain("cultcache.store.v9"));
         }
 
+        // Slots of the current catalog layout that do not decode are refused by name, as a malformed store is.
+        [TestCase("current-catalog-bad-canonical.msgpack")]
+        [TestCase("current-catalog-bad-members.msgpack")]
+        [TestCase("current-catalog-bad-compat.msgpack")]
+        [TestCase("current-catalog-bad-slot5-nil.msgpack")]
+        [TestCase("current-catalog-bad-slot5-int.msgpack")]
+        public void SingleFileRefusesAMalformedCurrentCatalogEntry(string vector)
+        {
+            Assert.That(Refusal(vector), Is.Not.Empty);
+        }
+
         // The release-now-c2a-bumps-format ruling rests on this: a store stamped with a newer format version is refused at
         // open, so this runtime cannot rewrite it. The file stays byte-identical through the refusal and through later
         // writes to the cache, whose refused store was never attached.
-        [TestCase("cultcache.store.v3")]
+        [TestCase("cultcache.store.v4")]
         [TestCase("cultcache.store.v9")]
         public async Task SingleFileStampedWithANewerFormatIsRefusedAndNeverRewritten(string newerFormat)
         {
@@ -140,7 +151,7 @@ namespace GameCult.Caching.Tests
                 var before = File.ReadAllBytes(file);
 
                 using var cache = new CultCache();
-                var error = Assert.Throws<NotSupportedException>(() =>
+                var error = Assert.Throws<CultStoreUnreadableException>(() =>
                     cache.AddBackingStore(new SingleFileMessagePackBackingStore(file)))!;
                 Assert.That(error.Message, Does.Contain(newerFormat));
                 Assert.That(cache.BackingStores, Is.Empty);
@@ -156,7 +167,7 @@ namespace GameCult.Caching.Tests
             }
         }
 
-        // Two processes: this one attached a v1 store, then a later build rewrote it as v3. A plain flush, a staged write
+        // Two processes: this one attached a v1 store, then a later build rewrote it as v4. A plain flush, a staged write
         // and a staged delete must each refuse to downgrade it, leaving the file as the other process wrote it.
         [Test]
         public async Task SingleFileFlushRefusesAStoreAnotherProcessStampedNewerSinceAttach()
@@ -170,16 +181,16 @@ namespace GameCult.Caching.Tests
                 await cache.PullAllBackingStoresAsync();
 
                 var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(file));
-                snapshot.FormatVersion = "cultcache.store.v3";
+                snapshot.FormatVersion = "cultcache.store.v4";
                 File.WriteAllBytes(file, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
                 var before = File.ReadAllBytes(file);
 
-                await cache.AddAsync(new PreCut2FixtureNote { Text = "staged after the other process wrote v3" });
-                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                await cache.AddAsync(new PreCut2FixtureNote { Text = "staged after the other process wrote v4" });
+                Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAllBackingStores());
                 Assert.That(File.ReadAllBytes(file), Is.EqualTo(before));
 
                 cache.Remove(new CultRecordKey("item:anvil"));
-                Assert.Throws<NotSupportedException>(() => cache.BackingStores.Single().PushAll());
+                Assert.Throws<CultStoreUnreadableException>(() => cache.BackingStores.Single().PushAll());
                 Assert.That(File.ReadAllBytes(file), Is.EqualTo(before));
             }
             finally
@@ -188,9 +199,10 @@ namespace GameCult.Caching.Tests
             }
         }
 
-        // An unreadable stamp is not a newer format: a flush still heals a damaged store.
+        // A write set cannot merge with a disk it cannot read: a flush refuses a store whose stamp is unreadable and leaves it
+        // as it is.
         [Test]
-        public async Task SingleFileFlushStillHealsAStoreWhoseStampIsUnreadable()
+        public async Task SingleFileFlushRefusesAStoreWhoseStampIsUnreadable()
         {
             var root = CopyFixture("single-file-v1");
             try
@@ -199,13 +211,13 @@ namespace GameCult.Caching.Tests
                 using var cache = new CultCache();
                 cache.AddBackingStore(new SingleFileMessagePackBackingStore(file));
                 await cache.PullAllBackingStoresAsync();
-                File.WriteAllBytes(file, new byte[] { 0xc1, 0xc1 });
+                var damaged = new byte[] { 0xc1, 0xc1 };
+                File.WriteAllBytes(file, damaged);
 
-                await cache.AddAsync(new PreCut2FixtureNote { Text = "heals" });
-                cache.FlushAllBackingStores();
+                await cache.AddAsync(new PreCut2FixtureNote { Text = "refused" });
+                Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAllBackingStores());
 
-                Assert.That(CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(file)).FormatVersion,
-                    Is.EqualTo("cultcache.store.v1"));
+                Assert.That(File.ReadAllBytes(file), Is.EqualTo(damaged));
             }
             finally
             {
@@ -237,15 +249,32 @@ namespace GameCult.Caching.Tests
         private static System.Collections.Generic.IEnumerable<TestCaseData> NewerStampOverUnreadableBody()
         {
             byte garbage = 0xc1;
-            yield return new TestCaseData(Raw((byte)0x93, "cultcache.store.v3", garbage, garbage)).SetName("v3 header over a bad body");
-            yield return new TestCaseData(Raw((byte)0x93, System.Text.Encoding.UTF8.GetBytes("cultcache.store.v3"), garbage, garbage)).SetName("bin header v3 over a bad body");
-            yield return new TestCaseData(Raw((byte)0x93, System.Text.Encoding.UTF8.GetBytes("cultcache.store.v9"), garbage, garbage)).SetName("bin header v9 over a bad body");
-            yield return new TestCaseData(Raw((byte)0x93, "cultcache.store.v3", (byte)0x91, garbage, (byte)0x90)).SetName("v3 header over a bad catalog");
-            yield return new TestCaseData(Raw((byte)0x92, "cultcache.store.v4", garbage)).SetName("v4 header over garbage");
+            yield return new TestCaseData(Raw((byte)0x93, "cultcache.store.v4", garbage, garbage), "cultcache.store.v4").SetName("v4 header over a bad body");
+            yield return new TestCaseData(Raw((byte)0x93, System.Text.Encoding.UTF8.GetBytes("cultcache.store.v3"), garbage, garbage), "binary").SetName("bin header v3 over a bad body");
+            yield return new TestCaseData(Raw((byte)0x93, System.Text.Encoding.UTF8.GetBytes("cultcache.store.v9"), garbage, garbage), "binary").SetName("bin header v9 over a bad body");
+            yield return new TestCaseData(Raw((byte)0x93, "cultcache.store.v4", (byte)0x91, garbage, (byte)0x90), "cultcache.store.v4").SetName("v4 header over a bad catalog");
+            yield return new TestCaseData(Raw((byte)0x92, "cultcache.store.v4", garbage), "cultcache.store.v4").SetName("v4 header over garbage");
+            yield return new TestCaseData(Raw((byte)0x93, "cultcache.store.v5", garbage, garbage), "cultcache.store.v5").SetName("v5 header over a bad body");
+            yield return new TestCaseData(BinaryStampOverAValidBody(), "binary").SetName("bin header v1 over a valid body");
+        }
+
+        // The single-file-v1 fixture's own bytes with the stamp re-encoded from a string to bin8: nothing else differs, so only the
+        // stamp's encoding can refuse it.
+        private static byte[] BinaryStampOverAValidBody()
+        {
+            var bytes = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "pre-cut2", "single-file-v1", "store.msgpack"));
+            var stamp = System.Text.Encoding.UTF8.GetBytes("cultcache.store.v1");
+            var at = 1;
+            Assert.That(bytes[0], Is.EqualTo(0x93), "the fixture opens with a three-slot array");
+            Assert.That(bytes[at], Is.EqualTo((byte)(0xa0 | stamp.Length)), "the stamp is a fixstr");
+            var rebuilt = new System.Collections.Generic.List<byte> { bytes[0], 0xc4, (byte)stamp.Length };
+            rebuilt.AddRange(stamp);
+            rebuilt.AddRange(bytes.Skip(at + 1 + stamp.Length));
+            return rebuilt.ToArray();
         }
 
         [TestCaseSource(nameof(NewerStampOverUnreadableBody))]
-        public async Task SingleFileFlushRefusesANewerStampWhateverItsBodyHolds(byte[] swapped)
+        public async Task SingleFileFlushRefusesANewerStampWhateverItsBodyHolds(byte[] swapped, string named)
         {
             var root = CopyFixture("single-file-v1");
             try
@@ -257,9 +286,11 @@ namespace GameCult.Caching.Tests
                 File.WriteAllBytes(file, swapped);
 
                 await cache.AddAsync(new PreCut2FixtureNote { Text = "must not overwrite" });
-                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                var flush = Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAllBackingStores())!;
+                Assert.That(flush.Message, Does.Contain(named));
                 Assert.That(File.ReadAllBytes(file), Is.EqualTo(swapped));
-                Assert.Throws<NotSupportedException>(() => new SingleFileMessagePackBackingStore(file).PullAll());
+                var pull = Assert.Throws<CultStoreUnreadableException>(() => new SingleFileMessagePackBackingStore(file).PullAll())!;
+                Assert.That(pull.Message, Does.Contain(named));
             }
             finally
             {
@@ -277,11 +308,11 @@ namespace GameCult.Caching.Tests
                 using var cache = new CultCache();
                 cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
                 await cache.PullAllBackingStoresAsync();
-                var swapped = Raw((byte)0x93, "cultcache.store.v5.directory-content-addressed-pages", (byte)0xc1, (byte)0xc1);
+                var swapped = Raw((byte)0x93, "cultcache.store.v6.directory-content-addressed-pages", (byte)0xc1, (byte)0xc1);
                 File.WriteAllBytes(manifest, swapped);
 
                 await cache.AddAsync(new PreCut2FixtureNote { Text = "must not overwrite" });
-                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAllBackingStores());
                 Assert.That(File.ReadAllBytes(manifest), Is.EqualTo(swapped));
             }
             finally
@@ -290,12 +321,13 @@ namespace GameCult.Caching.Tests
             }
         }
 
-        // A file that is read but carries no readable stamp (empty, or cut off) is damage, not a newer store: a flush heals it.
+        // A file that is read but carries no readable stamp (empty, or cut off) is not a store: a flush refuses it, whatever its
+        // length, and leaves it as it is.
         [TestCase(0)]
         [TestCase(1)]
         [TestCase(10)]
         [TestCase(-1)]
-        public async Task SingleFileFlushHealsAnEmptyOrTruncatedFile(int keep)
+        public async Task SingleFileFlushRefusesAnEmptyOrTruncatedFile(int keep)
         {
             var root = CopyFixture("single-file-v1");
             try
@@ -305,14 +337,13 @@ namespace GameCult.Caching.Tests
                 cache.AddBackingStore(new SingleFileMessagePackBackingStore(file));
                 await cache.PullAllBackingStoresAsync();
                 var whole = File.ReadAllBytes(file);
-                File.WriteAllBytes(file, whole.Take(keep < 0 ? whole.Length / 2 : keep).ToArray());
+                var damaged = whole.Take(keep < 0 ? whole.Length / 2 : keep).ToArray();
+                File.WriteAllBytes(file, damaged);
 
-                await cache.AddAsync(new PreCut2FixtureNote { Text = "heals" });
-                cache.FlushAllBackingStores();
+                await cache.AddAsync(new PreCut2FixtureNote { Text = "refused" });
+                Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAllBackingStores());
 
-                var healed = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(file));
-                Assert.That(healed.FormatVersion, Is.EqualTo("cultcache.store.v1"));
-                Assert.That(healed.Records.Length, Is.GreaterThan(0));
+                Assert.That(File.ReadAllBytes(file), Is.EqualTo(damaged));
             }
             finally
             {
@@ -320,23 +351,29 @@ namespace GameCult.Caching.Tests
             }
         }
 
-        // A store subclass that overrides nothing beyond its four abstract members is guarded by the base, not by an opt-in.
+        // A store subclass that overrides nothing beyond its abstract members is guarded by the base, not by an opt-in.
         private sealed class PlainCustomStore : SingleFileBackingStore
         {
             public PlainCustomStore(string path) : base(path) { }
 
-            protected override byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot) =>
-                CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot);
+            protected override byte[] SerializeStore(string formatVersion, System.Collections.Generic.IReadOnlyList<byte[]> catalogEntries, System.Collections.Generic.IReadOnlyList<byte[]> records) =>
+                CultDocumentMessagePackSerialization.SerializeStore(formatVersion, catalogEntries, records);
 
-            protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data)
+            protected override byte[] SerializeRecord(CultPersistedRecord record) =>
+                CultDocumentMessagePackSerialization.SerializePersistedRecord(record);
+
+            protected override byte[] SerializeCatalogEntry(CultSchemaCatalogEntry entry) =>
+                CultDocumentMessagePackSerialization.SerializeCatalogEntry(entry);
+
+            protected override (CultPersistedStoreSnapshot Snapshot, byte[][] CatalogBytes, byte[][] RecordBytes) ReadStore(byte[] data)
             {
-                var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(data);
-                CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot);
-                return snapshot;
+                var store = CultDocumentMessagePackSerialization.ReadStore(data);
+                CultDocumentMessagePackSerialization.RequireSingleFileFormat(store.Snapshot);
+                return store;
             }
 
-            protected override byte[] SerializePayload(object document) =>
-                CultDocumentMessagePackSerialization.SerializeUntyped(document, document.GetType(), Registry);
+            protected override byte[] SerializePayload(object document, Type documentType) =>
+                CultDocumentMessagePackSerialization.SerializeUntyped(document, documentType, Registry);
 
             protected override object DeserializePayload(Type documentType, byte[] payload) =>
                 CultDocumentMessagePackSerialization.DeserializeUntyped(documentType, payload, Registry);
@@ -359,11 +396,11 @@ namespace GameCult.Caching.Tests
                 using var cache = new CultCache();
                 cache.AddBackingStore(new PlainCustomStore(file));
                 await cache.PullAllBackingStoresAsync();
-                StampHeader(file, "cultcache.store.v3");
+                StampHeader(file, "cultcache.store.v4");
                 var before = File.ReadAllBytes(file);
 
                 await cache.AddAsync(new PreCut2FixtureNote { Text = "staged" });
-                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAllBackingStores());
                 Assert.That(File.ReadAllBytes(file), Is.EqualTo(before));
             }
             finally
@@ -420,10 +457,10 @@ namespace GameCult.Caching.Tests
 
             public WriteCountingStore(string path) : base(path) { }
 
-            protected override byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot)
+            protected override byte[] SerializeStore(string formatVersion, System.Collections.Generic.IReadOnlyList<byte[]> catalogEntries, System.Collections.Generic.IReadOnlyList<byte[]> records)
             {
                 Serialisations++;
-                return base.SerializeSnapshot(snapshot);
+                return base.SerializeStore(formatVersion, catalogEntries, records);
             }
         }
 
@@ -476,7 +513,7 @@ namespace GameCult.Caching.Tests
             }
         }
 
-        [TestCase("cultcache.store.v5.directory-content-addressed-pages")]
+        [TestCase("cultcache.store.v6.directory-content-addressed-pages")]
         [TestCase("cultcache.store.v9")]
         public async Task DirectoryWritesRefuseAStoreAnotherProcessStampedNewerSinceAttach(string newer)
         {
@@ -498,12 +535,12 @@ namespace GameCult.Caching.Tests
                 var before = files();
 
                 await cache.AddAsync(new PreCut2FixtureNote { Text = "staged after the other process wrote the newer format" });
-                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAllBackingStores());
                 Assert.That(files().Keys, Is.EquivalentTo(before.Keys));
                 foreach (var pair in before) Assert.That(File.ReadAllBytes(pair.Key), Is.EqualTo(pair.Value), pair.Key);
 
                 cache.Remove(new CultRecordKey("item:anvil"));
-                Assert.Throws<NotSupportedException>(() => cache.FlushAllBackingStores());
+                Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAllBackingStores());
                 Assert.That(files().Keys, Is.EquivalentTo(before.Keys));
                 foreach (var pair in before) Assert.That(File.ReadAllBytes(pair.Key), Is.EqualTo(pair.Value), pair.Key);
             }
@@ -554,7 +591,7 @@ namespace GameCult.Caching.Tests
             var bytes = new byte[] { 0x93, 0xc0, 0x90, 0x90 };
 
             Assert.That(() => CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes),
-                Throws.TypeOf<NotSupportedException>().With.Message.Contains("format version"));
+                Throws.TypeOf<CultStoreUnreadableException>().With.Message.Contains("format version"));
         }
 
         // Every runtime reads a store file the same way: a missing file is an empty store, an existing empty file is not
@@ -600,7 +637,8 @@ namespace GameCult.Caching.Tests
         public void SingleFileRefusalEchoesAHeaderOnlyInTheKnownShape(string header, bool echoed)
         {
             var snapshot = new CultPersistedStoreSnapshot { FormatVersion = header };
-            var error = Assert.Throws<NotSupportedException>(() => CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot))!;
+            var error = Assert.Throws<CultStoreUnreadableException>(() => CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot))!;
+            Assert.That(error.Message, Does.Contain($"this runtime reads {CultPersistedStoreSnapshot.FormatV1}, {CultPersistedStoreSnapshot.FormatV2} and {CultPersistedStoreSnapshot.FormatV3}."));
             if (echoed)
             {
                 Assert.That(error.Message, Does.Contain("format " + header + " is not"));
@@ -610,6 +648,28 @@ namespace GameCult.Caching.Tests
                 Assert.That(error.Message, Does.Not.Contain("SECRET").And.Not.Contain("format " + header + " is not"));
                 Assert.That(error.Message, Does.Contain($"of {header.Length} bytes"));
             }
+        }
+
+        // The stamp decides readability and the body never does: a newer stamp is named whatever follows it, without the body parsed.
+        [Test]
+        public void ReadStoreNamesANewerSingleFileStampWithoutParsingTheBody()
+        {
+            var garbage = (byte)0xc1;
+            var bytes = Raw((byte)0x93, "cultcache.store.v4", garbage, garbage);
+
+            var error = Assert.Throws<CultStoreUnreadableException>(() =>
+                CultDocumentMessagePackSerialization.ReadStore(bytes, CultDocumentMessagePackSerialization.RequireReadableSingleFileStamp))!;
+
+            Assert.That(error.Message, Does.Contain("format cultcache.store.v4 is not readable"));
+        }
+
+        // A snapshot with no format version has no stamp to write, so serialising it is refused rather than writing a nil slot 0.
+        [Test]
+        public void SerializeSnapshotRefusesASnapshotWithNoFormatVersion()
+        {
+            var snapshot = new CultPersistedStoreSnapshot { FormatVersion = null! };
+
+            Assert.Throws<ArgumentException>(() => CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
         }
 
         [Test]
@@ -646,10 +706,95 @@ namespace GameCult.Caching.Tests
 
                 using var cache = new CultCache();
 
-                Assert.That(() => cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest)),
-                    Throws.TypeOf<InvalidOperationException>().With.Message.Contains(formatVersion));
+                // The refusal names the manifest, and shows the header only when it is cultcache.store.v<digits>: the suffixed
+                // names a directory store once wrote are stored text like any other.
+                var shown = System.Text.RegularExpressions.Regex.IsMatch(formatVersion, @"^cultcache\.store\.v[0-9]+$");
+                var refusal = Assert.Throws<CultStoreUnreadableException>(() => cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest)))!;
+                Assert.That(refusal.Path, Is.EqualTo(manifest));
+                Assert.That(refusal.Message.Contains(" is " + formatVersion + ";", StringComparison.Ordinal), Is.EqualTo(shown), refusal.Message);
                 Assert.That(cache.BackingStores, Is.Empty);
                 Assert.That(File.ReadAllBytes(manifest), Is.EqualTo(bytes));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        // A header is named whole only in the shape cultcache.store.v<1-6 digits>, with a suffix counted and never echoed, and
+        // described by its length otherwise.
+        [TestCase("cultcache.store.v3", "cultcache.store.v3")]
+        [TestCase("cultcache.store.v10", "cultcache.store.v10")]
+        [TestCase("cultcache.store.v40", "cultcache.store.v40")]
+        [TestCase("cultcache.store.v123456", "cultcache.store.v123456")]
+        [TestCase("cultcache.store.v1234567", "an unrecognised cultcache.store.* header of 24 bytes")]
+        [TestCase("cultcache.store.v", "an unrecognised cultcache.store.* header of 17 bytes")]
+        [TestCase("cultcache.store.vx", "an unrecognised cultcache.store.* header of 18 bytes")]
+        [TestCase("cultcache.store.v3.extra", "cultcache.store.v3 with a suffix of 6 bytes")]
+        public void DescribeHeaderNamesOnlyTheKnownShape(string header, string described)
+        {
+            Assert.That(CultDocumentMessagePackSerialization.DescribeHeader(header), Is.EqualTo(described));
+        }
+
+        [Test]
+        public void DescribeHeaderCountsASuffixInBytes()
+        {
+            const string suffix = ".directory-content-addressed-pages";
+            var header = "cultcache.store.v6" + suffix;
+
+            Assert.That(CultDocumentMessagePackSerialization.DescribeHeader(header),
+                Is.EqualTo($"cultcache.store.v6 with a suffix of {System.Text.Encoding.UTF8.GetByteCount(suffix)} bytes"));
+        }
+
+        [Test]
+        public void DirectoryStoreNamesASuffixedNewerStampByItsLength()
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"cultlib-suffix-{Guid.NewGuid():N}");
+            var manifest = Path.Combine(root, "store.cc");
+            Directory.CreateDirectory(root);
+            try
+            {
+                File.WriteAllBytes(manifest, CultDocumentMessagePackSerialization.SerializeSnapshot(new CultPersistedStoreSnapshot
+                {
+                    FormatVersion = "cultcache.store.v6.directory-content-addressed-pages",
+                    SchemaCatalog = Array.Empty<CultSchemaCatalogEntry>(),
+                    Records = Array.Empty<CultPersistedRecord>()
+                }));
+
+                var refusal = Assert.Throws<CultStoreUnreadableException>(() => new DirectoryMessagePackBackingStore(manifest).PullAll())!;
+
+                var suffixBytes = System.Text.Encoding.UTF8.GetByteCount(".directory-content-addressed-pages");
+                Assert.That(refusal.Message, Does.Contain($" is cultcache.store.v6 with a suffix of {suffixBytes} bytes;"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        // An array with no stamp parses to the default v1, which no directory reads: the manifest is refused, and the pages that
+        // belong to the store beside it are neither rewritten nor deleted.
+        [Test]
+        public void DirectoryManifestThatIsAnEmptyArrayIsRefused()
+        {
+            var root = CopyFixture("directory-v4");
+            try
+            {
+                var manifest = Path.Combine(root, "store.cc");
+                var emptyArray = new byte[] { 0x90 };
+                File.WriteAllBytes(manifest, emptyArray);
+                var pages = Directory.GetFiles(root, "*", SearchOption.AllDirectories)
+                    .Where(file => file != manifest)
+                    .ToDictionary(file => file, File.ReadAllBytes);
+                Assert.That(pages, Is.Not.Empty, "the fixture's pages exist");
+
+                var refusal = Assert.Throws<CultStoreUnreadableException>(() => new DirectoryMessagePackBackingStore(manifest).PullAll())!;
+
+                Assert.That(refusal.Path, Is.EqualTo(manifest));
+                Assert.That(File.ReadAllBytes(manifest), Is.EqualTo(emptyArray));
+                Assert.That(Directory.GetFiles(root, "*", SearchOption.AllDirectories).Where(file => file != manifest), Is.EquivalentTo(pages.Keys));
+                foreach (var page in pages)
+                    Assert.That(File.ReadAllBytes(page.Key), Is.EqualTo(page.Value), page.Key);
             }
             finally
             {

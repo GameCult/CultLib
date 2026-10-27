@@ -83,18 +83,18 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void RecordRewrittenUnderAnotherSchemaWithItsStoredAtFailsExpect()
+        public void RecordRewrittenUnderAnotherSchemaFailsExpect()
         {
             SeedDrift(directory: false);
             using var cache = Drift(false, NarrowDrift).Open();
             var observed = cache.Get(DriftKey)!;
-            var storedAt = cache.GetStored(DriftKey)!.StoredAt;
             using (var other = Drift(false, ReusedDrift).Open())
+            {
+                other.BackingStores[0].Push(other.GetStored(DriftKey)!);
                 other.BackingStores[0].PushAll();
-            using (var reader = Drift(false, ReusedDrift).Open())
-                Assert.That(reader.GetStored(DriftKey)!.StoredAt, Is.EqualTo(storedAt), "the rewrite kept storedAt");
+            }
 
-            Assert.That(DriftCommit(cache, observed, 2), Is.False, "a record rewritten under another schema passed Expect on storedAt alone");
+            Assert.That(DriftCommit(cache, observed, 2), Is.False, "a record rewritten under another schema passed Expect");
         }
 
         // The directory store rewrites only what is pushed to it, so the other writer pushes the record it read unchanged.
@@ -137,49 +137,8 @@ namespace GameCult.Caching.Tests
             cache.BackingStores[0].PushAll();
 
             var stored = cache.GetStored(DriftKey)!;
-            Assert.That(stored.PersistedSchemaId, Is.EqualTo(stored.Descriptor.SchemaId), "the rewrite was not recorded");
+            Assert.That(stored.StoredSchemaId, Is.EqualTo(stored.Descriptor.SchemaId), "the rewrite was not recorded");
             Assert.That(DriftCommit(cache, cache.Get(DriftKey)!, 2), Is.True, "Expect failed after this cache's own push rewrote the record");
-        }
-
-        // A store written outside the library marks its own rewrite through the base class.
-        [Test]
-        public void ACustomStoreMarksItsOwnWholeFileRewrite()
-        {
-            SeedDrift(directory: false);
-            using var cache = new CultCache(NarrowDrift);
-            var store = new WholeFileStore(PathOf("drift.cc"));
-            cache.AddBackingStore(store);
-            store.PullAll();
-            var loaded = cache.GetStored(DriftKey)!;
-            Assert.That(loaded.PersistedSchemaId, Is.Not.EqualTo(loaded.Descriptor.SchemaId), "the record was not loaded under drift");
-
-            store.Push(loaded);
-            store.PushAll();
-
-            Assert.That(cache.GetStored(DriftKey)!.PersistedSchemaId, Is.EqualTo(loaded.Descriptor.SchemaId), "the custom store's rewrite was not recorded");
-            Assert.That(DriftCommit(cache, cache.Get(DriftKey)!, 2), Is.True, "Expect failed after the custom store rewrote the record");
-            using var reader = Drift(false, NarrowDrift).Open();
-            Assert.That(reader.Get<ConditionalDriftNarrow>(DriftKey)!.Value, Is.EqualTo(2));
-        }
-
-        // A store marks only what it holds: another cache's copy of the same record is refused and left as read.
-        [Test]
-        public void ACustomStoreCannotMarkAnEntryItDoesNotHold()
-        {
-            SeedDrift(directory: false);
-            using var owner = new CultCache(NarrowDrift);
-            var ownerStore = new WholeFileStore(PathOf("drift.cc"));
-            owner.AddBackingStore(ownerStore);
-            ownerStore.PullAll();
-            using var other = new CultCache(NarrowDrift);
-            var otherStore = new WholeFileStore(PathOf("drift.cc"));
-            other.AddBackingStore(otherStore);
-            otherStore.PullAll();
-            var foreign = owner.GetStored(DriftKey)!;
-            var persisted = foreign.PersistedSchemaId;
-
-            Assert.Throws<ArgumentException>(() => otherStore.Mark(foreign), "a store marked another cache's entry");
-            Assert.That(foreign.PersistedSchemaId, Is.EqualTo(persisted), "a refused mark changed the entry");
         }
 
         [Test]
@@ -215,12 +174,12 @@ namespace GameCult.Caching.Tests
                 wide = writer.GetStored(DriftKey)!.Descriptor.SchemaId;
             using var cache = Drift(false, NarrowDrift).Open();
             var loaded = cache.GetStored(DriftKey)!;
-            Assert.That(loaded.PersistedSchemaId, Is.EqualTo(wide), "the entry carries the schema id its record is stored under");
+            Assert.That(loaded.StoredSchemaId, Is.EqualTo(wide), "the entry carries the schema id its record is stored under");
             Assert.That(loaded.Descriptor.SchemaId, Is.Not.EqualTo(wide));
 
             Assert.That(DriftCommit(cache, cache.Get(DriftKey)!, 2), Is.True);
             var written = cache.GetStored(DriftKey)!;
-            Assert.That(written.PersistedSchemaId, Is.EqualTo(written.Descriptor.SchemaId));
+            Assert.That(written.StoredSchemaId, Is.EqualTo(written.Descriptor.SchemaId));
             Assert.That(DriftCommit(cache, cache.Get(DriftKey)!, 3), Is.True, "Expect failed on the record this cache just wrote");
         }
 
@@ -427,6 +386,24 @@ namespace GameCult.Caching.Tests
             Volatile.Write(ref running, false);
             Assert.That(() => reading.Wait(TimeSpan.FromSeconds(10)), Throws.Nothing);
             Assert.That(reads, Is.GreaterThan(0));
+        }
+
+        // With no backing store a record's version is minted with it: an Expect on the held record commits, and once the record is
+        // replaced after it was observed (here by the same document again) the Expect no longer holds.
+        [Test]
+        public void InMemoryExpectHoldsUntilTheRecordIsReplaced()
+        {
+            using var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(Counter) }));
+            cache.Commit(batch => batch.Upsert(new Counter { Name = "counter", Value = 1 }, new CultRecordHandle<Counter>(Key)));
+            var first = cache.Get<Counter>(Key)!;
+
+            Assert.That(cache.Commit(batch => batch.Expect(Key, first)), Is.True);
+
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.Expect(Key, first);
+                cache.UpsertAsync(first, new CultRecordHandle<Counter>(Key)).GetAwaiter().GetResult();
+            }), Is.False);
         }
 
         [Test]
@@ -775,7 +752,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void UnconditionalCommitIsLastWriterWinsLikeFlush()
+        public void UnconditionalCommitIsLastWriterWinsPerKeyLikeFlush()
         {
             var committed = LastWriter(SingleFile(PathOf("commit.cc")), (cache, key) =>
                 Assert.That(cache.Commit(batch => batch.Upsert(new Counter { Name = key.Value }, new CultRecordHandle<Counter>(key))), Is.True));
@@ -785,10 +762,10 @@ namespace GameCult.Caching.Tests
                 cache.FlushAllBackingStores();
             });
 
-            Assert.That(committed, Is.EqualTo(new[] { "a", "x" }), "an unconditional commit kept a record its cache never saw");
+            Assert.That(committed, Is.EqualTo(new[] { "a", "c", "x" }), "an unconditional commit dropped a record another writer added");
             Assert.That(committed, Is.EqualTo(flushed));
 
-            // A directory store's flush lands staged keys onto the current manifest, and its commit does exactly the same.
+            // A directory store's flush lands staged keys onto the current manifest, and its commit does exactly the same: so does a single file's.
             var directoryCommitted = LastWriter(DirectoryStore(PathOf("commit-dir.cc")), (cache, key) =>
                 Assert.That(cache.Commit(batch => batch.Upsert(new Counter { Name = key.Value }, new CultRecordHandle<Counter>(key))), Is.True));
             var directoryFlushed = LastWriter(DirectoryStore(PathOf("flush-dir.cc")), (cache, key) =>
@@ -830,9 +807,11 @@ namespace GameCult.Caching.Tests
                 writer.FlushAllBackingStores();
             }
 
+            // A record of a schema this cache does not register is not corruption: the store opens and carries it (ForeignRecordTests).
             var bytes = File.ReadAllBytes(unknown);
             using var narrow = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(Counter) }));
-            Assert.That(() => narrow.AddBackingStore(new SingleFileMessagePackBackingStore(unknown)), Throws.Exception, "a store with an unknown schema opened");
+            narrow.AddBackingStore(new SingleFileMessagePackBackingStore(unknown));
+            Assert.That(narrow.BackingStores.Single().ForeignRecords, Has.Count.EqualTo(1));
             Assert.That(File.ReadAllBytes(unknown), Is.EqualTo(bytes), "opening rewrote a store with an unknown schema");
         }
 
@@ -1029,6 +1008,10 @@ namespace GameCult.Caching.Tests
         private static StoreFactory DirectoryStore(string path, CultDocumentRegistry? registry = null) =>
             new(path, () => new DirectoryMessagePackBackingStore(path), registry);
 
+        // The id Wide is stored under, which the later versions declare compatible: a cache reads and writes a record under another
+        // id only when its type declares it. SeedDrift checks that the constant is Wide's id.
+        private const string WideDriftSchemaId = "sha256:6033aeca8a784899aff1f8c43eb9df6bf3364e4fb6014e423c65afd51a9b8f18";
+
         private static readonly CultRecordKey DriftKey = new("drift");
         private static readonly CultDocumentRegistry WideDrift = CultDocumentRegistry.ForTypes(new[] { typeof(ConditionalDriftWide) });
         private static readonly CultDocumentRegistry NarrowDrift = CultDocumentRegistry.ForTypes(new[] { typeof(ConditionalDriftNarrow) });
@@ -1040,6 +1023,7 @@ namespace GameCult.Caching.Tests
         // The record at DriftKey, written under v1.
         private void SeedDrift(bool directory)
         {
+            Assert.That(WideDrift.GetRequired(typeof(ConditionalDriftWide)).SchemaId, Is.EqualTo(WideDriftSchemaId));
             using var cache = Drift(directory, WideDrift).Open();
             Assert.That(cache.Commit(batch => batch.Upsert(
                 new ConditionalDriftWide { Name = "drift", Value = 1, Extra = "extra" },
@@ -1051,65 +1035,6 @@ namespace GameCult.Caching.Tests
             batch.Expect(DriftKey, observed);
             batch.Upsert(new ConditionalDriftNarrow { Name = "drift", Value = value }, new CultRecordHandle<ConditionalDriftNarrow>(DriftKey));
         });
-
-        // A store derived from CacheBackingStore alone, as a consumer would write one: it rewrites the whole file on every
-        // write, in the single-file MessagePack format, and marks each record it rewrote.
-        private sealed class WholeFileStore : CacheBackingStore
-        {
-            private readonly string _path;
-
-            public WholeFileStore(string path) => _path = path;
-
-            private CultPersistedStoreSnapshot Read() => CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(_path));
-
-            public override void PullAll() => Held(() =>
-            {
-                var snapshot = Read();
-                var loaded = snapshot.Records
-                    .Select(record => ToStoredDocument(record, snapshot.SchemaCatalog,
-                        (type, payload) => CultDocumentMessagePackSerialization.DeserializeUntyped(type, payload, Registry), out _))
-                    .ToArray();
-                Loaded?.Invoke(loaded, Array.Empty<CultStoredDocument>());
-                foreach (var stored in loaded)
-                    Entries[stored.Key.Value] = stored;
-            });
-
-            public override void Push(CultStoredDocument entry) => Held(() =>
-            {
-                Entries[entry.Key.Value] = entry;
-                IsDirty = true;
-            });
-
-            public override void Delete(CultStoredDocument entry) => throw new NotSupportedException();
-
-            public void Mark(CultStoredDocument entry) => MarkWritten(entry);
-
-            public override void PushAll() => Held(Write);
-
-            public override CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait) => Held(() =>
-            {
-                if (!request.ConditionsHold(Read().Records, Entries.Values))
-                    return CultCommitOutcome.Mismatch;
-                foreach (var entry in request.Upserts)
-                    Entries[entry.Key.Value] = entry;
-                Write();
-                return CultCommitOutcome.Committed;
-            });
-
-            private void Write()
-            {
-                var snapshot = new CultPersistedStoreSnapshot
-                {
-                    Records = Entries.Values.Select(entry => ToPersistedRecord(entry,
-                        document => CultDocumentMessagePackSerialization.SerializeUntyped(document, document.GetType(), Registry))).ToArray(),
-                    SchemaCatalog = Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()).ToArray()
-                };
-                File.WriteAllBytes(_path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
-                foreach (var entry in Entries.Values)
-                    MarkWritten(entry);
-                MarkFlushSucceeded();
-            }
-        }
 
         // Pauses a pull between reading the file and handing the records to the cache.
         private sealed class PausingStore : SingleFileMessagePackBackingStore
@@ -1130,9 +1055,9 @@ namespace GameCult.Caching.Tests
                 base.Push(entry);
             }
 
-            protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data)
+            protected override (CultPersistedStoreSnapshot Snapshot, byte[][] CatalogBytes, byte[][] RecordBytes) ReadStore(byte[] data)
             {
-                var snapshot = base.DeserializeSnapshot(data);
+                var snapshot = base.ReadStore(data);
                 if (Pause is { } pause)
                 {
                     Paused = true;
@@ -1196,7 +1121,7 @@ namespace GameCult.Caching.Tests
             public string Extra = string.Empty;
         }
 
-        [CultDocument("tests.conditional_drift", "tests.conditional_drift.v2")]
+        [CultDocument("tests.conditional_drift", "tests.conditional_drift.v2", CompatibleSchemaIds = new[] { WideDriftSchemaId })]
         [MessagePackObject(AllowPrivate = true)]
         internal sealed class ConditionalDriftNarrow
         {
@@ -1208,7 +1133,7 @@ namespace GameCult.Caching.Tests
             public int Value;
         }
 
-        [CultDocument("tests.conditional_drift", "tests.conditional_drift.v3")]
+        [CultDocument("tests.conditional_drift", "tests.conditional_drift.v3", CompatibleSchemaIds = new[] { WideDriftSchemaId })]
         [MessagePackObject(AllowPrivate = true)]
         internal sealed class ConditionalDriftReused
         {
