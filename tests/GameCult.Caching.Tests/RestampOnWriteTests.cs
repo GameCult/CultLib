@@ -184,7 +184,8 @@ namespace GameCult.Caching.Tests
         public void ADeclaredLossyDriftRecordIsWritable(bool directory)
         {
             var path = SeedWide(directory);
-            Assert.That(WideRegistry.GetRequired<NoteWide>().SchemaId, Is.EqualTo(WideId), "the declaration names the lossy record's id");
+            var wideId = WideRegistry.GetRequired<NoteWide>().SchemaId;
+            Assert.That(wideId, Is.EqualTo(WideId), "the declaration names the lossy record's id: " + wideId);
 
             using (var cache = Open(path, directory, DeclaringRegistry))
                 Assert.That(cache.Commit(batch => batch.Upsert(new NoteGrownDeclaring { Name = "note", Value = 2 }, new CultRecordHandle<NoteGrownDeclaring>(Note))), Is.True);
@@ -236,18 +237,34 @@ namespace GameCult.Caching.Tests
         public void ExpectAgreesWithRestamp(bool directory)
         {
             var path = SeedNarrow(directory);
+            var third = new CultRecordKey("third");
             using var cache = Open(path, directory, GrownRegistry);
-            using var second = Open(path, directory, GrownRegistry);
-            var observed = cache.Get(Note)!;
 
-            Assert.That(cache.Commit(batch => batch.ExpectUnchanged()), Is.True, "an unchanged drift record satisfies ExpectUnchanged");
             Assert.That(cache.Commit(batch =>
             {
-                batch.Expect(Note, observed);
+                batch.Expect(Note, cache.Get(Note));
+                batch.ExpectUnchanged();
+                batch.Upsert(new NoteGrown { Name = "third" }, new CultRecordHandle<NoteGrown>(third));
+            }), Is.True, "an unchanged drift record satisfies Expect and ExpectUnchanged");
+
+            using var second = Open(path, directory, GrownRegistry);
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.Expect(Note, cache.Get(Note));
                 batch.Upsert(new NoteGrown { Name = "note", Value = 2 }, new CultRecordHandle<NoteGrown>(Note));
-            }), Is.True, "a batch that Expects the drift record and upserts it commits and restamps");
-            Assert.That(cache.Commit(batch => batch.ExpectUnchanged()), Is.True, "the writer's later ExpectUnchanged holds");
-            Assert.That(second.Commit(batch => batch.ExpectUnchanged()), Is.False, "a cache loaded before the restamp sees the bytes change");
+            }), Is.True, "a batch that Expects the drift record and upserts it commits");
+            Assert.That(StoredIdOf(path, directory, GrownRegistry, Note), Is.EqualTo(GrownRegistry.GetRequired<NoteGrown>().SchemaId), "and restamps it");
+
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.ExpectUnchanged();
+                batch.Upsert(new NoteGrown { Name = "fourth" }, new CultRecordHandle<NoteGrown>(new CultRecordKey("fourth")));
+            }), Is.True, "the writer's later ExpectUnchanged holds");
+            Assert.That(second.Commit(batch =>
+            {
+                batch.Expect(Note, second.Get(Note));
+                batch.Upsert(new NoteGrown { Name = "note", Value = 3 }, new CultRecordHandle<NoteGrown>(Note));
+            }), Is.False, "a cache loaded before the restamp fails its Expect: the bytes changed");
         }
 
         private static string VectorPath(string name)

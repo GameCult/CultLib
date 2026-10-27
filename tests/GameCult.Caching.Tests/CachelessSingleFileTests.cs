@@ -1446,21 +1446,24 @@ namespace GameCult.Caching.Tests
         [Test]
         public void OneStoreCallTakesAtMostThreeGatesUnderSuccessfulAttachChurnAndThreeIsReached()
         {
+            var rounds = 0;
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
             new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
             var mostTakes = 0;
             var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
             for (var round = 0; mostTakes < 3 && DateTime.UtcNow < deadline; round++)
             {
+                rounds++;
                 var store = new RoleStore(_path);
                 store.ReleaseAttach.Set();
                 var cache = new CultCache(registry);
                 using var barrier = new Barrier(2);
                 var takes = 0;
-                var spin = (round % 16) * 40;
+                var spin = (round % 128) * 20;
                 var caller = new Thread(() =>
                 {
                     barrier.SignalAndWait();
+                    Thread.SpinWait(spin);
                     CacheBackingStore.GateTakes = 0;
                     store.ReadStoreSnapshot();
                     takes = CacheBackingStore.GateTakes;
@@ -1468,7 +1471,6 @@ namespace GameCult.Caching.Tests
                 var attacher = new Thread(() =>
                 {
                     barrier.SignalAndWait();
-                    Thread.SpinWait(spin);
                     cache.AddBackingStore(store);
                 });
                 caller.Start();
@@ -1480,7 +1482,7 @@ namespace GameCult.Caching.Tests
                 mostTakes = Math.Max(mostTakes, takes);
             }
 
-            Assert.That(mostTakes, Is.EqualTo(3), "a call that raced a successful attach took the third gate");
+            Assert.That(mostTakes, Is.EqualTo(3), $"a call that raced a successful attach took the third gate ({rounds} rounds)");
         }
 
         // Under attaches that fail, Cache read under the store's gate is always null (an attach publishes and retracts it inside one

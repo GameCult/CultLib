@@ -27,8 +27,9 @@ namespace GameCult.Caching.Tests
         private static readonly string WidgetId = Full.GetRequired(Widget).SchemaId;
 
         // Another writer's deck (an older or newer build, another runtime) under an id the deck does not declare. It declares the
-        // deck's own id compatible, so it may rewrite the deck's records; the deck still reads them through that listing, read-only.
-        private static readonly Type MovingDeck = Emit("ForeignSuiteMovingDeck", "tests.foreign_deck", "tests.foreign_deck.v3", new[] { new Field("Name", typeof(string), 0, IsName: true) }, new[] { DeckOnly.GetRequired(Deck).SchemaId });
+        // deck's own id compatible, so it may rewrite the deck's records; the deck still reads them through that listing, but only by
+        // dropping the Note slot it lacks, so it does not own them and holds them read-only.
+        private static readonly Type MovingDeck = Emit("ForeignSuiteMovingDeck", "tests.foreign_deck", "tests.foreign_deck.v3", new[] { new Field("Name", typeof(string), 0, IsName: true), new Field("Note", typeof(string), 1) }, new[] { DeckOnly.GetRequired(Deck).SchemaId });
         private static readonly CultDocumentRegistry Moving = CultDocumentRegistry.ForTypes(new[] { MovingDeck });
         private static readonly string MovingId = Moving.GetRequired(MovingDeck).SchemaId;
 
@@ -587,8 +588,8 @@ namespace GameCult.Caching.Tests
 
         private const string OtherRuntimeId = "other.runtime.deck";
 
-        // A deck another runtime wrote under its own id for the deck's schema. This build reads it through the catalog's schema name,
-        // but does not own the id.
+        // A deck another runtime wrote under its own id for the deck's schema, with a slot this build lacks. This build reads it
+        // through the catalog's schema name, but only by dropping that slot, so it does not own the id.
         private string OtherRuntimeStore(string name, bool withVariant = false)
         {
             var path = PathOf(name);
@@ -604,6 +605,7 @@ namespace GameCult.Caching.Tests
             entry.SchemaId = OtherRuntimeId;
             entry.ContentHash = OtherRuntimeId;
             entry.CompatibleSchemaIds = new[] { OtherRuntimeId };
+            entry.Members = entry.Members.Append(new CultSchemaMemberCatalogEntry { Slot = 99, MemberName = "Dropped", TypeName = "System.String" }).ToArray();
             foreach (var record in snapshot.Records)
                 record.SchemaId = OtherRuntimeId;
             // An older entry that also lists the id, first in the catalog: the entry that owns the id is the one that publishes it.
