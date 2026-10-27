@@ -1441,6 +1441,13 @@ namespace GameCult.Caching.Tests
             Assert.That(CacheBackingStore.GateTakes, Is.EqualTo(1), "a settled store's call takes only its cache's gate");
         }
 
+        [CultDocument("tests.gate_filler", "tests.gate_filler.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class GateFiller
+        {
+            [Key(0)] [CultName] public string Name = string.Empty;
+        }
+
         // Under attaches that succeed, a call takes at most three gates, and three is reachable: the guess was null, an attach then
         // settled before the call took the store's gate, and the call took the settled cache's gate as its third.
         [Test]
@@ -1449,6 +1456,7 @@ namespace GameCult.Caching.Tests
             var rounds = 0;
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
             new SingleFileMessagePackBackingStore(_path).WriteDocument(new CultRecordKey("a"), new IdDeck { Name = "a" }, registry: registry);
+            var withFiller = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck), typeof(GateFiller) });
             var mostTakes = 0;
             var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
             for (var round = 0; mostTakes < 3 && DateTime.UtcNow < deadline; round++)
@@ -1456,10 +1464,15 @@ namespace GameCult.Caching.Tests
                 rounds++;
                 var store = new RoleStore(_path);
                 store.ReleaseAttach.Set();
-                // A cache holding many records makes the attach's checks before it publishes Cache take long enough to race.
-                var cache = new CultCache(registry);
-                for (var index = 0; index < 20000; index++)
-                    cache.AddAsync(new IdDeck { Name = "held" + index }).GetAwaiter().GetResult();
+                // A cache holding many records in a store of its own makes the attach's checks before it publishes Cache take long
+                // enough to race.
+                var cache = new CultCache(withFiller);
+                cache.AddBackingStore(new SingleFileMessagePackBackingStore(_path + ".filler" + round), typeof(GateFiller));
+                cache.Commit(batch =>
+                {
+                    for (var index = 0; index < 20000; index++)
+                        batch.Upsert(new GateFiller { Name = "held" + index }, new CultRecordHandle<GateFiller>(new CultRecordKey("held" + index)));
+                });
                 using var barrier = new Barrier(2);
                 var takes = 0;
                 var spin = (round % 200) * 400;
@@ -1481,6 +1494,7 @@ namespace GameCult.Caching.Tests
                 Finishes(caller, "a calling thread");
                 Finishes(attacher, "an attaching thread");
                 cache.Dispose();
+                File.Delete(_path + ".filler" + round);
                 Assert.That(takes, Is.InRange(1, 3), "no call took more than three gates");
                 mostTakes = Math.Max(mostTakes, takes);
             }
