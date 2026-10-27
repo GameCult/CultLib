@@ -61,6 +61,17 @@ namespace GameCult.Caching.Tests
             [Key(0)] [CultName] public string Name = string.Empty;
         }
 
+        // Another schema with Narrow's shape that lists an old id: it claims records stored under that id.
+        [CultDocument("tests.restamp_lister", "tests.restamp_lister.v1", CompatibleSchemaIds = new[] { ListerOldId })]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class NoteLister
+        {
+            [Key(0)] [CultName] public string Name = string.Empty;
+            [Key(1)] public int Value;
+        }
+
+        private const string ListerOldId = "tests.restamp.lister_old";
+
         // Grown with the lossy id declared: declaration is the consent to the loss.
         [CultDocument("tests.restamp_note", "tests.restamp_note.v4", CompatibleSchemaIds = new[] { WideId })]
         [MessagePackObject(AllowPrivate = true)]
@@ -491,6 +502,65 @@ namespace GameCult.Caching.Tests
             WriteNarrow(path, cacheless, NarrowRegistry);
 
             Assert.That(Snapshot(path).Records.Single(record => record.Key == "note").SchemaId, Is.EqualTo(NarrowRegistry.GetRequired<NoteNarrow>().SchemaId));
+        }
+
+        private static readonly CultDocumentRegistry NarrowListerRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(NoteNarrow), typeof(NoteLister) });
+
+        // A store whose Narrow-shaped record sits under an id another registered type (Lister) claims: its old id, which its entry
+        // lists, or its current id.
+        private string SeedListerRecord(bool underCurrentId)
+        {
+            var path = SeedNarrow(directory: false);
+            var snapshot = Snapshot(path);
+            var listerId = NarrowListerRegistry.GetRequired<NoteLister>().SchemaId;
+            var entry = snapshot.SchemaCatalog.Single();
+            entry.SchemaId = entry.ContentHash = underCurrentId ? listerId : "tests.restamp.lister_published";
+            entry.SchemaName = "tests.restamp_lister";
+            entry.SchemaVersion = "tests.restamp_lister.v1";
+            entry.CompatibleSchemaIds = underCurrentId ? new[] { listerId } : new[] { "tests.restamp.lister_published", ListerOldId };
+            foreach (var record in snapshot.Records)
+                record.SchemaId = underCurrentId ? listerId : ListerOldId;
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            return path;
+        }
+
+        // A cacheless write owns a record only through a claimant it writes: another registered type that lists the record's id, or
+        // owns it, and reads it whole keeps the record, whatever the lent registry (or Shared, with none) registers.
+        // Registry null is Shared, which holds every [CultDocument] type of the test assembly.
+        [TestCase(false, true)]
+        [TestCase(false, false)]
+        [TestCase(true, true)]
+        [TestCase(true, false)]
+        public void ACachelessWriterNeverOwnsARecordAnotherRegisteredTypeClaims(bool underCurrentId, bool lendRegistry)
+        {
+            var path = SeedListerRecord(underCurrentId);
+            var before = Fingerprint(path);
+
+            Assert.Throws<CultSchemaConflictException>(() => WriteNarrow(path, cacheless: true, lendRegistry ? NarrowListerRegistry : CultDocumentRegistry.Shared));
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+        }
+
+        // The registry's other types change nothing about a record the written type claims itself.
+        [Test]
+        public void AnotherRegisteredTypeDoesNotTakeAWritersOwnDriftRecord()
+        {
+            var path = SeedRenamed(listsNarrow: true);
+
+            WriteNarrow(path, cacheless: true, NarrowListerRegistry);
+
+            Assert.That(Snapshot(path).Records.Single(record => record.Key == "note").SchemaId, Is.EqualTo(NarrowRegistry.GetRequired<NoteNarrow>().SchemaId));
+        }
+
+        // What the lent registry registers beyond the written type can only make the claim more ambiguous, never own more: a second
+        // version of the written schema's name refuses a record the write owned by name alone.
+        [Test]
+        public void ASecondVersionOfTheWrittenNameInTheLentRegistryOnlyRefuses()
+        {
+            var path = SeedRenamed(listsNarrow: false, name: "tests.restamp_note");
+            var before = Fingerprint(path);
+
+            Assert.Throws<CultSchemaConflictException>(() => WriteNarrow(path, cacheless: true, CultDocumentRegistry.ForTypes(new[] { typeof(NoteNarrow), typeof(NoteGrown) })));
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
         }
 
         // A record stored under an id its catalog entry only lists (no entry owns it) is published by that entry, and the type that

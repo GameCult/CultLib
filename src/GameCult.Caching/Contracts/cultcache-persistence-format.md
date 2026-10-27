@@ -208,8 +208,10 @@ loaded, is refused typed, and the record is reloaded as the store holds it, read
 read it. This holds for every write through the store, the store's own `Push`, `Delete` and
 `CommitBatch` included. A CultMesh single-file write asks the same rule: it owns its entry's own id and the ids that entry lists
 compatible, and an id whose publishing entry its claimant reads whole (no persisted slot unread). The claimant is
-the one a cache with the call's registry would pick, so a cacheless write is never more permissive than a cache;
-with no registry the call's one entry is the claimant. It is refused the same way otherwise.
+the one a cache with the call's registry would pick, and it owns the record only when it is the entry the call writes, so a
+cacheless write is never more permissive than a cache, nor than its own declaration: a record another registered type claims
+is refused, under that type's current id or an old one it lists. With no registry the call's one entry is the claimant. It is
+refused the same way otherwise.
 
 A record that resolves to no local type is a foreign record, for example one of a type this build does not
 have, or one renamed under a new schema name without declaring its old id. A store never destroys or relabels it: the store carries it
