@@ -206,16 +206,16 @@ The rule is checked again where the write lands, under the store's lock: a write
 whose durable record is not owned, because another writer rewrote it after this cache
 loaded, is refused typed, and the record is reloaded as the store holds it, read-only when a type can
 read it. This holds for every write through the store, the store's own `Push`, `Delete` and
-`CommitBatch` included. A CultMesh single-file write (`WriteDocument`, `WriteRecord`, or `PushAll` on an unattached store) asks the same rule: it owns the ids its
-written entries declare (their own ids and the ids they list compatible) and an id whose publishing entry its claimant reads whole (no persisted
-slot unread). The claimant is picked by the one precedence over the written entries and the call's registry, a written entry being the only
-description of its schema id (the registry's type for that id is never asked), and the record is owned only when the claimant is a written
-entry. A registry adds claimants and declares nothing, so it only adds refusals; with none the written entries are the only claimants. Refused:
-a record another registered type claims, under that type's current id or an old one it lists; a record whose stored entry lists another
-registered type's id ahead of the written one's, whatever name the stored entry carries; a record two registered types list compatible or two
-registered versions of the written schema could read; a record the picked written entry reads only by dropping persisted slots; and the
-removal of any stored record by a call that writes no entry. A registry-less `WriteDocument` reads `CultDocumentRegistry.Shared`. It is
-refused the same way otherwise.
+`CommitBatch` included. Whether a write may replace the record at a key is decided per key by the type it writes there, for a cache
+and for a CultMesh single-file write (`WriteDocument`, `WriteRecord`, or `PushAll` on an unattached store) alike, in a single-file store and
+a directory store alike: the written type owns the stored record when its entry declares the stored id (its own id, or one it lists
+compatible), or when it is the type that reads the stored record's published entry and reads it whole (no persisted slot unread), so an older
+id of its own schema name that it reads whole is its own and is restamped. Anything else is refused, another registered type's record
+included, and so is a record the written type would read only by dropping persisted slots. No registry enters the decision, `Shared` included:
+the answer for a given written entry, stored id and catalog is the same lent a registry or not, and a cache's registered types do not make
+each other's records writable. Retyping a key is a removal and an add: in one batch (the removal called before the add) or staged apart, with or without a backing store. The removal half is judged as a removal, so the key is retyped only when the removal rule allows it. A one-batch retype is staged as the held record's eviction and then the add: a watcher of the old type sees Removed and a watcher of the new type sees Added, a global's slot is freed, and every check, validator and store judge sees what it sees when the two are staged apart; this holds for plain records, variants and flattens alike (a Flatten after a Remove in the same batch flattens nothing and is refused). A one-batch retype across two home stores is refused, by the rule that a commit lands in one home store: the removal is in the first store and the add in the second, so the batch spans both. Stage the removal and the add apart, as two commits (not atomic); the key is then in exactly one store. A variant rebased onto a base of another type follows the plain-write rule: where a plain write of the new type would own the variant's record (the new type declares the old id) the rebase commits and the variant becomes that type, and where a plain write would be refused the rebase is refused. A removal or check of a key goes to the
+registry's removal rule (a record a registered type declares, or reads whole, may be removed), and a cacheless call, which has no registry,
+removes a record only when an entry it writes owns it; a call that writes no entry removes nothing.
 
 A record that resolves to no local type is a foreign record, for example one of a type this build does not
 have, or one renamed under a new schema name without declaring its old id. A store never destroys or relabels it: the store carries it

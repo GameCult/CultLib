@@ -274,6 +274,39 @@ namespace GameCult.Caching.Tests
             Assert.That(DiskRecord(path, "a").SchemaId, Is.Not.EqualTo(otherRuntimeId));
         }
 
+        // Pushing a loaded record rewrites it in place under this type's id, and the cache keeps that entry. A newer version of the type,
+        // registered afterwards, reads the entry the record is now published by whole, so it owns the record: staging asks the entry
+        // that publishes the id the record carries now, not the one that published the id it was loaded under.
+        [Test]
+        public void ANewerVersionReadsWholeTheRecordAPushRelabelledInPlace()
+        {
+            const string otherRuntimeId = "other.runtime.id_deck";
+            var path = PathOf("mint-then-newer.cc");
+            WritePreIdStore(path, null, ("a", "a", 1));
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var entry = snapshot.SchemaCatalog.Single();
+            entry.SchemaId = otherRuntimeId;
+            entry.ContentHash = otherRuntimeId;
+            entry.CompatibleSchemaIds = new[] { otherRuntimeId };
+            snapshot.Records.Single().SchemaId = otherRuntimeId;
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+            var key = new CultRecordKey("a");
+
+            using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = registry }))
+            {
+                var loaded = cache.GetStored(key)!;
+                cache.BackingStores[0].Push(loaded);
+                cache.BackingStores[0].PushAll();
+                Assert.That(ReferenceEquals(cache.GetStored(key), loaded), Is.True, "the cache keeps the entry the store relabelled");
+                Assert.That(loaded.StoredSchemaId, Is.Not.EqualTo(otherRuntimeId), "the push relabelled the loaded entry in place");
+                registry.GetRequired(typeof(IdDeckNext));
+                Assert.That(cache.Commit(batch => batch.Upsert(typeof(IdDeckNext), new IdDeckNext { Name = "newer" }, key)), Is.True);
+            }
+
+            Assert.That(DiskRecord(path, "a").SchemaId, Is.EqualTo(registry.GetRequired(typeof(IdDeckNext)).SchemaId));
+        }
+
         // A pre-id record this cache reads only by dropping a persisted slot is read-only, so the rewrite that would persist its
         // minted ids is refused typed, naming it, and the store is left byte for byte.
         [Test]
@@ -1395,6 +1428,16 @@ namespace GameCult.Caching.Tests
         [CultDocument("tests.element_id_deck", "tests.element_id_deck.v1")]
         [MessagePackObject]
         public sealed class IdDeck
+        {
+            [Key(0)] [CultName] public string Name { get; set; } = "";
+            [Key(1)] public List<IdReel> Reels { get; set; } = new();
+            [Key(2)] public List<IdMove> Moves { get; set; } = new();
+        }
+
+        // The next version of IdDeck: the same slots under a new schema version.
+        [CultDocument("tests.element_id_deck", "tests.element_id_deck.v2")]
+        [MessagePackObject]
+        public sealed class IdDeckNext
         {
             [Key(0)] [CultName] public string Name { get; set; } = "";
             [Key(1)] public List<IdReel> Reels { get; set; } = new();

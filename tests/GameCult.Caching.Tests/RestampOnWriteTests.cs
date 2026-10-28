@@ -480,17 +480,18 @@ namespace GameCult.Caching.Tests
 
         private static readonly CultDocumentRegistry NarrowShortRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(NoteNarrow), typeof(NoteShort) });
 
-        // Which entry reads a persisted entry is one precedence: a cacheless writer lent a registry picks the claimant that registry
-        // picks, never one by schema name over its own entry. Here the entry is named and shaped like Narrow but lists Short's id.
+        // A write's ownership is the written entry's alone (variants:ruling:own-entry-reads-whole): the stored entry is named and shaped
+        // like Narrow but lists Short's id, and a registry that holds Short (which would read it by listing the id) changes nothing, for
+        // a cache and a cacheless writer alike.
         [TestCase(false)]
         [TestCase(true)]
-        public void ACachelessWriterPicksTheClaimantItsRegistryPicks(bool cacheless)
+        public void AWrittenEntryReadingTheRecordWholeOwnsItWhateverTheRegistryHolds(bool cacheless)
         {
             var path = SeedRenamed(listsNarrow: false, alsoLists: NarrowShortRegistry.GetRequired<NoteShort>().SchemaId, name: "tests.restamp_note");
-            var before = Fingerprint(path);
 
-            Assert.Throws<CultSchemaConflictException>(() => WriteNarrow(path, cacheless, NarrowShortRegistry));
-            Assert.That(Fingerprint(path), Is.EqualTo(before));
+            WriteNarrow(path, cacheless, NarrowShortRegistry);
+
+            Assert.That(Snapshot(path).Records.Single(record => record.Key == "note").SchemaId, Is.EqualTo(NarrowRegistry.GetRequired<NoteNarrow>().SchemaId));
         }
 
         [TestCase(false)]
@@ -668,28 +669,6 @@ namespace GameCult.Caching.Tests
             Assert.That(Fingerprint(path), Is.EqualTo(before));
         }
 
-        // The shadow, where it is decided: a written entry answers for its schema id whatever the registry holds, and the registry
-        // still adds its other types.
-        [Test]
-        public void AWrittenEntryShadowsTheLentRegistrysTypeForItsId()
-        {
-            var written = NarrowRegistry.GetRequired<NoteNarrow>().ToCatalogEntry();
-            var lookup = new CatalogEntryLookup(new[] { written }, NarrowListerRegistry);
-            var lister = NarrowListerRegistry.GetRequired<NoteLister>();
-
-            Assert.That(lookup.Owner(written.SchemaId), Is.SameAs(written));
-            Assert.That(lookup.Named(written.SchemaName), Is.EqualTo(new[] { written }).Using<CultSchemaCatalogEntry>((x, y) => ReferenceEquals(x, y)));
-            Assert.That(lookup.Listing(written.SchemaId), Is.EqualTo(new[] { written }).Using<CultSchemaCatalogEntry>((x, y) => ReferenceEquals(x, y)));
-            Assert.That(lookup.Owner(lister.SchemaId)!.SchemaId, Is.EqualTo(lister.SchemaId));
-            Assert.That(lookup.Listing(ListerOldId).Select(entry => entry.SchemaId), Is.EqualTo(new[] { lister.SchemaId }));
-            Assert.That(lookup.Named(lister.SchemaName).Select(entry => entry.SchemaId), Is.EqualTo(new[] { lister.SchemaId }));
-
-            // A write of several entries shadows by the entry that has the id, not by all of them having it.
-            var other = CultDocumentRegistry.ForTypes(new[] { typeof(NoteOther) }).GetRequired<NoteOther>().ToCatalogEntry();
-            var several = new CatalogEntryLookup(new[] { other, written }, NarrowListerRegistry);
-            Assert.That(several.Named(written.SchemaName), Is.EqualTo(new[] { written }).Using<CultSchemaCatalogEntry>((x, y) => ReferenceEquals(x, y)));
-        }
-
         // The registry's other types change nothing about a record the written type claims itself.
         [Test]
         public void AnotherRegisteredTypeDoesNotTakeAWritersOwnDriftRecord()
@@ -701,16 +680,16 @@ namespace GameCult.Caching.Tests
             Assert.That(Snapshot(path).Records.Single(record => record.Key == "note").SchemaId, Is.EqualTo(NarrowRegistry.GetRequired<NoteNarrow>().SchemaId));
         }
 
-        // What the lent registry registers beyond the written type can only make the claim more ambiguous, never own more: a second
-        // version of the written schema's name refuses a record the write owned by name alone.
+        // What the lent registry registers beyond the written type changes nothing, in either direction: a second version of the
+        // written schema's name neither refuses nor widens a record the write owns by name alone.
         [Test]
-        public void ASecondVersionOfTheWrittenNameInTheLentRegistryOnlyRefuses()
+        public void ASecondVersionOfTheWrittenNameInTheLentRegistryChangesNothing()
         {
             var path = SeedRenamed(listsNarrow: false, name: "tests.restamp_note");
-            var before = Fingerprint(path);
 
-            Assert.Throws<CultSchemaConflictException>(() => WriteNarrow(path, cacheless: true, CultDocumentRegistry.ForTypes(new[] { typeof(NoteNarrow), typeof(NoteGrown) })));
-            Assert.That(Fingerprint(path), Is.EqualTo(before));
+            WriteNarrow(path, cacheless: true, CultDocumentRegistry.ForTypes(new[] { typeof(NoteNarrow), typeof(NoteGrown) }));
+
+            Assert.That(Snapshot(path).Records.Single(record => record.Key == "note").SchemaId, Is.EqualTo(NarrowRegistry.GetRequired<NoteNarrow>().SchemaId));
         }
 
         // A record stored under an id its catalog entry only lists (no entry owns it) is published by that entry, and the type that
@@ -765,8 +744,8 @@ namespace GameCult.Caching.Tests
             var writes = new[] { narrow };
             Func<string, bool> declares = id => id == narrow.SchemaId;
 
-            Assert.That(CultDocumentRegistry.Owns("tests.restamp.unpublished", writes, declares, new CatalogEntryLookup(writes, null), entry => entry, _ => true), Is.False);
-            Assert.That(CultDocumentRegistry.Owns(narrow.SchemaId, writes, declares, new CatalogEntryLookup(writes, null), entry => entry, _ => true), Is.True);
+            Assert.That(CultDocumentRegistry.Owns("tests.restamp.unpublished", writes, declares, new CatalogEntryLookup(writes), entry => entry), Is.False);
+            Assert.That(CultDocumentRegistry.Owns(narrow.SchemaId, writes, declares, new CatalogEntryLookup(writes), entry => entry), Is.True);
         }
 
         private static string VectorPath(string name)

@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- No InternalsVisibleTo reaches this assembly: a store kind written here sees only the library's public and protected surface. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <Nullable>enable</Nullable>
+    <RootNamespace>GameCult.Caching.OutsideStoreTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\GameCult.Caching\GameCult.Caching.csproj" />
+    <ProjectReference Include="..\..\src\GameCult.Caching.MessagePack\GameCult.Caching.MessagePack.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NUnit" Version="4.*" />
+    <PackageReference Include="NUnit3TestAdapter" Version="6.2.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.4.0" />
+  </ItemGroup>
+
+</Project>

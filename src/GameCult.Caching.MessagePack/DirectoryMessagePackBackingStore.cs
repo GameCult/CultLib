@@ -185,7 +185,12 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                     manifest.Records.ToDictionary(record => record.Key, record => VersionOf(record.Payload), StringComparer.Ordinal), Entries.Values, ForeignRecords))
                 return CultCommitOutcome.Mismatch;
 
-            RefuseUndeclaredOnDisk(manifest, request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).Concat(request.Checks).Concat(StagedKeys));
+            RefuseUndeclaredOnDisk(
+                manifest,
+                request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).Concat(request.Checks).Concat(StagedKeys),
+                request.Upserts,
+                request.Deletes,
+                request.Checks);
             if (request.Upserts.Count == 0 && request.Deletes.Count == 0 && !IsDirty)
             {
                 // Nothing to write: the batch only judged keys it does not hold.
@@ -243,7 +248,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             Directory.CreateDirectory(_manifestFile.DirectoryName!);
             using var commitLease = AcquireCommitLease(wait: true, create: true);
             var (manifest, catalogBytes) = ReadManifest();
-            RefuseUndeclaredOnDisk(manifest, StagedKeys);
+            RefuseUndeclaredOnDisk(manifest, StagedKeys, Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>(), Array.Empty<string>());
             if (IsDirty)
                 WriteGeneration(manifest, catalogBytes);
             else
@@ -275,7 +280,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             using var commitLease = AcquireCommitLease(wait, create: true);
             if (commitLease == null)
                 return CultCommitOutcome.Contended;
-            RefuseUndeclaredOnDisk(ReadManifest().Snapshot, keys);
+            RefuseUndeclaredOnDisk(ReadManifest().Snapshot, keys, Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>(), Array.Empty<string>());
             return CultCommitOutcome.Committed;
         });
     }
@@ -286,14 +291,24 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
     // The manifest's other records stay as they are, foreign and read-only ones included; a write that would replace or remove a
     // record the manifest holds that the writer does not own is refused before any page is written, by the one rule every
-    // store shares (CacheBackingStore.RefuseUndeclaredOnDisk). The refused records reload as a pull loads them.
-    private void RefuseUndeclaredOnDisk(CultPersistedStoreSnapshot currentManifest, IEnumerable<string> written)
+    // store shares (CacheBackingStore.UndeclaredAt, CacheBackingStore.RefuseUndeclaredOnDisk). The refused records reload as a
+    // pull loads them. A key is owned by the entry the write puts there: the batch's upsert, or the staged document. A key it
+    // removes (the batch's deletes, the staged deletes) or only checks goes to the registry's removal rule.
+    private void RefuseUndeclaredOnDisk(CultPersistedStoreSnapshot currentManifest, IEnumerable<string> written, IReadOnlyList<CultStoredDocument> upserts, IReadOnlyList<CultStoredDocument> deletes, IEnumerable<string> checks)
     {
         CultPersistedRecord? HeldAt(string key) =>
             currentManifest.Records.FirstOrDefault(record => string.Equals(record.Key, key, StringComparison.Ordinal));
+        var batch = upserts.ToDictionary(entry => entry.Key.Value, entry => entry.Descriptor, StringComparer.Ordinal);
+        CultSchemaCatalogEntry? WrittenAt(string key) =>
+            batch.TryGetValue(key, out var descriptor) ? descriptor.ToCatalogEntry()
+            : _dirtyKeys.ContainsKey(key) && Entries.TryGetValue(key, out var staged) ? staged.Descriptor.ToCatalogEntry()
+            : null;
         RefuseUndeclaredOnDisk(
             written,
-            key => HeldAt(key) is { } held ? Undeclared(held, currentManifest.SchemaCatalog, Registry.Owns) : null,
+            currentManifest.SchemaCatalog,
+            HeldAt,
+            WrittenAt,
+            deletes.Select(entry => entry.Key.Value).Concat(checks),
             key => HeldAt(key) is { } held && Foreign(held, currentManifest.SchemaCatalog, VersionOf(held.Payload)) == null
                 ? LoadPage(held, currentManifest.SchemaCatalog, out _, out _)
                 : null,

@@ -250,8 +250,10 @@ namespace GameCult.Caching.Tests
                 SeedBig(cache);
                 cache.Commit(batch => batch.Upsert(typeof(VariantOther), new VariantOther { Name = "other" }, new CultRecordKey("other")));
 
-                var rebase = Refused(() => cache.Commit(batch => batch.UpsertVariant(BigKey, new CultRecordKey("other"))));
-                Assert.That(rebase.Message, Does.Contain(BigKey.Value).And.Contain("VariantOther"));
+                var rebase = Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.UpsertVariant(BigKey, new CultRecordKey("other"))))!;
+                // Held in a store, the key's record is a VariantGear and the write is a VariantOther: the ownership rule refuses it first
+                // (variants:ruling:cache-refuses-retype), so this refusal no longer names the types.
+                Assert.That(rebase.Message, Does.Contain(BigKey.Value));
             }
 
             // A store whose variant record names another type than its base's: the loader refuses it naming both keys.
@@ -278,6 +280,24 @@ namespace GameCult.Caching.Tests
             }));
             var load = Refused(() => Open(bad).Dispose());
             Assert.That(load.Message, Does.Contain("other-variant").And.Contain("gear-base"));
+        }
+
+        // Rebasing a variant onto a base of another type would retype its key: refused with or without a store, the record untouched.
+        [Test]
+        public void ARebaseOntoABaseOfAnotherTypeIsRefusedWithoutAStore()
+        {
+            using var cache = new CultCache(Registry, CultCacheMessagePack.CreateCodec(Registry));
+            SeedBase(cache);
+            SeedBig(cache);
+            var other = new CultRecordKey("other");
+            cache.Commit(batch => batch.Upsert(typeof(VariantOther), new VariantOther { Name = "other" }, other));
+
+            var rebase = Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.UpsertVariant(BigKey, other)))!;
+
+            Assert.That(rebase.RecordKey, Is.EqualTo(BigKey.Value));
+            Assert.That(cache.GetStored(BigKey)!.Variant!.BaseKey, Is.EqualTo(BaseKey.Value));
+            Assert.That(cache.GetStored(BigKey)!.Descriptor.DocumentType, Is.EqualTo(typeof(VariantGear)));
+            Assert.Throws<CultSchemaConflictException>(() => cache.UpsertVariantAsync(BigKey, other).GetAwaiter().GetResult());
         }
 
         [Test]
