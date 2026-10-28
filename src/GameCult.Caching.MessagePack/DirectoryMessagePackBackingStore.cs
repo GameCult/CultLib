@@ -299,15 +299,16 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         CultPersistedRecord? HeldAt(string key) =>
             currentManifest.Records.FirstOrDefault(record => string.Equals(record.Key, key, StringComparison.Ordinal));
         var batch = upserts.ToDictionary(entry => entry.Key.Value, entry => entry.Descriptor, StringComparer.Ordinal);
-        var removed = deletes.Select(entry => entry.Key.Value).Concat(checks).Concat(StagedRemovals).ToHashSet(StringComparer.Ordinal);
         CultSchemaCatalogEntry? WrittenAt(string key) =>
-            removed.Contains(key) ? null
-            : batch.TryGetValue(key, out var descriptor) ? descriptor.ToCatalogEntry()
+            batch.TryGetValue(key, out var descriptor) ? descriptor.ToCatalogEntry()
             : _dirtyKeys.ContainsKey(key) && Entries.TryGetValue(key, out var staged) ? staged.Descriptor.ToCatalogEntry()
             : null;
         RefuseUndeclaredOnDisk(
             written,
-            UndeclaredAt(HeldAt, currentManifest.SchemaCatalog, WrittenAt, Registry.Owns),
+            currentManifest.SchemaCatalog,
+            HeldAt,
+            WrittenAt,
+            deletes.Select(entry => entry.Key.Value).Concat(checks),
             key => HeldAt(key) is { } held && Foreign(held, currentManifest.SchemaCatalog, VersionOf(held.Payload)) == null
                 ? LoadPage(held, currentManifest.SchemaCatalog, out _, out _)
                 : null,
