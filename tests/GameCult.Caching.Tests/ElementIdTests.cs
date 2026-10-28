@@ -274,11 +274,11 @@ namespace GameCult.Caching.Tests
             Assert.That(DiskRecord(path, "a").SchemaId, Is.Not.EqualTo(otherRuntimeId));
         }
 
-        // Minting rewrites a loaded record in place under this type's id, and the cache keeps that entry. A newer version of the type,
+        // Pushing a loaded record rewrites it in place under this type's id, and the cache keeps that entry. A newer version of the type,
         // registered afterwards, reads the entry the record is now published by whole, so it owns the record: staging asks the entry
         // that publishes the id the record carries now, not the one that published the id it was loaded under.
         [Test]
-        public void ANewerVersionReadsWholeTheRecordMintingRelabelledInPlace()
+        public void ANewerVersionReadsWholeTheRecordAPushRelabelledInPlace()
         {
             const string otherRuntimeId = "other.runtime.id_deck";
             var path = PathOf("mint-then-newer.cc");
@@ -295,8 +295,11 @@ namespace GameCult.Caching.Tests
 
             using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = registry }))
             {
-                Assert.That(cache.MintElementIds(), Is.EqualTo(1));
-                Assert.That(cache.GetStored(key)!.StoredSchemaId, Is.Not.EqualTo(otherRuntimeId), "minting relabelled the loaded entry in place");
+                var loaded = cache.GetStored(key)!;
+                cache.BackingStores[0].Push(loaded);
+                cache.BackingStores[0].PushAll();
+                Assert.That(ReferenceEquals(cache.GetStored(key), loaded), Is.True, "the cache keeps the entry the store relabelled");
+                Assert.That(loaded.StoredSchemaId, Is.Not.EqualTo(otherRuntimeId), "the push relabelled the loaded entry in place");
                 registry.GetRequired(typeof(IdDeckNext));
                 Assert.That(cache.Commit(batch => batch.Upsert(typeof(IdDeckNext), new IdDeckNext { Name = "newer" }, key)), Is.True);
             }
