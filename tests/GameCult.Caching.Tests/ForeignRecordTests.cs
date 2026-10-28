@@ -67,6 +67,13 @@ namespace GameCult.Caching.Tests
         private static CultCache Open(string path, CultDocumentRegistry registry, bool directory) =>
             CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = registry, UseDirectoryStore = directory });
 
+        // The other writer retypes a key: a removal and an add in separate commits (variants:ruling:cache-refuses-retype).
+        private static void Retype(CultCache writer, Type type, object document, CultRecordKey key)
+        {
+            Assert.That(writer.Commit(batch => batch.Remove(key)), Is.True);
+            Assert.That(writer.Commit(batch => batch.Upsert(type, document, key)), Is.True);
+        }
+
         private static object DeckOf(string name) => New(Deck, ("Name", name));
 
         private static object WidgetOf(string label) => New(Widget, ("Label", label));
@@ -205,7 +212,7 @@ namespace GameCult.Caching.Tests
             var path = Seeded("replaced.cc", directory);
             using var cache = Open(path, DeckOnly, directory);
             using (var other = Open(path, Full, directory))
-                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+                Retype(other, Widget, WidgetOf("now a widget"), D);
             var before = Fingerprint(path);
 
             var refusal = Assert.Throws<CultSchemaConflictException>(() => Land(cache, write, D, DeckOf(Canary)))!;
@@ -228,7 +235,7 @@ namespace GameCult.Caching.Tests
             var path = Seeded("unstuck.cc", directory);
             using var cache = Open(path, DeckOnly, directory);
             using (var other = Open(path, Full, directory))
-                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+                Retype(other, Widget, WidgetOf("now a widget"), D);
             var widget = Stored(path, D);
 
             Assert.Throws<CultSchemaConflictException>(() => Land(cache, refused, D, DeckOf(Canary)));
@@ -249,7 +256,7 @@ namespace GameCult.Caching.Tests
             var path = Seeded("not-served.cc", directory);
             using var cache = Open(path, DeckOnly, directory);
             using (var other = Open(path, Full, directory))
-                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+                Retype(other, Widget, WidgetOf("now a widget"), D);
 
             var refusal = Assert.Throws<CultSchemaConflictException>(() => Land(cache, refused, D, DeckOf(Canary)))!;
             Assert.That(refusal.Message, Does.StartWith("Record 'd' (schema id '" + WidgetId + "'"), "one refused key reads as one record");
@@ -332,7 +339,7 @@ namespace GameCult.Caching.Tests
             var path = Seeded("untouched.cc", directory);
             using var cache = Open(path, DeckOnly, directory);
             using (var other = Open(path, Full, directory))
-                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+                Retype(other, Widget, WidgetOf("now a widget"), D);
             var widget = Stored(path, D);
 
             Land(cache, write, E, DeckOf("e"));
@@ -356,7 +363,7 @@ namespace GameCult.Caching.Tests
             var path = Seeded("restamp.cc", directory);
             using var cache = Open(path, DeckOnly, directory);
             using (var other = Open(path, Full, directory))
-                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+                Retype(other, Widget, WidgetOf("now a widget"), D);
 
             Land(cache, write, E, DeckOf("e"));
 
@@ -374,7 +381,7 @@ namespace GameCult.Caching.Tests
             var path = Seeded("stale.cc", directory);
             using var cache = Open(path, DeckOnly, directory);
             using (var other = Open(path, Full, directory))
-                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+                Retype(other, Widget, WidgetOf("now a widget"), D);
             var widget = Stored(path, D);
 
             Assert.Throws<CultSchemaConflictException>(() => Land(cache, Write.Commit, D, DeckOf(Canary)));
@@ -392,7 +399,7 @@ namespace GameCult.Caching.Tests
             var path = Seeded("staged-commit.cc", directory);
             using var cache = Open(path, DeckOnly, directory);
             using (var other = Open(path, Full, directory))
-                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+                Retype(other, Widget, WidgetOf("now a widget"), D);
             var widget = Stored(path, D);
 
             cache.UpsertAsync(Deck, DeckOf(Canary), D).GetAwaiter().GetResult();
@@ -413,7 +420,7 @@ namespace GameCult.Caching.Tests
             using var cache = Open(path, DeckOnly, directory);
             Land(cache, landed, D, DeckOf("d again"));
             using (var other = Open(path, Full, directory))
-                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+                Retype(other, Widget, WidgetOf("now a widget"), D);
             var widget = Stored(path, D);
 
             Land(cache, Write.Commit, E, DeckOf("e"));
@@ -431,7 +438,7 @@ namespace GameCult.Caching.Tests
             cache.UpsertAsync(Deck, DeckOf("d staged"), D).GetAwaiter().GetResult();
             Land(cache, Write.Commit, E, DeckOf("e"));
             using (var other = Open(path, Full, directory))
-                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+                Retype(other, Widget, WidgetOf("now a widget"), D);
             var widget = Stored(path, D);
 
             Land(cache, Write.Commit, new CultRecordKey("e2"), DeckOf("e2"));
@@ -448,7 +455,7 @@ namespace GameCult.Caching.Tests
             var path = Seeded("staged-removal.cc", directory);
             using var cache = Open(path, DeckOnly, directory);
             using (var other = Open(path, Full, directory))
-                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+                Retype(other, Widget, WidgetOf("now a widget"), D);
             var widget = Stored(path, D);
 
             cache.Remove(D);
@@ -468,7 +475,7 @@ namespace GameCult.Caching.Tests
             var path = Seeded("pending.cc", directory);
             using var cache = Open(path, DeckOnly, directory);
             using (var other = Open(path, Full, directory))
-                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+                Retype(other, Widget, WidgetOf("now a widget"), D);
 
             cache.UpsertAsync(Deck, DeckOf(Canary), D).GetAwaiter().GetResult();
             Assert.Throws<CultSchemaConflictException>(() => cache.FlushAsync().GetAwaiter().GetResult());
@@ -478,7 +485,7 @@ namespace GameCult.Caching.Tests
             cache.UpsertAsync(Deck, DeckOf(Canary), E).GetAwaiter().GetResult();
             cache.UpsertAsync(Deck, DeckOf("v"), V).GetAwaiter().GetResult();
             using (var other = Open(path, Full, directory))
-                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), E));
+                Retype(other, Widget, WidgetOf("now a widget"), E);
             Assert.Throws<CultSchemaConflictException>(() => cache.FlushAsync().GetAwaiter().GetResult());
             Assert.That(cache.IsDirty, Is.True, "v is still staged");
             cache.FlushAsync().GetAwaiter().GetResult();
@@ -495,7 +502,7 @@ namespace GameCult.Caching.Tests
             using var cache = Open(path, DeckOnly, directory);
             cache.Commit(batch => batch.Upsert(Deck, DeckOf("e"), E));
             using (var other = Open(path, Full, directory))
-                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+                Retype(other, Widget, WidgetOf("now a widget"), D);
             var before = Fingerprint(path);
 
             // A condition keeps the single-file commit on the file as it is, so only the removal reaches d.
@@ -516,7 +523,7 @@ namespace GameCult.Caching.Tests
             var path = Seeded("pulled.cc", directory);
             using var cache = Open(path, DeckOnly, directory);
             using (var other = Open(path, Full, directory))
-                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+                Retype(other, Widget, WidgetOf("now a widget"), D);
 
             cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
 
@@ -562,7 +569,7 @@ namespace GameCult.Caching.Tests
             using var cache = Open(path, DeckOnly, directory);
             var z = new CultRecordKey("z");
             using (var other = Open(path, Full, directory))
-                other.Commit(batch => batch.Upsert(Widget, WidgetOf("z"), z));
+                Retype(other, Widget, WidgetOf("z"), z);
             var before = Stored(path, z);
 
             Land(cache, Write.Flush, E, DeckOf("e"));
@@ -803,8 +810,9 @@ namespace GameCult.Caching.Tests
             Assert.That(EmittedDocumentTypes.Read(reopened.Get(D)!, "Name"), Is.EqualTo("claimed"));
         }
 
-        // Whether a record is read-only is read live from the registry at the write, not fixed at load: a type registered after the
-        // load that declares the id makes the record writable, and the write stores it under the writing type's id, not the declarer's.
+        // Whether a record is writable is decided at the write, not fixed at load, and by the writing type alone: a type registered
+        // after the load that declares the id writes the record and stores it under its own id, and a registry holding it does not make
+        // another type the record's writer.
         [Test]
         public void ATypeRegisteredAfterLoadThatDeclaresTheIdMakesItWritable()
         {
@@ -815,11 +823,12 @@ namespace GameCult.Caching.Tests
             {
                 Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.Upsert(Deck, DeckOf("refused"), D)));
                 registry.GetRequired(LateClaimingDeck);
-                cache.Commit(batch => batch.Upsert(Deck, DeckOf("claimed"), D));
+                Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.Upsert(Deck, DeckOf("still refused"), D)), "the registry's other type does not make the record the writing type's");
+                cache.Commit(batch => batch.Upsert(LateClaimingDeck, New(LateClaimingDeck, ("Name", "claimed")), D));
             }
 
-            Assert.That(Read(path).Records.Single().SchemaId, Is.EqualTo(registry.GetRequired(Deck).SchemaId));
-            using var reopened = Open(path, DeckOnly, directory: false);
+            Assert.That(Read(path).Records.Single().SchemaId, Is.EqualTo(registry.GetRequired(LateClaimingDeck).SchemaId));
+            using var reopened = Open(path, CultDocumentRegistry.ForTypes(new[] { LateClaimingDeck }), directory: false);
             Assert.That(EmittedDocumentTypes.Read(reopened.Get(D)!, "Name"), Is.EqualTo("claimed"));
         }
 
@@ -1132,7 +1141,7 @@ namespace GameCult.Caching.Tests
             a.UpsertAsync(Deck, DeckOf("e"), E).GetAwaiter().GetResult();
             Assert.That(a.Remove(W), Is.False);
             using (var b = Open(path, Full, directory))
-                b.Commit(batch => batch.Upsert(Deck, DeckOf("theirs"), W));
+                Retype(b, Deck, DeckOf("theirs"), W);
             var theirs = Stored(path, W);
 
             Assert.DoesNotThrow(() => a.FlushAsync().GetAwaiter().GetResult());
@@ -1140,7 +1149,7 @@ namespace GameCult.Caching.Tests
             Assert.That(Read(path).Records.Select(record => record.Key), Is.EquivalentTo(new[] { "d", "e", "w" }), "the staged write landed beside the checked key");
             Assert.That(Stored(path, W), Is.EqualTo(theirs), "the record at the checked key is still the other writer's bytes");
             using (var c = Open(path, Full, directory))
-                c.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), W));
+                Retype(c, Widget, WidgetOf("now a widget"), W);
             Assert.DoesNotThrow(() => a.FlushAsync().GetAwaiter().GetResult(), "a flush clears what it judged: the next one has nothing to judge");
         }
 
@@ -1181,7 +1190,7 @@ namespace GameCult.Caching.Tests
             Assert.That(StoreOf(a).ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
             // The writer declares the widget's id, so it may replace the widget with a deck record under an id a reads but does not declare.
             using (var other = Open(path, CultDocumentRegistry.ForTypes(new[] { MovingDeck, Widget }), directory))
-                Assert.That(other.Commit(batch => batch.Upsert(MovingDeck, New(MovingDeck, ("Name", "moved")), W)), Is.True);
+                Retype(other, MovingDeck, New(MovingDeck, ("Name", "moved")), W);
 
             Assert.That(a.Remove(W), Is.False);
             var refusal = Assert.Throws<CultSchemaConflictException>(() => a.FlushAsync().GetAwaiter().GetResult())!;
@@ -1293,7 +1302,7 @@ namespace GameCult.Caching.Tests
             else
                 cache.FlushAsync().GetAwaiter().GetResult();
             using (var other = Open(path, Full, directory))
-                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), staged));
+                Retype(other, Widget, WidgetOf("now a widget"), staged);
 
             Assert.DoesNotThrow(() => cache.FlushAsync().GetAwaiter().GetResult());
         }
@@ -1371,7 +1380,7 @@ namespace GameCult.Caching.Tests
             using var cache = Open(path, DeckOnly, directory);
             Assert.That(StoreOf(cache).ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
             using (var other = Open(path, Full, directory))
-                other.Commit(batch => batch.Upsert(Deck, DeckOf("theirs"), W));
+                Retype(other, Deck, DeckOf("theirs"), W);
             var theirs = Stored(path, W);
 
             Assert.That(cache.Commit(batch => batch.Remove(W)), Is.True);
@@ -1455,7 +1464,7 @@ namespace GameCult.Caching.Tests
             using var _ = cache;
             Assert.That(cache.BackingStores[1].ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
             using (var late = Open(other, CultDocumentRegistry.ForTypes(new[] { Gizmo, Widget }), directory))
-                late.Commit(batch => batch.Upsert(Gizmo, New(Gizmo, ("Tag", "theirs")), W));
+                Retype(late, Gizmo, New(Gizmo, ("Tag", "theirs")), W);
             var theirs = Stored(other, W);
 
             Assert.That(cache.Commit(batch =>
