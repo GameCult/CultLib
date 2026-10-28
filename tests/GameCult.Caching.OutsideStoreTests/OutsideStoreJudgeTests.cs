@@ -78,6 +78,8 @@ namespace GameCult.Caching.OutsideStoreTests
             private readonly Disk _disk;
             private readonly CultCodec _codec;
             private readonly HashSet<string> _staged = new(StringComparer.Ordinal);
+            // StoredVersion is internal to the library, so a store kind tracks the version it last took of each key itself.
+            private readonly Dictionary<string, string> _versions = new(StringComparer.Ordinal);
 
             public OutsideStore(Disk disk, CultCodec codec)
             {
@@ -104,7 +106,7 @@ namespace GameCult.Caching.OutsideStoreTests
             public override void PullAll() => Held(() =>
             {
                 var loaded = _disk.Records
-                    .Where(pair => !Entries.TryGetValue(pair.Key, out var known) || !SameStoredIdentity(known.StoredVersion, pair.Value.Version))
+                    .Where(pair => !_versions.TryGetValue(pair.Key, out var known) || !SameStoredIdentity(known, pair.Value.Version))
                     .Select(pair => DurableAt(pair.Key))
                     .OfType<CultStoredDocument>()
                     .ToArray();
@@ -114,7 +116,10 @@ namespace GameCult.Caching.OutsideStoreTests
                 foreach (var stored in dropped)
                     Entries.TryRemove(stored.Key.Value, out _);
                 foreach (var stored in loaded)
+                {
                     Entries[stored.Key.Value] = stored;
+                    _versions[stored.Key.Value] = _disk.Records[stored.Key.Value].Version;
+                }
             });
 
             public override void Push(CultStoredDocument entry) => Held(() =>
@@ -185,10 +190,14 @@ namespace GameCult.Caching.OutsideStoreTests
                             Payload = _codec.Serialize(document.Document, type, type)
                         },
                         entries[key]);
+                    _versions[key] = _disk.Records[key].Version;
                 }
 
                 foreach (var key in removals.Where(key => !writes.ContainsKey(key)))
+                {
                     _disk.Records.Remove(key);
+                    _versions.Remove(key);
+                }
                 _staged.Clear();
                 MarkFlushSucceeded();
             }
