@@ -547,6 +547,9 @@ namespace GameCult.Caching
         // A plain record staged by Flatten: the one way a plain record may replace a variant at its key.
         internal bool Flattens { get; set; }
 
+        // A plain record a batch staged after a Flatten at its key: it replaces the plain record that flatten left, so it may land on the variant the cache holds.
+        internal bool ReplacesFlattened { get; set; }
+
         // True while this record holds element ids minted when it loaded, that no write has persisted (see MintElementIds).
         internal bool IdsInMemoryOnly { get; set; }
 
@@ -2076,8 +2079,9 @@ namespace GameCult.Caching
     // One staged write: a plain record (Stored), a variant (Variant), a flatten, or, with none of those, a removal.
     internal sealed class StagedOperation
     {
-        public StagedOperation(CultRecordKey key, CultStoredDocument? stored, CultVariantDelta? variant, bool flatten)
+        public StagedOperation(CultRecordKey key, CultStoredDocument? stored, CultVariantDelta? variant, bool flatten, bool afterFlatten = false)
         {
+            AfterFlatten = afterFlatten;
             Key = key;
             Stored = stored;
             Variant = variant;
@@ -2088,6 +2092,8 @@ namespace GameCult.Caching
         public CultStoredDocument? Stored { get; }
         public CultVariantDelta? Variant { get; }
         public bool Flatten { get; }
+        // A plain record staged after a Flatten at its key: the key holds a plain record by then, so it replaces that, not a variant.
+        public bool AfterFlatten { get; }
         public bool IsRemoval => Stored == null && Variant == null && !Flatten;
     }
 
@@ -2132,6 +2138,10 @@ namespace GameCult.Caching
         public CultRecordKey UpsertVariant(CultRecordKey key, CultRecordKey baseKey, IEnumerable<CultVariantOverride>? overrides = null)
         {
             ThrowIfSealed();
+            // A flatten staged here leaves a plain record at the key, which cannot become a variant in place, as when staged apart.
+            if (Operations.TryGetValue(key.Value, out var flattened) && flattened.Flatten)
+                throw new InvalidOperationException(
+                    $"Record {key.Value} is a plain record; it cannot become a variant of {baseKey.Value} in place. Use a new key.");
             Operations[key.Value] = new StagedOperation(
                 key, null, new CultVariantDelta(baseKey.Value, (overrides ?? Array.Empty<CultVariantOverride>()).ToArray()), false);
             return key;
@@ -2142,17 +2152,14 @@ namespace GameCult.Caching
         {
             ThrowIfSealed();
             // A flatten acts on what the key will hold, as staged apart: a variant staged here is flattened as it lands; a removal or a
-            // plain record staged here leaves nothing to flatten; with nothing staged it flattens the variant the cache holds.
+            // plain record staged here, or an earlier flatten, leaves nothing to flatten; with nothing staged it flattens the variant
+            // the cache holds.
             if (Operations.TryGetValue(key.Value, out var staged))
             {
-                if (staged.Variant != null)
-                {
-                    Operations[key.Value] = new StagedOperation(key, null, staged.Variant, true);
-                    return;
-                }
-
-                if (!staged.Flatten)
+                if (staged.Variant == null || staged.Flatten)
                     throw new InvalidOperationException($"Flatten({key.Value}): the record is not a variant.");
+                Operations[key.Value] = new StagedOperation(key, null, staged.Variant, true);
+                return;
             }
 
             Operations[key.Value] = new StagedOperation(key, null, null, true);
@@ -2175,7 +2182,8 @@ namespace GameCult.Caching
         {
             ThrowIfSealed();
             var stored = _cache.CreateStoredDocument(document, key);
-            Operations[stored.Key.Value] = new StagedOperation(stored.Key, stored, null, false);
+            Operations[stored.Key.Value] = new StagedOperation(
+                stored.Key, stored, null, false, afterFlatten: Operations.TryGetValue(stored.Key.Value, out var prior) && prior.Flatten);
             return stored.Key;
         }
 
@@ -2736,8 +2744,8 @@ namespace GameCult.Caching
         }
 
         // Call under the gate that admits the result, so no load can land a later storedAt in between.
-        private CultStoredDocument Stamp(CultRecordKey key, CultDocumentDescriptor descriptor, object document) =>
-            new(key, MintStoredAt(PreviousStoredAt(key), Clock()), descriptor, document);
+        private CultStoredDocument Stamp(CultRecordKey key, CultDocumentDescriptor descriptor, object document, bool replacesFlattened = false) =>
+            new(key, MintStoredAt(PreviousStoredAt(key), Clock()), descriptor, document) { ReplacesFlattened = replacesFlattened };
 
         // An unresolved variant: the admitting hold resolves it against its base before anything lands.
         // A staged variant that a Flatten followed lands as the plain record of its resolution (flattens).
@@ -2842,7 +2850,7 @@ namespace GameCult.Caching
                 // Staging stamped outside this gate; a pull since then may hold a later storedAt, so stamp again.
                 var upserts = batch.Operations.Values
                     .Where(op => !op.IsRemoval)
-                    .Select(op => op.Stored != null ? Stamp(op.Key, op.Stored.Descriptor, op.Stored.Document)
+                    .Select(op => op.Stored != null ? Stamp(op.Key, op.Stored.Descriptor, op.Stored.Document, op.AfterFlatten)
                         : op.Variant != null ? StampVariant(op.Key, DescriptorOfBase(op.Key, op.Variant.BaseKey, batch), op.Variant, op.Flatten)
                         : StampFlatten(op.Key))
                     .ToArray();
@@ -3299,7 +3307,7 @@ namespace GameCult.Caching
                     _entries.TryGetValue(stored.Key.Value, out var present);
                     if (gone.Contains(stored.Key.Value))
                         present = null;
-                    if (stored.Variant == null && !stored.Flattens && present?.Variant != null)
+                    if (stored.Variant == null && !stored.Flattens && !stored.ReplacesFlattened && present?.Variant != null)
                         throw new InvalidOperationException(
                             $"Record {stored.Key.Value} is a variant of {present.Variant.BaseKey}; a plain write cannot replace it. " +
                             "Change it through the variant API, or Flatten it.");

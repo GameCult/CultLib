@@ -365,6 +365,85 @@ namespace GameCult.Caching.Tests
             Assert.That(((EvA)cache.GetStored(K3)!.Document).Name, Is.EqualTo("plain"));
         }
 
+        // finding op-after-staged-flatten-diverges: an operation after a Flatten at the same key acts on the plain record that flatten
+        // leaves, so one intent has one answer in a batch and staged apart, in both stores kinds and after a reload from disk.
+        [TestCaseSource(nameof(VariantKinds))]
+        public void AnOperationAfterAStagedFlattenAnswersAsStagedApart(string kind)
+        {
+            var scenarios = new[] { "F,F", "F,P", "F,V", "V,F,V", "F,P,F", "V,F,P" };
+            foreach (var scenario in scenarios)
+            {
+                var steps = scenario.Split(',');
+                var results = new List<string>();
+                foreach (var oneBatch in new[] { true, false })
+                {
+                    var path = NewPath(kind);
+                    string outcome;
+                    using (var cache = Open(path, kind, AB))
+                    {
+                        var baseA = new CultRecordKey("base-a");
+                        cache.Commit(batch =>
+                        {
+                            batch.Upsert(typeof(EvA), new EvA { Name = "base-a", Value = 1 }, baseA);
+                            batch.UpsertVariant(K3, baseA, new[] { cache.Override<EvA>(nameof(EvA.Name), "v3") });
+                        });
+                        var variant = new[] { cache.Override<EvA>(nameof(EvA.Name), "vv") };
+
+                        try
+                        {
+                            if (oneBatch)
+                                cache.Commit(batch =>
+                                {
+                                    foreach (var step in steps)
+                                    {
+                                        if (step == "F") batch.Flatten(K3);
+                                        else if (step == "P") batch.Upsert(typeof(EvA), new EvA { Name = "plain" }, K3);
+                                        else batch.UpsertVariant(K3, baseA, variant);
+                                    }
+                                });
+                            else
+                                foreach (var step in steps)
+                                {
+                                    if (step == "F") cache.FlattenAsync(K3).GetAwaiter().GetResult();
+                                    else if (step == "P") cache.UpsertAsync(typeof(EvA), new EvA { Name = "plain" }, K3).GetAwaiter().GetResult();
+                                    else cache.UpsertVariantAsync(K3, baseA, variant).GetAwaiter().GetResult();
+                                }
+                            outcome = "committed";
+                        }
+                        catch (InvalidOperationException refused)
+                        {
+                            outcome = "refused: " + refused.Message;
+                        }
+
+                        outcome += " | " + Describe(cache);
+                        cache.FlushAsync().GetAwaiter().GetResult();
+                    }
+
+                    if (kind != "storeless" && outcome.StartsWith("committed", StringComparison.Ordinal))
+                    {
+                        using var reloaded = Open(path, kind, AB);
+                        outcome += " | reloaded " + Describe(reloaded);
+                    }
+
+                    results.Add(outcome);
+                }
+
+                // A refused batch changes nothing, while staged apart the steps before the refused one have landed: the answer compared
+                // is the verdict and its text, and the end state only where both committed.
+                var batchAnswer = results[0].Split(" | ")[0];
+                var apartAnswer = results[1].Split(" | ")[0];
+                Assert.That(batchAnswer, Is.EqualTo(apartAnswer), $"{kind} {scenario}");
+                if (batchAnswer == "committed")
+                    Assert.That(results[0], Is.EqualTo(results[1]), $"{kind} {scenario}");
+            }
+
+            static string Describe(CultCache cache)
+            {
+                var held = cache.GetStored(K3)!;
+                return $"{held.Descriptor.DocumentType.Name} variant={held.Variant?.BaseKey} name={((EvA)held.Document).Name}";
+            }
+        }
+
         // finding cross-store-retype-decided-by-key-home: a one-batch retype between two home stores is refused by the rule that a commit
         // lands in one home store, with that rule's text (an evicted key is absent to the one-key-one-store check, as when staged
         // apart); staged apart, as two commits, it leaves the key in exactly one store.
