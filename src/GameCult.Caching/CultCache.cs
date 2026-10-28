@@ -4560,7 +4560,9 @@ namespace GameCult.Caching
                 return CultCommitOutcome.Mismatch;
 
             var (upserts, removals) = StagedWrites(request.Upserts, request.Deletes);
-            var written = ApplyWriteSet(disk, upserts, removals, request.Checks);
+            // A key the batch deletes and also upserts is a retype: the upsert wins in the write set, so the deletion travels as a check,
+            // and the judge reads the key as the removal it names.
+            var written = ApplyWriteSet(disk, upserts, removals, request.Checks.Concat(request.Deletes.Select(entry => entry.Key.Value)));
             foreach (var entry in request.Deletes)
                 Entries.TryRemove(entry.Key.Value, out _);
             foreach (var entry in request.Upserts)
