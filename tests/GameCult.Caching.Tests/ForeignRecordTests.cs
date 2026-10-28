@@ -294,11 +294,10 @@ namespace GameCult.Caching.Tests
                 });
             using var cache = Open(path, DeckOnly, directory);
             using (var other = Open(path, Full, directory))
-                other.Commit(batch =>
-                {
-                    batch.Upsert(Widget, WidgetOf("w1"), D);
-                    batch.Upsert(Widget, WidgetOf("w2"), d2);
-                });
+            {
+                Retype(other, Widget, WidgetOf("w1"), D);
+                Retype(other, Widget, WidgetOf("w2"), d2);
+            }
 
             var refusal = Assert.Throws<CultSchemaConflictException>(() =>
             {

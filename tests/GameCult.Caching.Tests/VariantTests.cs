@@ -250,7 +250,7 @@ namespace GameCult.Caching.Tests
                 SeedBig(cache);
                 cache.Commit(batch => batch.Upsert(typeof(VariantOther), new VariantOther { Name = "other" }, new CultRecordKey("other")));
 
-                var rebase = Refused(() => cache.Commit(batch => batch.UpsertVariant(BigKey, new CultRecordKey("other"))));
+                var rebase = Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.UpsertVariant(BigKey, new CultRecordKey("other"))))!;
                 // Held in a store, the key's record is a VariantGear and the write is a VariantOther: the ownership rule refuses it first
                 // (variants:ruling:cache-refuses-retype), so this refusal no longer names the types.
                 Assert.That(rebase.Message, Does.Contain(BigKey.Value));

@@ -193,52 +193,39 @@ namespace GameCult.Caching.Tests
             Assert.That(TypeAt(path, false, ABRegistry, K1), Is.EqualTo(typeof(WoA)));
         }
 
-        private static CultStoredDocument Doc<T>(CultDocumentRegistry registry, CultRecordKey key, T document) where T : class =>
-            new(key, "2026-10-28T00:00:00.0000000+00:00", registry.GetRequired<T>(), document);
-
-        // The judge is per key: an unattached PushAll that stages A at B's key and B at A's key is refused, though together the writes
-        // declare both ids.
-        [Test]
-        public void AnUnattachedPushAllJudgesEachKeyByItsOwnWrittenType()
+        // The judge is per key, and an answer for one written type is never reused for another. Another writer left A's record at two
+        // keys; this stale cache holds A at one and B at the other and writes both. The key A owns lands, the key where B meets A's
+        // record is the one refused, whichever is judged first.
+        [TestCase("a-own", "b-bad", true, false)]
+        [TestCase("a-own", "b-bad", false, false)]
+        [TestCase("b-own", "a-bad", true, true)]
+        [TestCase("b-own", "a-bad", false, true)]
+        public void AStaleBatchIsJudgedPerKeyByEachKeysWrittenType(string ownKey, string badKey, bool ownFirst, bool directory)
         {
-            var path = SeedAAtK1BAtK2(directory: false);
-            var before = Fingerprint(path);
-            var swapped = new SingleFileMessagePackBackingStore(path);
-            swapped.Push(Doc(ABRegistry, K1, new WoB { Name = "k1", Value = 7 }));
-            swapped.Push(Doc(ABRegistry, K2, new WoA { Name = "k2", Value = 7 }));
-
-            Assert.Throws<CultSchemaConflictException>(() => swapped.PushAll());
-            Assert.That(Fingerprint(path), Is.EqualTo(before));
-
-            var own = new SingleFileMessagePackBackingStore(path);
-            own.Push(Doc(ABRegistry, K1, new WoA { Name = "k1", Value = 7 }));
-            own.Push(Doc(ABRegistry, K2, new WoB { Name = "k2", Value = 7 }));
-            own.PushAll();
-            Assert.That(Fingerprint(path), Is.Not.EqualTo(before));
-        }
-
-        // An answer for one written type is never reused for another: two records stored under A's id, A written at one key and B at
-        // the other, in either staging order and either key order.
-        [TestCase("a-own", "b-bad", true)]
-        [TestCase("a-own", "b-bad", false)]
-        [TestCase("b-own", "a-bad", true)]
-        [TestCase("b-own", "a-bad", false)]
-        public void AnAnswerForOneWrittenTypeIsNeverReusedForAnother(string ownKey, string badKey, bool ownFirst)
-        {
-            var path = PathFor(directory: false);
-            using (var seed = Open(path, false, ABRegistry))
+            var path = PathFor(directory);
+            var own = new CultRecordKey(ownKey);
+            var bad = new CultRecordKey(badKey);
+            using (var seed = Open(path, directory, ABRegistry))
                 Assert.That(seed.Commit(batch =>
                 {
-                    batch.Upsert(new WoA { Name = ownKey, Value = 1 }, new CultRecordHandle<WoA>(new CultRecordKey(ownKey)));
-                    batch.Upsert(new WoA { Name = badKey, Value = 1 }, new CultRecordHandle<WoA>(new CultRecordKey(badKey)));
+                    batch.Upsert(new WoA { Name = ownKey, Value = 1 }, new CultRecordHandle<WoA>(own));
+                    batch.Upsert(new WoB { Name = badKey, Value = 1 }, new CultRecordHandle<WoB>(bad));
                 }), Is.True);
-            var before = Fingerprint(path);
-            var store = new SingleFileMessagePackBackingStore(path);
-            void PushOwn() => store.Push(Doc(ABRegistry, new CultRecordKey(ownKey), new WoA { Name = ownKey, Value = 2 }));
-            void PushBad() => store.Push(Doc(ABRegistry, new CultRecordKey(badKey), new WoB { Name = badKey, Value = 2 }));
-            if (ownFirst) { PushOwn(); PushBad(); } else { PushBad(); PushOwn(); }
+            using var stale = Open(path, directory, ABRegistry);
+            using (var other = Open(path, directory, ABRegistry))
+            {
+                Assert.That(other.Commit(batch => batch.Remove(bad)), Is.True);
+                Assert.That(other.Commit(batch => batch.Upsert(new WoA { Name = badKey, Value = 2 }, new CultRecordHandle<WoA>(bad))), Is.True);
+            }
 
-            var refusal = Assert.Throws<CultSchemaConflictException>(() => store.PushAll())!;
+            var before = Fingerprint(path);
+            void StageOwn(CultCacheBatch batch) => batch.Upsert(new WoA { Name = ownKey, Value = 3 }, new CultRecordHandle<WoA>(own));
+            void StageBad(CultCacheBatch batch) => batch.Upsert(new WoB { Name = badKey, Value = 3 }, new CultRecordHandle<WoB>(bad));
+
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => stale.Commit(batch =>
+            {
+                if (ownFirst) { StageOwn(batch); StageBad(batch); } else { StageBad(batch); StageOwn(batch); }
+            }))!;
 
             Assert.That(refusal.RecordKey, Is.EqualTo(badKey));
             Assert.That(refusal.Message, Does.Not.Contain($"'{ownKey}'"), "the key A owns is not among the refused");
