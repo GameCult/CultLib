@@ -231,5 +231,26 @@ namespace GameCult.Caching.Tests
             Assert.That(refusal.Message, Does.Not.Contain($"'{ownKey}'"), "the key A owns is not among the refused");
             Assert.That(Fingerprint(path), Is.EqualTo(before));
         }
+
+        // A batch that removes a key is a removal of it, whatever this cache has staged there: the removal rule judges it, so a key
+        // another writer retyped can still be removed by the cache that staged a write of the old type.
+        [TestCaseSource(nameof(StoreKinds))]
+        public void ABatchRemovalOfAStagedKeyIsJudgedAsARemoval(bool directory)
+        {
+            var path = SeedAAtK1BAtK2(directory);
+            using var stale = Open(path, directory, ABRegistry);
+            stale.UpsertAsync(typeof(WoA), new WoA { Name = "k1", Value = 9 }, K1).GetAwaiter().GetResult();
+            using (var other = Open(path, directory, ABRegistry))
+            {
+                Assert.That(other.Commit(batch => batch.Remove(K1)), Is.True);
+                Assert.That(other.Commit(batch => batch.Upsert(new WoB { Name = "k1", Value = 5 }, new CultRecordHandle<WoB>(K1))), Is.True);
+            }
+
+            Assert.That(stale.Commit(batch => batch.Remove(K1)), Is.True);
+
+            using var reopened = Open(path, directory, ABRegistry);
+            Assert.That(reopened.GetStored(K1), Is.Null);
+            Assert.That(reopened.GetStored(K2)!.Descriptor.DocumentType, Is.EqualTo(typeof(WoB)), "the bystander is untouched");
+        }
     }
 }
