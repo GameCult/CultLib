@@ -367,7 +367,7 @@ namespace GameCult.Caching.Tests
             Assert.That(TypeAt(path, directory, ABRegistry, K1), Is.EqualTo(typeof(WoA)));
         }
 
-        // A removal is spent by the flush that judged it: a later add of another type with no removal in front of it is refused as ever.
+        // A removal is spent by the flush that judged it: a later add of another type, with no removal in front of it, is judged as an upsert again.
         [TestCaseSource(nameof(StoreKinds))]
         public void ARemovalIsSpentByTheFlushThatJudgedIt(bool directory)
         {
@@ -376,9 +376,13 @@ namespace GameCult.Caching.Tests
             using var cache = Open(path, directory, ABRegistry);
             Assert.That(cache.Remove(K2), Is.True);
             cache.FlushAllBackingStores();
-            cache.UpsertAsync(typeof(WoB), new WoB { Name = "k2", Value = 4 }, K2).GetAwaiter().GetResult();
-            cache.FlushAllBackingStores();
-            Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.Upsert(new WoA { Name = "k2", Value = 5 }, new CultRecordHandle<WoA>(K2))));
+
+            // Another writer puts B at the key this cache removed; this cache never loaded it, and stages an A there with no removal.
+            using (var other = Open(path, directory, ABRegistry))
+                Assert.That(other.Commit(batch => batch.Upsert(new WoB { Name = "k2", Value = 4 }, new CultRecordHandle<WoB>(K2))), Is.True);
+            cache.UpsertAsync(typeof(WoA), new WoA { Name = "k2", Value = 5 }, K2).GetAwaiter().GetResult();
+
+            Assert.Throws<CultSchemaConflictException>(() => cache.FlushAllBackingStores());
             Assert.That(TypeAt(path, directory, ABRegistry, K2), Is.EqualTo(typeof(WoB)));
         }
 
