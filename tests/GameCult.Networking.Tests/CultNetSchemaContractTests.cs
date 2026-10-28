@@ -206,6 +206,20 @@ namespace GameCult.Networking.Tests
             AssertErrorMatchesSchema(message);
         }
 
+        [Test]
+        public void ErrorMessage_RemoteWriteRefusedRealBytes_MatchesItsSchema()
+        {
+            var request = new CultNetRemoteWriteRequest(null!, CultNetRemoteWriteOperation.Put, "some.schema.v1", new CultRecordKey("some:key"), null, null);
+            var message = CultNetErrorMessage.ForRemoteWriteRefused(request, "not granted");
+
+            Assert.That(message.Code, Is.EqualTo("write_not_authorized"));
+            Assert.That(message.Details!.Field, Is.EqualTo("recordKey"));
+            Assert.That(message.Details.Value, Is.EqualTo("some:key"));
+            AssertErrorMatchesSchema(message);
+            // The bytes cultnet-rs's error_message.rs write_not_authorized case decodes and re-encodes.
+            Assert.That(Convert.ToHexString(CultNetSchemaMessageSerialization.Serialize(message)), Is.EqualTo("85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D92177726974655F6E6F745F617574686F72697A65643A206E6F74206772616E746564AB726F7574696E6748696E74C0A4636F6465B477726974655F6E6F745F617574686F72697A6564A764657461696C7384A56669656C64A97265636F72644B6579A576616C7565A8736F6D653A6B6579A461734F66C0A763757272656E74C0"));
+        }
+
         private static void AssertErrorMatchesSchema(CultNetErrorMessage message)
         {
             var validator = new MiniJsonSchemaValidator(SchemaDir());

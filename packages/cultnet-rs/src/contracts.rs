@@ -246,6 +246,7 @@ pub enum CultNetErrorCode {
     ReferenceOutsideTarget,
     VariantUnsupported,
     UnownedSchema,
+    WriteNotAuthorized,
 }
 
 impl CultNetErrorCode {
@@ -257,6 +258,7 @@ impl CultNetErrorCode {
             Self::ReferenceOutsideTarget => "reference_outside_target",
             Self::VariantUnsupported => "variant_unsupported",
             Self::UnownedSchema => "unowned_schema",
+            Self::WriteNotAuthorized => "write_not_authorized",
         }
     }
 
@@ -268,6 +270,7 @@ impl CultNetErrorCode {
             "reference_outside_target" => Ok(Self::ReferenceOutsideTarget),
             "variant_unsupported" => Ok(Self::VariantUnsupported),
             "unowned_schema" => Ok(Self::UnownedSchema),
+            "write_not_authorized" => Ok(Self::WriteNotAuthorized),
             _ => Err(anyhow!("ErrorMessage.Code is not a recognized cultnet.error.v0 code")),
         }
     }

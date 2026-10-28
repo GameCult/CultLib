@@ -1015,11 +1015,16 @@ namespace GameCult.Networking
         }
 
         /// <summary>
-        /// Applies a raw document mutation after checking shard authority.
+        /// Applies a raw document mutation after checking shard authority. This is the host's own door (and replication's):
+        /// it asks no remote write authority. A peer's put goes through <see cref="CultNetDatabaseServer"/>, which does.
         /// </summary>
         /// <exception cref="CultNetUnownedSchemaException">No shard owns the schema and key; nothing was written.</exception>
         /// <exception cref="CultNetShardLogException">The change committed and was published, but the shard log could not record it.</exception>
-        public async Task<object> ApplyPutAsync(CultNetDocumentPutRawMessage message)
+        public Task<object> ApplyPutAsync(CultNetDocumentPutRawMessage message) => ApplyPutAsync(message, authorize: null);
+
+        // The peer door: the same apply, with the server's authorize callback asked once the schema is resolved and before the
+        // shard is. The callback throws to refuse. The public overload is the host's own door and asks no remote authority.
+        internal async Task<object> ApplyPutAsync(CultNetDocumentPutRawMessage message, Action<string, CultRecordKey>? authorize)
         {
             ThrowIfDisposed();
             if (message == null) throw new ArgumentNullException(nameof(message));
@@ -1030,6 +1035,7 @@ namespace GameCult.Networking
 
             var key = new CultRecordKey(message.Document.RecordKey);
             var descriptor = _documents.ResolveDescriptorForRawDocument(message.Document);
+            authorize?.Invoke(descriptor.SchemaId, key);
             var shard = ResolveShardInternal(descriptor, key);
             EnsurePrimary(shard, descriptor.SchemaId, key, message.ShardEpoch);
             var document = _documents.DeserializeRawDocument(message.Document);
@@ -1039,17 +1045,22 @@ namespace GameCult.Networking
         }
 
         /// <summary>
-        /// Applies a raw document delete after checking shard authority.
+        /// Applies a raw document delete after checking shard authority. This is the host's own door: it asks no remote
+        /// write authority. A peer's delete goes through <see cref="CultNetDatabaseServer"/>, which does.
         /// </summary>
         /// <exception cref="CultNetUnownedSchemaException">No shard owns the schema and key; nothing was written.</exception>
         /// <exception cref="CultNetShardLogException">The change committed and was published, but the shard log could not record it.</exception>
-        public Task ApplyDeleteAsync(CultNetDocumentDeleteMessage message)
+        public Task ApplyDeleteAsync(CultNetDocumentDeleteMessage message) => ApplyDeleteAsync(message, authorize: null);
+
+        // The peer door; see the put overload.
+        internal Task ApplyDeleteAsync(CultNetDocumentDeleteMessage message, Action<string, CultRecordKey>? authorize)
         {
             ThrowIfDisposed();
             if (message == null) throw new ArgumentNullException(nameof(message));
 
             var key = new CultRecordKey(message.RecordKey);
             var descriptor = _documents.ResolveDescriptorForSchemaId(message.SchemaId);
+            authorize?.Invoke(descriptor.SchemaId, key);
             var shard = ResolveShardInternal(descriptor, key);
             EnsurePrimary(shard, descriptor.SchemaId, key, message.ShardEpoch);
             var previous = _cache.Get(key);

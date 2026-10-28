@@ -111,8 +111,9 @@ Not implemented yet:
 not guess. Adding a code is therefore a coordinated change across every runtime, made together: the schema (both
 copies), the C# `CultNetErrorMessage` factory, the Rust `CultNetErrorCode`, and a captured-bytes case in
 `packages/cultnet-rs/tests/error_message.rs` for it. TypeScript reads the schema. The current codes are
-`selection_invalid`, `cursor_stale`, `cursor_invalid`, `reference_outside_target`, `variant_unsupported` and
-`unowned_schema` (a write, or a remote put or delete, for a schema and key no shard owns).
+`selection_invalid`, `cursor_stale`, `cursor_invalid`, `reference_outside_target`, `variant_unsupported`,
+`unowned_schema` (a write, or a remote put or delete, for a schema and key no shard owns) and
+`write_not_authorized` (a peer's put or delete its server's remote write authority did not grant).
 
 ## Live Invariants
 
@@ -122,6 +123,9 @@ copies), the C# `CultNetErrorMessage` factory, the Rust `CultNetErrorCode`, and 
 - One primary owns writes for a shard until a stronger policy exists.
 - Non-owner writes are rejected or explicitly forwarded. They are not silently
   applied.
+- A peer's put or delete is applied or forwarded only when the server's
+  `RemoteWriteAuthority` grants it; none configured refuses every remote write.
+  The connection key admits a peer to the transport and is never a grant.
 - Raw snapshot/put/delete messages must pass through `CultNetDatabase`, not
   bypass shard policy.
 - The accepted shard log is stored in replica catch-up wire form. Object logs
