@@ -3126,7 +3126,7 @@ namespace GameCult.Caching
                         $"{descriptor.SchemaName} record {stored.Key.Value} was loaded from {source} but its home is {home?.ToString() ?? "no store"}.");
 
                 // One key, one store: a key never moves between homes, and two stores never both deliver it.
-                if (!removedKeys.Contains(stored.Key.Value) && _entries.TryGetValue(stored.Key.Value, out var present) &&
+                if (_entries.TryGetValue(stored.Key.Value, out var present) &&
                     Home(present.Descriptor.DocumentType) is var held &&
                     Home(descriptor.DocumentType) is var incoming &&
                     held != incoming)
