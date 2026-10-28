@@ -262,6 +262,80 @@ namespace GameCult.Caching.Tests
             Assert.Throws<InvalidOperationException>(() => cache.FlattenAsync(K3).GetAwaiter().GetResult());
         }
 
+        // finding flatten-guard-reads-removals: a Flatten acts on what the key will hold, as staged apart. A variant staged at the key
+        // (after a removal or not) is flattened as it lands; a plain record staged there leaves nothing to flatten.
+        [TestCaseSource(nameof(VariantKinds))]
+        public void AFlattenOfAVariantStagedInTheSameBatchFlattensItAsStagedApart(string kind)
+        {
+            foreach (var oneBatch in new[] { true, false })
+            {
+                using var cache = Open(NewPath(kind), kind, AB);
+                var baseA = new CultRecordKey("base-a");
+                Assert.That(cache.Commit(batch =>
+                {
+                    batch.Upsert(typeof(EvA), new EvA { Name = "base-a", Value = 1 }, baseA);
+                    batch.UpsertVariant(K3, baseA, new[] { cache.Override<EvA>(nameof(EvA.Name), "v3") });
+                    batch.Upsert(typeof(EvB), new EvB { Name = "k1", Value = 2 }, K1);
+                }), Is.True);
+
+                // Remove, UpsertVariant, Flatten: the plain record of the variant's resolution, retyped.
+                if (oneBatch)
+                    Assert.That(cache.Commit(batch =>
+                    {
+                        batch.Remove(K1);
+                        batch.UpsertVariant(K1, baseA, new[] { cache.Override<EvA>(nameof(EvA.Name), "v1") });
+                        batch.Flatten(K1);
+                    }), Is.True);
+                else
+                {
+                    Assert.That(cache.Remove(K1), Is.True);
+                    cache.UpsertVariantAsync(K1, baseA, new[] { cache.Override<EvA>(nameof(EvA.Name), "v1") }).GetAwaiter().GetResult();
+                    cache.FlattenAsync(K1).GetAwaiter().GetResult();
+                }
+
+                var flattened = cache.GetStored(K1)!;
+                Assert.That(flattened.Variant, Is.Null, $"one batch {oneBatch}");
+                Assert.That(flattened.Descriptor.DocumentType, Is.EqualTo(typeof(EvA)));
+                Assert.That(((EvA)flattened.Document).Name, Is.EqualTo("v1"));
+
+                // A held variant rebased and flattened in one batch flattens the rebase, not the held record.
+                if (oneBatch)
+                    Assert.That(cache.Commit(batch =>
+                    {
+                        batch.UpsertVariant(K3, baseA, new[] { cache.Override<EvA>(nameof(EvA.Name), "v3b") });
+                        batch.Flatten(K3);
+                    }), Is.True);
+                else
+                {
+                    cache.UpsertVariantAsync(K3, baseA, new[] { cache.Override<EvA>(nameof(EvA.Name), "v3b") }).GetAwaiter().GetResult();
+                    cache.FlattenAsync(K3).GetAwaiter().GetResult();
+                }
+
+                Assert.That(cache.GetStored(K3)!.Variant, Is.Null, $"one batch {oneBatch}");
+                Assert.That(((EvA)cache.GetStored(K3)!.Document).Name, Is.EqualTo("v3b"));
+            }
+        }
+
+        [TestCaseSource(nameof(VariantKinds))]
+        public void AFlattenOfAPlainRecordStagedInTheSameBatchIsRefusedAsStagedApart(string kind)
+        {
+            using var cache = Open(NewPath(kind), kind, AB);
+            PutB(cache, K2);
+
+            var refused = Assert.Throws<InvalidOperationException>(() => cache.Commit(batch =>
+            {
+                batch.Remove(K2);
+                batch.Upsert(typeof(EvA), new EvA { Name = "k2" }, K2);
+                batch.Flatten(K2);
+            }))!;
+            Assert.That(refused.Message, Does.Contain("Flatten(k2)").And.Contain("not a variant"));
+            Assert.That(cache.GetStored(K2)!.Descriptor.DocumentType, Is.EqualTo(typeof(EvB)), "the refused batch changed nothing");
+
+            Assert.That(cache.Remove(K2), Is.True);
+            cache.UpsertAsync(typeof(EvA), new EvA { Name = "k2" }, K2).GetAwaiter().GetResult();
+            Assert.Throws<InvalidOperationException>(() => cache.FlattenAsync(K2).GetAwaiter().GetResult());
+        }
+
         // finding cross-store-retype-decided-by-key-home: a one-batch retype between two home stores is refused by the rule that a commit
         // lands in one home store, with that rule's text (an evicted key is absent to the one-key-one-store check, as when staged
         // apart); staged apart, as two commits, it leaves the key in exactly one store.

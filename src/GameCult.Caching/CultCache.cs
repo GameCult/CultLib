@@ -2141,8 +2141,20 @@ namespace GameCult.Caching
         public void Flatten(CultRecordKey key)
         {
             ThrowIfSealed();
-            if (Removals.Contains(key.Value))
-                throw new InvalidOperationException($"Flatten({key.Value}): the record is not a variant.");
+            // A flatten acts on what the key will hold, as staged apart: a variant staged here is flattened as it lands; a removal or a
+            // plain record staged here leaves nothing to flatten; with nothing staged it flattens the variant the cache holds.
+            if (Operations.TryGetValue(key.Value, out var staged))
+            {
+                if (staged.Variant != null)
+                {
+                    Operations[key.Value] = new StagedOperation(key, null, staged.Variant, true);
+                    return;
+                }
+
+                if (!staged.Flatten)
+                    throw new InvalidOperationException($"Flatten({key.Value}): the record is not a variant.");
+            }
+
             Operations[key.Value] = new StagedOperation(key, null, null, true);
         }
 
@@ -2728,8 +2740,9 @@ namespace GameCult.Caching
             new(key, MintStoredAt(PreviousStoredAt(key), Clock()), descriptor, document);
 
         // An unresolved variant: the admitting hold resolves it against its base before anything lands.
-        private CultStoredDocument StampVariant(CultRecordKey key, CultDocumentDescriptor descriptor, CultVariantDelta delta) =>
-            new(key, MintStoredAt(PreviousStoredAt(key), Clock()), descriptor, delta, null, _codec);
+        // A staged variant that a Flatten followed lands as the plain record of its resolution (flattens).
+        private CultStoredDocument StampVariant(CultRecordKey key, CultDocumentDescriptor descriptor, CultVariantDelta delta, bool flattens = false) =>
+            new(key, MintStoredAt(PreviousStoredAt(key), Clock()), descriptor, delta, null, _codec) { Flattens = flattens };
 
         // The plain record a Flatten stages: the variant's resolved document, under the variant's own key and schema.
         private CultStoredDocument StampFlatten(CultRecordKey key)
@@ -2830,7 +2843,7 @@ namespace GameCult.Caching
                 var upserts = batch.Operations.Values
                     .Where(op => !op.IsRemoval)
                     .Select(op => op.Stored != null ? Stamp(op.Key, op.Stored.Descriptor, op.Stored.Document)
-                        : op.Variant != null ? StampVariant(op.Key, DescriptorOfBase(op.Key, op.Variant.BaseKey, batch), op.Variant)
+                        : op.Variant != null ? StampVariant(op.Key, DescriptorOfBase(op.Key, op.Variant.BaseKey, batch), op.Variant, op.Flatten)
                         : StampFlatten(op.Key))
                     .ToArray();
                 // A removal evicts the record the cache holds at the key, and a record staged at the key lands after the eviction, as
@@ -3411,7 +3424,7 @@ namespace GameCult.Caching
                                ?? throw new InvalidOperationException($"Variant {key} resolved to nothing.");
 
                 stack.RemoveAt(stack.Count - 1);
-                return done[key] = isVariant
+                return done[key] = isVariant && !variant.Flattens
                     ? variant.Resolved(document, minted ? new CultVariantDelta(delta.BaseKey, overrides) : delta, variant.IdsInMemoryOnly || (minted && source != null), _codec)
                     : new CultStoredDocument(variant.Key, variant.StoredAt, variant.Descriptor, document)
                     {
