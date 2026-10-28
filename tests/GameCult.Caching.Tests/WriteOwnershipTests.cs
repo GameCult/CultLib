@@ -252,5 +252,161 @@ namespace GameCult.Caching.Tests
             Assert.That(reopened.GetStored(K1), Is.Null);
             Assert.That(reopened.GetStored(K2)!.Descriptor.DocumentType, Is.EqualTo(typeof(WoB)), "the bystander is untouched");
         }
+
+        // The ruling's retype: one batch holds the removal and the add, in the order they were called. The removal half is judged as a
+        // removal (a registered type's record is removable), and the record lands at the key.
+        [TestCaseSource(nameof(StoreKinds))]
+        public void ARetypeIsOneBatchHoldingTheRemovalAndTheAdd(bool directory)
+        {
+            var path = SeedAAtK1BAtK2(directory);
+
+            using (var cache = Open(path, directory, ABRegistry))
+            {
+                Assert.That(cache.Commit(batch =>
+                {
+                    batch.Remove(K2);
+                    batch.Upsert(new WoA { Name = "k2", Value = 9 }, new CultRecordHandle<WoA>(K2));
+                }), Is.True);
+                Assert.That(cache.GetStored(K2)!.Descriptor.DocumentType, Is.EqualTo(typeof(WoA)));
+            }
+
+            Assert.That(TypeAt(path, directory, ABRegistry, K2), Is.EqualTo(typeof(WoA)));
+            Assert.That(TypeAt(path, directory, ABRegistry, K1), Is.EqualTo(typeof(WoA)), "the bystander is untouched");
+        }
+
+        // The order is the meaning: a removal called after the add leaves the key removed.
+        [TestCaseSource(nameof(StoreKinds))]
+        public void ARemovalCalledAfterTheAddLeavesTheKeyRemoved(bool directory)
+        {
+            var path = SeedAAtK1BAtK2(directory);
+
+            using (var cache = Open(path, directory, ABRegistry))
+            {
+                Assert.That(cache.Commit(batch =>
+                {
+                    batch.Remove(K2);
+                    batch.Upsert(new WoA { Name = "k2", Value = 9 }, new CultRecordHandle<WoA>(K2));
+                    batch.Remove(K2);
+                }), Is.True);
+                Assert.That(cache.GetStored(K2), Is.Null);
+            }
+
+            using var reopened = Open(path, directory, ABRegistry);
+            Assert.That(reopened.GetStored(K2), Is.Null);
+        }
+
+        // The removal half is a removal and nothing more: a record no registered type owns is not replaced by adding after its removal.
+        [TestCaseSource(nameof(StoreKinds))]
+        public void ARetypeOfARecordNoRegisteredTypeOwnsIsStillRefused(bool directory)
+        {
+            var path = SeedAAtK1BAtK2(directory);
+            var before = Fingerprint(path);
+
+            using (var cache = Open(path, directory, ARegistry))
+            {
+                Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch =>
+                {
+                    batch.Remove(K2);
+                    batch.Upsert(new WoA { Name = "k2", Value = 9 }, new CultRecordHandle<WoA>(K2));
+                }));
+            }
+
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+        }
+
+        // A removal of a key the cache does not hold is judged under the store's lock, and so is the add after it: another writer put
+        // B there, this cache never loaded it, and removing then adding A is a retype of whatever is stored.
+        [TestCaseSource(nameof(StoreKinds))]
+        public void ARetypeOfAKeyTheCacheDoesNotHoldCommitsInOneBatch(bool directory)
+        {
+            var path = PathFor(directory);
+            using var early = Open(path, directory, ABRegistry);
+            using (var other = Open(path, directory, ABRegistry))
+                Assert.That(other.Commit(batch => batch.Upsert(new WoB { Name = "k1", Value = 1 }, new CultRecordHandle<WoB>(K1))), Is.True);
+
+            Assert.That(early.Commit(batch =>
+            {
+                batch.Remove(K1);
+                batch.Upsert(new WoA { Name = "k1", Value = 2 }, new CultRecordHandle<WoA>(K1));
+            }), Is.True);
+
+            Assert.That(TypeAt(path, directory, ABRegistry, K1), Is.EqualTo(typeof(WoA)));
+        }
+
+        // A removal and an add called separately on the cache are one retype too: the add, staged after the removal, is not lost to the
+        // flush that judges it, and the type changes in the file.
+        [TestCaseSource(nameof(StoreKinds))]
+        public void AStagedRemovalAndAddOfAnotherTypeIsNotLostAtTheFlush(bool directory)
+        {
+            var path = SeedAAtK1BAtK2(directory);
+
+            using (var cache = Open(path, directory, ABRegistry))
+            {
+                Assert.That(cache.Remove(K2), Is.True);
+                cache.UpsertAsync(typeof(WoA), new WoA { Name = "k2", Value = 9 }, K2).GetAwaiter().GetResult();
+                cache.FlushAllBackingStores();
+                Assert.That(cache.GetStored(K2)!.Descriptor.DocumentType, Is.EqualTo(typeof(WoA)));
+            }
+
+            Assert.That(TypeAt(path, directory, ABRegistry, K2), Is.EqualTo(typeof(WoA)));
+        }
+
+        [TestCaseSource(nameof(StoreKinds))]
+        public void AStagedRemovalOfAKeyTheCacheDoesNotHoldAndAnAddOfAnotherTypeIsNotLostAtTheFlush(bool directory)
+        {
+            var path = PathFor(directory);
+            using var early = Open(path, directory, ABRegistry);
+            using (var other = Open(path, directory, ABRegistry))
+                Assert.That(other.Commit(batch => batch.Upsert(new WoB { Name = "k1", Value = 1 }, new CultRecordHandle<WoB>(K1))), Is.True);
+
+            Assert.That(early.Remove(K1), Is.False, "the cache holds nothing there");
+            early.UpsertAsync(typeof(WoA), new WoA { Name = "k1", Value = 2 }, K1).GetAwaiter().GetResult();
+            early.FlushAllBackingStores();
+
+            Assert.That(TypeAt(path, directory, ABRegistry, K1), Is.EqualTo(typeof(WoA)));
+        }
+
+        // A removal is spent by the flush that judged it: a later add of another type with no removal in front of it is refused as ever.
+        [TestCaseSource(nameof(StoreKinds))]
+        public void ARemovalIsSpentByTheFlushThatJudgedIt(bool directory)
+        {
+            var path = SeedAAtK1BAtK2(directory);
+
+            using var cache = Open(path, directory, ABRegistry);
+            Assert.That(cache.Remove(K2), Is.True);
+            cache.FlushAllBackingStores();
+            cache.UpsertAsync(typeof(WoB), new WoB { Name = "k2", Value = 4 }, K2).GetAwaiter().GetResult();
+            cache.FlushAllBackingStores();
+            Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.Upsert(new WoA { Name = "k2", Value = 5 }, new CultRecordHandle<WoA>(K2))));
+            Assert.That(TypeAt(path, directory, ABRegistry, K2), Is.EqualTo(typeof(WoB)));
+        }
+
+        // No store, same rule: a cache holding A and B refuses one's write over the other's record, on Commit and on UpsertAsync, and
+        // a retype is a removal and an add, in one batch or staged apart.
+        [Test]
+        public void AStorelessCacheRefusesToWriteOneRegisteredTypeOverAnothersRecord()
+        {
+            using var cache = new CultCache(ABRegistry);
+            Assert.That(cache.Commit(batch => batch.Upsert(new WoB { Name = "k2", Value = 2 }, new CultRecordHandle<WoB>(K2))), Is.True);
+
+            var commit = Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.Upsert(new WoA { Name = "k2", Value = 9 }, new CultRecordHandle<WoA>(K2))))!;
+            Assert.That(commit.RecordKey, Is.EqualTo(K2.Value));
+            Assert.Throws<CultSchemaConflictException>(() => cache.UpsertAsync(typeof(WoA), new WoA { Name = "k2", Value = 9 }, K2));
+            Assert.That(cache.GetStored(K2)!.Descriptor.DocumentType, Is.EqualTo(typeof(WoB)));
+
+            // The pair that differs only in the type written: B over B's own record.
+            Assert.That(cache.Commit(batch => batch.Upsert(new WoB { Name = "k2", Value = 3 }, new CultRecordHandle<WoB>(K2))), Is.True);
+
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.Remove(K2);
+                batch.Upsert(new WoA { Name = "k2", Value = 9 }, new CultRecordHandle<WoA>(K2));
+            }), Is.True);
+            Assert.That(cache.GetStored(K2)!.Descriptor.DocumentType, Is.EqualTo(typeof(WoA)));
+
+            Assert.That(cache.Remove(K2), Is.True);
+            cache.UpsertAsync(typeof(WoB), new WoB { Name = "k2", Value = 4 }, K2).GetAwaiter().GetResult();
+            Assert.That(cache.GetStored(K2)!.Descriptor.DocumentType, Is.EqualTo(typeof(WoB)));
+        }
     }
 }

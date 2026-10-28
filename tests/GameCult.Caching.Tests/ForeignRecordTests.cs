@@ -831,6 +831,26 @@ namespace GameCult.Caching.Tests
             Assert.That(EmittedDocumentTypes.Read(reopened.Get(D)!, "Name"), Is.EqualTo("claimed"));
         }
 
+        // The removal rule asks the registry as it is when the removal is judged: a record read-only at load becomes removable once a
+        // type that declares its id is registered. The write rule is not the removal rule (the test above): the late type may remove
+        // the record, and a removal is judged by what the registry declares, not by the type that last wrote the key.
+        [Test]
+        public void ATypeRegisteredAfterLoadThatDeclaresTheIdMakesTheRecordRemovable()
+        {
+            var path = OtherRuntimeStore("late-remove.cc");
+            var registry = CultDocumentRegistry.ForTypes(new[] { Deck });
+
+            using (var cache = Open(path, registry, directory: false))
+            {
+                Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.Remove(D)), "no registered type declares the id yet");
+                registry.GetRequired(LateClaimingDeck);
+                Assert.That(cache.Commit(batch => batch.Remove(D)), Is.True);
+                Assert.That(cache.Get(D), Is.Null);
+            }
+
+            Assert.That(Read(path).Records, Is.Empty);
+        }
+
         // A commit onto the file that involves a variant is judged on the set the file will hold. A foreign record is not decoded
         // for that judgement, so it neither fails the commit nor joins the set.
         [Test]

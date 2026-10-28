@@ -282,6 +282,24 @@ namespace GameCult.Caching.Tests
             Assert.That(load.Message, Does.Contain("other-variant").And.Contain("gear-base"));
         }
 
+        // Rebasing a variant onto a base of another type would retype its key: refused with or without a store, the record untouched.
+        [Test]
+        public void ARebaseOntoABaseOfAnotherTypeIsRefusedWithoutAStore()
+        {
+            using var cache = new CultCache(Registry);
+            SeedBase(cache);
+            SeedBig(cache);
+            var other = new CultRecordKey("other");
+            cache.Commit(batch => batch.Upsert(typeof(VariantOther), new VariantOther { Name = "other" }, other));
+
+            var rebase = Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.UpsertVariant(BigKey, other)))!;
+
+            Assert.That(rebase.RecordKey, Is.EqualTo(BigKey.Value));
+            Assert.That(cache.GetStored(BigKey)!.Variant!.BaseKey, Is.EqualTo(BaseKey.Value));
+            Assert.That(cache.GetStored(BigKey)!.Descriptor.DocumentType, Is.EqualTo(typeof(VariantGear)));
+            Assert.Throws<CultSchemaConflictException>(() => cache.UpsertVariantAsync(BigKey, other).GetAwaiter().GetResult());
+        }
+
         [Test]
         public void AVariantOfAGlobalIsRefused()
         {
