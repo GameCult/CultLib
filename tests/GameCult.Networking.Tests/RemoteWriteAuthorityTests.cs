@@ -1,11 +1,14 @@
 #nullable enable
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using GameCult.Caching;
+using LiteNetLib;
 using NUnit.Framework;
 using R3;
 using static GameCult.Networking.Tests.NetworkingTests;
@@ -60,7 +63,7 @@ namespace GameCult.Networking.Tests
                 new() { MessageId = "wire-delete", SchemaId = SchemaId, RecordKey = key.Value, ShardId = ShardId, ShardEpoch = 1 };
         }
 
-        private static Rig Build(ICultNetRemoteWriteAuthority? authority, bool primary = true, ICultNetShardWriteForwarder? forwarder = null)
+        private static Rig Build(ICultNetRemoteWriteAuthority? authority, bool primary = true, ICultNetShardWriteForwarder? forwarder = null, CultNetServerPeer? peer = null)
         {
             var cache = new CultCache();
             var schemaId = cache.Registry.GetRequired<NetworkSchemaNote>().SchemaId;
@@ -81,7 +84,7 @@ namespace GameCult.Networking.Tests
                 ForwardNonPrimaryWrites = forwarder != null,
                 WriteForwarder = forwarder
             });
-            var peer = (CultNetServerPeer)RuntimeHelpers.GetUninitializedObject(typeof(CultNetServerPeer));
+            peer ??= (CultNetServerPeer)RuntimeHelpers.GetUninitializedObject(typeof(CultNetServerPeer));
             const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Instance;
             var put = (Func<CultNetDocumentPutRawMessage, CultNetServerPeer, Task>)typeof(CultNetDatabaseServer).GetField("_putHandler", flags)!.GetValue(databaseServer)!;
             var delete = (Func<CultNetDocumentDeleteMessage, CultNetServerPeer, Task>)typeof(CultNetDatabaseServer).GetField("_deleteHandler", flags)!.GetValue(databaseServer)!;
@@ -94,8 +97,8 @@ namespace GameCult.Networking.Tests
                 Peer = peer,
                 Logger = logger,
                 SchemaId = schemaId,
-                Put = message => put(message, peer),
-                Delete = message => delete(message, peer)
+                Put = message => put(message, peer!),
+                Delete = message => delete(message, peer!)
             };
             rig.Subscription = database.WatchAllChanges().Subscribe(change => rig.Published.Add(change));
             return rig;
@@ -263,6 +266,143 @@ namespace GameCult.Networking.Tests
             Assert.That(message.Details.Value, Is.EqualTo(KeyA.Value));
             Assert.That(message.RoutingHint, Is.Null);
             Assert.That(CultNetErrorMessage.ForRemoteWriteRefused(request, null).Error, Is.EqualTo("write_not_authorized"));
+        }
+
+        // A real LiteNetLib pair on loopback with both sockets bound to ephemeral ports (Server and Client bind fixed ports,
+        // which a parallel suite cannot share). The server side is a real NetPeer wrapped as the CultNetServerPeer the handlers
+        // answer; the client side decodes what arrives on the wire with the production schema decoder.
+        private sealed class WirePair : IDisposable
+        {
+            private readonly NetManager _serverManager;
+            private readonly NetManager _clientManager;
+            public CultNetServerPeer Peer { get; }
+            public ConcurrentQueue<CultNetErrorMessage> Errors { get; } = new();
+
+            public WirePair()
+            {
+                var serverListener = new EventBasedNetListener();
+                _serverManager = new NetManager(serverListener) { UnsyncedEvents = true };
+                var clientListener = new EventBasedNetListener();
+                _clientManager = new NetManager(clientListener) { UnsyncedEvents = true };
+                var connected = new TaskCompletionSource<NetPeer>(TaskCreationOptions.RunContinuationsAsynchronously);
+                serverListener.ConnectionRequestEvent += request => request.AcceptIfKey("rwa-wire");
+                serverListener.PeerConnectedEvent += serverSide => connected.TrySetResult(serverSide);
+                var decoder = new LiteNetLibTransportConnection();
+                clientListener.NetworkReceiveEvent += (_, reader, _, _) =>
+                {
+                    var frame = decoder.Receive(reader.GetRemainingBytes());
+                    if (LiteNetLibTransportConnection.DecodeSchema(frame) is CultNetErrorMessage error) Errors.Enqueue(error);
+                };
+                _serverManager.Start(0);
+                _clientManager.Start(0);
+                _clientManager.Connect("127.0.0.1", _serverManager.LocalPort, "rwa-wire");
+                if (!connected.Task.Wait(TimeSpan.FromSeconds(10))) Assert.Fail("the wire pair did not connect");
+                var serverPeer = connected.Task.Result;
+                Peer = new CultNetServerPeer(serverPeer, new LiteNetLibTransportConnection(serverPeer));
+            }
+
+            public async Task<CultNetErrorMessage> NextErrorAsync()
+            {
+                var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+                CultNetErrorMessage? error;
+                while (!Errors.TryDequeue(out error))
+                {
+                    if (DateTime.UtcNow > deadline) Assert.Fail("no reply arrived on the wire");
+                    await Task.Delay(5);
+                }
+
+                return error;
+            }
+
+            public void Dispose()
+            {
+                _clientManager.Stop();
+                _serverManager.Stop();
+            }
+        }
+
+        [Test]
+        public async Task ThePeerReceivesTheTypedRefusalOnTheWire()
+        {
+            using var wire = new WirePair();
+            var rig = Build(authority: null, peer: wire.Peer);
+            await Seed(rig, KeyA, "server");
+            var logBefore = rig.LogLength;
+
+            await rig.Put(rig.PutOf(KeyA, "peer"));
+            var putReply = await wire.NextErrorAsync();
+            await rig.Delete(rig.DeleteOf(KeyA));
+            var deleteReply = await wire.NextErrorAsync();
+            await rig.Put(rig.PutOf(KeyB, "peer"));
+            var newKeyReply = await wire.NextErrorAsync();
+
+            foreach (var (reply, key) in new[] { (putReply, KeyA), (deleteReply, KeyA), (newKeyReply, KeyB) })
+            {
+                Assert.That(reply.Code, Is.EqualTo("write_not_authorized"));
+                Assert.That(reply.Error, Does.StartWith("write_not_authorized: "));
+                Assert.That(reply.Details!.Field, Is.EqualTo("recordKey"));
+                Assert.That(reply.Details.Value, Is.EqualTo(key.Value));
+            }
+
+            Assert.That(rig.TextOf(KeyA), Is.EqualTo("server"));
+            Assert.That(rig.TextOf(KeyB), Is.Null);
+            Assert.That(rig.LogLength, Is.EqualTo(logBefore));
+            Assert.That(wire.Errors, Is.Empty, "one reply per refused write");
+        }
+
+        [Test]
+        public async Task AnAuthoritysRefusalReasonReachesThePeerAndAGrantSendsNothingBack()
+        {
+            using var wire = new WirePair();
+            var rig = Build(new RecordingAuthority(request => request.RecordKey.Equals(KeyA)
+                ? CultNetRemoteWriteDecision.Grant()
+                : CultNetRemoteWriteDecision.Refuse("only a")), peer: wire.Peer);
+
+            await rig.Put(rig.PutOf(KeyA, "peer"));
+            await rig.Put(rig.PutOf(KeyB, "peer"));
+            var reply = await wire.NextErrorAsync();
+
+            Assert.That(reply.Code, Is.EqualTo("write_not_authorized"));
+            Assert.That(reply.Error, Is.EqualTo("write_not_authorized: only a"));
+            Assert.That(reply.Details!.Value, Is.EqualTo(KeyB.Value));
+            Assert.That(rig.TextOf(KeyA), Is.EqualTo("peer"));
+            await Task.Delay(100);
+            Assert.That(wire.Errors, Is.Empty, "the granted write was not answered with an error");
+        }
+
+        [Test]
+        public async Task ADeleteSentUnderASchemaAliasAsksTheAuthorityWithTheCanonicalId()
+        {
+            var authority = new RecordingAuthority(_ => CultNetRemoteWriteDecision.Grant());
+            var rig = Build(authority);
+            await Seed(rig, KeyA, "server");
+            var aliased = rig.DeleteOf(KeyA);
+            aliased.SchemaId = "tests.networking_note.v1";
+            Assert.That(aliased.SchemaId, Is.Not.EqualTo(rig.SchemaId), "the fixture really sends an alias");
+
+            await rig.Delete(aliased);
+
+            var request = authority.Requests.Single();
+            Assert.That(request.Operation, Is.EqualTo(CultNetRemoteWriteOperation.Delete));
+            Assert.That(request.SchemaId, Is.EqualTo(rig.SchemaId), "the authority sees the canonical id, not the alias as sent");
+            Assert.That(rig.TextOf(KeyA), Is.Null, "the aliased delete was granted and applied");
+        }
+
+        [Test]
+        public async Task ANullDecisionRefusesPutAndDelete()
+        {
+            var rig = Build(new RecordingAuthority(_ => null!));
+            await Seed(rig, KeyA, "server");
+
+            AssertAnswered(() => rig.Put(rig.PutOf(KeyA, "peer")), "a null decision is a refusal");
+            AssertAnswered(() => rig.Delete(rig.DeleteOf(KeyA)), "a null decision is a refusal");
+            AssertAnswered(() => rig.Put(rig.PutOf(KeyB, "peer")), "a null decision is a refusal");
+
+            Assert.That(rig.TextOf(KeyA), Is.EqualTo("server"));
+            Assert.That(rig.TextOf(KeyB), Is.Null);
+            Assert.That(rig.Logger.Warnings, Has.Some.Contains("raw put refused: the write was not authorized"));
+            Assert.That(rig.Logger.Warnings, Has.Some.Contains("raw delete refused: the write was not authorized"));
+            Assert.That(rig.Logger.Errors, Is.Empty, "a null decision is a refusal, not a fault");
         }
 
         private sealed class RecordingAuthority : ICultNetRemoteWriteAuthority
