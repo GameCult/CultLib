@@ -189,7 +189,8 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 manifest,
                 request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).Concat(request.Checks).Concat(StagedKeys),
                 request.Upserts,
-                request.Deletes);
+                request.Deletes,
+                request.Checks);
             if (request.Upserts.Count == 0 && request.Deletes.Count == 0 && !IsDirty)
             {
                 // Nothing to write: the batch only judged keys it does not hold.
@@ -247,7 +248,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             Directory.CreateDirectory(_manifestFile.DirectoryName!);
             using var commitLease = AcquireCommitLease(wait: true, create: true);
             var (manifest, catalogBytes) = ReadManifest();
-            RefuseUndeclaredOnDisk(manifest, StagedKeys, Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>());
+            RefuseUndeclaredOnDisk(manifest, StagedKeys, Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>(), Array.Empty<string>());
             if (IsDirty)
                 WriteGeneration(manifest, catalogBytes);
             else
@@ -279,7 +280,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             using var commitLease = AcquireCommitLease(wait, create: true);
             if (commitLease == null)
                 return CultCommitOutcome.Contended;
-            RefuseUndeclaredOnDisk(ReadManifest().Snapshot, keys, Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>());
+            RefuseUndeclaredOnDisk(ReadManifest().Snapshot, keys, Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>(), Array.Empty<string>());
             return CultCommitOutcome.Committed;
         });
     }
@@ -293,15 +294,16 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     // store shares (CacheBackingStore.UndeclaredAt, CacheBackingStore.RefuseUndeclaredOnDisk). The refused records reload as a
     // pull loads them. A key is owned by the entry the write puts there: the batch's upsert, or the staged document. A key it
     // removes (the batch's deletes, the staged deletes) or only checks goes to the registry's removal rule.
-    private void RefuseUndeclaredOnDisk(CultPersistedStoreSnapshot currentManifest, IEnumerable<string> written, IReadOnlyList<CultStoredDocument> upserts, IReadOnlyList<CultStoredDocument> deletes)
+    private void RefuseUndeclaredOnDisk(CultPersistedStoreSnapshot currentManifest, IEnumerable<string> written, IReadOnlyList<CultStoredDocument> upserts, IReadOnlyList<CultStoredDocument> deletes, IEnumerable<string> checks)
     {
         CultPersistedRecord? HeldAt(string key) =>
             currentManifest.Records.FirstOrDefault(record => string.Equals(record.Key, key, StringComparison.Ordinal));
         var batch = upserts.ToDictionary(entry => entry.Key.Value, entry => entry.Descriptor, StringComparer.Ordinal);
-        var removed = deletes.Select(entry => entry.Key.Value).ToHashSet(StringComparer.Ordinal);
+        var removed = deletes.Select(entry => entry.Key.Value).Concat(checks).Concat(StagedRemovals).ToHashSet(StringComparer.Ordinal);
         CultSchemaCatalogEntry? WrittenAt(string key) =>
-            batch.TryGetValue(key, out var descriptor) ? descriptor.ToCatalogEntry()
-            : !removed.Contains(key) && _dirtyKeys.ContainsKey(key) && Entries.TryGetValue(key, out var staged) ? staged.Descriptor.ToCatalogEntry()
+            removed.Contains(key) ? null
+            : batch.TryGetValue(key, out var descriptor) ? descriptor.ToCatalogEntry()
+            : _dirtyKeys.ContainsKey(key) && Entries.TryGetValue(key, out var staged) ? staged.Descriptor.ToCatalogEntry()
             : null;
         RefuseUndeclaredOnDisk(
             written,

@@ -213,7 +213,7 @@ compatible), or when it is the type that reads the stored record's published ent
 id of its own schema name that it reads whole is its own and is restamped. Anything else is refused, another registered type's record
 included, and so is a record the written type would read only by dropping persisted slots. No registry enters the decision, `Shared` included:
 the answer for a given written entry, stored id and catalog is the same lent a registry or not, and a cache's registered types do not make
-each other's records writable. Retyping a key is a removal and an add, in separate commits. A removal or check of a key goes to the
+each other's records writable. Retyping a key is a removal and an add: in one batch (the removal called before the add) or staged apart, with or without a backing store. The removal half is judged as a removal, so the key is retyped only when the removal rule allows it. A removal or check of a key goes to the
 registry's removal rule (a record a registered type declares, or reads whole, may be removed), and a cacheless call, which has no registry,
 removes a record only when an entry it writes owns it; a call that writes no entry removes nothing.
 
