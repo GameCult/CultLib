@@ -418,7 +418,7 @@ namespace GameCult.Caching.Tests
         [Test]
         public void ACacheWithoutACodecHoldsNoVariants()
         {
-            using var cache = new CultCache(Registry, CultCacheMessagePack.CreateCodec(Registry));
+            using var cache = new CultCache(Registry);
             cache.Commit(batch => batch.Upsert(typeof(VariantGear), Laser(), BaseKey));
             var error = Refused(() => cache.UpsertVariantAsync(BigKey, BaseKey).GetAwaiter().GetResult());
             Assert.That(error.Message, Does.Contain(BigKey.Value).And.Contain("codec"));

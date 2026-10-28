@@ -265,8 +265,9 @@ namespace GameCult.Caching.Tests
                 Assert.That(cache.Commit(batch =>
                 {
                     batch.Remove(K2);
+                    batch.Upsert(new WoB { Name = "k2", Value = 8 }, new CultRecordHandle<WoB>(K2));
                     batch.Upsert(new WoA { Name = "k2", Value = 9 }, new CultRecordHandle<WoA>(K2));
-                }), Is.True);
+                }), Is.True, "the key stays a replacement through a later add of the same batch");
                 Assert.That(cache.GetStored(K2)!.Descriptor.DocumentType, Is.EqualTo(typeof(WoA)));
             }
 
