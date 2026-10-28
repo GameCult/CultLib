@@ -370,7 +370,7 @@ namespace GameCult.Caching.Tests
         [TestCaseSource(nameof(VariantKinds))]
         public void AnOperationAfterAStagedFlattenAnswersAsStagedApart(string kind)
         {
-            var scenarios = new[] { "F,F", "F,P", "F,V", "V,F,V", "F,P,F", "V,F,P" };
+            var scenarios = new[] { "F,F", "F,P", "F,V", "V,F,V", "F,P,F", "V,F,P", "V,F,F" };
             foreach (var scenario in scenarios)
             {
                 var steps = scenario.Split(',');
