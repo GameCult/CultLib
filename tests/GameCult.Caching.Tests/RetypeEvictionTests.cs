@@ -336,6 +336,35 @@ namespace GameCult.Caching.Tests
             Assert.Throws<InvalidOperationException>(() => cache.FlattenAsync(K2).GetAwaiter().GetResult());
         }
 
+        // finding flatten-after-staged-plain-unpinned: where the key held a variant, Remove, a plain Upsert, then Flatten is refused
+        // as staged apart, and the plain write is never dropped for a flatten of the variant the cache held.
+        [TestCaseSource(nameof(VariantKinds))]
+        public void AFlattenAfterARemovalAndAPlainWriteOnAHeldVariantIsRefusedAndKeepsTheHeldVariant(string kind)
+        {
+            using var cache = Open(NewPath(kind), kind, AB);
+            var baseA = new CultRecordKey("base-a");
+            cache.Commit(batch =>
+            {
+                batch.Upsert(typeof(EvA), new EvA { Name = "base-a", Value = 1 }, baseA);
+                batch.UpsertVariant(K3, baseA, new[] { cache.Override<EvA>(nameof(EvA.Name), "v3") });
+            });
+
+            var refused = Assert.Throws<InvalidOperationException>(() => cache.Commit(batch =>
+            {
+                batch.Remove(K3);
+                batch.Upsert(typeof(EvA), new EvA { Name = "plain" }, K3);
+                batch.Flatten(K3);
+            }))!;
+            Assert.That(refused.Message, Does.Contain("Flatten(k3)").And.Contain("not a variant"));
+            Assert.That(cache.GetStored(K3)!.Variant, Is.Not.Null, "the refused batch changed nothing");
+
+            Assert.That(cache.Remove(K3), Is.True);
+            cache.UpsertAsync(typeof(EvA), new EvA { Name = "plain" }, K3).GetAwaiter().GetResult();
+            var apart = Assert.Throws<InvalidOperationException>(() => cache.FlattenAsync(K3).GetAwaiter().GetResult())!;
+            Assert.That(apart.Message, Is.EqualTo(refused.Message));
+            Assert.That(((EvA)cache.GetStored(K3)!.Document).Name, Is.EqualTo("plain"));
+        }
+
         // finding cross-store-retype-decided-by-key-home: a one-batch retype between two home stores is refused by the rule that a commit
         // lands in one home store, with that rule's text (an evicted key is absent to the one-key-one-store check, as when staged
         // apart); staged apart, as two commits, it leaves the key in exactly one store.
