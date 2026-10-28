@@ -101,6 +101,14 @@ namespace GameCult.Networking.Tests
             return rig;
         }
 
+        // The handler answered the peer with a refusal: the send reached the (uninitialized) peer and failed there, so the
+        // refusal message was built first. A failure earlier, in building it, would not pass through the peer's send.
+        private static void AssertAnswered(Func<Task> handler, string because)
+        {
+            var failure = Assert.CatchAsync(async () => await handler(), because)!;
+            Assert.That(failure.ToString(), Does.Contain("CultNetServerPeer.SendCultNet").And.Not.Contain("ForRemoteWriteRefused"), because);
+        }
+
         // The server writes its own record through the host's door, which asks no remote authority.
         private static async Task Seed(Rig rig, CultRecordKey key, string text) => await rig.Database.ApplyPutAsync(rig.PutOf(key, text));
 
@@ -113,9 +121,9 @@ namespace GameCult.Networking.Tests
             var logBefore = rig.LogLength;
             Assert.That(rig.TextOf(KeyA), Is.EqualTo("server"), "the host's own door needs no remote authority");
 
-            Assert.CatchAsync(async () => await rig.Put(rig.PutOf(KeyA, "peer")), "the peer is answered with a refusal");
-            Assert.CatchAsync(async () => await rig.Delete(rig.DeleteOf(KeyA)), "the peer is answered with a refusal");
-            Assert.CatchAsync(async () => await rig.Put(rig.PutOf(KeyB, "peer")), "a new key is refused too");
+            AssertAnswered(() => rig.Put(rig.PutOf(KeyA, "peer")), "the peer is answered with a refusal");
+            AssertAnswered(() => rig.Delete(rig.DeleteOf(KeyA)), "the peer is answered with a refusal");
+            AssertAnswered(() => rig.Put(rig.PutOf(KeyB, "peer")), "a new key is refused too");
 
             Assert.That(rig.TextOf(KeyA), Is.EqualTo("server"));
             Assert.That(rig.TextOf(KeyB), Is.Null);
@@ -168,8 +176,8 @@ namespace GameCult.Networking.Tests
             Assert.That(request.ShardEpoch, Is.EqualTo(1));
             Assert.That(rig.TextOf(KeyA), Is.EqualTo("aliased"));
 
-            Assert.CatchAsync(async () => await rig.Put(rig.PutOf(KeyB, "other-key")));
-            Assert.CatchAsync(async () => await rig.Delete(rig.DeleteOf(KeyA)));
+            AssertAnswered(() => rig.Put(rig.PutOf(KeyB, "other-key")), "the peer is answered with a refusal");
+            AssertAnswered(() => rig.Delete(rig.DeleteOf(KeyA)), "the peer is answered with a refusal");
             Assert.That(rig.TextOf(KeyB), Is.Null, "a grant scoped to key a refuses key b");
             Assert.That(rig.TextOf(KeyA), Is.EqualTo("aliased"), "a grant scoped to Put refuses Delete");
             Assert.That(recorded.Requests.Last().Operation, Is.EqualTo(CultNetRemoteWriteOperation.Delete));
@@ -182,13 +190,13 @@ namespace GameCult.Networking.Tests
             var forwarder = new CountingForwarder();
             var refusing = Build(new RecordingAuthority(_ => CultNetRemoteWriteDecision.Refuse("no")), primary: false, forwarder);
 
-            Assert.CatchAsync(async () => await refusing.Put(refusing.PutOf(KeyA, "peer")));
-            Assert.CatchAsync(async () => await refusing.Delete(refusing.DeleteOf(KeyA)));
+            AssertAnswered(() => refusing.Put(refusing.PutOf(KeyA, "peer")), "the peer is answered with a refusal");
+            AssertAnswered(() => refusing.Delete(refusing.DeleteOf(KeyA)), "the peer is answered with a refusal");
             Assert.That(forwarder.Puts, Is.EqualTo(0), "a refused put is not forwarded");
             Assert.That(forwarder.Deletes, Is.EqualTo(0), "a refused delete is not forwarded");
 
             var unconfigured = Build(authority: null, primary: false, forwarder);
-            Assert.CatchAsync(async () => await unconfigured.Put(unconfigured.PutOf(KeyA, "peer")));
+            AssertAnswered(() => unconfigured.Put(unconfigured.PutOf(KeyA, "peer")), "the peer is answered with a refusal");
             Assert.That(forwarder.Puts, Is.EqualTo(0), "no authority forwards nothing");
 
             var granting = Build(new RecordingAuthority(_ => CultNetRemoteWriteDecision.Grant()), primary: false, forwarder);
@@ -207,7 +215,7 @@ namespace GameCult.Networking.Tests
             put.ShardId = ShardId;
             put.ShardEpoch = 1;
 
-            Assert.CatchAsync(async () => await rig.Put(put));
+            AssertAnswered(() => rig.Put(put), "the peer is answered with a refusal");
 
             Assert.That(rig.Logger.Warnings, Has.Some.Contains("authority"), "an ungranted put of an unowned schema is answered write_not_authorized");
             Assert.That(rig.Logger.Warnings, Has.None.Contains("No shard owns"));
@@ -216,7 +224,7 @@ namespace GameCult.Networking.Tests
             var grantedPut = granting.Database.Documents.CreateRawDocumentPutMessage("wire", new CultRecordHandle<MeshQuickstartNote>(Unowned), unowned);
             grantedPut.ShardId = ShardId;
             grantedPut.ShardEpoch = 1;
-            Assert.CatchAsync(async () => await granting.Put(grantedPut));
+            AssertAnswered(() => granting.Put(grantedPut), "the peer is answered with a refusal");
             Assert.That(granting.Logger.Warnings, Has.Some.Contains("No shard owns"), "a granted put still meets the unowned-schema refusal");
         }
 
@@ -226,11 +234,21 @@ namespace GameCult.Networking.Tests
             var rig = Build(new RecordingAuthority(_ => throw new InvalidOperationException("authority exploded")));
             await Seed(rig, KeyA, "server");
 
-            Assert.CatchAsync(async () => await rig.Put(rig.PutOf(KeyA, "peer")), "the peer is answered with a refusal");
-            Assert.CatchAsync(async () => await rig.Delete(rig.DeleteOf(KeyA)));
+            AssertAnswered(() => rig.Put(rig.PutOf(KeyA, "peer")), "the peer is answered with a refusal");
+            AssertAnswered(() => rig.Delete(rig.DeleteOf(KeyA)), "the peer is answered with a refusal");
 
             Assert.That(rig.TextOf(KeyA), Is.EqualTo("server"), "fail closed");
             Assert.That(rig.Logger.Errors, Has.Some.Contains("authority exploded"));
+        }
+
+        [Test]
+        public void ARefusalWithNoReasonStillSaysWhy()
+        {
+            var rig = Build(new RecordingAuthority(_ => CultNetRemoteWriteDecision.Refuse()));
+
+            AssertAnswered(() => rig.Put(rig.PutOf(KeyA, "peer")), "refused");
+
+            Assert.That(rig.Logger.Warnings, Has.Some.Contains("raw put refused: the write was not authorized"));
         }
 
         [Test]
