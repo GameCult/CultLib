@@ -524,11 +524,12 @@ namespace GameCult.Caching
         // asked.
         internal bool StoredSchemaReadWhole { get; set; }
 
-        // The catalog entry that publishes StoredSchemaId in the store this record was loaded from, so staging can ask WrittenOwns the
-        // question the store's judge asks, over the catalog the record came with. Null for a record this cache constructed or wrote,
-        // which is stored under Descriptor's own id and published by Descriptor's entry. Only a loaded record carries it, and a loaded
-        // record is replaced by a new one when written, never relabelled in place, so it always names the id StoredSchemaId holds.
-        internal CultSchemaCatalogEntry? StoredPublishedBy { get; set; }
+        // The catalog entry that publishes StoredSchemaId in the store this record was loaded from, with the id it was published for,
+        // so staging can ask WrittenOwns the question the store's judge asks, over the catalog the record came with. Null for a record
+        // this cache constructed or wrote, which is stored under Descriptor's own id and published by Descriptor's entry. A write that
+        // relabels a loaded record in place (minting its element ids, then a flush) moves StoredSchemaId and leaves this behind, so a
+        // reader uses it only while the id still matches StoredSchemaId.
+        internal (string Id, CultSchemaCatalogEntry Entry)? StoredPublishedBy { get; set; }
 
         // Names the bytes this record was read from or written as: the SHA-256 of its persisted encoding, set by the store that
         // read or wrote them. A record no store has read or written has a version of its own that equals nothing else.
@@ -3986,8 +3987,8 @@ namespace GameCult.Caching
             };
         }
 
-        private static CultSchemaCatalogEntry? PublishedByIn(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog) =>
-            CultDocumentRegistry.PublishedBy(schemaId, catalog);
+        private static (string Id, CultSchemaCatalogEntry Entry)? PublishedByIn(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog) =>
+            CultDocumentRegistry.PublishedBy(schemaId, catalog) is { } entry ? (schemaId, entry) : null;
 
         protected void SetLastSchemaMigrationReports(IEnumerable<CultSchemaMigrationReport> reports)
         {
@@ -4035,7 +4036,10 @@ namespace GameCult.Caching
         // record's id when it was loaded (a record this cache wrote is published by its own type). The one answer for a store-backed
         // cache's staging and a store-less cache's.
         internal static bool UpsertOwned(CultStoredDocument held, CultDocumentDescriptor written) =>
-            CultDocumentRegistry.WrittenOwns(written.ToCatalogEntry(), held.StoredSchemaId, new[] { held.StoredPublishedBy ?? held.Descriptor.ToCatalogEntry() });
+            CultDocumentRegistry.WrittenOwns(
+                written.ToCatalogEntry(),
+                held.StoredSchemaId,
+                new[] { held.StoredPublishedBy is { } loaded && string.Equals(loaded.Id, held.StoredSchemaId, StringComparison.Ordinal) ? loaded.Entry : held.Descriptor.ToCatalogEntry() });
 
         // The refusal of a store-less cache that would retype a key.
         internal static CultSchemaConflictException Retyped(CultStoredDocument held, string key, CultDocumentDescriptor written) => new(
