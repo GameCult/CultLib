@@ -3107,6 +3107,7 @@ namespace GameCult.Caching
             var removedKeys = removed?.ToHashSet(StringComparer.Ordinal) ?? new HashSet<string>(StringComparer.Ordinal);
             var homes = new List<CacheBackingStore>();
             var globals = new Dictionary<Type, string>(_globals);
+            var evictedKeys = evicted.Select(stored => stored.Key.Value).ToHashSet(StringComparer.Ordinal);
             foreach (var stored in evicted)
             {
                 var type = stored.Descriptor.DocumentType;
@@ -3125,8 +3126,9 @@ namespace GameCult.Caching
                     throw new InvalidOperationException(
                         $"{descriptor.SchemaName} record {stored.Key.Value} was loaded from {source} but its home is {home?.ToString() ?? "no store"}.");
 
-                // One key, one store: a key never moves between homes, and two stores never both deliver it.
-                if (_entries.TryGetValue(stored.Key.Value, out var present) &&
+                // One key, one store: a key never moves between homes, and two stores never both deliver it. An evicted key is absent
+                // here, as it is staged apart; a retype across two home stores is then the batch spanning both (below): one rule, one text.
+                if (!evictedKeys.Contains(stored.Key.Value) && _entries.TryGetValue(stored.Key.Value, out var present) &&
                     Home(present.Descriptor.DocumentType) is var held &&
                     Home(descriptor.DocumentType) is var incoming &&
                     held != incoming)
@@ -3145,7 +3147,8 @@ namespace GameCult.Caching
             var distinct = homes.Distinct().ToArray();
             if (distinct.Length > 1)
                 throw new InvalidOperationException(
-                    $"The batch spans {distinct[0]} and {distinct[1]}; a commit lands in one home store.");
+                    $"The batch spans {distinct[0]} and {distinct[1]}; a commit lands in one home store. " +
+                    "To move a key between stores, stage its removal and its add apart (two commits, not one atomic commit).");
             return distinct.FirstOrDefault();
 
             void Claim(CultStoredDocument stored, bool upsert)

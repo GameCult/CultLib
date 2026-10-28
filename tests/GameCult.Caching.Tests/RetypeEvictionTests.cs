@@ -262,7 +262,55 @@ namespace GameCult.Caching.Tests
             Assert.Throws<InvalidOperationException>(() => cache.FlattenAsync(K3).GetAwaiter().GetResult());
         }
 
-        // finding removal-bookkeeping-unpinned, mutant X2 (a retype elsewhere in the batch skips every key's staging claim): a batch
+        // finding cross-store-retype-decided-by-key-home: a one-batch retype between two home stores is refused by the rule that a commit
+        // lands in one home store, with that rule's text (an evicted key is absent to the one-key-one-store check, as when staged
+        // apart); staged apart, as two commits, it leaves the key in exactly one store.
+        [Test]
+        public void ARetypeAcrossTwoHomeStoresInOneBatchIsRefusedByTheBatchSpanningRuleAndStagedApartLeavesOneStore()
+        {
+            string[] KeysIn(string path) =>
+                new SingleFileMessagePackBackingStore(path).ReadStoreSnapshot()?.Records.Select(record => record.Key).ToArray() ?? Array.Empty<string>();
+
+            CultCache OpenTwo(string a, string b)
+            {
+                var cache = new CultCache(AB, CultCacheMessagePack.CreateCodec(AB));
+                cache.AddBackingStore(new SingleFileMessagePackBackingStore(a), typeof(EvA));
+                cache.AddBackingStore(new SingleFileMessagePackBackingStore(b), typeof(EvB));
+                cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+                return cache;
+            }
+
+            var pathA = NewPath("single-file");
+            var pathB = NewPath("single-file");
+            Directory.CreateDirectory(Path.GetDirectoryName(pathA)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(pathB)!);
+            using (var cache = OpenTwo(pathA, pathB))
+            {
+                PutB(cache, K1);
+                Assert.That(KeysIn(pathB), Is.EqualTo(new[] { "k1" }));
+
+                var refused = Assert.Throws<InvalidOperationException>(() => cache.Commit(batch =>
+                {
+                    batch.Remove(K1);
+                    batch.Upsert(typeof(EvA), new EvA { Name = "k1" }, K1);
+                }))!;
+                Assert.That(refused.Message, Does.Contain("The batch spans").And.Contain("a commit lands in one home store")
+                    .And.Contain("stage its removal and its add apart").And.Not.Contain("second store"));
+                Assert.That(KeysIn(pathA), Is.Empty, "the refused batch wrote nothing");
+                Assert.That(KeysIn(pathB), Is.EqualTo(new[] { "k1" }));
+                Assert.That(cache.GetStored(K1)!.Descriptor.DocumentType, Is.EqualTo(typeof(EvB)));
+
+                Assert.That(cache.Remove(K1), Is.True);
+                cache.FlushAsync().GetAwaiter().GetResult();
+                cache.UpsertAsync(typeof(EvA), new EvA { Name = "k1" }, K1).GetAwaiter().GetResult();
+                cache.FlushAsync().GetAwaiter().GetResult();
+            }
+
+            Assert.That(KeysIn(pathA), Is.EqualTo(new[] { "k1" }), "staged apart the key is in the add's store");
+            Assert.That(KeysIn(pathB), Is.Empty, "and no longer in the removal's");
+        }
+
+        // finding removal-bookkeeping-unpinned, mutant X2(a retype elsewhere in the batch skips every key's staging claim): a batch
         // holding two retypes commits, and a cross-type add at a key it did not remove is still refused beside a retype.
         [TestCaseSource(nameof(Kinds))]
         public void EachKeyOfABatchIsJudgedByItsOwnRemoval(string kind)
