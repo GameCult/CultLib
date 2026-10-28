@@ -47,6 +47,9 @@ namespace GameCult.Caching.Tests
             [Key(0)] public string Value = string.Empty;
         }
 
+        // RbX's schema id, which RbY lists. The test below asserts it, so a changed derivation fails there.
+        private const string RbXId = "sha256:25087e0d76fd5b9ac950723ccd47f3f3ac1428b53b49ca9bda9aae8b38a0220a";
+
         // The rebase pair: RbY lists RbX's id compatible, so a plain write of RbY owns an RbX record; RbZ lists nothing.
         [CultDocument("tests.rb_x", "tests.rb_x.v1")]
         [MessagePackObject(AllowPrivate = true)]
@@ -56,7 +59,7 @@ namespace GameCult.Caching.Tests
             [Key(1)] public int Value;
         }
 
-        [CultDocument("tests.rb_y", "tests.rb_y.v1", CompatibleSchemaIds = new[] { "tests.rb_x.v1" })]
+        [CultDocument("tests.rb_y", "tests.rb_y.v1", CompatibleSchemaIds = new[] { RbXId })]
         [MessagePackObject(AllowPrivate = true)]
         internal sealed class RbY
         {
@@ -371,28 +374,21 @@ namespace GameCult.Caching.Tests
                 Assert.Ignore("a refusal is a store's.");
             var path = NewPath(kind);
             using (var seed = Open(path, kind, ABC))
-            {
-                PutB(seed, K1);
                 PutB(seed, K2);
-            }
 
             using var cache = Open(path, kind, AB);
             using var other = Open(path, kind, ABC);
             Assert.That(cache.Remove(K2), Is.True);
             cache.UpsertAsync(typeof(EvA), new EvA { Name = "k2", Value = 9 }, K2).GetAwaiter().GetResult();
-
-            Assert.That(other.Commit(batch =>
-            {
-                batch.Remove(K1);
-                batch.Upsert(typeof(EvC), new EvC { Name = "k1" }, K1);
-            }), Is.True);
             cache.UpsertAsync(typeof(EvA), new EvA { Name = "k1", Value = 1 }, K1).GetAwaiter().GetResult();
 
+            // Another writer puts a type this cache does not know at k1 before the flush: k1's staged add is refused under the lock.
+            Assert.That(other.Commit(batch => batch.Upsert(typeof(EvC), new EvC { Name = "k1" }, K1)), Is.True);
             var refusal = Assert.Throws<CultSchemaConflictException>(() => cache.FlushAllBackingStores())!;
-            Assert.That(refusal.RecordKey, Is.EqualTo(K1.Value), "k1 holds a type this cache does not know");
+            Assert.That(refusal.RecordKey, Is.EqualTo(K1.Value));
             cache.FlushAllBackingStores();
 
-            Assert.That(TypeAt(path, kind, AB, K2), Is.EqualTo(typeof(EvA)), "the retype of k2 survived the refusal of k1");
+            Assert.That(TypeAt(path, kind, ABC, K2), Is.EqualTo(typeof(EvA)), "the retype of k2 survived the refusal of k1");
         }
 
         // finding rebase-check-was-reachable, ruling variant-rebase-follows-plain-write: a variant rebased onto a base of another type
@@ -401,6 +397,7 @@ namespace GameCult.Caching.Tests
         [TestCaseSource(nameof(VariantKinds))]
         public void ARebaseChangesTypeExactlyWhereAPlainWriteMay(string kind)
         {
+            Assert.That(Rb.GetRequired(typeof(RbX)).SchemaId, Is.EqualTo(RbXId));
             using var cache = Open(NewPath(kind), kind, Rb);
             var baseX = new CultRecordKey("base-x");
             var baseY = new CultRecordKey("base-y");
