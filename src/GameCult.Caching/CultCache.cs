@@ -4872,7 +4872,7 @@ namespace GameCult.Caching
                 durable,
                 _staged.Concat(upserts.Select(staged => staged.Record.Key)).Concat(removals).Concat(checks).Concat(StagedChecks),
                 upserts,
-                checks.Concat(removals));
+                checks);
 
         // A key the write also names as a removal or check (the request's, or one the cache removed here since its last flush) is a
         // retype's removal half: it is judged by the removal rule, and the record staged there then lands. A refused key's durable

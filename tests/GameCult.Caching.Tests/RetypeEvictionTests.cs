@@ -251,11 +251,12 @@ namespace GameCult.Caching.Tests
                 batch.UpsertVariant(K3, baseA, new[] { cache.Override<EvA>(nameof(EvA.Name), "v3") });
             });
 
-            Assert.Throws<InvalidOperationException>(() => cache.Commit(batch =>
+            var flatten = Assert.Throws<InvalidOperationException>(() => cache.Commit(batch =>
             {
                 batch.Remove(K3);
                 batch.Flatten(K3);
-            }));
+            }))!;
+            Assert.That(flatten.Message, Does.Contain("Flatten(k3)").And.Contain("not a variant"));
             Assert.That(cache.GetStored(K3)!.Variant, Is.Not.Null, "the refused batch changed nothing");
             Assert.That(cache.Remove(K3), Is.True);
             Assert.Throws<InvalidOperationException>(() => cache.FlattenAsync(K3).GetAwaiter().GetResult());
@@ -305,11 +306,13 @@ namespace GameCult.Caching.Tests
             using var cache = Open(NewPath(kind), kind, AB);
             PutB(cache, K2);
 
-            Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch =>
+            var refused = Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch =>
             {
                 batch.Upsert(typeof(EvA), new EvA { Name = "k2", Value = 1 }, K2);
                 batch.Upsert(typeof(EvA), new EvA { Name = "k2", Value = 2 }, K2);
-            }));
+            }))!;
+            if (kind == "storeless")
+                Assert.That(refused.Message, Does.Contain("would retype the key").And.Contain("Remove the record first, in the same batch or an earlier commit, then add the other type's."));
             Assert.That(cache.GetStored(K2)!.Descriptor.DocumentType, Is.EqualTo(typeof(EvB)));
         }
 
