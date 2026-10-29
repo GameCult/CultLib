@@ -21,6 +21,22 @@ pub const ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA: &str = "odin.runtime_topolog
 pub const ODIN_RUNTIME_TOPOLOGY_CORRELATION_SIGNING_PURPOSE: &str =
     "odin.runtime_topology_correlation.v2";
 
+/// Names the runtime bundle directory Idunn launched this process with. Set by
+/// both Idunn drivers; read by `IdunnRuntimeAuthority::open`.
+pub const IDUNN_RUNTIME_BUNDLE_ENVIRONMENT: &str = "GAMECULT_IDUNN_RUNTIME_BUNDLE";
+/// Names the `host:port` Idunn expects the candidate to bind. Set by Idunn's
+/// systemd driver for routed targets.
+pub const IDUNN_RUNTIME_CANDIDATE_BIND_ENVIRONMENT: &str = "GAMECULT_IDUNN_CANDIDATE_BIND";
+/// Names the process write-lease record of a stateful target. Set by Idunn's
+/// systemd driver exactly when Expected requires a lease.
+pub const IDUNN_PROCESS_WRITE_LEASE_ENVIRONMENT: &str = "GAMECULT_IDUNN_PROCESS_WRITE_LEASE";
+/// Names the one-shot activation credential file. Set by Idunn's host driver.
+pub const IDUNN_ACTIVATION_CREDENTIAL_ENVIRONMENT: &str = "GAMECULT_IDUNN_ACTIVATION_CREDENTIAL";
+/// Names the stable provider identity credential file. Set by Idunn's host driver.
+pub const RUNTIME_PRESENCE_IDENTITY_BINDING: &str = "GAMECULT_RUNTIME_PRESENCE_IDENTITY";
+/// The name Idunn's systemd driver gives the stable provider identity descriptor.
+pub const RUNTIME_PRESENCE_IDENTITY_FD_NAME: &str = "gamecult-runtime-presence-identity";
+
 const MAX_RUNTIME_CAPABILITIES: usize = 256;
 const MAX_RUNTIME_DEPENDENCIES: usize = 256;
 const MAX_TOPOLOGY_DISAGREEMENTS: usize = 256;
