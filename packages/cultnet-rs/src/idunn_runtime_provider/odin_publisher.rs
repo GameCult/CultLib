@@ -342,11 +342,8 @@ fn pump(transport: &mut CultNetRudpSocketTransportConnection) -> Result<(), Deli
 /// `rudp://host:port` or bare `host:port` (an IPv6 host in brackets) as host
 /// and port. Any other scheme, a path, a blank host or a zero port is `None`.
 fn parse_endpoint(endpoint: &str) -> Option<(String, u16)> {
-    let rest = match endpoint.strip_prefix(RUDP_SCHEME) {
-        Some(rest) => rest,
-        None if endpoint.contains("://") => return None,
-        None => endpoint,
-    };
+    // Any other scheme leaves a `:` in the host, which is refused below.
+    let rest = endpoint.strip_prefix(RUDP_SCHEME).unwrap_or(endpoint);
     let (host, port) = if let Some(bracketed) = rest.strip_prefix('[') {
         let (host, after) = bracketed.split_once(']')?;
         (host, after.strip_prefix(':')?)

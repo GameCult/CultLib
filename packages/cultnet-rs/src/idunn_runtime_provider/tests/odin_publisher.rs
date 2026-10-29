@@ -47,6 +47,8 @@ impl Delivered {
 #[derive(Clone, Copy)]
 enum Sink {
     Accept,
+    /// Accepts after this long, so the ack comes late.
+    AcceptAfter(Duration),
     Refuse,
 }
 
@@ -74,7 +76,10 @@ impl Odin {
             move |receipt: CultMeshRudpRawDocumentReceipt| -> Result<()> {
                 match sink {
                     Sink::Refuse => bail!(SINK_CANARY),
-                    Sink::Accept => {
+                    Sink::Accept | Sink::AcceptAfter(_) => {
+                        if let Sink::AcceptAfter(delay) = sink {
+                            std::thread::sleep(delay);
+                        }
                         record.lock().unwrap().push(Delivered {
                             message_id: receipt.message_id,
                             record_key: receipt.document.record_key,
@@ -118,6 +123,7 @@ impl Odin {
         self.received.lock().unwrap().len()
     }
 
+    #[cfg(unix)]
     fn wait_for(&self, count: usize) -> Vec<Delivered> {
         let give_up = Instant::now() + Duration::from_secs(10);
         while self.count() < count {
@@ -333,6 +339,46 @@ fn publish_times_out_without_echoing_endpoint() -> Result<()> {
     assert!(!refused.contains(&dead.port().to_string()), "{refused}");
     assert!(elapsed >= Duration::from_millis(300), "{elapsed:?}");
     assert!(elapsed < Duration::from_millis(1_500), "{elapsed:?}");
+    Ok(())
+}
+
+#[test]
+fn publish_waits_for_a_slow_ack_and_gives_up_on_a_missing_one() -> Result<()> {
+    let odin = Odin::start(Sink::AcceptAfter(Duration::from_millis(400)));
+    let rig = odin_rig(false, &odin.rudp_endpoint())?;
+    let mut signer = rig.signer()?;
+    let patient = Cadence {
+        ack: Duration::from_millis(3_000),
+        ..TEST_CADENCE
+    };
+    let started = Instant::now();
+    publisher_for(&signer, patient)?.publish(&mut signer, "slow")?;
+    assert!(started.elapsed() >= Duration::from_millis(350));
+
+    let impatient = Cadence {
+        ack: Duration::from_millis(150),
+        ..TEST_CADENCE
+    };
+    let started = Instant::now();
+    let refused = refusal(publisher_for(&signer, impatient)?.publish(&mut signer, "slower"));
+    let elapsed = started.elapsed();
+    assert!(refused.contains("ack_timeout"), "{refused}");
+    assert!(elapsed >= Duration::from_millis(150), "{elapsed:?}");
+    assert!(elapsed < Duration::from_millis(390), "{elapsed:?}");
+    Ok(())
+}
+
+#[test]
+fn publisher_debug_names_no_endpoint() -> Result<()> {
+    let odin = Odin::start(Sink::Accept);
+    let rig = odin_rig(false, &odin.rudp_endpoint())?;
+    let publisher = publisher_for(&rig.signer()?, TEST_CADENCE)?;
+
+    let shown = format!("{publisher:?}");
+
+    assert!(shown.contains("IdunnRuntimePresencePublisher"), "{shown}");
+    assert!(!shown.contains("127.0.0.1"), "{shown}");
+    assert!(!shown.contains(&odin.addr.port().to_string()), "{shown}");
     Ok(())
 }
 
