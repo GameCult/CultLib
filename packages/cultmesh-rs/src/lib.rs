@@ -28,7 +28,7 @@ mod rudp_document_server;
 
 pub use rudp_document_server::*;
 
-pub const CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID: u32 = 0x0d1d_0002;
+pub use cultnet_rs::CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID;
 
 pub trait CultMeshDocumentSet: Clone + Send + Sync + 'static {
     fn register_cache(&self, cache: &mut CultCache) -> Result<()>;

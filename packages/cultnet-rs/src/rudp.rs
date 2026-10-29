@@ -1480,6 +1480,10 @@ impl CultNetRudpSession {
     }
 }
 
+/// The connection id of Odin's CultMesh document catalog, the RUDP endpoint that
+/// accepts raw documents and serves raw snapshots.
+pub const CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID: u32 = 0x0d1d_0002;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CultNetRudpSocketMode {
     Client,
