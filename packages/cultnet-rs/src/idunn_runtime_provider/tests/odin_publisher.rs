@@ -94,7 +94,10 @@ impl Odin {
         let running = Arc::clone(&stop);
         let thread = std::thread::spawn(move || {
             while !running.load(Ordering::Relaxed) {
-                if matches!(server.poll_once(), Ok(CultMeshRudpPollOutcome::Idle) | Err(_)) {
+                if matches!(
+                    server.poll_once(),
+                    Ok(CultMeshRudpPollOutcome::Idle) | Err(_)
+                ) {
                     std::thread::sleep(Duration::from_millis(1));
                 }
             }
@@ -140,7 +143,10 @@ impl Drop for Odin {
 
 /// An address nothing listens on.
 fn dead_address() -> SocketAddr {
-    UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap()
+    UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
 }
 
 // ----------------------------------------------------------------------- rigs
@@ -160,10 +166,7 @@ fn odin_dependency(schema: &str, endpoint: Option<String>) -> IdunnExpectedDepen
     }
 }
 
-fn rig_with(
-    write_lease_required: bool,
-    dependencies: Vec<IdunnExpectedDependency>,
-) -> Result<Rig> {
+fn rig_with(write_lease_required: bool, dependencies: Vec<IdunnExpectedDependency>) -> Result<Rig> {
     Rig::with_dependencies(write_lease_required, dependencies)
 }
 
@@ -232,7 +235,9 @@ fn for_signer_refuses_what_is_not_one_usable_endpoint() -> Result<()> {
     assert!(!refused.contains(canary), "{refused}");
 
     let missing = rig_with(false, vec![odin_dependency("odin.verse.v1", None)])?;
-    let refused = refusal(IdunnRuntimePresencePublisher::for_signer(&missing.signer()?));
+    let refused = refusal(IdunnRuntimePresencePublisher::for_signer(
+        &missing.signer()?,
+    ));
     assert!(refused.contains("provider_endpoint"), "{refused}");
 
     for bad in [
@@ -245,7 +250,10 @@ fn for_signer_refuses_what_is_not_one_usable_endpoint() -> Result<()> {
         format!("{canary}:9000/path"),
         format!(":{}", 9000),
     ] {
-        let rig = rig_with(false, vec![odin_dependency("odin.verse.v1", Some(bad.clone()))])?;
+        let rig = rig_with(
+            false,
+            vec![odin_dependency("odin.verse.v1", Some(bad.clone()))],
+        )?;
         let refused = refusal(IdunnRuntimePresencePublisher::for_signer(&rig.signer()?));
         assert!(
             refused.contains("provider_endpoint"),
@@ -298,7 +306,10 @@ fn publish_surfaces_odin_refusal() -> Result<()> {
     assert!(refused.contains("odin_refused"), "{refused}");
     assert!(!refused.contains(SINK_CANARY), "{refused}");
     assert!(!refused.contains("127.0.0.1"), "{refused}");
-    assert!(!refused.contains(&odin.addr.port().to_string()), "{refused}");
+    assert!(
+        !refused.contains(&odin.addr.port().to_string()),
+        "{refused}"
+    );
     Ok(())
 }
 
@@ -364,8 +375,16 @@ fn two_publishes_strictly_increase_sequence_in_fresh_sessions() -> Result<()> {
     assert_eq!(delivered.len(), 2);
     assert_eq!(delivered[0].record().publisher_sequence, 1);
     assert_eq!(delivered[1].record().publisher_sequence, 3);
-    assert!(delivered[0].message_id.ends_with(":1"), "{:?}", delivered[0]);
-    assert!(delivered[1].message_id.ends_with(":3"), "{:?}", delivered[1]);
+    assert!(
+        delivered[0].message_id.ends_with(":1"),
+        "{:?}",
+        delivered[0]
+    );
+    assert!(
+        delivered[1].message_id.ends_with(":3"),
+        "{:?}",
+        delivered[1]
+    );
     assert_ne!(
         delivered[0].from, delivered[1].from,
         "each publish is its own RUDP session"
@@ -554,7 +573,8 @@ mod lease_wait {
         let publisher = publisher_for(&signer, cadence)?;
 
         let started = Instant::now();
-        let refused = refusal(publisher.wait_for_write_lease(&mut signer, Duration::from_millis(500)));
+        let refused =
+            refusal(publisher.wait_for_write_lease(&mut signer, Duration::from_millis(500)));
         let elapsed = started.elapsed();
 
         assert!(elapsed >= Duration::from_millis(500), "{elapsed:?}");
@@ -587,7 +607,8 @@ mod lease_wait {
         };
         let publisher = publisher_for(&signer, cadence)?;
 
-        let refused = refusal(publisher.wait_for_write_lease(&mut signer, Duration::from_millis(400)));
+        let refused =
+            refusal(publisher.wait_for_write_lease(&mut signer, Duration::from_millis(400)));
 
         assert!(refused.contains(": 0 failed deliveries"), "{refused}");
         assert!(!refused.contains("last:"), "{refused}");
@@ -628,7 +649,10 @@ mod lease_wait {
             refusal(publisher.wait_for_write_lease(&mut signer, Duration::from_secs(10)))
         });
 
-        assert!(refused.contains("provider-owned Warming proof"), "{refused}");
+        assert!(
+            refused.contains("provider-owned Warming proof"),
+            "{refused}"
+        );
         assert!(started.elapsed() < Duration::from_secs(3));
         Ok(())
     }

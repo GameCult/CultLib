@@ -16,8 +16,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail, ensure};
 
 use super::{
-    IdunnRuntimePresenceSigner, ProcessWriteLeaseGuard, RuntimePresenceState,
-    SignedRuntimePresence,
+    IdunnRuntimePresenceSigner, ProcessWriteLeaseGuard, RuntimePresenceState, SignedRuntimePresence,
 };
 use crate::{
     CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID, CultNetErrorCode, CultNetMessage,
@@ -201,7 +200,8 @@ impl IdunnRuntimePresencePublisher {
         loop {
             let now = Instant::now();
             if now >= next_heartbeat {
-                let (_, delivery) = self.sign_and_deliver(signer, "waiting-for-process-write-lease")?;
+                let (_, delivery) =
+                    self.sign_and_deliver(signer, "waiting-for-process-write-lease")?;
                 if let Err(failure) = delivery {
                     failed_deliveries += 1;
                     last_failure = Some(failure);
@@ -369,12 +369,16 @@ mod tests {
     use super::*;
 
     fn parsed(endpoint: &str) -> Option<(&'static str, u16)> {
-        parse_endpoint(endpoint).map(|(host, port)| (Box::leak(host.into_boxed_str()) as &str, port))
+        parse_endpoint(endpoint)
+            .map(|(host, port)| (Box::leak(host.into_boxed_str()) as &str, port))
     }
 
     #[test]
     fn endpoints_are_rudp_or_bare_host_and_port() {
-        assert_eq!(parsed("rudp://odin.example:7001"), Some(("odin.example", 7001)));
+        assert_eq!(
+            parsed("rudp://odin.example:7001"),
+            Some(("odin.example", 7001))
+        );
         assert_eq!(parsed("10.0.0.5:7001"), Some(("10.0.0.5", 7001)));
         assert_eq!(parsed("rudp://[::1]:7001"), Some(("::1", 7001)));
         assert_eq!(parsed("[fd00::5]:65535"), Some(("fd00::5", 65535)));
