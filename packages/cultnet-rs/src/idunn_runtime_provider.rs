@@ -4,8 +4,10 @@
 //! runtime bundle with the two signing credentials Idunn hands it, reports its
 //! health as it changes, and signs presence records that Odin can authenticate
 //! and Idunn's route challenge can read. This module owns that provider half and
-//! owns no network; publishing the signed records is a separate concern that
-//! consumes [`IdunnRuntimePresenceSigner::sign`].
+//! owns no network; [`IdunnRuntimePresencePublisher`] delivers the signed records
+//! to Odin and waits for Idunn's write lease while Warming. A target whose
+//! Expected declares no Odin dependency is route-proof: `for_signer` returns
+//! `None` and `answer_route_observation` is its whole presence.
 //!
 //! The module compiles and runs on every platform an Idunn driver launches:
 //! Idunn's systemd driver (unix) delivers the credentials as inherited
@@ -14,9 +16,11 @@
 //! lock are unix-only.
 //!
 //! ```no_run
+//! use std::time::Duration;
+//!
 //! use cultnet_rs::{
 //!     GameCultRuntimeCapability, IdunnRuntimeAuthority, IdunnRuntimeCredentials,
-//!     IdunnRuntimePresenceSigner, RuntimePresenceState,
+//!     IdunnRuntimePresencePublisher, IdunnRuntimePresenceSigner, RuntimePresenceState,
 //! };
 //!
 //! # fn main() -> anyhow::Result<()> {
@@ -40,10 +44,13 @@
 //!         capacity: 1,
 //!     }],
 //! );
-//! let warming = signer.sign("starting")?; // the signer starts Warming
-//! signer.report_health(RuntimePresenceState::Active);
-//! let active = signer.sign("ready")?;
-//! # let _ = (warming, active);
+//! // Odin's endpoint comes from Expected; the publisher borrows the signer per call.
+//! if let Some(publisher) = IdunnRuntimePresencePublisher::for_signer(&signer)? {
+//!     // The signer starts Warming; heartbeats until Idunn writes the lease.
+//!     let _lease = publisher.wait_for_write_lease(&mut signer, Duration::from_secs(60))?;
+//!     signer.report_health(RuntimePresenceState::Active);
+//!     publisher.publish(&mut signer, "ready")?;
+//! }
 //! # Ok(())
 //! # }
 //! ```
@@ -1399,6 +1406,9 @@ fn unix_millis() -> Result<u64> {
         .try_into()
         .context("Unix time exceeds u64")
 }
+
+mod odin_publisher;
+pub use odin_publisher::IdunnRuntimePresencePublisher;
 
 #[cfg(test)]
 mod tests;

@@ -5,7 +5,7 @@ use cultcache_rs::{CacheBackingStore, CultCacheEnvelope};
 
 use super::*;
 use crate::{
-    IdunnExpectedCapability, IdunnExpectedRoute, IdunnRuntimeActivationLaunch,
+    IdunnExpectedCapability, IdunnExpectedDependency, IdunnExpectedRoute, IdunnRuntimeActivationLaunch,
     IdunnServiceIdentity, RUNTIME_PRESENCE_IDENTITY_FD_NAME, RuntimePresenceAuthenticationContext,
     VerifiedRuntimeAuthority, authenticate_runtime_presence_claim,
     correlate_runtime_presence_claim, enroll_service_identity_at, verify_runtime_authority,
@@ -114,6 +114,13 @@ struct Rig {
 
 impl Rig {
     fn new(write_lease_required: bool) -> Result<Self> {
+        Self::with_dependencies(write_lease_required, Vec::new())
+    }
+
+    fn with_dependencies(
+        write_lease_required: bool,
+        dependencies: Vec<IdunnExpectedDependency>,
+    ) -> Result<Self> {
         let dir = tempfile::tempdir()?;
         let provider_path = dir.path().join("provider.cc");
         let provider =
@@ -152,7 +159,7 @@ impl Rig {
                     minimum_capacity: 1,
                 })
                 .collect(),
-            dependencies: Vec::new(),
+            dependencies,
         };
         let (activation, activation_seed) = Self::issue(&expected, &idunn)?;
         let rig = Self {
@@ -2118,3 +2125,5 @@ fn host_credentials_keep_the_seed_when_the_provider_is_a_directory() -> Result<(
     assert!(seed.exists(), "a refused delivery leaves the one-shot seed");
     Ok(())
 }
+
+mod odin_publisher;
