@@ -904,6 +904,7 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
         // The site-array functions: a fixed-capacity array and a count, killed on the device (the lattice at rings up to 17).
         new Family($"vec4 cultmath_power_border(vec3, vec4[{SiteArrays.Capacity}], int)", "ulp-bounded", SiteArrays.PowerBorderArguments),
         new Family($"vec4 cultmath_weighted_lattice_cells(vec2, float, vec4[{SiteArrays.Capacity}], int, float, float, float, float, float, vec2, float)", "ulp-bounded", SiteArrays.LatticeArguments),
+        new Family("float cultmath_fbm(vec3, int, float, float)", "ulp-bounded", r => new object[] { Point3(r), 4, 2.0f, 0.5f }),
     }).ToArray();
 
     // A point of magnitude m, m log-uniform in [lo, hi]: one component at +-m, the other two uniform in [-m, m],

@@ -5,6 +5,14 @@ All notable changes to this package are documented in this file.
 Earlier releases (0.2.0-0.2.3) predate this package's changelog and are not
 backfilled here; see `docs/semver-policy.md` for why.
 
+## [Unreleased]
+
+### Added
+
+- `math.fbm(float3 p, int octaves, float lacunarity, float gain)` and `math.fbm(float3 p)` (four octaves,
+  lacunarity 2, gain 0.5): the value-only octave sum of `snoise`, the cost of `fbm_grad` without the gradient.
+  The shaders carry `cultmath_fbm` in HLSL and GLSL; octaves clamp to [0, 16] as `fbm_grad`'s do.
+
 ## [0.5.0]
 
 ### Breaking
