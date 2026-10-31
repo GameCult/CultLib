@@ -5,6 +5,10 @@ All notable changes to `cultnet-ts` are recorded here, following
 
 ## Unreleased
 
+### Added
+
+- `CultNetRudpSocketTransportServer`: one UDP socket serving many peers, each remote address and port with its own reliable session (`peerConnected`, `frame`, `peerDisconnected` events; `send(peer, ...)` answers on the peer a frame came from). A second client no longer replaces the first; idle peers are reaped after `peerTimeoutMs` (default 60 s) and Connects beyond `maxPeers` (default 256) are dropped. Matches the Rust `CultNetRudpServerHub` and C# `CultNetRudpSocketTransportServer`; the wire format is unchanged. `CultNetRudpSocketTransportConnection` in `server` mode still serves exactly one peer.
+
 ### Breaking
 
 - `CultMeshCdnChunkRef` carries `id` (slot 4), the reference's element id. `encodeManifest` writes five-slot chunk references and `packContent` sets the decimal offset as the id, as the reference does; a manifest written before ids reads `""` and is rewritten with the slot. Content vectors regenerated from the reference.
