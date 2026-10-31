@@ -29,11 +29,11 @@ import {
 
 const RUDP_MAGIC = [0x43, 0x4e, 0x52, 0x30] as const; // CNR0
 const RUDP_VERSION = 0;
-const RUDP_FIXED_HEADER_BYTES = 36;
+export const RUDP_FIXED_HEADER_BYTES = 36;
 /// The largest UDP payload a datagram can carry: 65,535 less the UDP header and,
 /// over IPv4, the minimal IP header. IPv6's header is outside its payload length.
-const MAX_UDP4_DATAGRAM_BYTES = 65_507;
-const MAX_UDP6_DATAGRAM_BYTES = 65_527;
+export const MAX_UDP4_DATAGRAM_BYTES = 65_507;
+export const MAX_UDP6_DATAGRAM_BYTES = 65_527;
 const MAX_CHANNEL_ID_BYTES = 255;
 export const CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS = 32;
 const RUDP_RECEIVED_SEQUENCE_WINDOW = 4_096;
@@ -1588,7 +1588,7 @@ export function createRudpTransportProfile(
   };
 }
 
-function channelOptions(channelId: string): { reliable: boolean; ordered: boolean; sequenced: boolean } {
+export function channelOptions(channelId: string): { reliable: boolean; ordered: boolean; sequenced: boolean } {
   if (channelId === "schema") {
     return { reliable: true, ordered: true, sequenced: false };
   }
