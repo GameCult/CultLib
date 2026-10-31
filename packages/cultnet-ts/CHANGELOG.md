@@ -7,7 +7,7 @@ All notable changes to `cultnet-ts` are recorded here, following
 
 ### Added
 
-- `CultNetRudpSocketTransportServer`: one UDP socket serving many peers, each remote address and port with its own reliable session (`peerConnected`, `frame`, `peerDisconnected` events; `send(peer, ...)` answers on the peer a frame came from). A second client no longer replaces the first; idle peers are reaped after `peerTimeoutMs` (default 60 s) and Connects beyond `maxPeers` (default 256) are dropped. Matches the Rust `CultNetRudpServerHub` and C# `CultNetRudpSocketTransportServer`; the wire format is unchanged. `CultNetRudpSocketTransportConnection` in `server` mode still serves exactly one peer.
+- `CultNetRudpSocketTransportServer`: one UDP socket serving many peers, each remote address and port with its own reliable session (`peerConnected`, `frame`, `peerDisconnected` events; `send(peer, ...)` answers on the peer a frame came from). A second client no longer replaces the first; Connects beyond `maxPeers` (default 256) are dropped, and `close()` resolves once every peer's goodbye has left the socket. The shape follows the Rust `CultNetRudpServerHub` and C# `CultNetRudpSocketTransportServer`, and the wire format is unchanged. The optional `peerTimeoutMs` (idle peers ended and told so; default off) exists only in TypeScript. `CultNetRudpSocketTransportConnection` in `server` mode still serves exactly one peer.
 
 ### Breaking
 

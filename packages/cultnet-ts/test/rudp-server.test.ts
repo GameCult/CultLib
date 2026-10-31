@@ -97,7 +97,7 @@ test("two clients on different ports talk through one server socket and neither 
     assert.equal(a.closed() || b.closed(), false);
     assert.equal(server.peers.length, 2);
   } finally {
-    a.connection.close(); b.connection.close(); server.close();
+    a.connection.close(); b.connection.close(); await server.close();
   }
 });
 
@@ -120,7 +120,7 @@ test("a client reconnecting from the same endpoint replaces only its own session
     await waitFor(() => a.received.includes("re:after") && b.received.includes("re:still"), "replies after the reconnect");
     assert.equal(b.closed(), false);
   } finally {
-    a.connection.close(); b.connection.close(); server.close();
+    a.connection.close(); b.connection.close(); await server.close();
   }
 });
 
@@ -147,7 +147,7 @@ test("a peer that leaves, or goes silent, is dropped and the others keep their s
     steady.connection.send("schema", enc("alive"));
     await waitFor(() => steady.received.includes("re:alive"), "the surviving peer's reply");
   } finally {
-    silent.connection.close(); steady.connection.close(); server.close();
+    silent.connection.close(); steady.connection.close(); await server.close();
   }
 });
 
@@ -167,6 +167,30 @@ test("Connects beyond maxPeers and datagrams from unadmitted endpoints are dropp
     first.connection.send("schema", enc("ok"));
     await waitFor(() => first.received.includes("re:ok"), "the admitted peer's reply");
   } finally {
-    stranger.close(); first.connection.close(); server.close();
+    stranger.close(); first.connection.close(); await server.close();
+  }
+});
+
+test("close() delivers a Disconnect to every peer before the socket is released", async () => {
+  const { server, port } = await startServer();
+  const peers = await Promise.all([0, 1, 2].map(async () => {
+    const socket = await bind();
+    const session = new CultNetRudpSession({ connectionId });
+    const types: string[] = [];
+    socket.on("message", (wire) => {
+      const packet = decodeRudpPacket(wire);
+      types.push(packet.packetType);
+      session.receive(packet, Date.now());
+    });
+    socket.send(encodeRudpPacket(session.createConnect(Date.now())), port, "127.0.0.1");
+    await waitFor(() => session.connected, "raw handshake");
+    return { socket, types };
+  }));
+  try {
+    assert.equal(server.peers.length, 3);
+    await server.close();
+    await waitFor(() => peers.every((peer) => peer.types.includes("disconnect")), "every peer to observe the Disconnect");
+  } finally {
+    peers.forEach((peer) => peer.socket.close());
   }
 });

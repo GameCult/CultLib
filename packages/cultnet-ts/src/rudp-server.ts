@@ -34,10 +34,12 @@ export interface CultNetRudpSocketServerOptions {
   /** A Connect from an endpoint beyond this many peers is dropped. Default 256. */
   maxPeers?: number;
   /**
-   * A peer that has sent nothing for this long is ended and told so. Default 60 000;
-   * `Infinity` keeps idle peers until they leave.
+   * A peer that has sent nothing for this long is ended and told so. TypeScript only: the
+   * Rust and C# servers never reap. Default `Infinity`, which keeps idle peers until they leave.
    */
   peerTimeoutMs?: number;
+  /** How long `close()` waits for the goodbyes to leave the socket. Default 1000. */
+  closeGraceMs?: number;
 }
 
 /** One remote endpoint's session. A peer that reconnects from the same endpoint is a new object. */
@@ -90,6 +92,7 @@ export class CultNetRudpSocketTransportServer extends EventEmitter {
   readonly #maxPeers: number;
   readonly #peerTimeoutMs: number;
   #closed = false;
+  #closing = false;
   readonly #stats: CultNetTransportStats = {
     bytesReceived: 0,
     bytesSent: 0,
@@ -104,7 +107,7 @@ export class CultNetRudpSocketTransportServer extends EventEmitter {
     this.#options = options;
     this.#socket = options.socket;
     this.#maxPeers = options.maxPeers ?? 256;
-    this.#peerTimeoutMs = options.peerTimeoutMs ?? 60_000;
+    this.#peerTimeoutMs = options.peerTimeoutMs ?? Infinity;
     if (!Number.isInteger(this.#maxPeers) || this.#maxPeers < 1) {
       throw new Error("RUDP server maxPeers must be a positive integer.");
     }
@@ -169,13 +172,23 @@ export class CultNetRudpSocketTransportServer extends EventEmitter {
     this.#endPeer(entry, entry.session.createDisconnect(Uint8Array.from(reason)));
   }
 
-  /** Ends every peer and releases the socket. */
-  close(): void {
+  /**
+   * Ends every peer and releases the socket once the goodbyes have left it (bounded by
+   * `closeGraceMs`, default 1000): closing the socket at once would drop them.
+   */
+  async close(): Promise<void> {
     if (this.#closed) return;
+    this.#closing = true;
     clearInterval(this.#timer);
-    for (const entry of [...this.#entries.values()]) {
-      this.#endPeer(entry, entry.session.createDisconnect(utf8("server closed")));
-    }
+    const sent = [...this.#entries.values()].map((entry) =>
+      this.#endPeer(entry, entry.session.createDisconnect(utf8("server closed"))));
+    let bound: NodeJS.Timeout | undefined;
+    await Promise.race([
+      Promise.all(sent),
+      new Promise<void>((resolve) => { bound = setTimeout(resolve, this.#options.closeGraceMs ?? 1_000); }),
+    ]);
+    clearTimeout(bound);
+    if (this.#closed) return;
     this.#closed = true;
     this.#socket.close();
   }
@@ -189,17 +202,24 @@ export class CultNetRudpSocketTransportServer extends EventEmitter {
   }
 
   /** Removes the peer, tells the caller, and says goodbye on the wire. Idempotent per entry. */
-  #endPeer(entry: PeerEntry, goodbye: CultNetRudpPacket): void {
-    if (this.#entries.get(entry.key) !== entry) return;
+  #endPeer(entry: PeerEntry, goodbye: CultNetRudpPacket): Promise<void> {
+    if (this.#entries.get(entry.key) !== entry) return Promise.resolve();
     this.#entries.delete(entry.key);
     this.emit("peerDisconnected", { peer: entry.peer, reason: goodbye.payload });
     // Best-effort: the session is over whether or not the peer hears it.
     const wire = encodeRudpPacket(goodbye);
     this.#stats.bytesSent += wire.length;
-    sendRudpDatagram(this.#socket, wire, entry.peer.remotePort, entry.peer.remoteHost, () => {});
+    return new Promise<void>((resolve) => {
+      try {
+        this.#socket.send(wire, entry.peer.remotePort, entry.peer.remoteHost, () => resolve());
+      } catch {
+        resolve();
+      }
+    });
   }
 
   #receiveDatagram(wire: Buffer, remote: RemoteInfo): void {
+    if (this.#closing) return;
     this.#stats.bytesReceived += wire.length;
     // What a datagram carries is the sender's business: a malformed frame, another
     // session's connection id and a sender no Connect admitted are dropped and counted.
