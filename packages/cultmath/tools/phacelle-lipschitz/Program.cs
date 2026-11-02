@@ -26,9 +26,15 @@ static double Op(float3 p, float3 side, float off, float n, out double comp)
 }
 static float3 Dir(double u, double th, double len) { var s = Math.Sqrt(Math.Max(0, 1-u*u)); return new float3((float)(s*Math.Cos(th)*len), (float)(s*Math.Sin(th)*len), (float)(u*len)); }
 
-long N = long.Parse(args[0]);
-var norms = args[1].Split(',').Select(float.Parse).ToArray();
-var sides = args[2].Split(',').Select(float.Parse).ToArray();
+float[]? norms = null, sides = null;
+try { norms = args.Length == 3 ? args[1].Split(',').Select(float.Parse).ToArray() : null; sides = args.Length == 3 ? args[2].Split(',').Select(float.Parse).ToArray() : null; }
+catch (FormatException) { }
+if (args.Length != 3 || !long.TryParse(args[0], out var N) || N <= 0 || norms is null || sides is null)
+{
+    Console.Error.WriteLine("usage: phacelle-lipschitz <samples per cell> <normalizations> <side lengths>");
+    Console.Error.WriteLine("  e.g. phacelle-lipschitz 4000000 0,0.5,0.75,0.9 0.25,0.5,1,1.5,2,4,8,12.5,25");
+    return 2;
+}
 Console.WriteLine("n\t|side|\tN\tsampledMax\tclimbedMax\tsecantMax\tscalarMax(cos|sin)\tp99.99\tclimbed*(1-n)/|side|");
 foreach (var n in norms) foreach (var sl in sides)
 {
@@ -83,3 +89,4 @@ foreach (var n in norms) foreach (var sl in sides)
     }
     Console.WriteLine($"{n}\t{sl}\t{N}\t{sampled:F3}\t{best.v:F3}\t{secant:F3}\t{scal.Max():F3}\t{p9999:F3}\t{best.v*(1-n)/sl:F3}");
 }
+return 0;
