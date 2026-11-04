@@ -1,5 +1,7 @@
 # CultLib
 
+**New here? Start at [`docs/start`](docs/start/README.md)**: a language x package matrix with tested first-call snippets.
+
 CultLib is GameCult's shared state, transport, and runtime substrate. It started
 as reusable C# game infrastructure, but the useful thing now is larger: typed
 `.cc` persistence, schema-stable wire formats, ergonomic reliable-UDP
