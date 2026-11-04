@@ -19,11 +19,23 @@ namespace CultMath.Tests;
 /// </summary>
 public sealed class CyclesOracleTests
 {
-    // The ulp distance a function is allowed from the reference. Empty: the fixtures are the SSE4.2 kernel's results
-    // and every function equals them, power and logarithm included (glibc's powf and logf, 0 ulp from MathF on Linux).
+    // The ulp distance a function is allowed from the reference; a function not named is held to 0. The fixtures are
+    // the SSE4.2 kernel's results and almost every function equals them, power and logarithm included (glibc's powf and
+    // logf, 0 ulp from MathF on Linux). asin, acos and atan2 are the exception: the fixtures' glibc and the libm these
+    // tests run on round them one ulp apart (glsl-parity.json families 95-97 are the same three, platform families
+    // there too), so each is allowed 1 ulp, never more (TolerancesAreCappedAtOneUlpAndStayOnTheDriftingFunctions).
     // An entry needs a measured case on the reference named in it (a failing case's bits and ulp); other builds'
     // tolerances belong to the class table in tools/cycles-oracle/README.md, not here.
-    private static readonly Dictionary<string, (int Ulp, string Measured)> Tolerances = new();
+    private const int MaxToleratedUlp = 1;
+
+    private static readonly Dictionary<string, (int Ulp, string Measured)> Tolerances = new()
+    {
+        ["cycles_arcsine"] = (1, "case 3f4dd9af -> 3f6f256c, C# 3f6f256d"),
+        ["cycles_arccosine"] = (1, "case 3f027192 -> 3f84a03c, C# 3f84a03b"),
+        ["cycles_arctan2"] = (1, "case 3f000000 bdcccccd -> 3fe2541c, C# 3fe2541d"),
+    };
+
+    private static int Allowed(string function) => Tolerances.TryGetValue(function, out var tolerance) ? tolerance.Ulp : 0;
 
     private const string CSharp = "C#";
     private const string Mirror = "HLSL mirror";
@@ -120,7 +132,7 @@ public sealed class CyclesOracleTests
             var name = (string)entry!["function"]!;
             var method = Method(name);
             var clamped = (string?)entry["then"] is not null;
-            var allowed = Tolerances.TryGetValue(name, out var tolerance) ? tolerance.Ulp : 0;
+            var allowed = Allowed(name);
             var worst = 0L;
             string? worstCase = null;
             var cases = entry["cases"]!.AsArray();
@@ -156,6 +168,24 @@ public sealed class CyclesOracleTests
         }
 
         Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
+    }
+
+    [Fact]
+    public void TolerancesAreCappedAtOneUlpAndStayOnTheDriftingFunctions()
+    {
+        Assert.Equal(new[] { "cycles_arccosine", "cycles_arcsine", "cycles_arctan2" }, Tolerances.Keys.Order().ToArray());
+        Assert.All(Tolerances.Values, t => Assert.InRange(t.Ulp, 1, MaxToleratedUlp));
+        Assert.All(Tolerances.Values, t => Assert.NotEmpty(t.Measured));
+
+        // A result two ulps from the reference is past every allowance, and one ulp is within the drifting functions' only.
+        foreach (var function in Tolerances.Keys.Append("cycles_power"))
+        {
+            var want = 0.7f;
+            var twoAway = MathF.BitIncrement(MathF.BitIncrement(want));
+            Assert.Equal(2, Distance(want, twoAway));
+            Assert.True(Distance(want, twoAway) > Allowed(function), $"{function}: a 2 ulp miss would pass");
+            Assert.Equal(function != "cycles_power", Distance(want, MathF.BitIncrement(want)) <= Allowed(function));
+        }
     }
 
     private static JsonNode RampEntry(string interpolation) =>

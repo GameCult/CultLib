@@ -975,6 +975,7 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
         var json = new StringBuilder();
         json.Append("{\n");
         json.Append("  \"generator\": \"GlslMirrorTests.GoldenFixtureMatchesCSharp (packages/cultmath/tests/CultMath.Tests); regenerate with CULTMATH_WRITE_GLSL=1\",\n");
+        json.Append("  \"recorded_on\": \"platform families: Yggdrasil's mcr.microsoft.com/dotnet/sdk:10.0 image (Debian GNU/Linux 13 trixie, .NET 10.0.14); lavapipe device bounds: fixtures/device-bounds-lavapipe.txt (llvmpipe LLVM 20.1.2, mesa-vulkan-drivers 25.2.8-0ubuntu0.24.04.4, ubuntu:24.04 probe image)\",\n");
         json.Append($"  \"seed\": {Seed},\n");
         json.Append($"  \"points\": {Points},\n");
         json.Append("  \"encoding\": \"each case is 'arguments -> result', every scalar a float32 or 32-bit integer bit pattern in hex, vectors and structs flattened in field order\",\n");
