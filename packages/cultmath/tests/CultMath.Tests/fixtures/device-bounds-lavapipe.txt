@@ -96,9 +96,9 @@ lavapipe-glsl	91	vec3 cultmath_cycles_mix_val(float, vec3, vec3)	ulp-bounded	256
 lavapipe-glsl	92	vec3 cultmath_cycles_mix_color(float, vec3, vec3)	ulp-bounded	256	0	0	00067b1567bcd6c07a81fa5002f145dfca22437a3f3df5389b2665334d14909b
 lavapipe-glsl	93	vec3 cultmath_cycles_mix_soft(float, vec3, vec3)	ulp-bounded	157	1.9750388068880254	0	ed7c5508ca0543cc20a5f0c5624e75e3ca2a2d6044d481816eeda2edc50c0592
 lavapipe-glsl	94	vec3 cultmath_cycles_mix_linear(float, vec3, vec3)	ulp-bounded	256	0	0	672435cc30bcbbb253cce7316ee0712b1a18f06924bc89cea2d3388dd164a15d
-lavapipe-glsl	95	float cultmath_cycles_arcsine(float)	ulp-bounded, platform asin	154	2734.286809678319	0	f28f3ed0a53ffeebdfa84865d2d3d41590e6b46fc1578d40e1215e2a9e1af585
+lavapipe-glsl	95	float cultmath_cycles_arcsine(float)	ulp-bounded, platform asin	155	2734.286809678319	0	f28f3ed0a53ffeebdfa84865d2d3d41590e6b46fc1578d40e1215e2a9e1af585
 lavapipe-glsl	96	float cultmath_cycles_arccosine(float)	ulp-bounded, platform acos	79	1046.8674409774287	0	22a2c38ab5a232cdbb33cf0c133362581a398f64a4d0d5d6dd89dc5af06bd890
-lavapipe-glsl	97	float cultmath_cycles_arctan2(float, float)	ulp-bounded, platform atan	6	25.5	0	2c60447d80186f6dc9726f19c09fa96ec3f66d8f5688968da533d9195ea463c4
+lavapipe-glsl	97	float cultmath_cycles_arctan2(float, float)	ulp-bounded, platform atan	7	25.5	0	2c60447d80186f6dc9726f19c09fa96ec3f66d8f5688968da533d9195ea463c4
 lavapipe-glsl	98	mat3 cultmath_snoise_hessian(vec3)	ulp-bounded	30	1358.4375	0	62bbafb8420ed5aaa0ce11d1470ca98945e690b186c33a1e7cf4d71478396465
 lavapipe-glsl	99	mat3 cultmath_snoise_hessian(vec3)	ulp-bounded, on the simplex tie set	110	1317.4754224467295	0	0efd9b3a637b46033ed0351f64de274db4d9ce05bb83dd1ce57afb3ceaea26bc
 lavapipe-glsl	100	float cultmath_integral_clamp_linear(float, float, float, float, float, float)	ulp-bounded	256	0	0	84bf9c9a2126b3114a692507cc54f58d313afc33de8a1cac83969cc508433cbe
@@ -222,9 +222,9 @@ lavapipe-hlsl	91	vec3 cultmath_cycles_mix_val(float, vec3, vec3)	ulp-bounded	256
 lavapipe-hlsl	92	vec3 cultmath_cycles_mix_color(float, vec3, vec3)	ulp-bounded	256	0	0	00067b1567bcd6c07a81fa5002f145dfca22437a3f3df5389b2665334d14909b
 lavapipe-hlsl	93	vec3 cultmath_cycles_mix_soft(float, vec3, vec3)	ulp-bounded	157	1.9750388068880254	0	ed7c5508ca0543cc20a5f0c5624e75e3ca2a2d6044d481816eeda2edc50c0592
 lavapipe-hlsl	94	vec3 cultmath_cycles_mix_linear(float, vec3, vec3)	ulp-bounded	256	0	0	672435cc30bcbbb253cce7316ee0712b1a18f06924bc89cea2d3388dd164a15d
-lavapipe-hlsl	95	float cultmath_cycles_arcsine(float)	ulp-bounded, platform asin	154	2734.286809678319	0	f28f3ed0a53ffeebdfa84865d2d3d41590e6b46fc1578d40e1215e2a9e1af585
+lavapipe-hlsl	95	float cultmath_cycles_arcsine(float)	ulp-bounded, platform asin	155	2734.286809678319	0	f28f3ed0a53ffeebdfa84865d2d3d41590e6b46fc1578d40e1215e2a9e1af585
 lavapipe-hlsl	96	float cultmath_cycles_arccosine(float)	ulp-bounded, platform acos	79	1046.8674409774287	0	22a2c38ab5a232cdbb33cf0c133362581a398f64a4d0d5d6dd89dc5af06bd890
-lavapipe-hlsl	97	float cultmath_cycles_arctan2(float, float)	ulp-bounded, platform atan	6	25.5	0	2c60447d80186f6dc9726f19c09fa96ec3f66d8f5688968da533d9195ea463c4
+lavapipe-hlsl	97	float cultmath_cycles_arctan2(float, float)	ulp-bounded, platform atan	7	25.5	0	2c60447d80186f6dc9726f19c09fa96ec3f66d8f5688968da533d9195ea463c4
 lavapipe-hlsl	98	mat3 cultmath_snoise_hessian(vec3)	ulp-bounded	33	2377.8799856935966	0	a64853839f394cc7c367ba5e107caa8bb396f07cf202263aa917095dd1c939f7
 lavapipe-hlsl	99	mat3 cultmath_snoise_hessian(vec3)	ulp-bounded, on the simplex tie set	132	1317.4754224467295	0	9066a49e50731881583ffca16c949171bb61578a1dfd497c54dafe773ab49488
 lavapipe-hlsl	100	float cultmath_integral_clamp_linear(float, float, float, float, float, float)	ulp-bounded	256	0	0	84bf9c9a2126b3114a692507cc54f58d313afc33de8a1cac83969cc508433cbe
