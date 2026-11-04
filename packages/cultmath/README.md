@@ -29,7 +29,8 @@ shader semantics.
   `cross`, `length`, `distance`, `normalize`, `reflect`, `csum`, `erf`,
   `erfinv` (scalar only), exponential
   `decay`/`damp`, intercept/segment helpers (`distance_to_segment` in 2D and 3D, with and without `out closest`, and `segment_closest`), Catmull-Rom, Bezier curves, and
-  deterministic value-noise primitives
+  deterministic value-noise primitives, and `fbm(p)` / `fbm(p, octaves, lacunarity, gain)`, the value-only octave sum
+  of `snoise` (`cultmath_fbm` in HLSL and GLSL)
 - Site cells: `power_cells` and `multiplicative_cells` return the two nearest sites of a point as `CultSiteCells`,
   `soft_gabriel_gate` gates a pair of sites by the empty-disc margin. Each is a loop over the shader steps
   `cultmath_power_score` / `cultmath_multiplicative_score`, `cultmath_site_cells_empty`, `cultmath_site_cells_insert`,

@@ -451,6 +451,26 @@ together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
   nearly cancels. The total weight `W` is positive for every `pcg3d` input (the
   smallest found by hill-climbing is 0.056); `W = 0`, and a NaN output, needs
   adversarial jitter no hash yields.
+  Lipschitz bound of the `(cosine, sine)` field in `p` (one cell is 1 unit): the
+  largest singular value of its 2×3 Jacobian is at most
+  `max(10, 1.25 |side|) / (1 - normalization)` for `normalization` in `[0, 0.9]` and
+  `|side|` in `[0.25, 25]`. A scalar use of `cosine` or `sine` alone is bounded by the same number (its gradient norm is
+  one row of the Jacobian, never above the largest singular value). Method (`tools/phacelle-lipschitz`):
+  random `p` (a 64-unit cube), a uniformly random `side` direction and offset, the
+  exact gradient at each, 4 million samples per (normalization, |side|); then
+  hill-climbing from the 256 best samples over `p`, `side` direction and offset
+  (10 000 steps each); then value differences around the climbed argmax to confirm the
+  gradient is the field's slope (agreement within 3%). Random sampling alone
+  undershoots the climbed maximum by up to 4×, because the maxima sit at near-cancellation
+  points of the blend (`1/|I|`); quote the climbed number. The climbed sup is 0.016 to 0.88 of
+  the envelope over the sweep: tightest (within 1.15×) at `normalization` 0 and `|side| >= 8`,
+  and 1.5 to 60× loose at small `|side|` or large `normalization`, where the
+  envelope's constant 10 is the worst case over all `|side|`. The typical gradient (99.99th percentile of the
+  samples) is 2 to 5× below the sup, so a sphere trace steps safely at `distance / L`
+  and can step farther with the returned gradient. The bound is not a proof (a
+  search found it, not an argument) and it does not hold as `normalization` approaches 1:
+  the 1/|I| factor is unbounded there (sampled 1335 at `normalization` 1, `|side|` 2π, and
+  rising with the sample count). If the caller scales `p` by `f` the bound scales by `f`.
   Cells whose per-axis lower bound `Σ max(0, |local - g| - 0.5)²` is at least
   2.25 lie outside the support and have weight exactly 0, so they are skipped,
   which changes no output bit. Cells whose bound sits just under 2.25 can still

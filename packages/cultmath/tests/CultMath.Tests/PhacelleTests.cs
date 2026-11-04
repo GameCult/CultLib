@@ -337,4 +337,33 @@ public sealed class PhacelleTests
         Assert.Equal(BitConverter.SingleToInt32Bits(expected.z), BitConverter.SingleToInt32Bits(actual.z));
         Assert.Equal(BitConverter.SingleToInt32Bits(expected.w), BitConverter.SingleToInt32Bits(actual.w));
     }
+
+    // The Lipschitz envelope of the (cosine, sine) field in p, per docs/design.md ("Lipschitz bound"): the largest
+    // singular value of its 2x3 Jacobian never exceeds max(10, 1.25 |side|) / (1 - normalization), for normalization
+    // in [0, 0.9] and |side| in [0.25, 25]. tools/phacelle-lipschitz measures it by sampling and hill-climbing; this
+    // pins that no ordinary sample passes it (the climbed maximum is at most 0.88 of the envelope).
+    [Theory]
+    [InlineData(0.0f)]
+    [InlineData(0.5f)]
+    [InlineData(0.75f)]
+    [InlineData(0.9f)]
+    public void GradientNormStaysUnderTheDocumentedLipschitzEnvelope(float normalization)
+    {
+        var random = new System.Random(0x11B5);
+        foreach (var sideLength in new[] { 0.25f, 1.0f, 1.5f, 4.0f, 12.5f, 25.0f })
+        {
+            var envelope = Math.Max(10.0, 1.25 * sideLength) / (1.0 - normalization);
+            for (var i = 0; i < 20000; i++)
+            {
+                var p = RandomPoint(random, 32.0f);
+                var side = math.normalize(RandomSide(random)) * sideLength;
+                var phasor = math.phacelle(p, side, random.NextSingle(), normalization);
+                var a = (double)math.dot(phasor.cosine.xyz, phasor.cosine.xyz);
+                var d = (double)math.dot(phasor.sine.xyz, phasor.sine.xyz);
+                var b = (double)math.dot(phasor.cosine.xyz, phasor.sine.xyz);
+                var norm = Math.Sqrt((a + d) / 2.0 + Math.Sqrt(Math.Max(0.0, (a + d) * (a + d) / 4.0 - (a * d - b * b))));
+                Assert.True(norm <= envelope, $"|J| {norm} passes the envelope {envelope} at p {p}, side {side}, normalization {normalization}");
+            }
+        }
+    }
 }

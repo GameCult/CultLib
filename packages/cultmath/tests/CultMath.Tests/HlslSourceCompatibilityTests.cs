@@ -47,6 +47,8 @@ public sealed class HlslSourceCompatibilityTests
         Assert.NotNull(ShaderFunction(shader, "cultmath_snoise_hessian", typeof(float3)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_integral_clamp_linear", typeof(float), typeof(float), typeof(float), typeof(float), typeof(float), typeof(float)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_fbm_grad", typeof(float3), typeof(int), typeof(float), typeof(float)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_fbm", typeof(float3), typeof(int), typeof(float), typeof(float)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_fbm", typeof(float3)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_ridged_grad", typeof(float3), typeof(int), typeof(float), typeof(float)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_phacelle", typeof(float3), typeof(float3), typeof(float), typeof(float)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_iv_snoise_ball", typeof(float3), typeof(float)));
@@ -205,7 +207,7 @@ public sealed class HlslSourceCompatibilityTests
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
         // The three site-array functions are compared by SiteArrayMirrorsMatchCSharp, which draws their counts and arrays.
-        Assert.Equal(140, compared.Count);
+        Assert.Equal(141, compared.Count);
     }
 
     /// <summary>

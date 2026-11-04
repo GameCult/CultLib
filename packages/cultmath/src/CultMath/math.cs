@@ -823,6 +823,29 @@ public static partial class math
         return new float4(gradient, value);
     }
 
+    // Value-only fractional Brownian motion: the octave sum of snoise, octave i at frequency lacunarity^i and
+    // amplitude gain^i. It is fbm_grad(p, octaves, lacunarity, gain).w without the gradient work (to float
+    // rounding: snoise and snoise_grad.w order their arithmetic differently), so a loop that only wants the height
+    // (a sphere trace) does not pay for the gradient. octaves clamps to [0, 16] as fbm_grad's does. The one-argument
+    // form is the stock four octaves, lacunarity 2, gain 1/2: its range is within +-1.875 times snoise's.
+    public static float fbm(float3 p, int octaves, float lacunarity, float gain)
+    {
+        octaves = clamp(octaves, 0, 16);
+        var amplitude = 1.0f;
+        var frequency = 1.0f;
+        var value = 0.0f;
+        for (var i = 0; i < octaves; i++)
+        {
+            value += amplitude * snoise(p * frequency);
+            frequency *= lacunarity;
+            amplitude *= gain;
+        }
+
+        return value;
+    }
+
+    public static float fbm(float3 value) => fbm(value, 4, 2.0f, 0.5f);
+
     // Ridged multifractal noise (Musgrave, Texturing and Modeling, ch. 16; the operator's dune term,
     // 2026-09-25): each octave folds snoise_grad about zero, value = Sum a_i*(1 - |n_i|), gradient =
     // -Sum a_i*f_i*sign(n_i)*grad(n_i), the same per-octave frequency scaling as fbm_grad's chain

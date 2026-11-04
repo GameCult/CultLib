@@ -342,6 +342,26 @@ float4 cultmath_fbm_grad(float3 p, int octaves, float lacunarity, float gain)
     return float4(gradient, value);
 }
 
+// Value-only octave sum of cultmath_snoise; see the C# math.fbm comment. The one-argument form is four octaves,
+// lacunarity 2, gain 0.5.
+float cultmath_fbm(float3 p, int octaves, float lacunarity, float gain)
+{
+    octaves = clamp(octaves, 0, 16);
+    float amplitude = 1.0;
+    float frequency = 1.0;
+    float value = 0.0;
+    for (int i = 0; i < octaves; i++)
+    {
+        value += amplitude * cultmath_snoise(p * frequency);
+        frequency *= lacunarity;
+        amplitude *= gain;
+    }
+
+    return value;
+}
+
+float cultmath_fbm(float3 value) { return cultmath_fbm(value, 4, 2.0, 0.5); }
+
 // Ridged multifractal noise (Musgrave, Texturing and Modeling, ch. 16); see the C# math.ridged_grad
 // comment for the fold/sign derivation, the deliberate crease at n = 0, and why octaves is clamped.
 float4 cultmath_ridged_grad(float3 p, int octaves, float lacunarity, float gain)
