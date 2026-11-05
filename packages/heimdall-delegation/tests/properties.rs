@@ -40,7 +40,7 @@ fn person(id: u64, estate: u64, weight: u64) -> Person {
     Person { id, estate, weight }
 }
 fn del(from: u64, to: u64) -> Delegation {
-    Delegation { from, to, scope: Scope::All, revoked: false }
+    Delegation { from, to, scope: Scope::All, revoked: None }
 }
 fn vote(voter: u64, choice: &str) -> Vote {
     Vote { voter, topic: TOPIC.into(), choice: choice.into() }
@@ -72,12 +72,12 @@ fn random_world(rng: &mut Rng) -> World {
                 from,
                 to: 1 + rng.below(n + 2), // n+1, n+2 are unseated
                 scope: Scope::All,
-                revoked: rng.below(6) == 0,
+                revoked: (rng.below(6) == 0).then(|| rng.below(1000)),
             }),
             _ => {
                 // two disjoint scoped delegations
-                delegations.push(Delegation { from, to: 1 + rng.below(n), scope: only(&["budget"]), revoked: false });
-                delegations.push(Delegation { from, to: 1 + rng.below(n), scope: only(&["war", "trade"]), revoked: false });
+                delegations.push(Delegation { from, to: 1 + rng.below(n), scope: only(&["budget"]), revoked: None });
+                delegations.push(Delegation { from, to: 1 + rng.below(n), scope: only(&["war", "trade"]), revoked: None });
             }
         }
     }
@@ -239,11 +239,15 @@ fn revoked_delegation_equals_removed_delegation() {
     for (seed, w) in worlds(400) {
         let mut revoked = w.clone();
         for d in revoked.delegations.iter_mut().filter(|d| d.from % 2 == 0) {
-            d.revoked = true;
+            d.revoked = Some(d.revoked.unwrap_or(7));
         }
         let mut removed = w.clone();
         removed.delegations.retain(|d| d.from % 2 != 0);
-        assert_eq!(revoked.resolve(), removed.resolve(), "seed {seed}");
+        let (mut a, mut b) = (revoked.resolve(), removed.resolve());
+        for r in a.receipts.iter_mut().chain(b.receipts.iter_mut()) {
+            r.revoked_at = None;
+        }
+        assert_eq!(a, b, "seed {seed}");
     }
 }
 
@@ -285,26 +289,37 @@ fn same_estate_switch_only_ever_removes_delegated_votes() {
 }
 
 #[test]
-fn cap_trims_deterministically_in_originator_order() {
-    // Estate 0: ten people of weight 1, holder is person 11 (estate 1).
-    // Cap 1/5 of estate 0 (total 10) = 2.
+fn cap_scales_every_delegator_by_the_same_factor() {
+    // Estate 0: ten people of weight 1 plus a weight-10 whale (total 20);
+    // cap 1/5 -> 4 from estate 0. Eleven delegators into holder 12 (estate 1):
+    // sum 20 > 4, factor 1/5: the whale keeps 2, the ten keep 0.2 each; the
+    // two leftover units go to the largest remainders (equal, so ids 1 and 2).
     let mut people: Vec<_> = (1..=10).map(|i| person(i, 0, 1)).collect();
-    people.push(person(11, 1, 1));
-    let d: Vec<_> = (1..=10).map(|i| del(i, 11)).collect();
+    people.push(person(11, 0, 10));
+    people.push(person(12, 1, 1));
+    let d: Vec<_> = (1..=11).map(|i| del(i, 12)).collect();
     let mut c = loose(1);
     c.cap = Ratio { num: 1, den: 5 };
-    let w = world(c, people, d, vec![vote(11, "yes")]);
-    let r = w.resolve();
-    for id in 1..=2 {
-        assert!(matches!(outcome(&r, id), Outcome::Delegated { holder: 11, .. }));
-    }
-    for id in 3..=10 {
-        assert_eq!(outcome(&r, id), &Outcome::Uncast(UncastReason::Trimmed));
-    }
-    assert_eq!(r.tally.by_estate[&0]["yes"], 2);
-    // Trimmed votes are not re-routed: the holder's own weight is untouched.
+    let r = world(c, people, d, vec![vote(12, "yes")]).resolve();
+    let counted: Vec<u64> = r.receipts.iter().filter(|x| x.estate == 0).map(|x| x.counted).collect();
+    assert_eq!(counted, vec![1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+    assert_eq!(outcome(&r, 3), &Outcome::Uncast(UncastReason::Trimmed));
+    assert_eq!(r.tally.by_estate[&0]["yes"], 4);
+    // The holder's own direct vote is outside the cap and untouched.
     assert_eq!(r.tally.by_estate[&1]["yes"], 1);
-    assert_eq!(r.tally.uncast, 8);
+    assert_eq!((r.tally.cast, r.tally.uncast), (5, 16));
+}
+
+#[test]
+fn partial_trim_keeps_the_delegation_and_reports_the_uncast_part() {
+    let people = vec![person(1, 0, 6), person(2, 0, 4), person(3, 1, 1)];
+    let mut c = loose(1);
+    c.cap = Ratio { num: 1, den: 2 }; // limit 5 of estate 0 (total 10)
+    let r = world(c, people, vec![del(1, 3), del(2, 3)], vec![vote(3, "yes")]).resolve();
+    let rc = |id| r.receipts.iter().find(|x| x.originator == id).unwrap();
+    assert_eq!((rc(1).counted, rc(2).counted), (3, 2)); // exactly 6/10 and 4/10 of 5
+    assert!(matches!(rc(1).outcome, Outcome::Delegated { holder: 3, .. }));
+    assert_eq!(r.tally.uncast, 5);
 }
 
 #[test]
@@ -317,30 +332,156 @@ fn cap_is_per_estate_and_applies_to_the_final_holder() {
     let mut c = loose(1);
     c.cap = Ratio { num: 1, den: 5 };
     let r = world(c, people, d, vec![vote(20, "yes")]).resolve();
-    let held: Vec<u64> = r
-        .receipts
-        .iter()
-        .filter(|x| matches!(x.outcome, Outcome::Delegated { .. }))
-        .map(|x| x.originator)
-        .collect();
-    assert_eq!(held, vec![1, 6]);
+    for e in [0, 1] {
+        let got: u64 = r.receipts.iter().filter(|x| x.estate == e).map(|x| x.counted).sum();
+        assert_eq!(got, 1, "estate {e}");
+    }
+}
+
+/// Worlds built to hit the cap: few holders, most people delegate straight
+/// to them, varied weights, tight caps.
+fn crowded_world(rng: &mut Rng) -> World {
+    let n = 6 + rng.below(20);
+    let holders = 1 + rng.below(3);
+    let people: Vec<Person> = (1..=n).map(|i| person(i, rng.below(3), 1 + rng.below(12))).collect();
+    let mut delegations = vec![];
+    let mut votes = vec![];
+    for i in 1..=n {
+        if i <= holders {
+            votes.push(vote(i, "yes"));
+        } else if rng.below(8) != 0 {
+            delegations.push(del(i, 1 + rng.below(holders)));
+        }
+    }
+    let config = Config { max_depth: 1, cap: Ratio { num: 1, den: 2 + rng.below(6) }, same_estate_only: false };
+    World { config, people, delegations, votes }
+}
+
+fn crowded(n: u64) -> impl Iterator<Item = (u64, World)> {
+    (1..=n).map(|seed| (seed, crowded_world(&mut Rng(seed * 104729))))
+}
+
+fn groups(w: &World, r: &Resolution) -> std::collections::BTreeMap<(u64, u64), Vec<Receipt>> {
+    let _ = w;
+    let mut g: std::collections::BTreeMap<(u64, u64), Vec<Receipt>> = Default::default();
+    for rc in &r.receipts {
+        if let Outcome::Delegated { holder, .. } = rc.outcome {
+            g.entry((holder, rc.estate)).or_default().push(rc.clone());
+        }
+    }
+    g
+}
+
+fn limit(w: &World, estate: u64) -> u128 {
+    let total: u128 = w.people.iter().filter(|p| p.estate == estate).map(|p| p.weight as u128).sum();
+    total * w.config.cap.num as u128 / w.config.cap.den as u128
 }
 
 #[test]
-fn cap_holds_for_every_holder_and_estate() {
-    for (seed, w) in worlds(400) {
-        let r = w.resolve();
-        let mut per: std::collections::BTreeMap<(u64, u64), u128> = Default::default();
-        for rc in &r.receipts {
-            if let Outcome::Delegated { holder, .. } = rc.outcome {
-                *per.entry((holder, rc.estate)).or_default() += rc.weight as u128;
-            }
-        }
-        for ((_, estate), got) in per {
-            let total: u128 = w.people.iter().filter(|p| p.estate == estate).map(|p| p.weight as u128).sum();
-            assert!(got <= total * w.config.cap.num as u128 / w.config.cap.den as u128, "seed {seed}");
+fn trim_is_order_independent_under_shuffles() {
+    let mut trimmed = 0;
+    for (seed, w) in crowded(400) {
+        let base = w.resolve();
+        trimmed += base.receipts.iter().filter(|r| r.counted < r.weight).count();
+        let mut rng = Rng(seed + 5000);
+        for _ in 0..5 {
+            let mut s = w.clone();
+            rng.shuffle(&mut s.people);
+            rng.shuffle(&mut s.delegations);
+            rng.shuffle(&mut s.votes);
+            assert_eq!(s.resolve(), base, "seed {seed}");
         }
     }
+    assert!(trimmed > 500, "generator must actually exercise the cap, got {trimmed}");
+}
+
+#[test]
+fn delegated_weight_never_exceeds_the_cap_and_fills_it_when_over() {
+    for (seed, w) in worlds(400).chain(crowded(400)) {
+        let r = w.resolve();
+        for ((_, estate), members) in groups(&w, &r) {
+            let sum: u128 = members.iter().map(|m| m.weight as u128).sum();
+            let got: u128 = members.iter().map(|m| m.counted as u128).sum();
+            let lim = limit(&w, estate);
+            assert!(got <= lim, "seed {seed}: {got} > {lim}");
+            if sum > lim {
+                assert_eq!(got, lim, "seed {seed}: over-cap group must use exactly the cap");
+            } else {
+                assert_eq!(got, sum, "seed {seed}: under-cap group is untouched");
+            }
+        }
+    }
+}
+
+#[test]
+fn no_delegator_is_scaled_more_than_another() {
+    for (seed, w) in crowded(400) {
+        let r = w.resolve();
+        for ((_, estate), members) in groups(&w, &r).into_iter().chain(trimmed_groups(&w, &r)) {
+            let sum: u128 = members.iter().map(|m| m.weight as u128).sum();
+            let lim = limit(&w, estate);
+            if sum <= lim {
+                continue;
+            }
+            for m in &members {
+                // counted is the exact pro-rata share rounded down or up, never further.
+                let exact = m.weight as u128 * lim;
+                let (lo, hi) = (exact / sum, exact.div_ceil(sum));
+                assert!((lo..=hi).contains(&(m.counted as u128)), "seed {seed}: {m:?}");
+            }
+            // Equal weights are scaled equally to within one unit of rounding,
+            // and a unit of rounding goes to the lower originator id on a tie.
+            for a in &members {
+                for b in &members {
+                    if a.weight == b.weight {
+                        assert!(a.counted.abs_diff(b.counted) <= 1, "seed {seed}");
+                        if a.counted < b.counted {
+                            assert!(a.originator > b.originator, "seed {seed}: tie broke against ascending id");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Delegators whose whole share rounded to zero are `Uncast(Trimmed)`, so they
+/// are not in `groups`; rebuild their groups by following the chain they would
+/// have taken (depth 1: their sole live delegation).
+fn trimmed_groups(w: &World, r: &Resolution) -> std::collections::BTreeMap<(u64, u64), Vec<Receipt>> {
+    let mut g = groups(w, r);
+    for rc in &r.receipts {
+        if rc.outcome == Outcome::Uncast(UncastReason::Trimmed) {
+            let to = w.delegations.iter().find(|d| d.from == rc.originator && d.revoked.is_none()).unwrap().to;
+            g.entry((to, rc.estate)).or_default().push(rc.clone());
+        }
+    }
+    g
+}
+
+#[test]
+fn receipts_carry_the_revocation_time_of_the_originators_own_revoked_delegation() {
+    let people = vec![person(1, 0, 1), person(2, 0, 1), person(3, 0, 1)];
+    let mut a = del(1, 2);
+    a.revoked = Some(40);
+    let mut b = del(1, 3);
+    b.revoked = Some(90);
+    b.scope = only(&["budget"]);
+    let mut c = del(1, 3);
+    c.revoked = Some(500);
+    c.scope = only(&["war"]); // other topic: not reported
+    let r = world(loose(2), people, vec![a, b, c], vec![vote(3, "yes")]).resolve();
+    let rc = |id| r.receipts.iter().find(|x| x.originator == id).unwrap();
+    assert_eq!(rc(1).revoked_at, Some(90)); // latest covering revocation
+    assert_eq!(outcome(&r, 1), &Outcome::Uncast(UncastReason::NoVote)); // and it stayed inert
+    assert_eq!(rc(2).revoked_at, None);
+    // A live delegation alongside an older revoked one still resolves.
+    let people = vec![person(1, 0, 1), person(2, 0, 1)];
+    let mut old = del(1, 2);
+    old.revoked = Some(3);
+    let r = world(loose(2), people, vec![old, del(1, 2)], vec![vote(2, "yes")]).resolve();
+    assert!(matches!(outcome(&r, 1), Outcome::Delegated { holder: 2, .. }));
+    assert_eq!(r.receipts[0].revoked_at, Some(3));
 }
 
 #[test]

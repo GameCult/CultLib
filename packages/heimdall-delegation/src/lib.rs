@@ -49,8 +49,9 @@ pub struct Delegation {
     pub from: PersonId,
     pub to: PersonId,
     pub scope: Scope,
-    /// Revoked delegations are inert.
-    pub revoked: bool,
+    /// `Some(t)` means revoked at caller-clock time `t`. Revoked delegations are
+    /// inert; the resolver never reads a clock and the caller owns the ledger.
+    pub revoked: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,7 +103,7 @@ pub enum UncastReason {
     NotSeated,
     /// `same_estate_only` and the next delegate is in another estate.
     CrossEstate,
-    /// The holder's cap for the originator's estate was reached.
+    /// The cap scaled this originator's whole weight away (rounded to zero).
     Trimmed,
 }
 
@@ -129,6 +130,14 @@ pub struct Receipt {
     pub originator: PersonId,
     pub estate: EstateId,
     pub weight: u64,
+    /// Part of `weight` that counted for the outcome's choice. `weight` for a
+    /// direct vote, `0` for an uncast one, and for a delegated one `weight`
+    /// scaled by the cap; `weight - counted` is uncast.
+    pub counted: u64,
+    /// Latest revocation time among the originator's own revoked delegations
+    /// whose scope covers this topic. Those delegations took no part in the
+    /// resolution; the receipt records that they existed.
+    pub revoked_at: Option<u64>,
     pub outcome: Outcome,
 }
 
@@ -178,8 +187,16 @@ pub fn resolve(
         }
     }
     let mut live: BTreeMap<PersonId, Vec<&Delegation>> = BTreeMap::new();
-    for d in delegations.iter().filter(|d| !d.revoked) {
-        live.entry(d.from).or_default().push(d);
+    let mut revoked_at: BTreeMap<PersonId, u64> = BTreeMap::new();
+    for d in delegations {
+        match d.revoked {
+            None => live.entry(d.from).or_default().push(d),
+            Some(t) if d.scope.covers(topic) => {
+                let e = revoked_at.entry(d.from).or_insert(t);
+                *e = (*e).max(t);
+            }
+            Some(_) => {}
+        }
     }
     for (from, ds) in &live {
         for (i, a) in ds.iter().enumerate() {
@@ -231,27 +248,59 @@ pub fn resolve(
             }
             Walk::Uncast(r) => Outcome::Uncast(r),
         };
-        receipts.push(Receipt { topic: topic.to_string(), originator: p.id, estate: p.estate, weight: p.weight, outcome });
+        let counted = if matches!(outcome, Outcome::Direct { .. } | Outcome::Delegated { .. }) { p.weight } else { 0 };
+        receipts.push(Receipt {
+            topic: topic.to_string(),
+            originator: p.id,
+            estate: p.estate,
+            weight: p.weight,
+            counted,
+            revoked_at: revoked_at.get(&p.id).copied(),
+            outcome,
+        });
     }
 
-    // Cap: per (holder, originator estate), keep originators in ascending id
-    // order until the next would overflow; the rest are trimmed.
+    // Cap: per (final holder, originator estate) the holder may wield at most
+    // floor(estate total * cap) of delegated weight (the holder's own direct
+    // vote is not part of it). An over-cap group is scaled pro rata: every
+    // delegator by the same factor limit / sum, in integer weight by largest
+    // remainder. Only exact remainder ties fall to ascending originator id.
     let mut estate_total: BTreeMap<EstateId, u128> = BTreeMap::new();
     for p in roster.values() {
         *estate_total.entry(p.estate).or_default() += p.weight as u128;
     }
-    let mut used: BTreeMap<(PersonId, EstateId), u128> = BTreeMap::new();
-    let mut full: BTreeSet<(PersonId, EstateId)> = BTreeSet::new();
-    for r in receipts.iter_mut() {
-        let Outcome::Delegated { holder, .. } = r.outcome else { continue };
-        let key = (holder, r.estate);
-        let limit = estate_total[&r.estate] * config.cap.num as u128 / config.cap.den as u128;
-        let after = used.get(&key).copied().unwrap_or(0) + r.weight as u128;
-        if full.contains(&key) || after > limit {
-            full.insert(key);
-            r.outcome = Outcome::Uncast(UncastReason::Trimmed);
-        } else {
-            used.insert(key, after);
+    let mut groups: BTreeMap<(PersonId, EstateId), Vec<usize>> = BTreeMap::new();
+    for (i, r) in receipts.iter().enumerate() {
+        if let Outcome::Delegated { holder, .. } = r.outcome {
+            groups.entry((holder, r.estate)).or_default().push(i);
+        }
+    }
+    for ((_, estate), members) in groups {
+        let limit = estate_total[&estate] * config.cap.num as u128 / config.cap.den as u128;
+        let sum: u128 = members.iter().map(|&i| receipts[i].weight as u128).sum();
+        if sum <= limit {
+            continue;
+        }
+        // members are in ascending originator id (receipts are), so a stable
+        // sort by descending remainder leaves ids ascending within ties.
+        let mut shares: Vec<(usize, u128, u128)> = members
+            .iter()
+            .map(|&i| {
+                let scaled = receipts[i].weight as u128 * limit;
+                (i, scaled / sum, scaled % sum)
+            })
+            .collect();
+        let leftover = limit - shares.iter().map(|s| s.1).sum::<u128>();
+        let mut order: Vec<usize> = (0..shares.len()).collect();
+        order.sort_by(|&a, &b| shares[b].2.cmp(&shares[a].2));
+        for &k in order.iter().take(leftover as usize) {
+            shares[k].1 += 1;
+        }
+        for (i, counted, _) in shares {
+            receipts[i].counted = counted as u64;
+            if counted == 0 {
+                receipts[i].outcome = Outcome::Uncast(UncastReason::Trimmed);
+            }
         }
     }
 
@@ -259,9 +308,10 @@ pub fn resolve(
     for r in &receipts {
         match &r.outcome {
             Outcome::Direct { choice } | Outcome::Delegated { choice, .. } => {
-                *tally.by_choice.entry(choice.clone()).or_default() += r.weight;
-                *tally.by_estate.entry(r.estate).or_default().entry(choice.clone()).or_default() += r.weight;
-                tally.cast += r.weight;
+                *tally.by_choice.entry(choice.clone()).or_default() += r.counted;
+                *tally.by_estate.entry(r.estate).or_default().entry(choice.clone()).or_default() += r.counted;
+                tally.cast += r.counted;
+                tally.uncast += r.weight - r.counted;
             }
             Outcome::Uncast(_) => tally.uncast += r.weight,
         }
