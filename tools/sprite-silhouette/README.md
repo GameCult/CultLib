@@ -2,7 +2,7 @@
 
 Turns a sprite's alpha channel into a simplified polygon in percent coordinates, for CSS
 `shape-outside: polygon()`, so text wraps around the figure instead of its rectangle. Zero
-dependencies: Node 18+ (`node:zlib` does the PNG inflate). Entry point: `silhouette.mjs`.
+dependencies: Node (tested on 24; `node:zlib` does the PNG inflate). Entry point: `silhouette.mjs`.
 Live and tested; there is no packaging or release for it, it is a repo tool.
 
 ## First call
@@ -17,7 +17,7 @@ tool reads it and every PNG it names, and writes nothing there. Output is a JSON
 pose id, `mind/label` in catalogue order (`void/neutral`, `eureka/probe`, ...):
 
 ```json
-{ "void/neutral": { "width": 577, "height": 579,
+{ "void/neutral": { "width": 605, "height": 461,
     "points": [[42.98, 6.72], [49.59, 8.24], "..."],
     "css": "polygon(42.98% 6.72%, 49.59% 8.24%, ...)" } }
 ```
