@@ -27,6 +27,13 @@ any CultMesh projection.
   ascending originator id. A receipt's `counted` is its scaled weight and
   `weight - counted` is uncast; a share that rounds to zero is
   `Uncast(Trimmed)`. Cast + uncast = total weight.
+  **Caveat:** the cap binds the ledger, not influence. A delegator under an
+  over-cap holder can copy that holder's ballot and vote directly; the
+  resolver sees a direct ballot and cannot see the copying. In the Bifrost sim
+  (`docs/research/2026-11-05-estate-rule-sim/`, commit `5d352c6c`, Bifrost PR
+  #4), with full copying the cap leaves effective top-holder share unchanged
+  (difference +0.001 or less at every alpha), while the formal share drops. The
+  copy rate there is an assumption, not a measurement.
 - Revocation (**placeholder**): `Delegation::revoked` is `Some(time)` when
   revoked. A revoked delegation is inert; the resolver reads no clock and the
   caller owns the ledger. Each receipt carries `revoked_at`, the latest
