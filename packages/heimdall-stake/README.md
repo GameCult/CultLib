@@ -63,6 +63,17 @@ as a cliff, not a slope: with a 50 EUR minimum, 100 EUR split in two still gains
 in the example), and split in three weighs 0. So the minimum has to sit near the size of a typical
 budget to deter splitting, and the report is how to see where it does.
 
+## Why the sybil defence cannot live here
+
+`weight = 1 + log_b(amount / unit)` pays the constant 1 once per identity. Splitting a budget into
+k identities pays that 1 k times and costs only the logarithm's shrinkage, so splitting wins until
+the log term goes negative: with unit 1 EUR and b = 10, 100 EUR weighs 3 as one identity, 5.40 as
+two, 20 as ten and 100 as one hundred (`tests/vectors/stake_golden.csv`, pinned by
+`tests/golden.rs`). No choice of `b` fixes this: `b` scales the log term and never the constant.
+A cap or a per-identity minimum only moves the cliff (see Splitting gain). So the defence belongs
+outside the function: non-transferable or vesting stake, a per-person cap on total stake, and a
+cost to create an identity. This crate states the incentive; it cannot remove it.
+
 ## Where this sits in the estate rule
 
 This crate does not normalize. The estate rule normalizes weights above it; the weights here are
