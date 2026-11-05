@@ -34,6 +34,7 @@ which is what `dotnet test tests/GameCult.Caching.Tests --filter FirstCallTests`
 cannot drift without the test failing.
 
 ```csharp
+using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
 using MessagePack;
@@ -47,20 +48,27 @@ public sealed class Item
     [Key(2)] public int Value;
 }
 
-var store = new SingleFileMessagePackBackingStore("first-call.cc");
-var cache = new CultCache();
-cache.AddBackingStore(store);
-var handle = await cache.AddAsync(new Item { Name = "Potion", Category = "Consumable", Value = 50 });
-store.PushAll();                                   // write the .cc file
+public static class FirstCall
+{
+    public static async Task<Item?> Run(string path)
+    {
+        var store = new SingleFileMessagePackBackingStore(path);
+        var cache = new CultCache();
+        cache.AddBackingStore(store);
+        var handle = await cache.AddAsync(new Item { Name = "Potion", Category = "Consumable", Value = 50 });
+        store.PushAll();                                   // write the .cc file
 
-var reopened = new CultCache();
-reopened.AddBackingStore(new SingleFileMessagePackBackingStore("first-call.cc"));
-await reopened.PullAllBackingStoresAsync();        // read it back
-var potion = reopened.Get<Item>(handle.Key);       // by key
-var byName = reopened.GetByName<Item>("Potion");   // by [CultName]
+        var reopened = new CultCache();
+        reopened.AddBackingStore(new SingleFileMessagePackBackingStore(path));
+        await reopened.PullAllBackingStoresAsync();        // read it back
+        var potion = reopened.Get<Item>(handle.Key);       // by key
+        var byName = reopened.GetByName<Item>("Potion");   // by [CultName]
+        return byName ?? potion;
+    }
+}
 ```
 
-The test's `Item` is nested and internal, so it carries `[MessagePackObject(AllowPrivate = true)]`; the snippet above is the public-class form and is not itself compiled. More: `src/GameCult.Caching/README.md`.
+`FirstCall.Run` is the call; a second test in that file fails if the block above stops matching it. More: `src/GameCult.Caching/README.md`.
 
 ## TypeScript first call
 
@@ -90,23 +98,26 @@ const itemDocument = defineDocumentType({
 });
 const registry = defineDocumentRegistry(itemDocument);
 
-const cache = CultCache.builder()
-  .withRegistry(registry)
-  .withGenericStore(new SingleFileMessagePackBackingStore("first-call.cc"))
-  .build();
-await cache.pullAllBackingStores();
-await cache.put(itemDocument, "item:potion", { name: "Potion", category: "Consumable", value: 50 });
+async function firstCall(path: string) {
+  const cache = CultCache.builder()
+    .withRegistry(registry)
+    .withGenericStore(new SingleFileMessagePackBackingStore(path))
+    .build();
+  await cache.pullAllBackingStores();
+  await cache.put(itemDocument, "item:potion", { name: "Potion", category: "Consumable", value: 50 });
 
-const reopened = CultCache.builder()
-  .withRegistry(registry)
-  .withGenericStore(new SingleFileMessagePackBackingStore("first-call.cc"))
-  .build();
-await reopened.pullAllBackingStores();
-const potion = reopened.get(itemDocument, "item:potion");
-const byName = reopened.getByName(itemDocument, "Potion");
+  const reopened = CultCache.builder()
+    .withRegistry(registry)
+    .withGenericStore(new SingleFileMessagePackBackingStore(path))
+    .build();
+  await reopened.pullAllBackingStores();
+  const potion = reopened.get(itemDocument, "item:potion");
+  const byName = reopened.getByName(itemDocument, "Potion");
+  return { potion, byName };
+}
 ```
 
-The test imports from `../src/index`; an application imports `@gamecult/cultcache-ts`. More:
+The test imports from `../src/index` where the block reads `@gamecult/cultcache-ts`; a second test in that file fails if the block stops matching the rest. More:
 `packages/cultcache-ts/README.md`.
 
 ## Rust first call
