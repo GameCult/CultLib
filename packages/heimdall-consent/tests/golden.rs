@@ -162,6 +162,11 @@ fn golden_vectors() {
                         })
                         .unwrap();
                 }
+                "expect_terms" => {
+                    let t = cache.get_required::<MemberTerms>(&MemberTerms::cache_key(member).unwrap()).unwrap();
+                    assert_eq!((t.member_id.as_str(), t.terms_version.as_str(), t.terms_accepted_at), (member, payload, ts), "{ctx}");
+                }
+                "expect_no_terms" => assert!(cache.get::<MemberTerms>(&MemberTerms::cache_key(member).unwrap()).unwrap().is_none(), "{ctx}"),
                 "expect_counts" => {
                     let want = format!(
                         "answers={};acceptances={}",
@@ -214,7 +219,7 @@ fn records_survive_a_reopen() {
 
 #[test]
 fn key_refuses_unversioned_sample_ids() {
-    for bad in ["s", "s@", "s@0", "s@x", "@1", "s@-1", "s@+1", "s@4294967296"] {
+    for bad in ["s", "s@", "s@0", "s@x", "@1", "s@-1", "s@+1", "s@4294967296", "s@01", "s@00", "s@001"] {
         assert!(Answer::cache_key("r", bad, "m").is_err(), "{bad}");
     }
     assert!(Answer::cache_key("r", "s@4294967295", "m").is_ok());
@@ -356,4 +361,62 @@ fn later_reply_is_greater_received_at_then_bytewise_event_id() {
     assert!(at(1, "a").supersedes(&at(1, "B")), "bytewise: 0x61 > 0x42");
     assert!(at(1, "z").supersedes(&at(1, "aa")), "bytewise, not by length");
     assert!(!at(1, "e").supersedes(&at(1, "e")));
+}
+
+#[test]
+fn keys_join_the_parts_with_u001f_and_refuse_empty_or_separator_parts() {
+    assert_eq!(Answer::cache_key("r", "s@1", "m").unwrap(), "r\u{1f}s@1\u{1f}m");
+    assert_eq!(NoticeAcceptance::cache_key("r", "m", 3).unwrap(), "r\u{1f}m\u{1f}3");
+    assert_eq!(MemberTerms::cache_key("m").unwrap(), "m");
+    for (experiment, sample, member) in [("", "s@1", "m"), ("r", "s@1", ""), ("r\u{1f}x", "s@1", "m"), ("r", "s\u{1f}x@1", "m"), ("r", "s@1", "m\u{1f}x")] {
+        assert!(Answer::cache_key(experiment, sample, member).is_err(), "{experiment:?} {sample:?} {member:?}");
+    }
+    assert!(NoticeAcceptance::cache_key("", "m", 1).is_err());
+    assert!(NoticeAcceptance::cache_key("r", "", 1).is_err());
+    assert!(NoticeAcceptance::cache_key("r\u{1f}", "m", 1).is_err());
+    assert!(NoticeAcceptance::cache_key("r", "m\u{1f}", 1).is_err());
+    assert!(MemberTerms::cache_key("").is_err());
+    assert!(MemberTerms::cache_key("m\u{1f}").is_err());
+    // Parts that would collide if the separator were not refused or were `,` or empty.
+    assert_ne!(Answer::cache_key("a", "s@1", "bc").unwrap(), Answer::cache_key("ab", "s@1", "c").unwrap());
+}
+
+#[test]
+fn an_acceptance_for_another_member_or_experiment_never_covers_the_answer() {
+    let acc = NoticeAcceptance {
+        member_id: "m".into(),
+        experiment_id: "r".into(),
+        notice_version: 1,
+        scope: Scope::Train,
+        accepted_at: 1,
+        event_id: "e0".into(),
+    };
+    assert!(answer().is_training_data(Some(&acc)));
+    let other_member = NoticeAcceptance { member_id: "m2".into(), ..acc.clone() };
+    let other_experiment = NoticeAcceptance { experiment_id: "r2".into(), ..acc };
+    assert!(!answer().is_training_data(Some(&other_member)));
+    assert!(!answer().is_training_data(Some(&other_experiment)));
+}
+
+/// The doc states the rule once: the answer's scope is `train`, the acceptance's own scope is `train`,
+/// and the two are equal. The code keeps all three conditions (any two imply the third, so a single
+/// removal is an equivalent mutant); this pins the rule itself over every pair of scopes.
+#[test]
+fn only_a_train_answer_under_a_train_acceptance_is_training_data() {
+    let scopes = [Scope::Show, Scope::Study, Scope::Train];
+    for answer_scope in scopes {
+        for acceptance_scope in scopes {
+            let a = Answer { scope: Some(answer_scope), ..answer() };
+            let acc = NoticeAcceptance {
+                member_id: "m".into(),
+                experiment_id: "r".into(),
+                notice_version: 1,
+                scope: acceptance_scope,
+                accepted_at: 1,
+                event_id: "e0".into(),
+            };
+            let want = answer_scope == Scope::Train && acceptance_scope == Scope::Train;
+            assert_eq!(a.is_training_data(Some(&acc)), want, "answer {answer_scope:?} under acceptance {acceptance_scope:?}");
+        }
+    }
 }

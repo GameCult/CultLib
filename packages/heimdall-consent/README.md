@@ -14,7 +14,7 @@ Entry points: `src/lib.rs`; golden vectors `tests/vectors/consent_golden.csv`, r
 | Ruling | Doc | Crate |
 |---|---|---|
 | Timestamps are Unix ms UTC, signed 64-bit | L98-99; `received_at` is collector-assigned, L75 | `i64` on `accepted_at`, `received_at`, `terms_accepted_at` |
-| Ids are non-empty opaque strings, `event_id` verbatim; versions unsigned 32-bit and positive | L100-103 | `validate()`; `notice_version: u32`; `check_sample_id` parses `u32` |
+| Ids are non-empty opaque strings, `event_id` verbatim; versions unsigned 32-bit and positive | L100-103 | `validate()`; `notice_version: u32`; `check_sample_id` parses `u32` and refuses a leading zero in the version (`s@01`) so one version has one key; the doc says only "positive integer", so Heimdall may instead rule that the crate normalises |
 | Key parts joined with U+001F; empty part or part containing it refused | L104-105 | `key()` |
 | Tombstone is the exited `Answer` with `text_hash` (32 bytes); HMAC-SHA-256 keyed by a per-member salt held by the member-side service; the collector cannot compute it | L74, L132-152, L186-193 | `Answer.text_hash`; `redacted([u8; 32])` takes the service's output and refuses an answer with no `text` (L148-149); `validate()` requires 32 bytes and `exited` |
 | A reply with no established notice version or scope is stored with both absent, writes no acceptance, is excluded from every use | L87-94 | `notice_version`/`scope` optional and absent together (`validate()`); vector case `no-scope` |

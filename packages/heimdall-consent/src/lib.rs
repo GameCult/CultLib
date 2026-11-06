@@ -35,15 +35,16 @@ fn nonempty(name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// `<sample>@<version>`, version a positive unsigned 32-bit integer. The version is part of the id,
-/// so it is part of every answer key and no key can name a sample without one.
+/// `<sample>@<version>`, version a positive unsigned 32-bit integer written without leading zeros
+/// (`s@01` and `s@1` would be two keys for one version). The version is part of the id, so it is part
+/// of every answer key and no key can name a sample without one.
 pub fn check_sample_id(sample_id: &str) -> Result<(&str, u32)> {
     let Some((sample, version)) = sample_id.rsplit_once('@') else {
         bail!("sample id {sample_id:?} has no @version");
     };
     match version.parse::<u32>() {
-        Ok(v) if v > 0 && !sample.is_empty() && !version.starts_with('+') => Ok((sample, v)),
-        _ => bail!("sample id {sample_id:?} needs a non-empty sample and a positive integer version"),
+        Ok(v) if v > 0 && !sample.is_empty() && !version.starts_with(['+', '0']) => Ok((sample, v)),
+        _ => bail!("sample id {sample_id:?} needs a non-empty sample and a positive integer version without leading zeros"),
     }
 }
 

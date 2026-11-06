@@ -5,7 +5,7 @@
 # A reply with no established notice version or scope is stored with both absent (doc L87-94, Answer record), writes no acceptance, and is excluded. answer_raw with a version but no acceptance models a lost or never-written acceptance: still excluded (doc L119-122).
 # reply_rejected: validate must refuse the answer (nothing stored). answer_revoked: stores an exited answer with no text; payload is the tombstone hash (empty means none). expect_winner: the stored answer's event_id and text must equal event and payload.
 # Replacement at one key: the later reply is the greater (received_at, event_id), event_id compared bytewise; input order never decides (doc L78-81 and Heimdall PR #6 comment 759).
-# terms: member field terms_version (payload) and terms_accepted_at (ts). expect_*: payload is what must hold.
+# terms: member field terms_version (payload) and terms_accepted_at (ts). expect_terms: the stored pair for that member reads back as payload and ts; expect_no_terms: the member has none. expect_*: payload is what must hold.
 # Expected values are written by hand from docs/answer-collector-consent.md (Heimdall PR #6, doc commit 4e99bfa), not computed by the crate.
 versioned-key,reply,m1,room1,1,train,s1@1,first,100,e1
 versioned-key,reply,m1,room1,1,train,s1@2,second,200,e2
@@ -26,6 +26,8 @@ redacted-reply,expect_exited,m6,room1,,,s1@1,a1b2c3d4e5f60718293a4b5c6d7e8f90a1b
 redacted-reply,expect_train,,,,,,e10,,
 redacted-reply,expect_counts,,,,,,answers=2;acceptances=2,,
 newcomer,terms,m8,,,,,2026-11,50,
+newcomer,expect_terms,m8,,,,,2026-11,50,
+newcomer,expect_no_terms,m9,,,,,,,
 newcomer,reply,m8,room1,3,train,s1@1,hello,100,e11
 newcomer,reply,m9,room1,3,train,s1@1,veteran,110,e12
 newcomer,reply,m8,room1,4,study,s1@1,again,200,e13
