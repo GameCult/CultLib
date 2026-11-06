@@ -3059,3 +3059,22 @@ test("RUDP operation service admits a restarted client on the same address", asy
     await server.close();
   }
 });
+
+// MessagePack encodes undefined as nil, and a peer rejects a document whose optional source fields are nil.
+test("document put message omits unset optional keys so the encoded wire has no nil", () => {
+  const definition = defineDocumentType({ type: "putnil.doc", schema: z.object({ body: z.string() }) });
+  const binding = defineCultNetDocumentBinding({ definition });
+  const registry = new CultNetDocumentRegistry([binding]);
+
+  const bare = registry.createDocumentPutMessage(binding, "m", "k", { body: "x" });
+  assert.deepEqual(Object.keys(bare.document).sort(), ["payload", "recordKey", "schemaId", "storedAt"]);
+  const decodedBare = decodeMsgpack(encode(bare)) as { document: Record<string, unknown> };
+  assert.ok(Object.values(decodedBare.document).every(value => value !== null), "no nil values on the wire");
+  assert.ok(!("sourceRuntimeId" in decodedBare.document));
+
+  const stamped = registry.createDocumentPutMessage(binding, "m", "k", { body: "x" },
+    { sourceRuntimeId: "r", sourceAgentId: "a", sourceRole: "role", tags: ["t"] });
+  assert.deepEqual(decodeMsgpack(encode(stamped)), stamped);
+  assert.equal(stamped.document.sourceRuntimeId, "r");
+  assert.deepEqual(stamped.document.tags, ["t"]);
+});
