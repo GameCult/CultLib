@@ -1,15 +1,16 @@
 # case,op,member,experiment,notice_version,scope,sample_id,payload,ts,event_id
 # Ops run in order against a real CultCache; each case starts empty. Timestamps are unix ms.
 # reply: first reply under a (room, member, notice_version) writes an acceptance, then the answer replaces any earlier one at (room, sample_id, member); payload is the text.
-# answer_raw: stores the answer with no acceptance written. redact: replaces the answer whose event_id matches with its tombstone; payload is the hash as hex.
+# answer_raw: stores the answer with no acceptance written. redact: replaces the answer whose event_id matches with its tombstone; payload is the 32-byte tombstone hash as 64 hex chars (the member-side service's output; the crate never computes it).
+# A reply with no established notice version or scope is stored with both absent (doc L82-89, Answer record), writes no acceptance, and is excluded. answer_raw with a version but no acceptance models a lost or never-written acceptance: still excluded (doc L120).
 # terms: member field terms_version (payload) and terms_accepted_at (ts). expect_*: payload is what must hold.
-# Expected values are written by hand from docs/answer-collector-consent.md (Heimdall PR #6, head d836f29), not computed by the crate.
+# Expected values are written by hand from docs/answer-collector-consent.md (Heimdall PR #6, doc commit 2364979), not computed by the crate.
 versioned-key,reply,m1,room1,1,train,s1@1,first,100,e1
 versioned-key,reply,m1,room1,1,train,s1@2,second,200,e2
 versioned-key,reply,m1,room1,1,train,s1@1,replaced,300,e3
 versioned-key,expect_counts,,,,,,answers=2;acceptances=1,,
 versioned-key,expect_train,,,,,,e2;e3,,
-no-scope,reply,m2,room1,1,,s1@1,unscoped,100,e4
+no-scope,reply,m2,room1,,,s1@1,unscoped,100,e4
 no-scope,reply,m2,room1,,,s1@2,unversioned,110,e5
 no-scope,answer_raw,m3,room1,1,train,s1@1,no-acceptance,120,e6
 no-scope,reply,m4,room1,1,study,s1@1,study-only,130,e7
@@ -18,8 +19,8 @@ no-scope,expect_counts,,,,,,answers=5;acceptances=2,,
 no-scope,expect_train,,,,,,e8,,
 redacted-reply,reply,m6,room1,1,train,s1@1,secret words,100,e9
 redacted-reply,reply,m7,room1,1,train,s1@1,kept,110,e10
-redacted-reply,redact,m6,room1,,,s1@1,a1b2c3d4,,e9
-redacted-reply,expect_exited,m6,room1,,,s1@1,a1b2c3d4,100,e9
+redacted-reply,redact,m6,room1,,,s1@1,a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90,,e9
+redacted-reply,expect_exited,m6,room1,,,s1@1,a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90,100,e9
 redacted-reply,expect_train,,,,,,e10,,
 redacted-reply,expect_counts,,,,,,answers=2;acceptances=2,,
 newcomer,terms,m8,,,,,2026-11,50,
@@ -31,3 +32,10 @@ newcomer,expect_acceptance,m8,room1,4,study,,e13,200,
 newcomer,expect_acceptance,m9,room1,3,train,,e12,110,
 newcomer,expect_counts,,,,,,answers=2;acceptances=3,,
 newcomer,expect_train,,,,,,e12,,
+version-change,reply,m10,room1,1,train,s1@1,under v1,100,e14
+version-change,answer_raw,m10,room1,2,train,s1@2,v2 without a fresh first reply,200,e15
+version-change,expect_counts,,,,,,answers=2;acceptances=1,,
+version-change,expect_train,,,,,,e14,,
+version-change,reply,m10,room1,2,train,s1@3,first reply under v2,300,e16
+version-change,expect_counts,,,,,,answers=3;acceptances=2,,
+version-change,expect_train,,,,,,e14;e16,,

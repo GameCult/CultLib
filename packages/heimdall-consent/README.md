@@ -1,21 +1,32 @@
 # heimdall-consent
 
 Typed CultCache records for Heimdall's answer collector: `NoticeAcceptance`, `Answer` and `MemberTerms`,
-plus the two rules that need no store to state (`Answer::is_training_data`, `Answer::redacted`). Cut from
-`docs/answer-collector-consent.md` in GameCult/Heimdall PR #6 (head d836f29); the doc's tables are the
-contract. Specification only: no collector, tally or export lives here.
+plus the rules that need no store to state (`Answer::is_training_data`, `Answer::redacted`,
+`validate`). Cut from `docs/answer-collector-consent.md` in GameCult/Heimdall PR #6 at doc commit
+`2364979`; the doc's tables and Representation section are the contract, and its rulings are on the PR
+(comment 682). Specification only: no collector, tally, export or tombstone hashing lives here.
 
 Entry points: `src/lib.rs`; golden vectors `tests/vectors/consent_golden.csv`, run by `tests/golden.rs`
 (`cargo test`). Planned, not live: the collector, the tally, the training export.
 
-## Choices the doc does not fix (questions for Heimdall)
+## Where each ruling lands (doc lines at 2364979)
 
-1. Timestamps are unix milliseconds (`i64`), matching `origin_server_ts`. The doc says "UTC timestamp".
-2. `member_id`, `experiment_id`, `event_id` are strings; `notice_version` is `u32`; `terms_version` a string. The doc names only "Heimdall member id" and "Matrix event id".
-3. Key text is the parts joined with U+001F; a part that is empty or contains it is refused. Matrix ids can hold most other separators.
-4. The tombstone's salted `text` hash has no row in the answer table. It is carried as `Answer.text_hash` (bytes) on the exited record. Which hash function, whose salt, and whether the tombstone is a separate record is undecided; the crate never computes the hash.
-5. `Answer.notice_version` and `scope` are optional in the typed record so an answer lacking them can exist and be excluded; the table makes both required. Should such a reply be stored at all, given "is not collected"?
-6. A reply under a notice with no recorded scope writes no acceptance in the vector's collector; the doc says the first reply accepts "the notice version then pinned" and does not cover a missing pin.
-7. `MemberTerms` is a separate record keyed by `member_id`. The doc puts the fields on the member; the member record lives in Heimdall, not CultLib.
-8. Training rule item 2 also requires the acceptance's scope to be `train` and to match the answer's experiment and member; the doc requires only that an acceptance exist for the key with `accepted_at <= received_at`.
-9. The "separate store or partition" for records wider than `show` is not modelled here.
+| Ruling | Doc | Crate |
+|---|---|---|
+| Timestamps are Unix ms UTC, signed 64-bit | L93-94 | `i64` on `accepted_at`, `received_at`, `terms_accepted_at` |
+| Ids are non-empty opaque strings, `event_id` verbatim; versions unsigned 32-bit and positive | L95-98 | `validate()`; `notice_version: u32`; `check_sample_id` parses `u32` |
+| Key parts joined with U+001F; empty part or part containing it refused | L99-100 | `key()` |
+| Tombstone is the exited `Answer` with `text_hash` (32 bytes); HMAC-SHA-256 keyed by a per-member salt held by the member-side service; the collector cannot compute it | L74, L127-147, L186-187 | `Answer.text_hash`; `redacted([u8; 32])` takes the service's output and refuses an answer with no `text` (L143-144); `validate()` requires 32 bytes and `exited` |
+| A reply with no established notice version or scope is stored with both absent, writes no acceptance, is excluded from every use | L82-89 | `notice_version`/`scope` optional and absent together (`validate()`); vector case `no-scope` |
+| A reply's version is the one pinned at its `origin_server_ts`; changed version needs a fresh first reply | L32-34, L47, L87-89 | acceptance key includes the version; `is_training_data` accepts only the acceptance for the answer's own version; vector case `version-change` |
+| `MemberTerms` is the typed shape of the member record's `terms_version`/`terms_accepted_at`, not a second store | L51-56 | `MemberTerms` doc comment; the collector does not hold it |
+| Training needs acceptance `scope = train` equal to the answer's `scope`, and `accepted_at <= received_at` | L111-119 | `is_training_data` |
+| One store per scope plus a store for scopeless replies | L120-125 | not modelled; the collector's layout owns it |
+
+## Questions for Heimdall
+
+1. May `text` be an empty string? The doc says `text` is "string, or absent" (L72) and ids are non-empty
+   (L95), but says nothing of answer text. The crate accepts `Some("")` and `redacted` tombstones it.
+2. The doc says a later answer to the same key replaces the earlier by "latest `received_at` wins"
+   (L78-80). Equal `received_at` for two different events is unspecified. The crate holds no replace
+   rule; the collector owns it.

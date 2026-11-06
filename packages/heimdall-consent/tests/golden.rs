@@ -59,7 +59,7 @@ fn golden_vectors() {
             _ => cases.push((f[0], vec![f])),
         }
     }
-    assert_eq!(cases.len(), 4, "fixture shrank");
+    assert_eq!(cases.len(), 5, "fixture shrank");
     for (name, rows) in cases {
         let dir = tempfile::tempdir().unwrap();
         let mut cache = new_cache(&dir);
@@ -87,7 +87,7 @@ fn golden_vectors() {
                             }
                         }
                     }
-                    put_answer(&mut cache, &Answer {
+                    let answer = Answer {
                         sample_id: sample.into(),
                         experiment_id: room.into(),
                         member_id: member.into(),
@@ -98,13 +98,16 @@ fn golden_vectors() {
                         received_at: ts,
                         event_id: event.into(),
                         text_hash: None,
-                    });
+                    };
+                    answer.validate().unwrap();
+                    put_answer(&mut cache, &answer);
                 }
                 "redact" => {
                     let k = Answer::cache_key(room, sample, member).unwrap();
                     let a = cache.get_required::<Answer>(&k).unwrap();
                     assert_eq!(a.event_id, event, "{ctx}");
-                    put_answer(&mut cache, &a.redacted(hex(payload)));
+                    let hash: [u8; 32] = hex(payload).try_into().expect("tombstone hash is 32 bytes");
+                    put_answer(&mut cache, &a.redacted(hash).unwrap());
                 }
                 "terms" => {
                     cache
@@ -157,8 +160,9 @@ fn records_survive_a_reopen() {
         exited: true,
         received_at: 5,
         event_id: "e".into(),
-        text_hash: Some(vec![1, 2]),
+        text_hash: Some(vec![7; 32]),
     };
+    a.validate().unwrap();
     put_answer(&mut cache, &a);
     let reopened = new_cache(&dir);
     assert_eq!(reopened.get_required::<Answer>(&Answer::cache_key("r", "s@1", "m").unwrap()).unwrap(), a);
@@ -166,9 +170,10 @@ fn records_survive_a_reopen() {
 
 #[test]
 fn key_refuses_unversioned_sample_ids() {
-    for bad in ["s", "s@", "s@0", "s@x", "@1", "s@-1", "s@+1"] {
+    for bad in ["s", "s@", "s@0", "s@x", "@1", "s@-1", "s@+1", "s@4294967296"] {
         assert!(Answer::cache_key("r", bad, "m").is_err(), "{bad}");
     }
+    assert!(Answer::cache_key("r", "s@4294967295", "m").is_ok());
     assert!(Answer::cache_key("r", "s@1", "m").unwrap() != Answer::cache_key("r", "s@2", "m").unwrap());
 }
 
@@ -197,4 +202,98 @@ fn acceptance_after_the_answer_does_not_cover_it() {
     assert!(a.is_training_data(Some(&acc(100))));
     assert!(!a.is_training_data(Some(&acc(101))));
     assert!(!a.is_training_data(None));
+}
+
+fn answer() -> Answer {
+    Answer {
+        sample_id: "s@1".into(),
+        experiment_id: "r".into(),
+        member_id: "m".into(),
+        notice_version: Some(1),
+        scope: Some(Scope::Train),
+        text: Some("t".into()),
+        exited: false,
+        received_at: 100,
+        event_id: "e".into(),
+        text_hash: None,
+    }
+}
+
+#[test]
+fn acceptance_for_another_notice_version_never_covers_the_answer() {
+    let acc = NoticeAcceptance {
+        member_id: "m".into(),
+        experiment_id: "r".into(),
+        notice_version: 1,
+        scope: Scope::Train,
+        accepted_at: 1,
+        event_id: "e0".into(),
+    };
+    let mut a = answer();
+    assert!(a.is_training_data(Some(&acc)));
+    a.notice_version = Some(2);
+    assert!(!a.is_training_data(Some(&acc)), "a changed notice version needs a fresh first reply");
+}
+
+#[test]
+fn training_needs_acceptance_scope_equal_to_the_answers_scope() {
+    let mut acc = NoticeAcceptance {
+        member_id: "m".into(),
+        experiment_id: "r".into(),
+        notice_version: 1,
+        scope: Scope::Study,
+        accepted_at: 1,
+        event_id: "e0".into(),
+    };
+    assert!(!answer().is_training_data(Some(&acc)));
+    acc.scope = Scope::Train;
+    assert!(answer().is_training_data(Some(&acc)));
+}
+
+#[test]
+fn a_reply_never_collected_gets_no_tombstone() {
+    let mut a = answer();
+    a.text = None;
+    assert!(a.redacted([0; 32]).is_err());
+    let t = answer().redacted([9; 32]).unwrap();
+    assert!(t.exited && t.text.is_none() && t.text_hash == Some(vec![9; 32]));
+    assert!(t.redacted([9; 32]).is_err(), "exit is one-way and a tombstone has no text to hash again");
+}
+
+#[test]
+fn validate_enforces_the_representation_rules() {
+    assert!(answer().validate().is_ok());
+    let cases: Vec<(&str, Box<dyn Fn(&mut Answer)>)> = vec![
+        ("empty member", Box::new(|a| a.member_id.clear())),
+        ("empty event", Box::new(|a| a.event_id.clear())),
+        ("version zero", Box::new(|a| a.notice_version = Some(0))),
+        ("version without scope", Box::new(|a| a.scope = None)),
+        ("scope without version", Box::new(|a| a.notice_version = None)),
+        ("exited with text", Box::new(|a| a.exited = true)),
+        ("hash on a live answer", Box::new(|a| a.text_hash = Some(vec![0; 32]))),
+        ("short hash", Box::new(|a| {
+            a.exited = true;
+            a.text = None;
+            a.text_hash = Some(vec![0; 31]);
+        })),
+    ];
+    for (name, break_it) in cases {
+        let mut a = answer();
+        break_it(&mut a);
+        assert!(a.validate().is_err(), "{name}");
+    }
+    let mut unscoped = answer();
+    unscoped.notice_version = None;
+    unscoped.scope = None;
+    assert!(unscoped.validate().is_ok(), "a scopeless reply is stored");
+    let acc = NoticeAcceptance {
+        member_id: "m".into(),
+        experiment_id: "r".into(),
+        notice_version: 0,
+        scope: Scope::Show,
+        accepted_at: 1,
+        event_id: "e".into(),
+    };
+    assert!(acc.validate().is_err());
+    assert!(MemberTerms { member_id: "m".into(), terms_version: String::new(), terms_accepted_at: 1 }.validate().is_err());
 }
