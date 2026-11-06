@@ -2,11 +2,11 @@
 # Ops run in order against a real CultCache; each case starts empty. Timestamps are unix ms.
 # reply: first reply under a (room, member, notice_version) writes an acceptance, then the answer replaces any earlier one at (room, sample_id, member); payload is the text.
 # answer_raw: stores the answer with no acceptance written. redact: replaces the answer whose event_id matches with its tombstone; payload is the 32-byte tombstone hash as 64 hex chars (the member-side service's output; the crate never computes it).
-# A reply with no established notice version or scope is stored with both absent (doc L82-89, Answer record), writes no acceptance, and is excluded. answer_raw with a version but no acceptance models a lost or never-written acceptance: still excluded (doc L120).
+# A reply with no established notice version or scope is stored with both absent (doc L87-94, Answer record), writes no acceptance, and is excluded. answer_raw with a version but no acceptance models a lost or never-written acceptance: still excluded (doc L119-122).
 # reply_rejected: validate must refuse the answer (nothing stored). answer_revoked: stores an exited answer with no text; payload is the tombstone hash (empty means none). expect_winner: the stored answer's event_id and text must equal event and payload.
-# Replacement at one key: the later reply is the greater (received_at, event_id), event_id compared bytewise; input order never decides (doc L78-80 and Heimdall PR #6 comment 759).
+# Replacement at one key: the later reply is the greater (received_at, event_id), event_id compared bytewise; input order never decides (doc L78-81 and Heimdall PR #6 comment 759).
 # terms: member field terms_version (payload) and terms_accepted_at (ts). expect_*: payload is what must hold.
-# Expected values are written by hand from docs/answer-collector-consent.md (Heimdall PR #6, doc commit 2364979), not computed by the crate.
+# Expected values are written by hand from docs/answer-collector-consent.md (Heimdall PR #6, doc commit 4e99bfa), not computed by the crate.
 versioned-key,reply,m1,room1,1,train,s1@1,first,100,e1
 versioned-key,reply,m1,room1,1,train,s1@2,second,200,e2
 versioned-key,reply,m1,room1,1,train,s1@1,replaced,300,e3
