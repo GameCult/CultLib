@@ -3,6 +3,8 @@
 # reply: first reply under a (room, member, notice_version) writes an acceptance, then the answer replaces any earlier one at (room, sample_id, member); payload is the text.
 # answer_raw: stores the answer with no acceptance written. redact: replaces the answer whose event_id matches with its tombstone; payload is the 32-byte tombstone hash as 64 hex chars (the member-side service's output; the crate never computes it).
 # A reply with no established notice version or scope is stored with both absent (doc L82-89, Answer record), writes no acceptance, and is excluded. answer_raw with a version but no acceptance models a lost or never-written acceptance: still excluded (doc L120).
+# reply_rejected: validate must refuse the answer (nothing stored). answer_revoked: stores an exited answer with no text; payload is the tombstone hash (empty means none). expect_winner: the stored answer's event_id and text must equal event and payload.
+# Replacement at one key: the later reply is the greater (received_at, event_id), event_id compared bytewise; input order never decides (doc L78-80 and Heimdall PR #6 comment 759).
 # terms: member field terms_version (payload) and terms_accepted_at (ts). expect_*: payload is what must hold.
 # Expected values are written by hand from docs/answer-collector-consent.md (Heimdall PR #6, doc commit 2364979), not computed by the crate.
 versioned-key,reply,m1,room1,1,train,s1@1,first,100,e1
@@ -39,3 +41,26 @@ version-change,expect_train,,,,,,e14,,
 version-change,reply,m10,room1,2,train,s1@3,first reply under v2,300,e16
 version-change,expect_counts,,,,,,answers=3;acceptances=2,,
 version-change,expect_train,,,,,,e14;e16,,
+empty-live-rejected,reply_rejected,m11,room1,,,s1@1,,100,e17
+empty-live-rejected,expect_counts,,,,,,answers=0;acceptances=0,,
+empty-live-rejected,reply,m11,room1,,,s1@1,now filled,110,e18
+empty-live-rejected,expect_winner,m11,room1,,,s1@1,now filled,,e18
+empty-revoked,answer_revoked,m12,room1,1,train,s1@1,,100,e19
+empty-revoked,answer_revoked,m13,room1,1,train,s1@1,a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90,100,e20
+empty-revoked,expect_counts,,,,,,answers=2;acceptances=0,,
+empty-revoked,expect_train,,,,,,,,
+tie-greater-first,reply,m14,room1,,,s1@1,upper-B,500,B
+tie-greater-first,reply,m14,room1,,,s1@1,lower-a,500,a
+tie-greater-first,reply,m15,room1,,,s1@1,short-z,500,z
+tie-greater-first,reply,m15,room1,,,s1@1,long-aa,500,aa
+tie-greater-first,reply,m16,room1,,,s1@1,newer-ts-first,600,a
+tie-greater-first,reply,m16,room1,,,s1@1,older-ts-last,500,z
+tie-greater-first,expect_winner,m14,room1,,,s1@1,lower-a,,a
+tie-greater-first,expect_winner,m15,room1,,,s1@1,short-z,,z
+tie-greater-first,expect_winner,m16,room1,,,s1@1,newer-ts-first,,a
+tie-greater-last,reply,m14,room1,,,s1@1,lower-a,500,a
+tie-greater-last,reply,m14,room1,,,s1@1,upper-B,500,B
+tie-greater-last,reply,m15,room1,,,s1@1,long-aa,500,aa
+tie-greater-last,reply,m15,room1,,,s1@1,short-z,500,z
+tie-greater-last,expect_winner,m14,room1,,,s1@1,lower-a,,a
+tie-greater-last,expect_winner,m15,room1,,,s1@1,short-z,,z

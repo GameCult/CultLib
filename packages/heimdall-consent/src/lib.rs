@@ -108,7 +108,8 @@ pub struct Answer {
     /// One-way: set by redaction, never cleared.
     #[cultcache(key = 6, default)]
     pub exited: bool,
-    /// `origin_server_ts` of the reply, unix milliseconds UTC.
+    /// Assigned by the collector on receipt, unix milliseconds UTC (the reply's `origin_server_ts`
+    /// in practice); ties are broken by `supersedes`.
     #[cultcache(key = 7)]
     pub received_at: i64,
     #[cultcache(key = 8)]
@@ -141,12 +142,22 @@ impl Answer {
         if self.exited && self.text.is_some() {
             bail!("an exited answer holds no text");
         }
+        if !self.exited && self.text.as_deref().is_none_or(str::is_empty) {
+            bail!("a live answer needs non-empty text; empty text is valid only on a revoked answer");
+        }
         if let Some(hash) = &self.text_hash {
             if !self.exited || hash.len() != 32 {
                 bail!("text_hash is 32 bytes and only on an exited answer");
             }
         }
         Ok(())
+    }
+
+    /// Replacement rule for two answers at one key: the later reply is the greater `(received_at,
+    /// event_id)`. `received_at` is assigned by the collector; a tie breaks by `event_id` compared
+    /// bytewise, the greater winning (Heimdall PR #6 comment 759). Insertion order never decides.
+    pub fn supersedes(&self, earlier: &Answer) -> bool {
+        (self.received_at, self.event_id.as_bytes()) > (earlier.received_at, earlier.event_id.as_bytes())
     }
 
     /// Redaction is exit: text erased, `exited` set, the tombstone hash kept. The hash comes from the

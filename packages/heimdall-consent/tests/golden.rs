@@ -31,6 +31,15 @@ fn put_answer(cache: &mut CultCache, a: &Answer) {
     cache.put(Answer::cache_key(&a.experiment_id, &a.sample_id, &a.member_id).unwrap(), a).unwrap();
 }
 
+/// The collector's replace rule: an incoming answer replaces the stored one only if it is the later reply.
+fn put_if_later(cache: &mut CultCache, a: &Answer) {
+    let k = Answer::cache_key(&a.experiment_id, &a.sample_id, &a.member_id).unwrap();
+    if cache.get::<Answer>(&k).unwrap().is_some_and(|old| !a.supersedes(&old)) {
+        return;
+    }
+    cache.put(k, a).unwrap();
+}
+
 fn training_events(cache: &CultCache) -> Vec<String> {
     let mut ids: Vec<String> = cache
         .get_all::<Answer>()
@@ -59,7 +68,7 @@ fn golden_vectors() {
             _ => cases.push((f[0], vec![f])),
         }
     }
-    assert_eq!(cases.len(), 5, "fixture shrank");
+    assert_eq!(cases.len(), 9, "fixture shrank");
     for (name, rows) in cases {
         let dir = tempfile::tempdir().unwrap();
         let mut cache = new_cache(&dir);
@@ -100,7 +109,42 @@ fn golden_vectors() {
                         text_hash: None,
                     };
                     answer.validate().unwrap();
-                    put_answer(&mut cache, &answer);
+                    put_if_later(&mut cache, &answer);
+                }
+                "reply_rejected" => {
+                    let answer = Answer {
+                        sample_id: sample.into(),
+                        experiment_id: room.into(),
+                        member_id: member.into(),
+                        notice_version: nv,
+                        scope: scope(sc),
+                        text: Some(payload.into()),
+                        exited: false,
+                        received_at: ts,
+                        event_id: event.into(),
+                        text_hash: None,
+                    };
+                    assert!(answer.validate().is_err(), "{ctx}: must be refused");
+                }
+                "answer_revoked" => {
+                    let answer = Answer {
+                        sample_id: sample.into(),
+                        experiment_id: room.into(),
+                        member_id: member.into(),
+                        notice_version: nv,
+                        scope: scope(sc),
+                        text: None,
+                        exited: true,
+                        received_at: ts,
+                        event_id: event.into(),
+                        text_hash: if payload.is_empty() { None } else { Some(hex(payload)) },
+                    };
+                    answer.validate().unwrap();
+                    put_if_later(&mut cache, &answer);
+                }
+                "expect_winner" => {
+                    let a = cache.get_required::<Answer>(&Answer::cache_key(room, sample, member).unwrap()).unwrap();
+                    assert_eq!((a.event_id.as_str(), a.text.as_deref()), (event, Some(payload)), "{ctx}");
                 }
                 "redact" => {
                     let k = Answer::cache_key(room, sample, member).unwrap();
@@ -269,6 +313,8 @@ fn validate_enforces_the_representation_rules() {
         ("version zero", Box::new(|a| a.notice_version = Some(0))),
         ("version without scope", Box::new(|a| a.scope = None)),
         ("scope without version", Box::new(|a| a.notice_version = None)),
+        ("live without text", Box::new(|a| a.text = None)),
+        ("live with empty text", Box::new(|a| a.text = Some(String::new()))),
         ("exited with text", Box::new(|a| a.exited = true)),
         ("hash on a live answer", Box::new(|a| a.text_hash = Some(vec![0; 32]))),
         ("short hash", Box::new(|a| {
@@ -282,6 +328,10 @@ fn validate_enforces_the_representation_rules() {
         break_it(&mut a);
         assert!(a.validate().is_err(), "{name}");
     }
+    let mut revoked = answer();
+    revoked.text = None;
+    revoked.exited = true;
+    assert!(revoked.validate().is_ok(), "empty text is valid on a revoked answer");
     let mut unscoped = answer();
     unscoped.notice_version = None;
     unscoped.scope = None;
@@ -296,4 +346,14 @@ fn validate_enforces_the_representation_rules() {
     };
     assert!(acc.validate().is_err());
     assert!(MemberTerms { member_id: "m".into(), terms_version: String::new(), terms_accepted_at: 1 }.validate().is_err());
+}
+
+#[test]
+fn later_reply_is_greater_received_at_then_bytewise_event_id() {
+    let at = |t, e: &str| Answer { received_at: t, event_id: e.into(), ..answer() };
+    assert!(at(2, "a").supersedes(&at(1, "z")));
+    assert!(!at(1, "z").supersedes(&at(2, "a")));
+    assert!(at(1, "a").supersedes(&at(1, "B")), "bytewise: 0x61 > 0x42");
+    assert!(at(1, "z").supersedes(&at(1, "aa")), "bytewise, not by length");
+    assert!(!at(1, "e").supersedes(&at(1, "e")));
 }
