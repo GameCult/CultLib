@@ -32,6 +32,20 @@ struct Gadget {
     category: String,
 }
 
+/// Sorts after `Item` and has its exact shape: a lookup that ran past the end of its own type would answer from it.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "zed")]
+struct Zed {
+    #[cultcache(key = 0, name)]
+    name: String,
+    #[cultcache(key = 1, index)]
+    category: String,
+    #[cultcache(key = 2, index = "sku")]
+    code: Option<String>,
+    #[cultcache(key = 3, default)]
+    value: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "settings", global)]
 struct Settings {
@@ -63,6 +77,7 @@ fn cache() -> CultCache {
     let mut cache = CultCache::new();
     cache.register_entry_type::<Item>().unwrap();
     cache.register_entry_type::<Gadget>().unwrap();
+    cache.register_entry_type::<Zed>().unwrap();
     cache.register_entry_type::<Settings>().unwrap();
     cache.register_entry_type::<Plain>().unwrap();
     cache.register_entry_type::<Numbered>().unwrap();
@@ -142,10 +157,12 @@ fn lookups_never_cross_types() {
     let mut cache = cache();
     cache.put("item:a", &item("same", "same", None)).unwrap();
     cache.put("gadget:a", &Gadget { name: "same".into(), category: "same".into() }).unwrap();
+    cache.put("zed:a", &Zed { name: "same".into(), category: "same".into(), code: None, value: 0 }).unwrap();
 
     assert_eq!(cache.get_by_name::<Gadget>("same").unwrap().unwrap().name, "same");
     cache.delete::<Item>("item:a").unwrap();
     assert_eq!(cache.get_by_name::<Item>("same").unwrap(), None);
+    assert_eq!(cache.get_by_index::<Item>("category", "same").unwrap(), None);
     assert!(cache.get_by_name::<Gadget>("same").unwrap().is_some());
     assert!(cache.get_by_index::<Gadget>("category", "same").unwrap().is_some());
 }
