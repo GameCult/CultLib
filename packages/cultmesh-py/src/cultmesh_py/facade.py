@@ -35,6 +35,7 @@ from .node import (
 from .server import CULTMESH_RUDP_DEFAULT_MAX_FRAGMENT_BYTES, CultMeshLocalServer
 from .session import CultMeshGameSession, CultMeshGameSessionOptions
 from .simulation import CultMeshSimulationFactCommitter
+from .write_authority import CultMeshRemoteWriteAuthority
 from cultnet_py.cultmesh_contracts import (
     AuthorityLeaseVerifier,
     CultMeshAuthorityLeaseCatalog,

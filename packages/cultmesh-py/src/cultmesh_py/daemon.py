@@ -13,6 +13,7 @@ from cultnet_py import CultNetSimulationConsensusOptions, CultNetSimulationObser
 
 from .facade import CultMesh
 from .server import CultMeshLocalServer
+from .write_authority import CultMeshGrantAllWrites
 from cultnet_py.cultmesh_contracts import (
     CultMeshPeerCard,
     CultMeshPeerCatalog,
@@ -53,6 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--simulation-quorum-ratio", type=float, default=0.5)
     parser.add_argument("--verse-id")
     parser.add_argument("--verse-display-name")
+    parser.add_argument("--allow-peer-writes", action="store_true", help="grant every connected peer put and delete; without it peer writes are refused")
     parser.add_argument("--role", action="append", dest="roles")
     args = parser.parse_args(argv)
 
@@ -117,6 +119,7 @@ def start_server(args: argparse.Namespace, parser: argparse.ArgumentParser) -> C
             display_name=args.display_name,
             max_snapshot_documents=args.max_snapshot_documents,
             max_snapshot_bytes=args.max_snapshot_bytes,
+            write_authority=CultMeshGrantAllWrites() if args.allow_peer_writes else None,
         )
     except ValueError as error:
         # The server owns its option rules; a limit it refuses is a usage error, not a crash.

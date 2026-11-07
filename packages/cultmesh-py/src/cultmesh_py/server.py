@@ -582,11 +582,15 @@ class CultMeshLocalServer:
                 message_id=str(message.get("messageId") or ""),
                 code="malformed_document_put",
             )]
-        target = self.node.database.raw_put_target(message)
-        if target is not None:
-            refusal = self._refuse_unauthorized_write(peer, CultMeshRemoteWriteOperation.PUT, target, message)
-            if refusal is not None:
-                return [refusal]
+        # Refusal precedes every other judgment of the put, so a peer that may not write learns nothing
+        # of what is registered here. A put the node cannot resolve is asked about under the ids as sent.
+        target = self.node.database.raw_put_target(message) or (
+            str(document_record.get("schemaId") or ""),
+            str(document_record.get("recordKey") or ""),
+        )
+        refusal = self._refuse_unauthorized_write(peer, CultMeshRemoteWriteOperation.PUT, target, message)
+        if refusal is not None:
+            return [refusal]
         unservable = self._unservable_put(message, over_rudp=over_rudp)
         if unservable is not None:
             return [unservable]
@@ -632,11 +636,10 @@ class CultMeshLocalServer:
                 message_id=str(message.get("messageId") or ""),
                 code="malformed_document_delete",
             )]
-        target = self.node.database.raw_delete_target(message)
-        if target is not None:
-            refusal = self._refuse_unauthorized_write(peer, CultMeshRemoteWriteOperation.DELETE, target, message)
-            if refusal is not None:
-                return [refusal]
+        target = self.node.database.raw_delete_target(message) or (schema_id, record_key)
+        refusal = self._refuse_unauthorized_write(peer, CultMeshRemoteWriteOperation.DELETE, target, message)
+        if refusal is not None:
+            return [refusal]
         change = self.node.database.apply_raw_delete_message(message)
         if change is None:
             return [self._error_response(

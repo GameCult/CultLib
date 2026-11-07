@@ -27,6 +27,7 @@ from cultnet_py.cultmesh_contracts import CultMeshAuthorityLeaseCatalog, CultMes
 
 if TYPE_CHECKING:
     from .server import CultMeshLocalServer
+    from .write_authority import CultMeshRemoteWriteAuthority
 
 
 @dataclass(frozen=True)

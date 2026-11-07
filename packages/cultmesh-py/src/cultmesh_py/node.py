@@ -652,7 +652,10 @@ class CultMeshDatabase:
 
     def raw_put_target(self, message: dict[str, Any]) -> tuple[str, str] | None:
         """The canonical schema id and record key a raw put would write, or None when it would not apply."""
-        prepared = self._raw_put_envelope(message)
+        try:
+            prepared = self._raw_put_envelope(message)
+        except (KeyError, TypeError, ValueError):
+            return None  # a malformed document is the store's refusal to give, after the authority has spoken
         return None if prepared is None else (prepared[0].catalog_entry().schema_id, prepared[1].key)
 
     def raw_delete_target(self, message: dict[str, Any]) -> tuple[str, str] | None:
