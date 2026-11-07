@@ -582,8 +582,12 @@ class CultMeshLocalServer:
                 message_id=str(message.get("messageId") or ""),
                 code="malformed_document_put",
             )]
-        # Refusal precedes every other judgment of the put, so a peer that may not write learns nothing
-        # of what is registered here. A put the node cannot resolve is asked about under the ids as sent.
+        # Refusal precedes every other judgment of the put. The node resolves the schema first, because the
+        # authority must be asked about the canonical schema id (a payload-inferred alias included), as C#
+        # does; only a payload of the wire shape is resolved, so nothing of an ungranted peer's is
+        # allocated. A put the node cannot resolve is asked about under the ids as sent. Residual: the
+        # refusal is the same either way, but an ungranted peer can still tell registered from unregistered
+        # schemas by timing.
         target = self.node.database.raw_put_target(message) or (
             str(document_record.get("schemaId") or ""),
             str(document_record.get("recordKey") or ""),

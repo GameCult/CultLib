@@ -129,6 +129,9 @@ authority grants it, mirroring C# `ICultNetRemoteWriteAuthority`. Before this, a
 or delete the node's documents. The refusal is a typed `cultnet.error.v0` with code `write_not_authorized` and the
 record key in `details`; an authority that raises, or returns no decision, refuses too.
 
+Known residual: ungranted peers can still distinguish registered from unregistered schemas by timing (the node resolves the
+schema before the gate so the authority sees the canonical id); the refusal itself is identical.
+
 ```python
 from cultmesh_py import CultMeshGrantAllWrites, CultMeshRemoteWriteDecision, CultMeshRemoteWriteRequest
 
