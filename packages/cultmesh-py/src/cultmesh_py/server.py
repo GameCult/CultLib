@@ -582,6 +582,9 @@ class CultMeshLocalServer:
                 message_id=str(message.get("messageId") or ""),
                 code="malformed_document_put",
             )]
+        malformed_shard = self._malformed_shard_fields(message, "malformed_document_put")
+        if malformed_shard is not None:
+            return [malformed_shard]
         # Refusal precedes every other judgment of the put. The node resolves the schema first, because the
         # authority must be asked about the canonical schema id (a payload-inferred alias included), as C#
         # does; only a payload of the wire shape is resolved, so nothing of an ungranted peer's is
@@ -640,6 +643,9 @@ class CultMeshLocalServer:
                 message_id=str(message.get("messageId") or ""),
                 code="malformed_document_delete",
             )]
+        malformed_shard = self._malformed_shard_fields(message, "malformed_document_delete")
+        if malformed_shard is not None:
+            return [malformed_shard]
         target = self.node.database.raw_delete_target(message) or (schema_id, record_key)
         refusal = self._refuse_unauthorized_write(peer, CultMeshRemoteWriteOperation.DELETE, target, message)
         if refusal is not None:
@@ -652,6 +658,22 @@ class CultMeshLocalServer:
                 code="unregistered_document_delete",
             )]
         return self._database_delete_notifications(message, subscriptions, resolved_schema_id=change.schema_id)
+
+    def _malformed_shard_fields(self, message: dict[str, Any], code: str) -> dict[str, Any] | None:
+        """The protocol error for a shardId that is not a string or a shardEpoch that is not an int (a bool is
+        not), else None. It precedes the gate, so the authority only ever judges a write whose shard it can
+        read, and the store never files a write under a shard the authority did not see."""
+        shard_id = message.get("shardId")
+        shard_epoch = message.get("shardEpoch")
+        if (shard_id is None or isinstance(shard_id, str)) and (
+            shard_epoch is None or (isinstance(shard_epoch, int) and not isinstance(shard_epoch, bool))
+        ):
+            return None
+        return self._error_response(
+            "shardId must be a string and shardEpoch an integer.",
+            message_id=str(message.get("messageId") or ""),
+            code=code,
+        )
 
     def _refuse_unauthorized_write(
         self,
@@ -675,10 +697,8 @@ class CultMeshLocalServer:
                 operation=operation,
                 schema_id=schema_id,
                 record_key=record_key,
-                shard_id=message.get("shardId") if isinstance(message.get("shardId"), str) else None,
-                shard_epoch=message.get("shardEpoch")
-                if isinstance(message.get("shardEpoch"), int) and not isinstance(message.get("shardEpoch"), bool)
-                else None,
+                shard_id=message.get("shardId"),
+                shard_epoch=message.get("shardEpoch"),
             )
             try:
                 decision = authority.decide(request)

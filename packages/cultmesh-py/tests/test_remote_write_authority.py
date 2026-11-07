@@ -305,15 +305,31 @@ class RemoteWriteAuthorityTests(unittest.TestCase):
         self.assert_refused(replies, KEY_A)
         self.assertLess(peak, 10_000_000)
 
-    def test_shard_fields_of_the_wrong_type_reach_the_authority_as_none(self) -> None:
+    def test_wrong_typed_shard_fields_are_refused_before_the_gate_and_write_nothing(self) -> None:
         authority = Recording(lambda _: CultMeshRemoteWriteDecision.grant())
         server = self.build(authority)
-        message = put_of(KEY_A, "x")
-        message["shardId"] = {"not": "a string"}
-        message["shardEpoch"] = "7"
-        self.send(server, message)
-        self.assertIsNone(authority.requests[0].shard_id)
-        self.assertIsNone(authority.requests[0].shard_epoch)
+        self.seed(server, KEY_B, "server")
+        shards_before = server.node.database.shard_ids()
+        for field, value in (("shardId", {"not": "a string"}), ("shardId", 5), ("shardEpoch", "7"), ("shardEpoch", True), ("shardEpoch", 1.5)):
+            for operation, code in (
+                ("put", "malformed_document_put"),
+                ("delete", "malformed_document_delete"),
+            ):
+                with self.subTest(field=field, value=value, operation=operation):
+                    message = put_of(KEY_A, "x") if operation == "put" else delete_of(KEY_B)
+                    message[field] = value
+                    replies = self.send(server, message)
+                    self.assertEqual([reply["code"] for reply in replies], [code])
+        self.assertEqual(authority.requests, [], "the authority was never asked")
+        self.assertIsNone(self.text_of(server, KEY_A), "nothing was written")
+        self.assertEqual(self.text_of(server, KEY_B), "server", "nothing was deleted")
+        self.assertEqual(server.node.database.shard_ids(), shards_before, "no shard or log entry was filed")
+
+    def test_well_typed_shard_fields_reach_the_authority_as_sent(self) -> None:
+        authority = Recording(lambda _: CultMeshRemoteWriteDecision.grant())
+        server = self.build(authority)
+        self.send(server, put_of(KEY_A, "x"))
+        self.assertEqual((authority.requests[0].shard_id, authority.requests[0].shard_epoch), (SHARD_ID, 1))
 
     def test_grant_all_is_an_explicit_choice_that_grants_every_write(self) -> None:
         server = self.build(CultMeshGrantAllWrites())
