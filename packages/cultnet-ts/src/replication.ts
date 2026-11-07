@@ -270,6 +270,20 @@ export class CultNetDocumentRegistry {
     );
   }
 
+  /**
+   * The canonical schema id a put or delete naming `schemaId` writes under, from the id alone, or `undefined` when no
+   * binding takes it (or several claim it). A server asks its write authority about this id, not the alias a peer sent.
+   */
+  canonicalSchemaId(schemaId: string): string | undefined {
+    try {
+      const binding = this.getBySchemaId(schemaId);
+      return binding ? schemaIdForBinding(binding) : undefined;
+    } catch (error) {
+      if (error instanceof SchemaConflictError) return undefined;
+      throw error;
+    }
+  }
+
   async applyDocumentDeleteMessage(
     cache: CultCache,
     message: CultNetDocumentDeleteMessage,

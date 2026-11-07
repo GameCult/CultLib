@@ -1,3 +1,4 @@
+import { isNullOrWhiteSpaceCSharp } from "./cultmesh-authority";
 import type { DocumentPayload } from "@gamecult/cultcache-ts/document";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 
@@ -202,6 +203,20 @@ export type CultNetErrorCode = (typeof CULTNET_ERROR_CODES)[number];
 /** A refusal that carries text only: `routingHint`, `code` and `details` are written as null, as the reference writes an absent member. */
 export function cultNetTextError(error: string): CultNetErrorMessage {
   return { schemaVersion: "cultnet.error.v0", error, routingHint: null, code: null, details: null };
+}
+
+/**
+ * The refusal for a peer write its server's authority did not grant (C# `CultNetErrorMessage.ForRemoteWriteRefused`):
+ * code `write_not_authorized`, `details` naming the record in `recordKey`. A blank `reason` leaves the text bare.
+ */
+export function cultNetWriteNotAuthorizedError(recordKey: string, reason?: string | null): CultNetErrorMessage {
+  return {
+    schemaVersion: "cultnet.error.v0",
+    error: typeof reason === "string" && !isNullOrWhiteSpaceCSharp(reason) ? `write_not_authorized: ${reason}` : "write_not_authorized",
+    routingHint: null,
+    code: "write_not_authorized",
+    details: { field: "recordKey", value: recordKey, asOf: null, current: null },
+  };
 }
 
 export interface CultNetErrorRoutingHint {
