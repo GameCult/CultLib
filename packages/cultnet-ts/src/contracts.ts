@@ -199,6 +199,11 @@ export const CULTNET_ERROR_CODES = [
 
 export type CultNetErrorCode = (typeof CULTNET_ERROR_CODES)[number];
 
+/** A refusal that carries text only: `routingHint`, `code` and `details` are written as null, as the reference writes an absent member. */
+export function cultNetTextError(error: string): CultNetErrorMessage {
+  return { schemaVersion: "cultnet.error.v0", error, routingHint: null, code: null, details: null };
+}
+
 export interface CultNetErrorRoutingHint {
   shard: Record<string, unknown> | null;
   reason: string;
@@ -958,14 +963,8 @@ function parseGameCultNetworkingMessage(input: unknown): CultNetMessage {
         session: requireLegacyBytes(payload[1], "LoginSuccessMessage.Session"),
       };
     case 4:
-      return {
-        schemaVersion: "cultnet.error.v0",
-        error: requireLegacyString(payload[0], "ErrorMessage.Error"),
-        // The legacy union ErrorMessage carries only Error; the R-N fields exist on cultnet.schema.v0 alone.
-        routingHint: null,
-        code: null,
-        details: null,
-      };
+      // The legacy union ErrorMessage carries only Error; the R-N fields exist on cultnet.schema.v0 alone.
+      return cultNetTextError(requireLegacyString(payload[0], "ErrorMessage.Error"));
     case 5:
       return {
         schemaVersion: "cultnet.sample.change_name.v0",

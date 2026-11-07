@@ -20,6 +20,7 @@ import {
   CultNetRudpSocketTransportConnection,
   rudpClientBindHost,
   CultNetSchemaCatalog,
+  cultNetTextError,
   CultNetShardCatalog,
   cultNetBuiltinSchemaRegistry,
   decodeRudpPacket,
@@ -5577,10 +5578,7 @@ export class CultMesh {
       switch (message.schemaVersion) {
         case "cultnet.snapshot_request.v0": {
           if (!options.getCache) {
-            sendSchemaMessage(record, {
-              schemaVersion: "cultnet.error.v0",
-              error: "CultMesh RUDP document server has no cache for snapshot requests.",
-            });
+            sendSchemaMessage(record, cultNetTextError("CultMesh RUDP document server has no cache for snapshot requests."));
             return;
           }
           let reply: CultNetMessage;
@@ -5613,7 +5611,7 @@ export class CultMesh {
             const unservable = unservablePut(message);
             if (unservable) {
               reportError(unservable);
-              sendSchemaMessage(record, { schemaVersion: "cultnet.error.v0", error: unservable.message });
+              sendSchemaMessage(record, cultNetTextError(unservable.message));
               return;
             }
             const receipt = await options.onDocumentPutRaw(normalizeRudpDocumentPut(message, record.remote, options.documents));
@@ -5623,29 +5621,20 @@ export class CultMesh {
               } catch (error) {
                 // The put is stored: the peer must hear that its receipt is not coming.
                 reportError(error);
-                sendSchemaMessage(record, {
-                  schemaVersion: "cultnet.error.v0",
-                  error: `CultMesh RUDP document server stored a put but could not send its receipt.`,
-                });
+                sendSchemaMessage(record, cultNetTextError(`CultMesh RUDP document server stored a put but could not send its receipt.`));
               }
             }
           }
           return;
         case "cultnet.operation_request.v0":
           if (!options.onOperationRequest) {
-            sendSchemaMessage(record, {
-              schemaVersion: "cultnet.error.v0",
-              error: "CultMesh RUDP document server has no operation handler.",
-            });
+            sendSchemaMessage(record, cultNetTextError("CultMesh RUDP document server has no operation handler."));
             return;
           }
           sendSchemaMessage(record, await options.onOperationRequest(message, publicSession(record)));
           return;
         default:
-          sendSchemaMessage(record, {
-            schemaVersion: "cultnet.error.v0",
-            error: `Unsupported CultMesh RUDP document request ${message.schemaVersion}.`,
-          });
+          sendSchemaMessage(record, cultNetTextError(`Unsupported CultMesh RUDP document request ${message.schemaVersion}.`));
       }
     }
 
@@ -5741,7 +5730,7 @@ export class CultMesh {
      */
     function refuse(record: SessionRecord, text: string): void {
       if (record.closed) return;
-      const payload = encodeSchemaMessage({ schemaVersion: "cultnet.error.v0", error: text });
+      const payload = encodeSchemaMessage(cultNetTextError(text));
       for (const packet of record.session.sendMany("schema", payload, {
         reliable: false,
         ordered: false,
