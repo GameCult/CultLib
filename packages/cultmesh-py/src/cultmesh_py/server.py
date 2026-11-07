@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import logging
 import socket
 import threading
@@ -57,6 +58,7 @@ from cultnet_py.cultmesh_contracts import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_EPHEMERAL_PAIR_ATTEMPTS = 64
 
 
 class _ReplyUnqueueable(Exception):
@@ -168,25 +170,48 @@ class CultMeshLocalServer:
     def start(self) -> "CultMeshLocalServer":
         if self._socket is not None:
             return self
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind((self.host, self.port))
-        server.listen()
+        server, rudp_socket = self._bind_sockets()
         server.settimeout(0.2)
         self._socket = server
         self.port = int(server.getsockname()[1])
         self._stop.clear()
         self._thread = threading.Thread(target=self._accept_loop, daemon=True)
         self._thread.start()
-        if self.enable_rudp:
-            rudp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            rudp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            rudp_socket.bind((self.host, self.port))
+        if rudp_socket is not None:
             rudp_socket.settimeout(0.02)
             self._rudp_socket = rudp_socket
             self._rudp_thread = threading.Thread(target=self._rudp_loop, daemon=True)
             self._rudp_thread.start()
         return self
+
+    def _bind_sockets(self) -> tuple[socket.socket, socket.socket | None]:
+        """The listening TCP socket and, when RUDP is on, the UDP socket on the same port number.
+
+        An explicit port is bound as asked and a failure is the caller's. Port 0 asks for any free port, and the
+        kernel picks the TCP one without knowing whether another process holds that number for UDP, so a
+        UDP collision retries with a fresh TCP port instead of failing the start. Both sockets are bound
+        before any thread starts, so a failed start leaves nothing running or open.
+        """
+        attempts = _EPHEMERAL_PAIR_ATTEMPTS if self.port == 0 and self.enable_rudp else 1
+        for attempt in range(attempts):
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            rudp_socket = None
+            try:
+                server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server.bind((self.host, self.port))
+                server.listen()
+                if self.enable_rudp:
+                    rudp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    rudp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    rudp_socket.bind((self.host, int(server.getsockname()[1])))
+                return server, rudp_socket
+            except OSError as error:
+                server.close()
+                if rudp_socket is not None:
+                    rudp_socket.close()
+                if error.errno != errno.EADDRINUSE or attempt == attempts - 1:
+                    raise
+        raise AssertionError("unreachable")
 
     def stop(self) -> None:
         self._stop.set()
