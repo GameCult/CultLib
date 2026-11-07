@@ -12,7 +12,9 @@ over binary loopback CultNet WebSocket routes under an explicit
 `local-development` trust policy. It proves one canonical
 command effect, idempotent retry, shared observation, provider restart on a new
 physical route, browser rediscovery, retained lease resubscription, and a second
-canonical command after reconnection.
+canonical command after reconnection. Running the sample needs a sibling Eve
+checkout (`--eve-root`); it is not part of `CultLib.sln` and does not build
+standalone.
 
 The current substrate has a browser client boundary and local live proof, but
 not a complete public Verse proof:
