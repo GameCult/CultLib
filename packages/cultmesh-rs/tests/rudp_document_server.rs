@@ -6,7 +6,7 @@ use cultmesh_rs::{
     CultMeshRudpSnapshotQuery, CultMeshRudpSnapshotSource,
 };
 use cultnet_rs::{
-    CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding,
+    CultNetErrorCode, CultNetErrorDetails, CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding,
     CultNetRudpReliableSendReceipt, CultNetRudpReliableSendStatus, CultNetRudpSocketMode,
     CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions, CultNetWireContract,
     decode_cultnet_message_from_slice, encode_cultnet_message_to_vec,
@@ -343,6 +343,15 @@ fn refusal_seen_by(
     client: &mut CultNetRudpSocketTransportConnection,
     receipt: &CultNetRudpReliableSendReceipt,
 ) -> Result<String> {
+    let (error, code, details) = typed_refusal_seen_by(client, receipt)?;
+    assert_eq!((code, details), (None, None));
+    Ok(error)
+}
+
+fn typed_refusal_seen_by(
+    client: &mut CultNetRudpSocketTransportConnection,
+    receipt: &CultNetRudpReliableSendReceipt,
+) -> Result<(String, Option<CultNetErrorCode>, Option<CultNetErrorDetails>)> {
     let mut refusal = None;
     for _ in 0..2_000 {
         if let Some(frame) = client.receive_once()? {
@@ -362,7 +371,6 @@ fn refusal_seen_by(
     else {
         panic!("the refused peer was sent no refusal: {refusal:?}");
     };
-    assert_eq!((code, details), (None, None));
     assert!(
         !error.contains("CANARY"),
         "a sink's or source's text reached the peer: {error}"
@@ -384,7 +392,7 @@ fn refusal_seen_by(
         client.reliable_send_status(receipt),
         CultNetRudpReliableSendStatus::Invalidated
     );
-    Ok(error)
+    Ok((error, code, details))
 }
 
 /// Reads every datagram waiting at the server, such as a refused peer's
@@ -671,10 +679,21 @@ fn application_rejection_is_nonfatal_peer_scoped_refused_to_the_peer_and_unackno
     );
     assert_eq!(server.session_count(), 2);
     // The caller keeps the sink's text; the peer is sent fixed text, never it.
+    // A refused put is typed write_not_authorized and names the record; nothing of it reached the sink.
     assert_eq!(
-        refusal_seen_by(&mut publisher, &publish_receipt)?,
-        "the catalog refused the document"
+        typed_refusal_seen_by(&mut publisher, &publish_receipt)?,
+        (
+            "write_not_authorized: the catalog refused the document".to_string(),
+            Some(CultNetErrorCode::WriteNotAuthorized),
+            Some(CultNetErrorDetails {
+                field: Some("recordKey".into()),
+                value: Some(document("rejected", vec![0, 255, 1]).record_key),
+                as_of: None,
+                current: None,
+            })
+        )
     );
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 0, "a refused put changes nothing");
     drain_until_idle(&mut server)?;
 
     let snapshot_receipt = send_reliable(
@@ -1525,9 +1544,14 @@ fn a_refusal_reaches_a_peer_missing_an_earlier_packet() -> Result<()> {
     assert_eq!(
         refusals,
         vec![CultNetMessage::Error {
-            error: "the catalog refused the document".into(),
-            code: None,
-            details: None,
+            error: "write_not_authorized: the catalog refused the document".into(),
+            code: Some(CultNetErrorCode::WriteNotAuthorized),
+            details: Some(CultNetErrorDetails {
+                field: Some("recordKey".into()),
+                value: Some(document("refused", vec![4, 5, 6]).record_key),
+                as_of: None,
+                current: None,
+            }),
         }]
     );
     assert!(disconnected, "the refusal is followed by a goodbye");

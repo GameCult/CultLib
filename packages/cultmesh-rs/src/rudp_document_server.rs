@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use cultnet_rs::{
-    CultNetMessage, CultNetRawDocumentRecord, CultNetRudpPacket, CultNetRudpPacketType,
+    CultNetErrorCode, CultNetErrorDetails, CultNetMessage, CultNetRawDocumentRecord, CultNetRudpPacket, CultNetRudpPacketType,
     CultNetRudpSendOptions, CultNetRudpSession, CultNetRudpSessionOptions, CultNetWireContract,
     decode_cultnet_message_from_slice, decode_rudp_packet, encode_cultnet_message_to_vec,
     encode_rudp_packet, is_permanent_send_error, send_error_code,
@@ -316,12 +316,48 @@ impl CultMeshRudpRejectionReason {
     }
 }
 
+/// The typed `write_not_authorized` refusal for a put whose record is `record_key`, as C#
+/// `CultNetErrorMessage.ForRemoteWriteRefused` builds it: code, and `details` naming the record.
+pub(crate) fn write_refused_message(record_key: &str, reason: &str) -> CultNetMessage {
+    CultNetMessage::Error {
+        error: format!("write_not_authorized: {reason}"),
+        code: Some(CultNetErrorCode::WriteNotAuthorized),
+        details: Some(CultNetErrorDetails {
+            field: Some("recordKey".into()),
+            value: Some(record_key.into()),
+            as_of: None,
+            current: None,
+        }),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CultMeshRudpApplicationRejection {
     pub session: CultMeshRudpSessionKey,
     pub operation: CultMeshRudpApplicationOperation,
     pub message_id: String,
+    /// The record a rejected put concerned; `None` for a snapshot request. A sink refusal names it to the peer.
+    pub record_key: Option<String>,
     pub reason: CultMeshRudpRejectionReason,
+}
+
+impl CultMeshRudpApplicationRejection {
+    /// What the refused peer is sent: a sink's refusal of a put is a typed `write_not_authorized` naming
+    /// the record; every other rejection is the variant's fixed text, untyped. Neither carries the
+    /// sink's or source's own text.
+    fn refusal_message(&self) -> CultNetMessage {
+        let text = self.reason.refusal_text();
+        match (&self.reason, &self.record_key) {
+            (CultMeshRudpRejectionReason::SinkRefused(_), Some(record_key)) => {
+                write_refused_message(record_key, text)
+            }
+            _ => CultNetMessage::Error {
+                error: text.into(),
+                code: None,
+                details: None,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -335,8 +371,8 @@ pub enum CultMeshRudpPollOutcome {
 enum SessionEnd {
     /// The session refused a packet.
     Refused,
-    /// The server rejected a peer's message; the peer is sent this fixed text.
-    Rejected(&'static str),
+    /// The server rejected a peer's message; the peer is sent this refusal.
+    Rejected(CultNetMessage),
     /// The session owes its peer a packet that can never be sent as built.
     Unsendable(std::io::Error),
 }
@@ -555,7 +591,7 @@ where
                     rejection.reason,
                     CultMeshRudpRejectionReason::ResponseSendFailed(_)
                 ) {
-                    self.end_session(key, SessionEnd::Rejected(rejection.reason.refusal_text()))?;
+                    self.end_session(key, SessionEnd::Rejected(rejection.refusal_message()))?;
                 }
                 return Ok(CultMeshRudpPollOutcome::ApplicationRejected(rejection));
             }
@@ -683,11 +719,13 @@ where
                 message_id,
                 document,
             } => {
+                let record_key = document.record_key.clone();
                 let reject = |reason| {
                     Ok(Some(CultMeshRudpApplicationRejection {
                         session: key,
                         operation: CultMeshRudpApplicationOperation::DocumentPutRaw,
                         message_id: message_id.clone(),
+                        record_key: Some(record_key.clone()),
                         reason,
                     }))
                 };
@@ -758,6 +796,7 @@ where
                             session: key,
                             operation: CultMeshRudpApplicationOperation::SnapshotRequest,
                             message_id,
+                            record_key: None,
                             reason: CultMeshRudpRejectionReason::SnapshotSourceFailed(format!(
                                 "{error:#}"
                             )),
@@ -769,6 +808,7 @@ where
                         session: key,
                         operation: CultMeshRudpApplicationOperation::SnapshotRequest,
                         message_id,
+                        record_key: None,
                         reason: CultMeshRudpRejectionReason::SnapshotTooManyDocuments {
                             documents: documents.len(),
                             max_snapshot_documents: self.options.max_snapshot_documents,
@@ -786,6 +826,7 @@ where
                             session: key,
                             operation: CultMeshRudpApplicationOperation::SnapshotRequest,
                             message_id,
+                            record_key: None,
                             reason: CultMeshRudpRejectionReason::ResponseEncodingFailed(error),
                         }));
                     }
@@ -795,6 +836,7 @@ where
                         session: key,
                         operation: CultMeshRudpApplicationOperation::SnapshotRequest,
                         message_id,
+                        record_key: None,
                         reason: CultMeshRudpRejectionReason::SnapshotResponseTooLarge {
                             response_bytes: payload.len(),
                             max_snapshot_response_bytes: self.options.max_snapshot_response_bytes,
@@ -806,6 +848,7 @@ where
                         session: key,
                         operation: CultMeshRudpApplicationOperation::SnapshotRequest,
                         message_id,
+                        record_key: None,
                         reason: CultMeshRudpRejectionReason::PayloadBudgetFull,
                     }));
                 }
@@ -832,6 +875,7 @@ where
                             session: key,
                             operation: CultMeshRudpApplicationOperation::SnapshotRequest,
                             message_id,
+                            record_key: None,
                             reason: CultMeshRudpRejectionReason::ResponseQueueFailed(format!(
                                 "{error:#}"
                             )),
@@ -848,6 +892,7 @@ where
                             session: key,
                             operation: CultMeshRudpApplicationOperation::SnapshotRequest,
                             message_id,
+                            record_key: None,
                             reason: CultMeshRudpRejectionReason::ResponseSendFailed(code),
                         }));
                     }
@@ -875,7 +920,7 @@ where
         };
         let (refusal, mut unsendable) = match end {
             SessionEnd::Refused => (Vec::new(), None),
-            SessionEnd::Rejected(text) => (self.refusal_packets(&mut entry.session, text), None),
+            SessionEnd::Rejected(refusal) => (self.refusal_packets(&mut entry.session, &refusal), None),
             SessionEnd::Unsendable(error) => (Vec::new(), Some(error)),
         };
         entry.session.reset_peer_state();
@@ -902,14 +947,9 @@ where
     fn refusal_packets(
         &self,
         session: &mut CultNetRudpSession,
-        text: &str,
+        refusal: &CultNetMessage,
     ) -> Vec<CultNetRudpPacket> {
-        let refusal = CultNetMessage::Error {
-            error: text.into(),
-            code: None,
-            details: None,
-        };
-        encode_cultnet_message_to_vec(&refusal, CultNetWireContract::CultNetSchemaV0)
+        encode_cultnet_message_to_vec(refusal, CultNetWireContract::CultNetSchemaV0)
             .and_then(|payload| {
                 session.send_many(
                     "schema",
@@ -1079,4 +1119,27 @@ fn encode_snapshot_response(response: &CultNetMessage) -> std::result::Result<Ve
 
 fn duration_millis(duration: Duration) -> u64 {
     duration.as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // contracts/cultnet/interop/error-vectors.json, `write_not_authorized`: bytes captured from C# MessagePack
+    // (`ForRemoteWriteRefused(request for "some:key", "not granted")`) and pinned by C#, TS and Python too.
+    const WRITE_NOT_AUTHORIZED_HEX: &str = "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D92177726974655F6E6F745F617574686F72697A65643A206E6F74206772616E746564AB726F7574696E6748696E74C0A4636F6465B477726974655F6E6F745F617574686F72697A6564A764657461696C7384A56669656C64A97265636F72644B6579A576616C7565A8736F6D653A6B6579A461734F66C0A763757272656E74C0";
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02X}")).collect()
+    }
+
+    #[test]
+    fn the_sink_refusal_is_the_pinned_write_not_authorized_bytes() {
+        let bytes = encode_cultnet_message_to_vec(
+            &write_refused_message("some:key", "not granted"),
+            CultNetWireContract::CultNetSchemaV0,
+        )
+        .unwrap();
+        assert_eq!(hex(&bytes), WRITE_NOT_AUTHORIZED_HEX);
+    }
 }
