@@ -154,13 +154,9 @@ fn golden_vectors() {
                     put_answer(&mut cache, &a.redacted(hash).unwrap());
                 }
                 "terms" => {
-                    cache
-                        .put(MemberTerms::cache_key(member).unwrap(), &MemberTerms {
-                            member_id: member.into(),
-                            terms_version: payload.into(),
-                            terms_accepted_at: ts,
-                        })
-                        .unwrap();
+                    let terms = MemberTerms { member_id: member.into(), terms_version: payload.into(), terms_accepted_at: ts };
+                    terms.validate().unwrap();
+                    cache.put(MemberTerms::cache_key(member).unwrap(), &terms).unwrap();
                 }
                 "expect_terms" => {
                     let t = cache.get_required::<MemberTerms>(&MemberTerms::cache_key(member).unwrap()).unwrap();
@@ -224,6 +220,35 @@ fn key_refuses_unversioned_sample_ids() {
     }
     assert!(Answer::cache_key("r", "s@4294967295", "m").is_ok());
     assert!(Answer::cache_key("r", "s@1", "m").unwrap() != Answer::cache_key("r", "s@2", "m").unwrap());
+}
+
+#[test]
+fn one_version_rule_everywhere() {
+    for ok in ["1", "2", "4294967295"] {
+        let n: u32 = ok.parse().unwrap();
+        assert_eq!(check_version(ok).unwrap(), n, "{ok}");
+        assert_eq!(check_sample_id(&format!("s@{ok}")).unwrap(), ("s", n), "s@{ok}");
+        assert!(MemberTerms { member_id: "m".into(), terms_version: ok.into(), terms_accepted_at: 1 }.validate().is_ok(), "terms {ok}");
+    }
+    for bad in ["0", "4294967296", "4294967297", "8589934593", "99999999999999999999", "01", "+1", "-1", "", "2026-11"] {
+        assert!(check_version(bad).is_err(), "{bad}");
+        assert!(check_sample_id(&format!("s@{bad}")).is_err(), "s@{bad}");
+        assert!(MemberTerms { member_id: "m".into(), terms_version: bad.into(), terms_accepted_at: 1 }.validate().is_err(), "terms {bad}");
+    }
+}
+
+#[test]
+fn notice_version_zero_is_refused_in_both_records() {
+    let acc = NoticeAcceptance {
+        member_id: "m".into(),
+        experiment_id: "r".into(),
+        notice_version: 0,
+        scope: Scope::Train,
+        accepted_at: 1,
+        event_id: "e".into(),
+    };
+    assert!(acc.validate().is_err());
+    assert!(NoticeAcceptance { notice_version: u32::MAX, ..acc }.validate().is_ok());
 }
 
 #[test]

@@ -35,17 +35,25 @@ fn nonempty(name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// `<sample>@<version>`, version a positive unsigned 32-bit integer written without leading zeros
-/// (`s@01` and `s@1` would be two keys for one version). The version is part of the id, so it is part
-/// of every answer key and no key can name a sample without one.
+/// The one version rule (Heimdall ruling 2026-11-07): a positive integer written without leading
+/// zeros or a sign, at most 4294967295 (`u32::MAX`). `01` and `1` would be two keys for one version.
+pub fn check_version(version: &str) -> Result<u32> {
+    match version.parse::<u32>() {
+        Ok(v) if v > 0 && !version.starts_with(['+', '0']) => Ok(v),
+        _ => bail!("version {version:?} must be a positive integer, no leading zeros, at most {}", u32::MAX),
+    }
+}
+
+/// `<sample>@<version>`, the version under `check_version`. The version is part of the id, so it is
+/// part of every answer key and no key can name a sample without one.
 pub fn check_sample_id(sample_id: &str) -> Result<(&str, u32)> {
     let Some((sample, version)) = sample_id.rsplit_once('@') else {
         bail!("sample id {sample_id:?} has no @version");
     };
-    match version.parse::<u32>() {
-        Ok(v) if v > 0 && !sample.is_empty() && !version.starts_with(['+', '0']) => Ok((sample, v)),
-        _ => bail!("sample id {sample_id:?} needs a non-empty sample and a positive integer version without leading zeros"),
+    if sample.is_empty() {
+        bail!("sample id {sample_id:?} needs a non-empty sample");
     }
+    Ok((sample, check_version(version)?))
 }
 
 /// The first reply a member posts under a notice version. Written once, never updated.
@@ -207,7 +215,7 @@ pub struct MemberTerms {
 impl MemberTerms {
     pub fn validate(&self) -> Result<()> {
         nonempty("member_id", &self.member_id)?;
-        nonempty("terms_version", &self.terms_version)
+        check_version(&self.terms_version).map(drop)
     }
 
     /// `member_id`.
