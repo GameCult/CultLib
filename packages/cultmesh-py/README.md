@@ -228,6 +228,17 @@ prediction = session.predict(note_doc, "input:python:move", {"body": "predicted 
 unsubscribe()
 ```
 
+## Authority route verification
+
+`cultmesh_py.authority` ports the C# reference
+(`src/GameCult.Mesh/CultMeshAuthorityProof.cs`): `AuthorityTrustPolicy.validate`
+judges an Odin-signed ECDSA P-256 route (channel protection, trusted root,
+validity window, IEEE P1363 signature over the canonical bytes) and
+`verify_session_proof` checks the provider nonce proof. Refusals raise
+`AuthorityRouteRefusal` with the C# message text. It needs `cryptography`.
+`tests/test_authority_route_vectors.py` judges
+`contracts/cultmesh/authority-route-vectors*.json`.
+
 ## Verify
 
 `cultmesh_py.verify` checks the public exports and `py.typed` markers of all
