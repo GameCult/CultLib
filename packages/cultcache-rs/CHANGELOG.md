@@ -13,6 +13,7 @@ only in git history.
 
 ### Added
 
+- Lookups, matching the C# `GetByName`, `GetByIndex` and `GetGlobal`. `#[cultcache(name)]` and `#[cultcache(index)]` / `#[cultcache(index = "alias")]` on `DatabaseEntry` fields and `#[cultcache(global)]` on the struct give `CultCache::get_by_name`, `get_by_index` and `get_global`. An empty name and a blank index value are not found; records of one type sharing a name or value find the one with the smallest key. A second record of a global type under another key is refused on every write path and on load with `CultCacheSecondGlobal`. Two `name` members, or two members with one index alias, are refused at compile time. A member's text comes from `CultLookupValue` (`String`, `Option` of one, integers, `bool`, `char`).
 - `SchemaConflictError`, the typed refusal of a write the catalog cannot describe: records of different types under one schema id, or an arrived schema and a registered one that share an id and disagree on the schema name. A whole-store write (`push_all`) refuses with it, names the schema id, the names involved and a record key, writes nothing and leaves the file as it is. A caller tells it apart with `error.downcast_ref::<SchemaConflictError>()`.
 
 ## [0.3.1]

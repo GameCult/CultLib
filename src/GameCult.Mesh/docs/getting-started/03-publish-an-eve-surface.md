@@ -135,7 +135,9 @@ does **not** prove the network layer; the second program owns that evidence.
 
 The network program is
 [`samples/eve-browser-network`](../../../../samples/eve-browser-network/README.md).
-Run it separately only while diagnosing that layer. A smoke against the
+Running it needs a sibling Eve checkout (`--eve-root`); it is not part of
+`CultLib.sln` and does not build standalone. Run it separately only while
+diagnosing that layer. A smoke against the
 deployed Odin daemon remains a separate infrastructure gate. Its owner map
 and full acceptance contract are recorded in
 [`browser-verse-transport.md`](../browser-verse-transport.md).

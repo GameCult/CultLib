@@ -174,6 +174,9 @@ without pretending Rust has runtime reflection hiding under the floorboards.
 - `get_required_envelope::<T>`
 - `get_all::<T>`
 - `get_all_with_keys::<T>`
+- `get_by_name::<T>`
+- `get_by_index::<T>`
+- `get_global::<T>`
 - `soa::<T>`
 - `put::<T>`
 - `put_envelope::<T>`

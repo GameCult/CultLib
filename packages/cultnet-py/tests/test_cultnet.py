@@ -2235,9 +2235,11 @@ class CultNetTests(unittest.TestCase):
         self.assertEqual(delete_schema["properties"]["recordKey"]["type"], "string")
 
         error_schema = json.loads(by_version["cultnet.error.v0"]["schemaJson"])
-        self.assertEqual(error_schema["required"], ["schemaVersion", "error"])
+        contract = json.loads((Path(__file__).resolve().parents[3] / "contracts" / "cultnet" / "cultnet.error.schema.json").read_text(encoding="utf-8"))
+        self.assertEqual(error_schema["required"], contract["required"])
+        self.assertEqual(sorted(error_schema["properties"]), sorted(contract["properties"]))
         self.assertEqual(error_schema["properties"]["error"]["type"], "string")
-        self.assertIn("details", error_schema["properties"])
+        self.assertEqual(error_schema["properties"]["code"]["enum"], contract["properties"]["code"]["enum"])
 
         login_schema = json.loads(by_version["cultnet.login.v0"]["schemaJson"])
         self.assertEqual(login_schema["required"], ["schemaVersion", "nonce", "auth", "password"])

@@ -15,6 +15,8 @@ All notable changes to `@gamecult/cultcache-ts` are recorded here, following
 
 ### Added
 
+- `@gamecult/cultcache-ts/browser`, also what a bundler resolves for the package root under the `browser` export condition: the root surface without `SingleFileMessagePackBackingStore` and `readSingleFileStore`, so it imports no `node:*` built-in and no `koffi` and bundles with esbuild `platform: "browser"`. The Node entry exports exactly what it did.
+
 - `readSingleFileStore(path)`, the one synchronous reader of a single-file store, for consumers that must read a store file rather than decode it themselves. `pullAll`, `push`, `delete` and `pushAll` ask the same reader.
 - `StoreUnreadableError` for a store file this runtime cannot read, `SchemaConflictError` for a write the catalog cannot describe, and `schemaIdentityOf` with its result type `CultCacheSchemaIdentity` (`schemaId`, `schemaName`, `schemaVersion`, `compatibleSchemaIds`), the one derivation of a definition's identity.
 - `SingleFileStoreRead`, exported: the result type of `readSingleFileStore` (`absent`, `format`, `envelopes`, `repairedLegacyPayload`).

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Changed
+
+- `msgpack` is a hard dependency, as `pyproject.toml` declared it. The optional-import fallbacks and the `cultcache-py[msgpack]` extra they named (which never existed) are gone: a missing msgpack is an `ImportError` at import.
+- The single-file store's `push`, `push_all` and `delete` take the cross-process lock on `<path>.lock` (flock; LockFileEx over the whole file on Windows) across the read and the replace, waiting up to `lock_timeout` seconds (30 by default, `TimeoutError` after), and exclude the C#, Rust and TypeScript runtimes' writers. The staged file is `<path>.tmp-<pid>-<uuid>`, fsynced before the replace, with a directory fsync after it off Windows. A fixed `<path>.tmp` is no longer used.
+
 ### Breaking
 
 - A single-file store written as `cultcache.store.v3` is read and written: a record that holds an element id (an owned list element with an `[CultElementId]` member, carried through every write) marks the store v3, and a v3 store is carried through a rewrite with its ids. A runtime from before this change refuses a v3 store by name.

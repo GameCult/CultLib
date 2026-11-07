@@ -127,10 +127,11 @@ export class CultNetDocumentRegistry {
         recordKey: documentKey,
         storedAt: options.storedAt ?? new Date().toISOString(),
         payload: parsed,
-        sourceRuntimeId: options.sourceRuntimeId,
-        sourceAgentId: options.sourceAgentId,
-        sourceRole: options.sourceRole,
-        tags: options.tags,
+        // Absent optional fields must be omitted, not set to undefined: MessagePack encodes undefined as nil and the peer rejects it.
+        ...(options.sourceRuntimeId !== undefined && { sourceRuntimeId: options.sourceRuntimeId }),
+        ...(options.sourceAgentId !== undefined && { sourceAgentId: options.sourceAgentId }),
+        ...(options.sourceRole !== undefined && { sourceRole: options.sourceRole }),
+        ...(options.tags !== undefined && { tags: options.tags }),
       },
     };
   }
