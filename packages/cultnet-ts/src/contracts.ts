@@ -174,6 +174,7 @@ export const CULTNET_ERROR_CODES = [
   "variant_unsupported",
   "unowned_schema",
   "write_not_authorized",
+  "unsupported_schema_version",
 ] as const;
 
 export type CultNetErrorCode = (typeof CULTNET_ERROR_CODES)[number];

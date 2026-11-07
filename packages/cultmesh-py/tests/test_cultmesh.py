@@ -5048,17 +5048,16 @@ class CultMeshTests(unittest.TestCase):
         finally:
             server.stop()
 
-        self.assertEqual(unsupported["messageId"], "bad-schema")
         self.assertEqual(unsupported["code"], "unsupported_schema_version")
-        self.assertEqual(unsupported["details"]["schemaVersion"], "cultnet.nope.v0")
-        self.assertIn("Unsupported CultNet message schema", unsupported["error"])
+        self.assertEqual(unsupported["details"]["field"], "schemaVersion")
+        self.assertEqual(unsupported["details"]["value"], "cultnet.nope.v0")
+        self.assertIn("unsupported_schema_version", unsupported["error"])
         self.assertEqual(malformed_put["messageId"], "bad-put")
         self.assertEqual(malformed_put["code"], "malformed_document_put")
         self.assertEqual(malformed_delete["messageId"], "bad-delete")
         self.assertEqual(malformed_delete["code"], "malformed_document_delete")
-        self.assertEqual(unsupported_v1["messageId"], "bad-v1-selection")
         self.assertEqual(unsupported_v1["code"], "unsupported_schema_version")
-        self.assertEqual(unsupported_v1["details"]["schemaVersion"], "cultnet.snapshot_request.v1")
+        self.assertEqual(unsupported_v1["details"]["value"], "cultnet.snapshot_request.v1")
 
     def test_cultmesh_authority_lease_requires_live_matching_lease(self) -> None:
         peer = CultMeshPeerCard(

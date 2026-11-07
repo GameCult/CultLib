@@ -2580,7 +2580,8 @@ class CultNetTests(unittest.TestCase):
                 self.assertEqual(len(responses), 1)
                 self.assertEqual(responses[0]["schemaVersion"], "cultnet.error.v0")
                 self.assertEqual(responses[0]["code"], "unsupported_schema_version")
-                self.assertEqual(responses[0]["messageId"], "v1-refused")
+                self.assertEqual(responses[0]["details"]["value"], schema_version)
+                self.assertNotIn("messageId", responses[0])
 
     def test_cultnet_simulation_consensus_dedupes_witnesses_and_requires_quorum(self) -> None:
         from cultnet_py import CultNetSimulationConsensus

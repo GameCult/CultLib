@@ -70,7 +70,7 @@ test("dropping code or details breaks the round trip and the decode", () => {
 
 test("a code outside the closed enum is refused, as is a malformed details object", () => {
   const base = decode(bytesOf(vectors.find((v) => v.name === "cursor_stale")!.messagePackHex)) as Record<string, unknown>;
-  assert.throws(() => parseCultNetMessage({ ...base, code: "unsupported_schema_version" }), /cultnet\.error\.v0/);
+  assert.throws(() => parseCultNetMessage({ ...base, code: "not_a_code" }), /cultnet\.error\.v0/);
   assert.throws(() => parseCultNetMessage({ ...base, code: 7 }), /cultnet\.error\.v0/);
   assert.throws(
     () => parseCultNetMessage({ ...base, details: { field: null, value: null, asOf: 1, current: 2, extra: 1 } }),

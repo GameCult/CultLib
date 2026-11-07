@@ -173,6 +173,21 @@ fn cases() -> Vec<Case> {
                 }),
             },
         },
+        Case {
+            name: "unsupported_schema_version",
+            // C#: ForUnsupportedSchemaVersion("cultnet.hello.v1")
+            csharp_hex: "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D92C756E737570706F727465645F736368656D615F76657273696F6E3A2063756C746E65742E68656C6C6F2E7631AB726F7574696E6748696E74C0A4636F6465BA756E737570706F727465645F736368656D615F76657273696F6EA764657461696C7384A56669656C64AD736368656D6156657273696F6EA576616C7565B063756C746E65742E68656C6C6F2E7631A461734F66C0A763757272656E74C0",
+            message: || CultNetMessage::Error {
+                error: "unsupported_schema_version: cultnet.hello.v1".to_string(),
+                code: Some(CultNetErrorCode::UnsupportedSchemaVersion),
+                details: Some(CultNetErrorDetails {
+                    field: Some("schemaVersion".to_string()),
+                    value: Some("cultnet.hello.v1".to_string()),
+                    as_of: None,
+                    current: None,
+                }),
+            },
+        },
     ]
 }
 
