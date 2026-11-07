@@ -17,6 +17,7 @@ export {
   type CultNetRawDocumentRecord,
   type CultNetRawPayloadEncoding,
   CULTNET_ERROR_CODES,
+  cultNetTextError,
   type CultNetErrorCode,
   type CultNetErrorDetails,
   type CultNetErrorMessage,

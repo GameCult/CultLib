@@ -12,6 +12,7 @@ import {
   CultNetPeer,
   CultNetRudpSession,
   cultNetBuiltinSchemaRegistry,
+  cultNetTextError,
   decodeRudpPacket,
   defineCultNetDocumentBinding,
   encodeRudpPacket,
@@ -3708,7 +3709,7 @@ test("CultMesh TS RUDP document server answers a peer whose reliable queue is fu
     while (!refusalIn(rig.inbox) && Date.now() - startedAt < 3_000) await delay(5);
     const refusal = refusalIn(rig.inbox);
     assert.ok(refusal, "the refusal reaches the peer");
-    assert.deepEqual(refusal.message, { schemaVersion: "cultnet.error.v0", error: "the snapshot response could not be queued" });
+    assert.deepEqual(refusal.message, cultNetTextError("the snapshot response could not be queued"));
     for (const part of refusal.parts) {
       assert.ok(refused.every((sequence) => !acknowledges(part, sequence)), `ack ${part.ack} mask ${part.ackMask}`);
     }
@@ -3725,7 +3726,7 @@ test("CultMesh TS RUDP document server refuses a snapshot with fixed text, never
     while (!refusalIn(rig.inbox) && Date.now() - startedAt < 3_000) await delay(5);
     const refusal = refusalIn(rig.inbox);
     assert.ok(refusal, "the refusal reaches the peer");
-    assert.deepEqual(refusal.message, { schemaVersion: "cultnet.error.v0", error: "the snapshot source failed" });
+    assert.deepEqual(refusal.message, cultNetTextError("the snapshot source failed"));
     assert.match(rig.errors[0]?.message ?? "", /CANARY-7f3a/);
   });
 });
