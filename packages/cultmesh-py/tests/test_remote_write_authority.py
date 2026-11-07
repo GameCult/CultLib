@@ -24,7 +24,7 @@ from cultmesh_py import (
     create_node,
 )
 from cultmesh_py.server import CultMeshLocalServer
-from cultnet_py import CultNetPeerError, document_delete, document_put_raw, error_message
+from cultnet_py import CultNetPeerError, create_rudp_schema_transport, document_delete, document_put_raw, error_message
 
 SCHEMA_ID = "sha256:authority-note"
 ALIAS = "runtime.generated.authority-note.ui.42"
@@ -260,6 +260,60 @@ class RemoteWriteAuthorityTests(unittest.TestCase):
 
         self.assertEqual(self.text_of(server, KEY_A), "server")
         self.assertIsNone(self.text_of(server, KEY_B))
+
+    def test_a_peer_over_rudp_is_refused_with_its_rudp_endpoint_and_the_server_serves_on(self) -> None:
+        authority = Recording(lambda _: CultMeshRemoteWriteDecision.refuse("rudp no"))
+        server = self.build(authority)
+        server.start()
+        try:
+            transport = create_rudp_schema_transport(
+                host="127.0.0.1", port=server.port, connection_id=server.rudp_connection_id, timeout_seconds=4.0
+            )
+            try:
+                transport.send("schema", msgpack.packb(put_of(KEY_A, "peer"), use_bin_type=True))
+                reply = msgpack.unpackb(transport.receive(timeout_seconds=4.0).payload, raw=False)
+                transport.send("schema", msgpack.packb(delete_of(KEY_A), use_bin_type=True))
+                delete_reply = msgpack.unpackb(transport.receive(timeout_seconds=4.0).payload, raw=False)
+            finally:
+                transport.close()
+        finally:
+            server.stop()
+        self.assertEqual(reply["error"], "write_not_authorized: rudp no")
+        self.assertEqual(delete_reply["code"], "write_not_authorized")
+        self.assertEqual([r.peer.transport for r in authority.requests], ["rudp", "rudp"])
+        self.assertTrue(all(r.peer.endpoint.startswith("127.0.0.1:") for r in authority.requests))
+        self.assertIsNone(self.text_of(server, KEY_A))
+
+    def test_a_put_with_an_absurd_payload_is_refused_by_the_gate_not_crashed_on(self) -> None:
+        server = self.build(None)
+        absurd = put_of(KEY_A, "x")
+        absurd["document"]["payload"] = 2**70
+        self.assert_refused(self.send(server, absurd), KEY_A)
+
+    def test_an_ungranted_peers_huge_payload_is_refused_without_allocating_it(self) -> None:
+        import tracemalloc
+
+        server = self.build(None)
+        huge = put_of(KEY_A, "x")
+        huge["document"]["payload"] = 10**9  # bytes(10**9) would allocate a gigabyte
+        tracemalloc.start()
+        try:
+            replies = self.send(server, huge)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assert_refused(replies, KEY_A)
+        self.assertLess(peak, 10_000_000)
+
+    def test_shard_fields_of_the_wrong_type_reach_the_authority_as_none(self) -> None:
+        authority = Recording(lambda _: CultMeshRemoteWriteDecision.grant())
+        server = self.build(authority)
+        message = put_of(KEY_A, "x")
+        message["shardId"] = {"not": "a string"}
+        message["shardEpoch"] = "7"
+        self.send(server, message)
+        self.assertIsNone(authority.requests[0].shard_id)
+        self.assertIsNone(authority.requests[0].shard_epoch)
 
     def test_grant_all_is_an_explicit_choice_that_grants_every_write(self) -> None:
         server = self.build(CultMeshGrantAllWrites())

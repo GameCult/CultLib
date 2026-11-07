@@ -671,8 +671,10 @@ class CultMeshLocalServer:
                 operation=operation,
                 schema_id=schema_id,
                 record_key=record_key,
-                shard_id=message.get("shardId"),
-                shard_epoch=message.get("shardEpoch"),
+                shard_id=message.get("shardId") if isinstance(message.get("shardId"), str) else None,
+                shard_epoch=message.get("shardEpoch")
+                if isinstance(message.get("shardEpoch"), int) and not isinstance(message.get("shardEpoch"), bool)
+                else None,
             )
             try:
                 decision = authority.decide(request)
