@@ -18,8 +18,8 @@
 // harness can dial a peer late and exercise Cut C's retained-state seed
 // instead of the provider always tearing down the moment it is done sending.
 //
-// Neither mode imports `cultmesh-ts` itself (the harness drives processes,
-// and the dependency direction is `cultmesh-ts` -> `cultnet-ts`, never the
+// Neither mode imports `@gamecult/cultmesh-ts` itself (the harness drives processes,
+// and the dependency direction is `@gamecult/cultmesh-ts` -> `@gamecult/cultnet-ts`, never the
 // reverse); this script reaches the provider/connector through its own
 // package's `src/`.
 

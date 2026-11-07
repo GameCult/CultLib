@@ -284,7 +284,7 @@ public static class CultNetFirstCall
 
 Source: [`packages/cultnet-ts/test/first-call.test.ts`](../../packages/cultnet-ts/test/first-call.test.ts), run by
 `npm test` in `packages/cultnet-ts` (build `packages/cultcache-ts` first: `npm run build` there). The test imports
-from `../src` where the block reads `cultnet-ts`. More: `packages/cultnet-ts/README.md`.
+from `../src` where the block reads `@gamecult/cultnet-ts`. More: `packages/cultnet-ts/README.md`.
 
 ```ts
 import { createServer, connect } from "node:net";
@@ -294,7 +294,7 @@ import {
   CultNetDocumentRegistry,
   createTcpFramedCultNetPeer,
   defineCultNetDocumentBinding,
-} from "cultnet-ts";
+} from "@gamecult/cultnet-ts";
 
 const noteDocument = defineDocumentType({
   type: "note",

@@ -16,7 +16,7 @@
 // agree with itself.
 
 import { documentPayloadBytes, documentPayloadFromBytes, type DocumentPayload } from "@gamecult/cultcache-ts";
-import { isNullOrWhiteSpaceCSharp } from "cultnet-ts";
+import { isNullOrWhiteSpaceCSharp } from "@gamecult/cultnet-ts";
 
 /** `CultMeshRealtimeWireProtocol.ApplicationProtocolName`: the QUIC ALPN. */
 export const CULTMESH_REALTIME_ALPN = "cultmesh-state-v1";
@@ -70,7 +70,7 @@ const INT64_MAX = 2n ** 63n - 1n;
  * `CultMeshRealtimeFrame.Validate`. The C# reading of "non-empty" is
  * `string.IsNullOrWhiteSpace`, whose whitespace set is not
  * `String.prototype.trim`'s, so this borrows the one TypeScript implementation
- * of that set from `cultnet-ts` rather than keeping a second reading here.
+ * of that set from `@gamecult/cultnet-ts` rather than keeping a second reading here.
  *
  * The range check has no C# counterpart because `long` gives it for free; a
  * `bigint` does not, and a `DataView` would otherwise throw a bare `RangeError`

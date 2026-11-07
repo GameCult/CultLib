@@ -19,7 +19,7 @@ import {
   CultNetDocumentRegistry,
   defineCultNetDocumentBinding,
   type CultNetPeer,
-} from "cultnet-ts";
+} from "@gamecult/cultnet-ts";
 import { CultMesh, cultMeshDocumentFromSingleFile, type CultMeshRudpDocumentPut } from "../src/index";
 
 // A document written in the reference's positional shape, and a plain map document beside it. Every mesh reader of a

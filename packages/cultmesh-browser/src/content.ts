@@ -3,8 +3,8 @@
 // The response's declared length and coding are never consulted (Fetch decodes codings; the bytes received are the evidence).
 // Hashing, hex rules, record keys, the loopback rule and manifest validation belong to cultnet-ts and are only called here.
 
-import { EMPTY_SHA256, chunkRecordKey, parseSha256Hex, sha256Hex, validateManifest, type CultMeshCdnArtifactManifest } from "cultnet-ts/content";
-import { isLoopbackEndpoint } from "cultnet-ts/authority";
+import { EMPTY_SHA256, chunkRecordKey, parseSha256Hex, sha256Hex, validateManifest, type CultMeshCdnArtifactManifest } from "@gamecult/cultnet-ts/content";
+import { isLoopbackEndpoint } from "@gamecult/cultnet-ts/authority";
 
 export type CultMeshContentErrorCode =
   | "manifest-invalid" | "too-large" | "insecure-endpoint" | "webcrypto-unavailable" | "network"

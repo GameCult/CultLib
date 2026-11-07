@@ -461,13 +461,13 @@ function loadUnderDgramStub(modulePath: string): string {
 }
 
 test("the idunn-runtime subpath loads the signer and loader without loading dgram; the package root does load it", () => {
-  const subpath = require.resolve("cultnet-ts/idunn-runtime");
+  const subpath = require.resolve("@gamecult/cultnet-ts/idunn-runtime");
   assert.equal(loadUnderDgramStub(subpath), "loaded");
-  assert.equal(loadUnderDgramStub(require.resolve("cultnet-ts")), "failed: dgram was loaded");
+  assert.equal(loadUnderDgramStub(require.resolve("@gamecult/cultnet-ts")), "failed: dgram was loaded");
   const exported = require(subpath) as Record<string, unknown>;
   assert.equal(typeof exported.createIdunnRuntimeSigner, "function");
   assert.equal(typeof exported.loadIdunnRuntimeAuthorityFromEnvironment, "function");
   assert.equal(exported.createIdunnRuntimePresencePublisher, undefined);
   assert.equal(exported.signIdunnRuntimePresence, undefined);
-  assert.equal((require("cultnet-ts") as Record<string, unknown>).signIdunnRuntimePresence, undefined);
+  assert.equal((require("@gamecult/cultnet-ts") as Record<string, unknown>).signIdunnRuntimePresence, undefined);
 });

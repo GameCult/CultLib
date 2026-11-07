@@ -7,7 +7,7 @@ game sessions with prediction reconciliation, committed simulation facts, the
 local TCP/RUDP server, and a package daemon.
 
 It depends on `cultcache-py` and `cultnet-py`, mirroring `cultmesh-rs` and
-`cultmesh-ts`. The Verse catalog, peer exchange, authority lease, stream
+`@gamecult/cultmesh-ts`. The Verse catalog, peer exchange, authority lease, stream
 negotiation, and simulation fact contracts are defined in
 `cultnet_py.cultmesh_contracts` and re-exported here.
 

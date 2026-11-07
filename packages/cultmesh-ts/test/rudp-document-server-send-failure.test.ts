@@ -6,14 +6,14 @@ import assert from "node:assert/strict";
 import { createSocket, type RemoteInfo, type Socket } from "node:dgram";
 import test from "node:test";
 import { documentPayloadFromBytes } from "@gamecult/cultcache-ts";
-import { encodeWireValue } from "cultnet-ts/wire";
+import { encodeWireValue } from "@gamecult/cultnet-ts/wire";
 import {
   CultNetDocumentRegistry,
   CultNetRudpSession,
   decodeRudpPacket,
   encodeRudpPacket,
   type CultNetPeer,
-} from "cultnet-ts";
+} from "@gamecult/cultnet-ts";
 import { CultMesh } from "../src/index";
 
 async function waitFor(predicate: () => boolean, description: string): Promise<void> {

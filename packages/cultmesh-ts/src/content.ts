@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
-import { DEFAULT_CHUNK_SIZE_BYTES, EMPTY_SHA256, chunkRecordKey, isNullOrWhiteSpaceCSharp, parseSha256Hex, sha256Hex } from "cultnet-ts/content";
+import { DEFAULT_CHUNK_SIZE_BYTES, EMPTY_SHA256, chunkRecordKey, isNullOrWhiteSpaceCSharp, parseSha256Hex, sha256Hex } from "@gamecult/cultnet-ts/content";
 
 /** What the provider reads of a request. The path and the headers are never read: the route is the query alone. */
 export interface ContentChunkRequest { method: string; url: string; }

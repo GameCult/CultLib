@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { decodeManifest } from "cultnet-ts/content";
+import { decodeManifest } from "@gamecult/cultnet-ts/content";
 import { fetchVerifiedChunk, fetchVerifiedContent, CultMeshContentError } from "../../src/content.js";
 
 const [endpointsJson, manifestsDir, only] = process.argv.slice(2) as [string, string, string | undefined];

@@ -46,8 +46,8 @@ try {
   const moduleMap = {
     "@gamecult/eve-contracts": join(eveRoot, "packages", "eve-contracts", "src", "index.ts"),
     "@gamecult/eve-browser-lowering": join(eveRoot, "packages", "eve-browser-lowering", "src", "index.ts"),
-    "cultmesh-browser": join(repoRoot, "packages", "cultmesh-browser", "src", "index.ts"),
-    "cultnet-ts/contracts": join(repoRoot, "packages", "cultnet-ts", "src", "contracts.ts"),
+    "@gamecult/cultmesh-browser": join(repoRoot, "packages", "cultmesh-browser", "src", "index.ts"),
+    "@gamecult/cultnet-ts/contracts": join(repoRoot, "packages", "cultnet-ts", "src", "contracts.ts"),
   };
   const sampleTsconfig = join(workRoot, "tsconfig.json");
   await writeFile(sampleTsconfig, JSON.stringify({

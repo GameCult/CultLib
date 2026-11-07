@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { EMPTY_SHA256, encodeManifest, packContent } from "cultnet-ts/content";
+import { EMPTY_SHA256, encodeManifest, packContent } from "@gamecult/cultnet-ts/content";
 
 const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url)); // dist-test/test/interop

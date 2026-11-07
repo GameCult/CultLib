@@ -1,6 +1,6 @@
 # CultMesh Browser
 
-`cultmesh-browser` is the browser-safe CultMesh client boundary. It owns one
+`@gamecult/cultmesh-browser` is the browser-safe CultMesh client boundary. It owns one
 WebSocket session for a stable Verse/authority-runtime target, retains explicit raw
 document leases across route replacement, and correlates typed CultNet
 operations with provider receipts.
@@ -95,7 +95,7 @@ WebCrypto `crypto.subtle`; without WebCrypto it fails with
 endpoint CultMesh resolved is the only host the reader trusts.
 
 ```ts
-import { fetchVerifiedContent } from "cultmesh-browser";
+import { fetchVerifiedContent } from "@gamecult/cultmesh-browser";
 
 const bytes = await fetchVerifiedContent(endpoint, manifest, {
   signal: AbortSignal.timeout(30_000),

@@ -9,7 +9,7 @@ leave because both lease the same document.
 
 | Piece | Status |
 | --- | --- |
-| Two clients, real WebSockets, real `cultmesh-browser` client, one arena: join, see each other, move, leave | **tested** (`arena.test.ts`) |
+| Two clients, real WebSockets, real `@gamecult/cultmesh-browser` client, one arena: join, see each other, move, leave | **tested** (`arena.test.ts`) |
 | Edge clamp, and the source below matching the files that ran | **tested** |
 | Browser bundle builds and the page is served | **tested** (HTTP fetch only) |
 | The page running in a real browser, two windows | **not yet**: no browser on the host that built this recipe |
@@ -19,7 +19,7 @@ leave because both lease the same document.
 | Dropped players: a closed tab that never sent `leave` stays in the arena | **not yet**: operations do not carry a connection identity to the authority |
 | `CultCache` in the browser | **not yet**: the `@gamecult/cultcache-ts` entry imports Node built-ins, so the client keeps the decoded document in a variable and only `./document` is imported |
 
-No `cultmesh-ts` or `cultnet-ts` TypeScript authority server exists. The server below is the CultNet
+No `@gamecult/cultmesh-ts` or `@gamecult/cultnet-ts` TypeScript authority server exists. The server below is the CultNet
 message handling a provider owes, written in this recipe with the `ws` package.
 
 ## Run it
@@ -61,8 +61,8 @@ export const arenaSize = 100;
 import { createServer, type RequestListener, type Server } from "node:http";
 import { CultCache } from "@gamecult/cultcache-ts";
 import { defineDocumentRegistry } from "@gamecult/cultcache-ts/document";
-import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
-import { encodeCultNetMessageForWire, parseCultNetMessage, type CultNetMessage } from "cultnet-ts/contracts";
+import { decodeWireValue, encodeWireValue } from "@gamecult/cultnet-ts/wire";
+import { encodeCultNetMessageForWire, parseCultNetMessage, type CultNetMessage } from "@gamecult/cultnet-ts/contracts";
 import { WebSocketServer, type WebSocket } from "ws";
 import { arenaDocument, arenaKey, arenaSize, authorityRuntimeId, verseId, type ArenaState } from "./schema.ts";
 
@@ -163,7 +163,7 @@ export async function startArena(port = 0, host = "127.0.0.1", onRequest?: Reque
 ## client.ts
 
 ```ts
-import { CultMeshBrowserClient, CultMeshBrowserOdinRendezvous, decodeCultNetOperationPayload, decodeCultNetPayload } from "cultmesh-browser";
+import { CultMeshBrowserClient, CultMeshBrowserOdinRendezvous, decodeCultNetOperationPayload, decodeCultNetPayload } from "@gamecult/cultmesh-browser";
 import { arenaDocument, arenaKey, authorityRuntimeId, verseId, type ArenaState } from "./schema.ts";
 
 // Runs unchanged in a browser or in Node 22+: both have a global WebSocket.

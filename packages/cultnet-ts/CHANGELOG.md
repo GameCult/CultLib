@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `cultnet-ts` are recorded here, following
+All notable changes to `@gamecult/cultnet-ts` are recorded here, following
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
@@ -13,6 +13,7 @@ All notable changes to `cultnet-ts` are recorded here, following
 
 ### Breaking
 
+- The package is renamed `cultnet-ts` to `@gamecult/cultnet-ts` (the repo already scopes `@gamecult/cultcache-ts`), so the unscoped name cannot be claimed by someone else. Import from `@gamecult/cultnet-ts` and its subpaths; the API is unchanged.
 - `CultNetErrorMessage` carries `routingHint`, `code` and `details` (null when absent), as the reference writes them and `cultnet.error.schema.json` requires; the interface previously dropped them. New `CultNetErrorCode`, `CultNetErrorDetails` and `CultNetShardRoutingHint` types.
 
 - `CultMeshCdnChunkRef` carries `id` (slot 4), the reference's element id. `encodeManifest` writes five-slot chunk references and `packContent` sets the decimal offset as the id, as the reference does; a manifest written before ids reads `""` and is rewritten with the slot. Content vectors regenerated from the reference.

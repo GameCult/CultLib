@@ -1,5 +1,5 @@
 {
-  "name": "cultnet-ts",
+  "name": "@gamecult/cultnet-ts",
   "version": "0.3.0",
   "description": "CultNet-style typed direct-pipe messaging and state replication for TypeScript runtimes.",
   "main": "dist/index.js",

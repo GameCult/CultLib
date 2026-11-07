@@ -4,7 +4,7 @@ This is the real-process continuation of `samples/eve-two-runtime`:
 
 - one C# provider owns a durable `.cc` counter, the Eve surface, command
   idempotency, and canonical receipts;
-- one real Chromium page leases both documents through `cultmesh-browser` and
+- one real Chromium page leases both documents through `@gamecult/cultmesh-browser` and
   lowers the provider-owned Eve surface;
 - one retained C# headless client discovers the provider through the same Odin
   identity, observes the typed counter and canonical receipt ids, survives the

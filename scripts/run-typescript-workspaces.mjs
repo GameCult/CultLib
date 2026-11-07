@@ -11,7 +11,7 @@ const npmCli = process.env.npm_execpath ??
 // moves when a package is scoped: `8cb3b72` renamed `cultcache-ts` to
 // `@gamecult/cultcache-ts` and left this entry behind, which broke `build:ts` and
 // `test:ts` for every workspace from that commit on.
-const workspaces = ["@gamecult/cultcache-ts", "cultnet-ts", "cultmesh-ts", "cultmesh-browser"];
+const workspaces = ["@gamecult/cultcache-ts", "@gamecult/cultnet-ts", "@gamecult/cultmesh-ts", "@gamecult/cultmesh-browser"];
 const childEnv = process.platform === "win32"
   ? {
       ...process.env,
