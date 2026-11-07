@@ -21,6 +21,7 @@ import {
   rudpClientBindHost,
   CultNetSchemaCatalog,
   cultNetTextError,
+  cultNetWriteNotAuthorizedError,
   CultNetShardCatalog,
   cultNetBuiltinSchemaRegistry,
   decodeRudpPacket,
@@ -32,6 +33,7 @@ import {
   sendRudpDatagram,
   type CultNetErrorMessage,
   type CultNetDocumentBinding,
+  type CultNetDocumentDeleteMessage,
   type CultNetMessage,
   type CultNetOperationRequestMessage,
   type CultNetOperationResponseMessage,
@@ -3992,6 +3994,63 @@ export type CultMeshRudpDocumentPut = {
   | { readonly decoded: false; readonly payload: DocumentPayload }
 );
 
+/** The peer a write arrived from: the datagram's source, nothing the peer claimed. */
+export interface CultMeshRemoteWritePeer {
+  address: string;
+  family: string;
+  port: number;
+}
+
+export type CultMeshRemoteWriteOperation = "put" | "delete";
+
+/**
+ * One peer write as the authority sees it. `schemaId` is the canonical id the registry resolved for the write (the id
+ * as sent when no binding takes it), never an alias the peer used when a binding resolves it. `shardId` and
+ * `shardEpoch` are as a put carried them, `null` when it sent none (always `null` for a delete, which has none); a
+ * put carrying either with the wrong type is refused before any authority is asked.
+ */
+export interface CultMeshRemoteWriteRequest {
+  peer: CultMeshRemoteWritePeer;
+  operation: CultMeshRemoteWriteOperation;
+  schemaId: string;
+  recordKey: string;
+  shardId: string | null;
+  shardEpoch: number | null;
+}
+
+export interface CultMeshRemoteWriteDecision {
+  granted: boolean;
+  /** Told to the refused peer after `write_not_authorized:`; keep it free of anything secret. */
+  reason?: string;
+}
+
+/**
+ * The one question a document server asks before it applies a peer's put or delete (C# `ICultNetRemoteWriteAuthority`).
+ * A server with no authority refuses every peer write; one whose authority throws, rejects or answers anything but
+ * `granted: true` refuses too.
+ */
+export interface CultMeshRemoteWriteAuthority {
+  decide(request: CultMeshRemoteWriteRequest): CultMeshRemoteWriteDecision | Promise<CultMeshRemoteWriteDecision>;
+}
+
+/**
+ * Grants every peer write. For a host that has already authenticated its peers, or a test rig: it is an explicit
+ * choice because serving without an authority refuses writes.
+ */
+export class CultMeshGrantAllWrites implements CultMeshRemoteWriteAuthority {
+  decide(): CultMeshRemoteWriteDecision {
+    return { granted: true };
+  }
+}
+
+/** A delete as `onDocumentDeleteRaw` receives it, after the authority granted it. */
+export interface CultMeshRudpDocumentDelete {
+  messageId: string;
+  schemaId: string;
+  recordKey: string;
+  remote: CultMeshRemoteWritePeer;
+}
+
 export interface CultMeshRudpDocumentReceipt<TDefinition extends AnyCultCacheDocumentDefinition = AnyCultCacheDocumentDefinition> {
   binding: CultNetDocumentBinding<TDefinition>;
   recordKey: string;
@@ -4031,10 +4090,18 @@ export interface CultMeshRudpDocumentServerOptions extends CultMeshRudpSocketOpt
   documents: CultNetDocumentRegistry;
   getCache?: () => Promise<CultCache> | CultCache;
   onError?: (error: Error) => void;
+  /**
+   * Who may put and delete. Without it every peer put and delete is refused with a typed `write_not_authorized`
+   * (and `onDocumentPutRaw` is never called); pass `new CultMeshGrantAllWrites()` to accept them all. The authority is
+   * asked before the document is sized, resolved or decoded.
+   */
+  writeAuthority?: CultMeshRemoteWriteAuthority;
   onDocumentPutRaw?: (document: CultMeshRudpDocumentPut) =>
     | CultMeshRudpDocumentReceipt
     | void
     | Promise<CultMeshRudpDocumentReceipt | void>;
+  /** Applies a delete the authority granted. Without it a granted delete is answered with a text refusal. */
+  onDocumentDeleteRaw?: (request: CultMeshRudpDocumentDelete) => void | Promise<void>;
   onOperationRequest?: (
     request: CultNetOperationRequestMessage,
     session: CultMeshRudpServerSession,
@@ -5574,7 +5641,21 @@ export class CultMesh {
       payload: Uint8Array,
     ): Promise<void> {
       if (record.closed) return;
-      const message = parseCultNetMessage(decodeWireValue(payload), wireContract);
+      let decoded: unknown;
+      let message: CultNetMessage;
+      try {
+        decoded = decodeWireValue(payload);
+        message = parseCultNetMessage(decoded, wireContract);
+      } catch (error) {
+        // A frame the server cannot read is judged as the write it looks like (a put when it does not even decode), so
+        // an ungranted peer hears the same refusal for it as for any other write, not a parse error.
+        const write = readableWrite(decoded);
+        if (decoded !== undefined && !write) throw error;
+        if (await writeRefused(record, write?.operation ?? "put", write?.schemaId ?? "", write?.recordKey ?? "", null, null)) return;
+        reportError(error);
+        sendSchemaMessage(record, malformedWriteError(write?.operation ?? "put", "CultMesh RUDP document server could not read the write."));
+        return;
+      }
       switch (message.schemaVersion) {
         case "cultnet.snapshot_request.v0": {
           if (!options.getCache) {
@@ -5607,6 +5688,24 @@ export class CultMesh {
           sendSchemaMessage(record, cultNetBuiltinSchemaRegistry.createCatalogResponse(message));
           return;
         case "cultnet.document_put_raw.v0":
+          {
+            // The parser passes shard fields of any type through a put. The authority is asked first, with the shard
+            // fields it can trust (null when wrong-typed), so an ungranted peer hears only the refusal; a granted peer
+            // whose shard fields are wrong-typed is then refused as malformed.
+            const { shardId, shardEpoch } = message as { shardId?: unknown; shardEpoch?: unknown };
+            const malformedShard =
+              (shardId !== undefined && typeof shardId !== "string") ||
+              (shardEpoch !== undefined && !Number.isSafeInteger(shardEpoch));
+            if (await writeRefused(
+              record, "put", message.document.schemaId, message.document.recordKey,
+              malformedShard ? null : (shardId as string | undefined) ?? null,
+              malformedShard ? null : (shardEpoch as number | undefined) ?? null,
+            )) return;
+            if (malformedShard) {
+              sendSchemaMessage(record, malformedWriteError("put", "Raw put messages must carry a string shardId and an integer shardEpoch."));
+              return;
+            }
+          }
           if (options.onDocumentPutRaw) {
             const unservable = unservablePut(message);
             if (unservable) {
@@ -5626,6 +5725,20 @@ export class CultMesh {
             }
           }
           return;
+        case "cultnet.document_delete.v0": {
+          if (await writeRefused(record, "delete", message.schemaId, message.recordKey, null, null)) return;
+          if (!options.onDocumentDeleteRaw) {
+            sendSchemaMessage(record, cultNetTextError("CultMesh RUDP document server has no delete handler."));
+            return;
+          }
+          await options.onDocumentDeleteRaw({
+            messageId: message.messageId,
+            schemaId: message.schemaId,
+            recordKey: message.recordKey,
+            remote: { ...record.remote },
+          });
+          return;
+        }
         case "cultnet.operation_request.v0":
           if (!options.onOperationRequest) {
             sendSchemaMessage(record, cultNetTextError("CultMesh RUDP document server has no operation handler."));
@@ -5636,6 +5749,77 @@ export class CultMesh {
         default:
           sendSchemaMessage(record, cultNetTextError(`Unsupported CultMesh RUDP document request ${message.schemaVersion}.`));
       }
+    }
+
+    function clipUtf8(text: string, maxBytes: number): string {
+      const bytes = Buffer.from(text, "utf8");
+      return bytes.byteLength <= maxBytes ? text : new TextDecoder().decode(bytes.subarray(0, maxBytes)).replace(/\uFFFD+$/, "");
+    }
+
+    /** The put or delete a decoded frame claims to be, with the ids it carries when they are strings. */
+    function readableWrite(value: unknown): { operation: CultMeshRemoteWriteOperation; schemaId: string; recordKey: string } | undefined {
+      if (typeof value !== "object" || value === null) return undefined;
+      const frame = value as { schemaVersion?: unknown; schemaId?: unknown; recordKey?: unknown; document?: unknown };
+      const str = (v: unknown): string => (typeof v === "string" ? v : "");
+      if (frame.schemaVersion === "cultnet.document_delete.v0") {
+        return { operation: "delete", schemaId: str(frame.schemaId), recordKey: str(frame.recordKey) };
+      }
+      if (frame.schemaVersion === "cultnet.document_put_raw.v0") {
+        const document = (typeof frame.document === "object" && frame.document !== null ? frame.document : {}) as { schemaId?: unknown; recordKey?: unknown };
+        return { operation: "put", schemaId: str(document.schemaId), recordKey: str(document.recordKey) };
+      }
+      return undefined;
+    }
+
+    // Not a `code`: malformed_document_put/delete are outside the schema's closed code enum, which TS and Rust peers
+    // refuse to decode (docs/cultnet-error-contract-cut.md), so the name leads the text of a codeless error instead.
+    function malformedWriteError(operation: CultMeshRemoteWriteOperation, text: string): CultNetMessage {
+      return cultNetTextError(`malformed_document_${operation}: ${text}`);
+    }
+
+    /**
+     * Asks the write authority about a put or delete, before anything of the write is sized, resolved or decoded, and
+     * answers a refusal with the typed `write_not_authorized` naming the record. True when the write is refused.
+     * No authority refuses; an authority that throws, rejects or does not say `granted: true` refuses too (fail
+     * closed), and a failure is reported without quoting it.
+     */
+    async function writeRefused(
+      record: SessionRecord,
+      operation: CultMeshRemoteWriteOperation,
+      schemaId: string,
+      recordKey: string,
+      shardId: string | null,
+      shardEpoch: number | null,
+    ): Promise<boolean> {
+      let reason: string | undefined;
+      const authority = options.writeAuthority;
+      if (!authority) {
+        reason = "no remote write authority is configured";
+      } else {
+        try {
+          const decision = await authority.decide({
+            peer: { ...record.remote },
+            operation,
+            schemaId: options.documents.canonicalSchemaId(schemaId) ?? schemaId,
+            recordKey,
+            shardId,
+            shardEpoch,
+          });
+          if (decision?.granted === true) return false;
+          reason = typeof decision?.reason === "string" ? decision.reason : undefined;
+        } catch (error) {
+          reportError(new Error(`CultMesh remote write authority failed (${error instanceof Error ? error.name : typeof error}); the write was refused.`));
+          reason = "the write authority failed";
+        }
+      }
+      try {
+        // The key is the peer's and the reason the authority's: both are clipped so the refusal fits `maxPayloadBytes`
+        // whatever they are (the peer is told the clipped key; a `maxPayloadBytes` under about 512 can still not carry it).
+        sendSchemaMessage(record, cultNetWriteNotAuthorizedError(clipUtf8(recordKey, 64), reason === undefined ? undefined : clipUtf8(reason, 96)));
+      } catch (error) {
+        reportError(error);
+      }
+      return true;
     }
 
     function publicSession(record: SessionRecord): CultMeshRudpServerSession {
