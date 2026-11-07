@@ -3,6 +3,9 @@ export {
   encodeCultNetMessageForWire,
   parseCultNetMessage,
   validateGhostlightAgentState,
+  type CultNetDatabaseSubscribeV1Message,
+  type CultNetSnapshotRequestV1Message,
+  type CultNetSnapshotResponseRawV1Message,
   type CultNetDocumentDeleteMessage,
   type CultNetDocumentMutationContract,
   type CultNetDocumentPutMessage,
@@ -66,6 +69,19 @@ export {
   type GhostlightVariableMap,
   type GhostlightWorldState,
 } from "./contracts";
+export {
+  CultNetSelectionInvalidError,
+  validateSelectionShape,
+  type CultNetCitation,
+  type CultNetEdge,
+  type CultNetFieldPredicate,
+  type CultNetIncoming,
+  type CultNetRawDocumentHeader,
+  type CultNetRecordRef,
+  type CultNetSelection,
+  type CultNetSelectionOperator,
+  type CultNetSelectionProjection,
+} from "./selection";
 export {
   base64ToBytes,
   bytesToBase64,
