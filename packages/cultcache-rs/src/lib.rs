@@ -162,7 +162,67 @@ pub use cultcache_rs_derive::DatabaseEntry;
 pub trait DatabaseEntry: Serialize + DeserializeOwned + Clone + Send + 'static {
     const TYPE: &'static str;
     const SCHEMA_NAME: &'static str = "DatabaseEntry";
+    /// `#[cultcache(global)]`: the cache holds at most one record of this type, found by `get_global`.
+    const GLOBAL: bool = false;
+    /// The `#[cultcache(name)]` member's value, which `get_by_name` finds the record by. `None` is no name.
+    fn cult_name(&self) -> Option<String> {
+        None
+    }
+    /// Each `#[cultcache(index)]` member as (alias, value), which `get_by_index` finds the record by.
+    fn cult_indexes(&self) -> Vec<(&'static str, String)> {
+        Vec::new()
+    }
 }
+
+/// What a `#[cultcache(name)]` or `#[cultcache(index)]` member says it is called: its text, or `None` for a member
+/// that holds no value (an `Option` that is `None`). The cache treats an empty name and a blank index value as none.
+pub trait CultLookupValue {
+    fn lookup_value(&self) -> Option<String>;
+}
+
+impl CultLookupValue for String {
+    fn lookup_value(&self) -> Option<String> {
+        Some(self.clone())
+    }
+}
+
+impl<T: CultLookupValue> CultLookupValue for Option<T> {
+    fn lookup_value(&self) -> Option<String> {
+        self.as_ref().and_then(CultLookupValue::lookup_value)
+    }
+}
+
+macro_rules! lookup_value_by_display {
+    ($($ty:ty),* $(,)?) => {$(
+        impl CultLookupValue for $ty {
+            fn lookup_value(&self) -> Option<String> {
+                Some(self.to_string())
+            }
+        }
+    )*};
+}
+
+lookup_value_by_display!(bool, char, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
+
+/// A global type already holds a record under another key; a second would leave `get_global` with two answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CultCacheSecondGlobal {
+    pub schema_name: String,
+    pub existing_key: String,
+    pub key: String,
+}
+
+impl std::fmt::Display for CultCacheSecondGlobal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} is a global and already has record {}; {} would be a second.",
+            self.schema_name, self.existing_key, self.key
+        )
+    }
+}
+
+impl std::error::Error for CultCacheSecondGlobal {}
 
 /// A type written as a positional slots array: what the `CultSlots` and `DatabaseEntry`
 /// derives implement, and what a `CultUnion` arm must carry.
@@ -2655,6 +2715,8 @@ struct CultCacheStoreRegistration {
 
 pub struct CultCache {
     definitions: BTreeMap<String, &'static str>,
+    /// The registered types declared `#[cultcache(global)]`.
+    globals: BTreeSet<String>,
     schema_name_definitions: BTreeMap<String, String>,
     entries: BTreeMap<(String, String), CultCacheEnvelope>,
     stores: Vec<CultCacheStoreRegistration>,
@@ -2664,6 +2726,7 @@ impl CultCache {
     pub fn new() -> Self {
         Self {
             definitions: BTreeMap::new(),
+            globals: BTreeSet::new(),
             schema_name_definitions: BTreeMap::new(),
             entries: BTreeMap::new(),
             stores: Vec::new(),
@@ -2694,6 +2757,11 @@ impl CultCache {
             ));
         }
         self.definitions.insert(T::TYPE.to_string(), T::SCHEMA_NAME);
+        if T::GLOBAL {
+            self.globals.insert(T::TYPE.to_string());
+        } else {
+            self.globals.remove(T::TYPE);
+        }
         self.schema_name_definitions
             .insert(T::SCHEMA_NAME.to_string(), T::TYPE.to_string());
         Ok(())
@@ -2800,6 +2868,7 @@ impl CultCache {
                 loaded.insert(entry_id(&entry), entry);
             }
         }
+        self.refuse_second_globals(&loaded)?;
         self.entries = loaded;
         Ok(())
     }
@@ -2883,6 +2952,65 @@ impl CultCache {
         Ok(values)
     }
 
+    /// The one record of a `#[cultcache(global)]` type, or `None` before it is written (and for a type that is
+    /// not a global).
+    pub fn get_global<T: DatabaseEntry>(&self) -> Result<Option<T>> {
+        self.require_entry_type::<T>()?;
+        if !T::GLOBAL {
+            return Ok(None);
+        }
+        self.find_record::<T>(|_| true)
+    }
+
+    /// The record whose `#[cultcache(name)]` member is `name`. An empty name is no name, so it finds nothing. Records
+    /// of one type sharing a name find the one with the smallest key (ordinal), whatever order they were written or
+    /// loaded in; removing it finds the next.
+    pub fn get_by_name<T: DatabaseEntry>(&self, name: &str) -> Result<Option<T>> {
+        self.require_entry_type::<T>()?;
+        if name.is_empty() {
+            return Ok(None);
+        }
+        self.find_record::<T>(|document| document.cult_name().as_deref() == Some(name))
+    }
+
+    /// The record whose `#[cultcache(index)]` member `alias` holds `value`. A blank value is not indexed, so it finds
+    /// nothing. Records of one type sharing a value find the one with the smallest key (ordinal), whatever order they
+    /// were written or loaded in; removing it finds the next.
+    pub fn get_by_index<T: DatabaseEntry>(&self, alias: &str, value: &str) -> Result<Option<T>> {
+        self.require_entry_type::<T>()?;
+        if value.trim().is_empty() {
+            return Ok(None);
+        }
+        self.find_record::<T>(|document| {
+            document
+                .cult_indexes()
+                .iter()
+                .any(|(held_alias, held_value)| *held_alias == alias && held_value == value)
+        })
+    }
+
+    /// The first record of `T`, in key order, that `matches`.
+    fn find_record<T: DatabaseEntry>(&self, matches: impl Fn(&T) -> bool) -> Result<Option<T>> {
+        let held = self
+            .entries
+            .range((T::TYPE.to_string(), String::new())..)
+            .take_while(|((held_type, _), _)| held_type == T::TYPE);
+        for (_, entry) in held {
+            let document: T = decode_payload(&entry.payload).with_context(|| {
+                format!(
+                    "failed to decode CultCache entry {:?} at key {:?} as {}",
+                    T::TYPE,
+                    entry.key,
+                    T::SCHEMA_NAME
+                )
+            })?;
+            if matches(&document) {
+                return Ok(Some(document));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn soa<T: SoaDocument>(&self) -> Result<CultSoaTable<T>> {
         let keyed_rows = self.get_all_with_keys::<T>()?;
         let (keys, documents): (Vec<_>, Vec<_>) = keyed_rows.into_iter().unzip();
@@ -2900,6 +3028,7 @@ impl CultCache {
 
     pub fn put<T: DatabaseEntry>(&mut self, key: impl Into<String>, value: &T) -> Result<T> {
         let (entry, parsed) = self.prepare_entry(key, value)?;
+        self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
         if let Some(home) = self.home_index(T::TYPE)? {
             self.stores[home].store.push(&entry)?;
         }
@@ -3011,6 +3140,7 @@ impl CultCache {
         for entry in &staged {
             next.insert(entry_id(entry), entry.clone());
         }
+        self.refuse_second_globals(&next)?;
         if let Some(store_index) = store_index {
             // The home store receives its own records only: those it already
             // holds in this cache plus the staged ones.
@@ -3029,6 +3159,7 @@ impl CultCache {
 
     pub fn put_envelope<T: DatabaseEntry>(&mut self, entry: CultCacheEnvelope) -> Result<T> {
         let parsed = self.validate_envelope::<T>(&entry)?;
+        self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
         if let Some(home) = self.home_index(T::TYPE)? {
             self.stores[home].store.push(&entry)?;
         }
@@ -3061,6 +3192,7 @@ impl CultCache {
             ));
         }
         require_payload_depth(&entry)?;
+        self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
         if let Some(home) = self.home_index(&entry.r#type)? {
             self.stores[home].store.push(&entry)?;
         }
@@ -3146,7 +3278,40 @@ impl CultCache {
             self.home_index(&entry.r#type)?;
             loaded.insert(entry_id(&entry), entry);
         }
+        self.refuse_second_globals(&loaded)?;
         self.entries = loaded;
+        Ok(())
+    }
+
+    fn refuse_second_global(
+        &self,
+        entries: &BTreeMap<(String, String), CultCacheEnvelope>,
+        type_id: &str,
+        key: &str,
+    ) -> Result<()> {
+        if !self.globals.contains(type_id) {
+            return Ok(());
+        }
+        let held_other = entries
+            .range((type_id.to_string(), String::new())..)
+            .take_while(|((held_type, _), _)| held_type == type_id)
+            .map(|((_, held_key), _)| held_key)
+            .find(|held_key| held_key.as_str() != key);
+        match held_other {
+            Some(existing_key) => Err(CultCacheSecondGlobal {
+                schema_name: self.definitions.get(type_id).copied().unwrap_or(type_id).to_string(),
+                existing_key: existing_key.clone(),
+                key: key.to_string(),
+            }
+            .into()),
+            None => Ok(()),
+        }
+    }
+
+    fn refuse_second_globals(&self, entries: &BTreeMap<(String, String), CultCacheEnvelope>) -> Result<()> {
+        for (type_id, key) in entries.keys() {
+            self.refuse_second_global(entries, type_id, key)?;
+        }
         Ok(())
     }
 

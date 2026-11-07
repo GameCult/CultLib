@@ -22,6 +22,7 @@ fn database_entry_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
     let ident = input.ident.clone();
     let mut entry_type: Option<LitStr> = None;
     let mut schema_name: Option<LitStr> = None;
+    let mut global = false;
 
     for attribute in input
         .attrs
@@ -36,6 +37,12 @@ fn database_entry_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
             } else if meta.path.is_ident("schema") {
                 once(&schema_name, &meta, "schema")?;
                 schema_name = Some(meta.value()?.parse()?);
+                Ok(())
+            } else if meta.path.is_ident("global") {
+                if global {
+                    return Err(meta.error("repeated `global`: #[cultcache(global)] is given once"));
+                }
+                global = true;
                 Ok(())
             } else {
                 Err(meta.error("unsupported cultcache attribute"))
@@ -54,11 +61,40 @@ fn database_entry_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
 
     let slots = named_slots(input.data, &ident, "DatabaseEntry")?;
     let codec = slot_codec(&ident, &slots);
+    let name_member = slots.iter().find(|slot| slot.name).map(|slot| &slot.ident);
+    let name_fn = name_member.map(|member| {
+        quote! {
+            fn cult_name(&self) -> ::std::option::Option<::std::string::String> {
+                ::cultcache_rs::CultLookupValue::lookup_value(&self.#member)
+            }
+        }
+    });
+    let index_members = slots.iter().filter_map(|slot| slot.index.as_ref().map(|alias| (alias, &slot.ident)));
+    let index_pushes = index_members.map(|(alias, member)| {
+        quote! {
+            if let ::std::option::Option::Some(value) = ::cultcache_rs::CultLookupValue::lookup_value(&self.#member) {
+                held.push((#alias, value));
+            }
+        }
+    });
+    let index_pushes: Vec<_> = index_pushes.collect();
+    let indexes_fn = (!index_pushes.is_empty()).then(|| {
+        quote! {
+            fn cult_indexes(&self) -> ::std::vec::Vec<(&'static str, ::std::string::String)> {
+                let mut held = ::std::vec::Vec::new();
+                #(#index_pushes)*
+                held
+            }
+        }
+    });
 
     Ok(quote! {
         impl ::cultcache_rs::DatabaseEntry for #ident {
             const TYPE: &'static str = #entry_type;
             const SCHEMA_NAME: &'static str = #schema_name;
+            const GLOBAL: bool = #global;
+            #name_fn
+            #indexes_fn
         }
 
         #codec
@@ -133,6 +169,8 @@ fn named_slots(data: Data, ident: &syn::Ident, owner: &str) -> syn::Result<Vec<C
         let mut key: Option<usize> = None;
         let mut default = false;
         let mut bytes = false;
+        let mut name = false;
+        let mut index: Option<String> = None;
         for attribute in field
             .attrs
             .iter()
@@ -157,6 +195,22 @@ fn named_slots(data: Data, ident: &syn::Ident, owner: &str) -> syn::Result<Vec<C
                 } else if meta.path.is_ident("bytes") {
                     bytes = true;
                     Ok(())
+                } else if owner == "DatabaseEntry" && meta.path.is_ident("name") {
+                    if name {
+                        return Err(meta.error("repeated `name`: #[cultcache(name)] is given once"));
+                    }
+                    name = true;
+                    Ok(())
+                } else if owner == "DatabaseEntry" && meta.path.is_ident("index") {
+                    once(&index, &meta, "index")?;
+                    // A bare `index`, or an alias that is blank, names the field itself.
+                    let alias = if meta.input.peek(syn::Token![=]) {
+                        meta.value()?.parse::<LitStr>()?.value()
+                    } else {
+                        String::new()
+                    };
+                    index = Some(if alias.trim().is_empty() { field_ident.to_string() } else { alias });
+                    Ok(())
                 } else {
                     Err(meta.error("unsupported field cultcache attribute"))
                 }
@@ -180,7 +234,27 @@ fn named_slots(data: Data, ident: &syn::Ident, owner: &str) -> syn::Result<Vec<C
             ty: field.ty,
             default,
             bytes,
+            name,
+            index,
         });
+    }
+    if let Some(second) = slots.iter().filter(|slot| slot.name).nth(1) {
+        return Err(syn::Error::new_spanned(
+            &second.ident,
+            format!("{owner} declares #[cultcache(name)] on more than one member; a record has one name"),
+        ));
+    }
+    for (position, slot) in slots.iter().enumerate() {
+        let Some(alias) = &slot.index else { continue };
+        if let Some(first) = slots[..position].iter().find(|earlier| earlier.index.as_ref() == Some(alias)) {
+            return Err(syn::Error::new_spanned(
+                &slot.ident,
+                format!(
+                    "{owner} members {} and {} both declare index alias \"{alias}\"; an index alias must name one member",
+                    first.ident, slot.ident
+                ),
+            ));
+        }
     }
     slots.sort_by_key(|slot| slot.key);
     Ok(slots)
@@ -367,6 +441,10 @@ struct CultCacheSlot {
     ty: Type,
     default: bool,
     bytes: bool,
+    /// `#[cultcache(name)]`: the member `get_by_name` finds the record by.
+    name: bool,
+    /// `#[cultcache(index)]` or `#[cultcache(index = "alias")]`: the alias `get_by_index` finds the record by.
+    index: Option<String>,
 }
 
 fn union_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
@@ -842,4 +920,89 @@ mod tests {
         let input: DeriveInput = syn::parse_str(source).expect("the fixture parses");
         named_slots(input.data, &input.ident, "CultSlots").expect("the fixture is accepted");
     }
+    fn entry_error(source: &str) -> String {
+        let input: DeriveInput = syn::parse_str(source).expect("the fixture parses");
+        database_entry_codec(input).expect_err("the fixture is refused").to_string()
+    }
+
+    fn entry_tokens(source: &str) -> String {
+        let input: DeriveInput = syn::parse_str(source).expect("the fixture parses");
+        database_entry_codec(input).expect("the fixture is accepted").to_string().replace(' ', "")
+    }
+
+    #[test]
+    fn name_index_and_global_generate_the_lookup_surface() {
+        let tokens = entry_tokens(
+            r#"#[cultcache(type = "t", global)] struct S {
+                #[cultcache(key = 0, name)] label: String,
+                #[cultcache(key = 1, index)] code: String,
+                #[cultcache(key = 2, index = "sku")] stock: Option<String>,
+            }"#,
+        );
+        assert!(tokens.contains("constGLOBAL:bool=true"), "{tokens}");
+        assert!(tokens.contains("fncult_name"), "{tokens}");
+        assert!(tokens.contains("(\"code\",value)"), "{tokens}");
+        assert!(tokens.contains("(\"sku\",value)"), "{tokens}");
+    }
+
+    #[test]
+    fn a_record_without_lookups_generates_none_of_them() {
+        let tokens = entry_tokens(r#"#[cultcache(type = "t")] struct S { #[cultcache(key = 0)] a: String }"#);
+        assert!(tokens.contains("constGLOBAL:bool=false"), "{tokens}");
+        assert!(!tokens.contains("fncult_name") && !tokens.contains("fncult_indexes"), "{tokens}");
+    }
+
+    // ResolveIndexAlias: a blank alias is the member's name.
+    #[test]
+    fn a_blank_index_alias_is_the_member_name() {
+        let tokens = entry_tokens(
+            r#"#[cultcache(type = "t")] struct S { #[cultcache(key = 0, index = "  ")] code: String }"#,
+        );
+        assert!(tokens.contains("(\"code\",value)"), "{tokens}");
+    }
+
+    #[test]
+    fn two_names_are_refused_for_that_reason() {
+        let message = entry_error(
+            r#"#[cultcache(type = "t")] struct S { #[cultcache(key = 0, name)] a: String, #[cultcache(key = 1, name)] b: String }"#,
+        );
+        assert!(message.contains("more than one member"), "{message}");
+    }
+
+    // D10: two members that declare one alias; a bare index is the member name, so it collides with an explicit alias of it.
+    #[test]
+    fn two_members_with_one_index_alias_are_refused_for_that_reason() {
+        let message = entry_error(
+            r#"#[cultcache(type = "t")] struct S { #[cultcache(key = 0, index = "k")] a: String, #[cultcache(key = 1, index = "k")] b: String }"#,
+        );
+        assert!(message.contains("both declare index alias \"k\""), "{message}");
+        let message = entry_error(
+            r#"#[cultcache(type = "t")] struct S { #[cultcache(key = 0, index)] a: String, #[cultcache(key = 1, index = "a")] b: String }"#,
+        );
+        assert!(message.contains("both declare index alias \"a\""), "{message}");
+    }
+
+    #[test]
+    fn a_repeated_lookup_attribute_is_refused() {
+        let message = entry_error(
+            r#"#[cultcache(type = "t")] struct S { #[cultcache(key = 0, name, name)] a: String }"#,
+        );
+        assert!(message.contains("repeated `name`"), "{message}");
+        let message = entry_error(
+            r#"#[cultcache(type = "t")] struct S { #[cultcache(key = 0, index, index = "x")] a: String }"#,
+        );
+        assert!(message.contains("repeated `index`"), "{message}");
+        let message = entry_error(r#"#[cultcache(type = "t", global, global)] struct S { #[cultcache(key = 0)] a: String }"#);
+        assert!(message.contains("repeated `global`"), "{message}");
+    }
+
+    // Only a DatabaseEntry is looked up: a nested slot record carrying the attributes is refused as before.
+    #[test]
+    fn lookup_attributes_are_refused_on_a_slots_record() {
+        let message = slots_error(r#"struct S { #[cultcache(key = 0, name)] a: String }"#);
+        assert!(message.contains("unsupported field cultcache attribute"), "{message}");
+        let message = slots_error(r#"struct S { #[cultcache(key = 0, index)] a: String }"#);
+        assert!(message.contains("unsupported field cultcache attribute"), "{message}");
+    }
+
 }
