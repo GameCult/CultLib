@@ -1,0 +1,134 @@
+{
+  "provenance": "Captured from MessagePack C# 3.1.7 (CultNetErrorMessage/CultNetErrorDetails, Options = Standard.WithSecurity(UntrustedData)); pinned byte-for-byte by packages/cultnet-rs/tests/error_message.rs, whose inline hex equals messagePackHex here (test error_vectors_file_matches_the_inline_csharp_captures). Rust encodes to these exact bytes, so C#-written and Rust-written bytes are one set. Every key is written on the wire, nil included.",
+  "vectors": [
+    {
+      "name": "selection_invalid_schemas_null",
+      "messagePackHex": "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D92473656C656374696F6E5F696E76616C69643A206D757374206E6F7420626520656D707479AB726F7574696E6748696E74C0A4636F6465B173656C656374696F6E5F696E76616C6964A764657461696C7384A56669656C64A7736368656D6173A576616C7565C0A461734F66C0A763757272656E74C0",
+      "message": {
+        "schemaVersion": "cultnet.error.v0",
+        "error": "selection_invalid: must not be empty",
+        "routingHint": null,
+        "code": "selection_invalid",
+        "details": {
+          "field": "schemas",
+          "value": null,
+          "asOf": null,
+          "current": null
+        }
+      }
+    },
+    {
+      "name": "selection_invalid_field_value",
+      "messagePackHex": "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D92273656C656374696F6E5F696E76616C69643A20626C616E6B206B657920656E747279AB726F7574696E6748696E74C0A4636F6465B173656C656374696F6E5F696E76616C6964A764657461696C7384A56669656C64A46B657973A576616C7565A3202020A461734F66C0A763757272656E74C0",
+      "message": {
+        "schemaVersion": "cultnet.error.v0",
+        "error": "selection_invalid: blank key entry",
+        "routingHint": null,
+        "code": "selection_invalid",
+        "details": {
+          "field": "keys",
+          "value": "   ",
+          "asOf": null,
+          "current": null
+        }
+      }
+    },
+    {
+      "name": "cursor_stale",
+      "messagePackHex": "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72BD637572736F725F7374616C653A20637572736F72206973207374616C65AB726F7574696E6748696E74C0A4636F6465AC637572736F725F7374616C65A764657461696C7384A56669656C64C0A576616C7565C0A461734F6601A763757272656E7402",
+      "message": {
+        "schemaVersion": "cultnet.error.v0",
+        "error": "cursor_stale: cursor is stale",
+        "routingHint": null,
+        "code": "cursor_stale",
+        "details": {
+          "field": null,
+          "value": null,
+          "asOf": 1,
+          "current": 2
+        }
+      }
+    },
+    {
+      "name": "cursor_invalid",
+      "messagePackHex": "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D923637572736F725F696E76616C69643A2063616E6E6F7420706172736520637572736F72AB726F7574696E6748696E74C0A4636F6465AE637572736F725F696E76616C6964A764657461696C73C0",
+      "message": {
+        "schemaVersion": "cultnet.error.v0",
+        "error": "cursor_invalid: cannot parse cursor",
+        "routingHint": null,
+        "code": "cursor_invalid",
+        "details": null
+      }
+    },
+    {
+      "name": "reference_outside_target",
+      "messagePackHex": "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D9317265666572656E63655F6F7574736964655F7461726765743A206F757473696465206465636C6172656420746172676574AB726F7574696E6748696E74C0A4636F6465B87265666572656E63655F6F7574736964655F746172676574A764657461696C73C0",
+      "message": {
+        "schemaVersion": "cultnet.error.v0",
+        "error": "reference_outside_target: outside declared target",
+        "routingHint": null,
+        "code": "reference_outside_target",
+        "details": null
+      }
+    },
+    {
+      "name": "variant_unsupported_subscription_ended",
+      "messagePackHex": "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72B876617269616E7420756E737570706F727465642068657265AB726F7574696E6748696E74C0A4636F6465B376617269616E745F756E737570706F72746564A764657461696C7384A56669656C64AE737562736372697074696F6E4964A576616C7565A57375622D31A461734F66C0A763757272656E74C0",
+      "message": {
+        "schemaVersion": "cultnet.error.v0",
+        "error": "variant unsupported here",
+        "routingHint": null,
+        "code": "variant_unsupported",
+        "details": {
+          "field": "subscriptionId",
+          "value": "sub-1",
+          "asOf": null,
+          "current": null
+        }
+      }
+    },
+    {
+      "name": "variant_unsupported_no_subscription",
+      "messagePackHex": "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72B876617269616E7420756E737570706F727465642068657265AB726F7574696E6748696E74C0A4636F6465B376617269616E745F756E737570706F72746564A764657461696C73C0",
+      "message": {
+        "schemaVersion": "cultnet.error.v0",
+        "error": "variant unsupported here",
+        "routingHint": null,
+        "code": "variant_unsupported",
+        "details": null
+      }
+    },
+    {
+      "name": "unowned_schema",
+      "messagePackHex": "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D95C756E6F776E65645F736368656D613A204E6F207368617264206F776E7320736368656D612027736F6D652E736368656D612E763127206B65792027736F6D653A6B6579273B207468652077726974652077617320726566757365642EAB726F7574696E6748696E74C0A4636F6465AE756E6F776E65645F736368656D61A764657461696C7384A56669656C64A8736368656D614964A576616C7565AE736F6D652E736368656D612E7631A461734F66C0A763757272656E74C0",
+      "message": {
+        "schemaVersion": "cultnet.error.v0",
+        "error": "unowned_schema: No shard owns schema 'some.schema.v1' key 'some:key'; the write was refused.",
+        "routingHint": null,
+        "code": "unowned_schema",
+        "details": {
+          "field": "schemaId",
+          "value": "some.schema.v1",
+          "asOf": null,
+          "current": null
+        }
+      }
+    },
+    {
+      "name": "write_not_authorized",
+      "messagePackHex": "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D92177726974655F6E6F745F617574686F72697A65643A206E6F74206772616E746564AB726F7574696E6748696E74C0A4636F6465B477726974655F6E6F745F617574686F72697A6564A764657461696C7384A56669656C64A97265636F72644B6579A576616C7565A8736F6D653A6B6579A461734F66C0A763757272656E74C0",
+      "message": {
+        "schemaVersion": "cultnet.error.v0",
+        "error": "write_not_authorized: not granted",
+        "routingHint": null,
+        "code": "write_not_authorized",
+        "details": {
+          "field": "recordKey",
+          "value": "some:key",
+          "asOf": null,
+          "current": null
+        }
+      }
+    }
+  ]
+}

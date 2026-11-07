@@ -38,6 +38,7 @@ from .cultmesh_contracts import (
 )
 from .framing import decode_frame, encode_frame, read_frame, write_frame
 from .messages import (
+    CULTNET_ERROR_CODES,
     CultNetMessage,
     CultNetWitnessArtifactBundle,
     compute_simulation_claim_hash,
@@ -47,6 +48,7 @@ from .messages import (
     document_delete,
     document_put_raw,
     encode_witness_artifact_bundle_payload,
+    error_message,
     hello,
     login,
     login_success,
@@ -103,6 +105,12 @@ from .shard_replication import (
 )
 from .snapshot import CultNetRawDocumentRecord, CultNetRawSnapshotResponse
 from .subscription import CultNetDatabaseChange
+from .rudp_server import (
+    CultNetRudpSocketServerFrame,
+    CultNetRudpSocketServerOptions,
+    CultNetRudpSocketServerPeer,
+    CultNetRudpSocketTransportServer,
+)
 from .transport import (
     CultNetRudpDeliveredFrame,
     CultNetRudpPacket,
@@ -165,6 +173,7 @@ __all__ = [
     "simulation_fact_document",
     "verse_catalog_request",
     "verse_from_wire",
+    "CULTNET_ERROR_CODES",
     "CultNetMessage",
     "CultNetWitnessArtifactBundle",
     "CultNetDatabaseSubscription",
@@ -211,6 +220,10 @@ __all__ = [
     "CultNetRudpReceiveResult",
     "CultNetRudpSendOptions",
     "CultNetRudpSession",
+    "CultNetRudpSocketServerFrame",
+    "CultNetRudpSocketServerOptions",
+    "CultNetRudpSocketServerPeer",
+    "CultNetRudpSocketTransportServer",
     "is_permanent_send_error",
     "send_error_code",
     "CultNetRudpSessionOptions",
@@ -247,6 +260,7 @@ __all__ = [
     "encode_witness_artifact_bundle_payload",
     "encode_frame",
     "encode_rudp_packet",
+    "error_message",
     "hello",
     "INTEROP_WIRE_CONTRACT",
     "login",

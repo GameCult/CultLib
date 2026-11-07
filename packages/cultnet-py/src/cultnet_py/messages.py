@@ -28,7 +28,59 @@ def parse_message(payload: bytes) -> CultNetMessage:
         raise ValueError("CultNet schema-v0 messages must declare schemaVersion")
     body = dict(decoded)
     del body["schemaVersion"]
+    if schema_version == "cultnet.error.v0":
+        _validate_error_body(body)
     return CultNetMessage(schema_version=schema_version, body=body)
+
+
+# Closed refusal-code set of cultnet.error.v0 (contracts/cultnet/cultnet.error.schema.json). Adding a
+# code is one coordinated change across every runtime; a peer refuses a code it does not know.
+CULTNET_ERROR_CODES: tuple[str, ...] = (
+    "selection_invalid",
+    "cursor_stale",
+    "cursor_invalid",
+    "reference_outside_target",
+    "variant_unsupported",
+    "unowned_schema",
+    "write_not_authorized",
+)
+
+_ERROR_DETAILS_KEYS = ("field", "value", "asOf", "current")
+
+
+def _is_uint(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _validate_error_body(body: dict[str, Any]) -> None:
+    """Refuse a cultnet.error.v0 body that is not the full-key shape the schema requires."""
+    expected = ("error", "routingHint", "code", "details")
+    if set(body) != set(expected):
+        raise ValueError(f"cultnet.error.v0 must carry exactly {list(expected)}, got {sorted(body)}")
+    if not isinstance(body["error"], str) or not body["error"]:
+        raise ValueError("cultnet.error.v0 error must be a non-empty string")
+    code = body["code"]
+    if code is not None and (not isinstance(code, str) or code not in CULTNET_ERROR_CODES):
+        raise ValueError(f"cultnet.error.v0 code {code!r} is not a recognized refusal code")
+    hint = body["routingHint"]
+    if hint is not None:
+        if (
+            not isinstance(hint, dict)
+            or set(hint) != {"shard", "reason"}
+            or not isinstance(hint["reason"], str)
+            or not (hint["shard"] is None or isinstance(hint["shard"], dict))
+        ):
+            raise ValueError("cultnet.error.v0 routingHint must be null or {shard, reason}")
+    details = body["details"]
+    if details is not None:
+        if not isinstance(details, dict) or set(details) != set(_ERROR_DETAILS_KEYS):
+            raise ValueError(f"cultnet.error.v0 details must be null or carry exactly {list(_ERROR_DETAILS_KEYS)}")
+        for key in ("field", "value"):
+            if details[key] is not None and not isinstance(details[key], str):
+                raise ValueError(f"cultnet.error.v0 details.{key} must be a string or null")
+        for key in ("asOf", "current"):
+            if details[key] is not None and not _is_uint(details[key]):
+                raise ValueError(f"cultnet.error.v0 details.{key} must be a non-negative integer or null")
 
 
 def hello(
@@ -97,6 +149,29 @@ def verify_session(
             "session": session,
         },
     )
+
+
+def error_message(
+    error: str,
+    *,
+    code: str | None = None,
+    details: dict[str, Any] | None = None,
+    routing_hint: dict[str, Any] | None = None,
+) -> CultNetMessage:
+    """Build cultnet.error.v0 with every key written (nil included), as the C# map formatter does.
+
+    ``details`` may name any of field/value/asOf/current; the rest are written as null.
+    """
+    body = {
+        "error": error,
+        "routingHint": routing_hint,
+        "code": code,
+        "details": None if details is None else {key: details.get(key) for key in _ERROR_DETAILS_KEYS},
+    }
+    if details is not None and set(details) - set(_ERROR_DETAILS_KEYS):
+        raise ValueError(f"cultnet.error.v0 details has unknown keys {sorted(set(details) - set(_ERROR_DETAILS_KEYS))}")
+    _validate_error_body(body)
+    return CultNetMessage("cultnet.error.v0", body)
 
 
 def login_success(

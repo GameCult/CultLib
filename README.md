@@ -98,7 +98,8 @@ start with the maintained
 series. Its first executable package-consumer checkpoint is
 [`samples/eve-two-runtime`](samples/eve-two-runtime/README.md).
 The real-process browser continuation is
-[`samples/eve-browser-network`](samples/eve-browser-network/README.md).
+[`samples/eve-browser-network`](samples/eve-browser-network/README.md); it
+needs a sibling Eve checkout (`--eve-root`) and is not in `CultLib.sln`.
 One documented command runs both layers:
 
 ```powershell

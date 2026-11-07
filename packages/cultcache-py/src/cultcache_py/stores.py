@@ -3,9 +3,15 @@
 import base64
 import json
 import os
+import sys
 import threading
+import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Iterator, TypeVar
+
+import msgpack
 
 from .backing_store import (
     CultCacheEnvelope,
@@ -21,6 +27,8 @@ STORE_FORMAT_ELEMENT_IDS = "cultcache.store.v3"
 _READABLE_STORE_FORMATS = (STORE_FORMAT_VERSION, STORE_FORMAT_ELEMENT_IDS)
 _STORE_FORMAT_PREFIX = "cultcache.store."
 _PERSISTED_RECORD_SLOTS = 4
+_LOCK_POLL_SECONDS = 0.01
+LOCK_TIMEOUT_SECONDS = 30.0
 _Contents = TypeVar("_Contents")
 
 
@@ -114,14 +122,14 @@ class JsonLinesBackingStore:
 
 
 class SingleFileMessagePackBackingStore:
-    def __init__(self, path: str | os.PathLike[str]) -> None:
+    def __init__(self, path: str | os.PathLike[str], lock_timeout: float = LOCK_TIMEOUT_SECONDS) -> None:
         self.path = Path(path)
+        self.lock_timeout = lock_timeout
         self._lock = threading.RLock()
         # The header this store read; a rewrite keeps it, so a store that holds element ids never sheds its marker.
         self._format = STORE_FORMAT_VERSION
 
     def pull_all(self) -> list[CultCacheEnvelope]:
-        msgpack = self._msgpack()
         with self._lock:
             # An empty file is not a store (no writer leaves one), so it is decoded and refused.
             # The disk decides the header: a file that is gone is not marked.
@@ -135,39 +143,34 @@ class SingleFileMessagePackBackingStore:
                 if snapshot is not None:
                     self._format, envelopes = snapshot
                     return envelopes
-                return _decode_legacy_envelopes(decoded, msgpack)
+                return _decode_legacy_envelopes(decoded)
             except Exception as exc:
                 raise StoreUnreadableError(self.path, exc) from exc
 
     def push(self, envelope: CultCacheEnvelope) -> None:
-        with self._lock:
+        with self._write_transaction():
             self._replace_all([envelope], self.pull_all())
 
     def push_all(self, envelopes: list[CultCacheEnvelope]) -> None:
-        with self._lock:
+        with self._write_transaction():
             self._replace_all(list(envelopes), self.pull_all())
 
     def delete(self, type: str, key: str) -> None:
-        with self._lock:
+        with self._write_transaction():
             self._replace_all([], [item for item in self.pull_all() if not (item.type == type and item.key == key)])
 
-    def _replace_all(self, supplied: list[CultCacheEnvelope], arrived: list[CultCacheEnvelope]) -> None:
-        msgpack = self._msgpack()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temp = self.path.with_suffix(self.path.suffix + ".tmp")
-        temp.write_bytes(msgpack.packb(_encode_snapshot(supplied, arrived, self._format), use_bin_type=True))
-        temp.replace(self.path)
+    @contextmanager
+    def _write_transaction(self) -> Iterator[None]:
+        """The thread lock, then the cross-process lock on `<path>.lock`, held across the read and the replace so two
+        processes never rewrite from the same stale read."""
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with store_write_lock(self.path, self.lock_timeout):
+                yield
 
-    @staticmethod
-    def _msgpack() -> Any:
-        try:
-            import msgpack  # type: ignore
-        except ModuleNotFoundError as exc:
-            raise RuntimeError(
-                "SingleFileMessagePackBackingStore requires the optional 'msgpack' dependency. "
-                "Install with: python -m pip install cultcache-py[msgpack]"
-            ) from exc
-        return msgpack
+    def _replace_all(self, supplied: list[CultCacheEnvelope], arrived: list[CultCacheEnvelope]) -> None:
+        commit_store_file(self.path, msgpack.packb(_encode_snapshot(supplied, arrived, self._format), use_bin_type=True))
+
 
 
 def canonical(candidates: Any) -> list[CultCacheSchemaCatalogEntry]:
@@ -261,6 +264,85 @@ def _encode_snapshot(
     ]
     return [format_version, catalog, records]
 
+def commit_store_file(path: Path, data: bytes) -> None:
+    """Writes `data` to a unique staged file beside the store, fsyncs it, replaces the store with it and, off Windows,
+    fsyncs the directory so the replace is durable. A failure before the replace removes the staged file and leaves the
+    store untouched. The caller holds the store lock."""
+    staged = path.with_name(f"{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
+    try:
+        fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(staged, path)
+    except BaseException:
+        try:
+            os.unlink(staged)
+        except OSError:
+            pass
+        raise
+    if sys.platform != "win32":
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
+@contextmanager
+def store_write_lock(path: Path, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
+    """Holds the exclusive store lock on `<path>.lock`, the lock the C#, Rust and TypeScript runtimes take: flock on Unix,
+    LockFileEx over the whole file on Windows, polled every 10 ms with no handle held between polls. The lock file is
+    created if absent and never written or deleted."""
+    lock_path = path.with_name(path.name + ".lock")
+    deadline = time.monotonic() + timeout
+    while True:
+        release = _try_lock(lock_path)
+        if release is not None:
+            break
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"CultCache timed out after {timeout} s waiting for the store lock {lock_path}.")
+        time.sleep(_LOCK_POLL_SECONDS)
+    try:
+        yield
+    finally:
+        release()
+
+
+def _try_lock(lock_path: Path) -> Callable[[], None] | None:
+    if sys.platform == "win32":
+        return _try_lock_windows(lock_path)
+    import fcntl
+
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o666)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return lambda: os.close(fd)  # closing drops the flock
+
+
+def _try_lock_windows(lock_path: Path) -> Callable[[], None] | None:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.LockFileEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o666)
+    handle = msvcrt.get_osfhandle(fd)
+    overlapped = ctypes.create_string_buffer(32)
+    # LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY over the whole range, as the TypeScript runtime takes it.
+    if not kernel.LockFileEx(handle, 0x3, 0, 0xFFFFFFFF, 0xFFFFFFFF, overlapped):
+        os.close(fd)
+        return None
+    return lambda: os.close(fd)  # closing drops the lock
+
 
 def _read_store(path: Path, read: Callable[[Path], _Contents]) -> _Contents | None:
     """Reads a store file, or returns None when nothing is at its path.
@@ -351,7 +433,7 @@ def _decode_snapshot(decoded: Any) -> tuple[str, list[CultCacheEnvelope]] | None
     return decoded[0], envelopes
 
 
-def _decode_legacy_envelopes(decoded: Any, msgpack: Any) -> list[CultCacheEnvelope]:
+def _decode_legacy_envelopes(decoded: Any) -> list[CultCacheEnvelope]:
     if not isinstance(decoded, list):
         raise ValueError("CultCache MessagePack store is not a recognized snapshot")
     envelopes: list[CultCacheEnvelope] = []

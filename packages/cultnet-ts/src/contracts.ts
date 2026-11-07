@@ -185,17 +185,24 @@ export interface CultNetLoginSuccessMessage {
   session: string;
 }
 
-/** The closed `code` enum of `cultnet.error.schema.json`; the schema refuses any other string. */
-export type CultNetErrorCode =
-  | "selection_invalid"
-  | "cursor_stale"
-  | "cursor_invalid"
-  | "reference_outside_target"
-  | "variant_unsupported"
-  | "unowned_schema"
-  | "write_not_authorized";
+/** The closed refusal-code set of cultnet.error.v0 (contracts/cultnet/cultnet.error.schema.json). */
+export const CULTNET_ERROR_CODES = [
+  "selection_invalid",
+  "cursor_stale",
+  "cursor_invalid",
+  "reference_outside_target",
+  "variant_unsupported",
+  "unowned_schema",
+  "write_not_authorized",
+] as const;
 
-/** Code-specific detail; each field is populated only for the code that defines it, null otherwise. */
+export type CultNetErrorCode = (typeof CULTNET_ERROR_CODES)[number];
+
+export interface CultNetErrorRoutingHint {
+  shard: Record<string, unknown> | null;
+  reason: string;
+}
+
 export interface CultNetErrorDetails {
   field: string | null;
   value: string | null;
@@ -203,17 +210,11 @@ export interface CultNetErrorDetails {
   current: number | null;
 }
 
-/** Shard routing detail for an authority failure. */
-export interface CultNetShardRoutingHint {
-  shard: Record<string, unknown> | null;
-  reason: string;
-}
-
-/** The reference writes all five keys, nil included, so a received error always carries them. */
+/** Every key is written on the wire, null included (the C# map formatter never omits a key). */
 export interface CultNetErrorMessage {
   schemaVersion: "cultnet.error.v0";
   error: string;
-  routingHint: CultNetShardRoutingHint | null;
+  routingHint: CultNetErrorRoutingHint | null;
   code: CultNetErrorCode | null;
   details: CultNetErrorDetails | null;
 }
@@ -959,6 +960,7 @@ function parseGameCultNetworkingMessage(input: unknown): CultNetMessage {
       return {
         schemaVersion: "cultnet.error.v0",
         error: requireLegacyString(payload[0], "ErrorMessage.Error"),
+        // The legacy union ErrorMessage carries only Error; the R-N fields exist on cultnet.schema.v0 alone.
         routingHint: null,
         code: null,
         details: null,
