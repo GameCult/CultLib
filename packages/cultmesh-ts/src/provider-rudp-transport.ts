@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createSocket, type Socket } from "node:dgram";
 import { documentPayloadFromBytes } from "@gamecult/cultcache-ts";
-import { encodeWireValue } from "cultnet-ts/wire";
+import { encodeWireValue } from "@gamecult/cultnet-ts/wire";
 import {
   CultNetPeer,
   CultNetRudpSocketTransportConnection,
@@ -9,7 +9,7 @@ import {
   type CultNetOperationRequestMessage,
   type CultNetOperationResponseMessage,
   type CultNetRawDocumentRecord,
-} from "cultnet-ts";
+} from "@gamecult/cultnet-ts";
 
 import type {
   CultMeshProviderCommand,

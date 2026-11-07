@@ -1,6 +1,6 @@
 # CultNet TS
 
-`cultnet-ts` is the TypeScript port of the useful shape of GameCult's
+`@gamecult/cultnet-ts` is the TypeScript port of the useful shape of GameCult's
 networking layer: typed MessagePack messages, direct-pipe framing, CultLib-style
 security/session helpers, and state replication that hands typed values into a
 `CultCache` instead of making consumer code paw raw database envelopes.
@@ -42,7 +42,7 @@ We want:
 So the split is:
 
 - `cultcache-ts`: typed local persistence
-- `cultnet-ts`: typed transport, auth, and state replication
+- `@gamecult/cultnet-ts`: typed transport, auth, and state replication
 
 Same family. Different organs. Nobody needs a second spine growing out of the
 transport layer.
@@ -80,7 +80,7 @@ CultNet without inventing a second ontology first.
 
 ## Generated Swarm Contracts
 
-`cultnet-ts` can consume canonical JSON Schema files and generate:
+`@gamecult/cultnet-ts` can consume canonical JSON Schema files and generate:
 
 - TypeScript contract classes/interfaces
 - runtime schema verifiers
@@ -111,7 +111,7 @@ which exports:
 
 ## Wire Contracts
 
-`cultnet-ts` does not sniff random payloads and pretend that counts as rigor.
+`@gamecult/cultnet-ts` does not sniff random payloads and pretend that counts as rigor.
 You choose the contract explicitly.
 
 Current wire-contract options:
@@ -129,7 +129,7 @@ away from the C# lineage.
 
 ## Content
 
-`cultnet-ts/content` owns the TypeScript shapes of the CultMesh CDN
+`@gamecult/cultnet-ts/content` owns the TypeScript shapes of the CultMesh CDN
 (`src/content.ts`, the twin of `CultMeshCdn.cs`): the artifact manifest and chunk
 reference, their MessagePack form, hash normalization, both record-key grammars,
 SHA-256 hashing through WebCrypto, and `packContent`. It is browser-safe: it
@@ -160,7 +160,7 @@ imports no `node:` module, so a browser bundle can take it.
 ## Local Fast Lane
 
 For direct-pipe neighbors that already share the same CultCache formatter
-contract, `cultnet-ts` now has a raw replication lane:
+contract, `@gamecult/cultnet-ts` now has a raw replication lane:
 
 - `cultnet.document_put_raw.v0`
 - `cultnet.snapshot_response_raw.v0`
@@ -185,7 +185,7 @@ cuts out the dumbest part of the trip.
 Apps sharing a CultNet space should be able to ask each other what they can
 exchange without resorting to folklore.
 
-`cultnet-ts` now includes:
+`@gamecult/cultnet-ts` now includes:
 
 - `cultnet.schema_catalog_request.v0`
 - `cultnet.schema_catalog_response.v0`
@@ -232,7 +232,7 @@ import {
   createTcpFramedCultNetPeer,
   defineCultNetDocumentBinding,
   ghostlightAgentStateGeneratedContract,
-} from "cultnet-ts";
+} from "@gamecult/cultnet-ts";
 
 const ghostlightStateDefinition = defineDocumentType({
   type: "ghostlight.agent-state",
@@ -270,7 +270,7 @@ That means a TypeScript runtime can follow the same cryptographic and session
 story as the C# version instead of inventing one more house religion around
 "trust me, this pipe is probably fine."
 
-For the legacy `gamecult.networking.v0` contract, `cultnet-ts` normalizes the
+For the legacy `gamecult.networking.v0` contract, `@gamecult/cultnet-ts` normalizes the
 encrypted binary fields as base64url strings in the ergonomic TS surface and
 maps them back to the exact C# union payload shape at the wire boundary.
 

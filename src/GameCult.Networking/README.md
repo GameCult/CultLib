@@ -431,7 +431,7 @@ opt-in. Text frames and messages over the configured size bound are closed
 before schema dispatch.
 
 The matching `CultNetWebSocketSchemaClient` is suitable for C# headless and
-service consumers. Browser applications use `cultmesh-browser`, which owns
+service consumers. Browser applications use `@gamecult/cultmesh-browser`, which owns
 stable Verse/provider identity, document leases, resubscription, and operation
 correlation above the raw WebSocket route.
 

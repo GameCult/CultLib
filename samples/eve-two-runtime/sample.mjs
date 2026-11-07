@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { JSDOM } from "jsdom";
 import { z } from "zod";
 import { defineDocumentType } from "@gamecult/cultcache-ts";
-import { CultMesh } from "cultmesh-ts";
+import { CultMesh } from "@gamecult/cultmesh-ts";
 import {
   parseEveCommandReceipt,
   parseEveSurfaceDocument,

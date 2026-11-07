@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createSocket } from "node:dgram";
 import { documentPayloadBytes } from "@gamecult/cultcache-ts";
-import { decodeWireValue } from "cultnet-ts/wire";
+import { decodeWireValue } from "@gamecult/cultnet-ts/wire";
 import {
   CultNetDocumentRegistry,
   CultNetRudpSession,
@@ -10,7 +10,7 @@ import {
   encodeRudpPacket,
   type CultNetOperationRequestMessage,
   type CultNetRudpPacket,
-} from "cultnet-ts";
+} from "@gamecult/cultnet-ts";
 
 import {
   CultMesh,

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { documentPayloadBytes, documentPayloadFromBytes, encodeDocumentPayload, type DocumentPayload } from "@gamecult/cultcache-ts";
-import { encodeWireValue } from "cultnet-ts/wire";
+import { encodeWireValue } from "@gamecult/cultnet-ts/wire";
 
 import {
   cultMeshProviderSessionSchemas,

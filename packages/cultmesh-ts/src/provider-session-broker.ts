@@ -1,11 +1,11 @@
 import { encodeDocumentPayload } from "@gamecult/cultcache-ts";
-import { encodeWireValue } from "cultnet-ts/wire";
+import { encodeWireValue } from "@gamecult/cultnet-ts/wire";
 import type {
   CultNetDocumentPutRawMessage,
   CultNetOperationRequestMessage,
   CultNetOperationResponseMessage,
   CultNetRawDocumentRecord,
-} from "cultnet-ts";
+} from "@gamecult/cultnet-ts";
 
 import type { CultMeshRudpServerSession } from "./index";
 import {

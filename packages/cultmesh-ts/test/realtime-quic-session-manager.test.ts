@@ -14,8 +14,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { CultMeshAuthorityTrustPolicy } from "cultnet-ts";
-import type { CultMeshAuthorityRouteMessage, CultMeshVerseDescriptorMessage } from "cultnet-ts/contracts";
+import type { CultMeshAuthorityTrustPolicy } from "@gamecult/cultnet-ts";
+import type { CultMeshAuthorityRouteMessage, CultMeshVerseDescriptorMessage } from "@gamecult/cultnet-ts/contracts";
 
 import {
   CultMeshQuicRealtimeSessionManager,

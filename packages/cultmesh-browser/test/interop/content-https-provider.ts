@@ -5,8 +5,8 @@ import { readFileSync } from "node:fs";
 import { createServer } from "node:https";
 import type { AddressInfo } from "node:net";
 import { createInterface } from "node:readline";
-import { chunkRecordKey } from "cultnet-ts/content";
-import { createContentChunkHandler, createDirectoryChunkStore, toNodeListener, type ContentChunkAnswer, type ContentChunkRequest } from "cultmesh-ts/content";
+import { chunkRecordKey } from "@gamecult/cultnet-ts/content";
+import { createContentChunkHandler, createDirectoryChunkStore, toNodeListener, type ContentChunkAnswer, type ContentChunkRequest } from "@gamecult/cultmesh-ts/content";
 
 const [storeDir, corruptDir, keyPem, certPem, escapeKey] = process.argv.slice(2) as [string, string, string, string, string];
 const say = (line: object): void => { process.stdout.write(`${JSON.stringify(line)}\n`); };

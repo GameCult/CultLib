@@ -101,7 +101,7 @@ The real-process C# sample is then rebuilt from that same temporary NuGet feed.
 The source project references in its `.csproj` are contributor convenience only
 and are disabled by the checkpoint; they are not the consumer contract.
 
-The first layer builds and packs `cultcache-ts`, `cultnet-ts`, `cultmesh-ts`,
+The first layer builds and packs `cultcache-ts`, `@gamecult/cultnet-ts`, `@gamecult/cultmesh-ts`,
 `@gamecult/eve-contracts`, and `@gamecult/eve-browser-lowering`, installs the
 tarballs into an empty temporary consumer, and runs
 `samples/eve-two-runtime/sample.mjs`. Eve's generated runtime validators reject

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
+import { decodeWireValue, encodeWireValue } from "@gamecult/cultnet-ts/wire";
 import { z } from "zod";
 import { SchemaConflictError, defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "@gamecult/cultcache-ts";
 import {
@@ -19,7 +19,7 @@ import {
   type CultNetRudpPacket,
   type CultNetMessage,
   type CultNetSnapshotResponseRawMessage,
-} from "cultnet-ts";
+} from "@gamecult/cultnet-ts";
 import { CultMesh, CultMeshRudpUnservableDocumentError } from "../src/index";
 
 // A record's payload as the bytes a peer would put on the wire.

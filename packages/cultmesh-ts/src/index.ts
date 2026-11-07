@@ -1,5 +1,5 @@
 import { createSocket, type Socket } from "node:dgram";
-import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
+import { decodeWireValue, encodeWireValue } from "@gamecult/cultnet-ts/wire";
 
 import {
   CultCache,
@@ -40,7 +40,7 @@ import {
   type CultNetSchemaCatalogOptions,
   type CultNetSnapshotResponseRawMessage,
   type CultNetWireContract,
-} from "cultnet-ts";
+} from "@gamecult/cultnet-ts";
 
 import {
   CultMeshQuicRealtimeConnector,

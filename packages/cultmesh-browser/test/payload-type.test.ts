@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { documentPayloadBytes, documentPayloadFromBytes, type DocumentPayload } from "@gamecult/cultcache-ts";
-import { decodeWireValue } from "cultnet-ts/wire";
-import type { CultNetRawDocumentRecord } from "cultnet-ts/contracts";
+import { decodeWireValue } from "@gamecult/cultnet-ts/wire";
+import type { CultNetRawDocumentRecord } from "@gamecult/cultnet-ts/contracts";
 
 import { decodeCultNetPayload } from "../src/index.js";
 

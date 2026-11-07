@@ -1,6 +1,6 @@
 import { decodeDocumentPayload, defineDocumentType } from "@gamecult/cultcache-ts";
-import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
-import type { CultNetRawDocumentRecord } from "cultnet-ts";
+import { decodeWireValue, encodeWireValue } from "@gamecult/cultnet-ts/wire";
+import type { CultNetRawDocumentRecord } from "@gamecult/cultnet-ts";
 
 export const CULTMESH_PROVIDER_SESSION_SERVICE_ID = "gamecult.mesh.provider_session";
 

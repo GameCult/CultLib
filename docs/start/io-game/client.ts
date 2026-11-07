@@ -1,4 +1,4 @@
-import { CultMeshBrowserClient, CultMeshBrowserOdinRendezvous, decodeCultNetOperationPayload, decodeCultNetPayload } from "cultmesh-browser";
+import { CultMeshBrowserClient, CultMeshBrowserOdinRendezvous, decodeCultNetOperationPayload, decodeCultNetPayload } from "@gamecult/cultmesh-browser";
 import { arenaDocument, arenaKey, authorityRuntimeId, verseId, type ArenaState } from "./schema.ts";
 
 // Runs unchanged in a browser or in Node 22+: both have a global WebSocket.

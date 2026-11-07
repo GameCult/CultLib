@@ -6,7 +6,7 @@ import test from "node:test";
 // The TypeScript CultNet first-call snippet that docs/start/README.md shows: define a typed document, send it
 // over a loopback TCP pipe as a cultnet.document_put_raw.v0 message, receive it into a second cache. The docs show
 // the region between the `snippet` markers verbatim, except that the package import reads
-// "cultnet-ts" where this file reads "../src"; the docs test below fails when they differ.
+// "@gamecult/cultnet-ts" where this file reads "../src"; the docs test below fails when they differ.
 // snippet:begin
 import { createServer, connect } from "node:net";
 import { z } from "zod";
@@ -72,7 +72,7 @@ test("docs show the tested snippet", async () => {
   const snippet = source
     .split("// snippet:begin\n")[1]
     .split("// snippet:end\n")[0]
-    .replace('"../src"', '"cultnet-ts"');
+    .replace('"../src"', '"@gamecult/cultnet-ts"');
   const docs = (await readFile(join(__dirname, "..", "..", "..", "..", "docs", "start", "README.md"), "utf8")).replace(/\r\n/g, "\n");
   assert.ok(docs.includes("```ts\n" + snippet + "```"), "docs/start/README.md no longer shows test/first-call.test.ts");
 });

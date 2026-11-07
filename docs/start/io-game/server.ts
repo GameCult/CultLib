@@ -1,8 +1,8 @@
 import { createServer, type RequestListener, type Server } from "node:http";
 import { CultCache } from "@gamecult/cultcache-ts";
 import { defineDocumentRegistry } from "@gamecult/cultcache-ts/document";
-import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
-import { encodeCultNetMessageForWire, parseCultNetMessage, type CultNetMessage } from "cultnet-ts/contracts";
+import { decodeWireValue, encodeWireValue } from "@gamecult/cultnet-ts/wire";
+import { encodeCultNetMessageForWire, parseCultNetMessage, type CultNetMessage } from "@gamecult/cultnet-ts/contracts";
 import { WebSocketServer, type WebSocket } from "ws";
 import { arenaDocument, arenaKey, arenaSize, authorityRuntimeId, verseId, type ArenaState } from "./schema.ts";
 
