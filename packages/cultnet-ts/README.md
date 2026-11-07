@@ -65,6 +65,7 @@ Current message families:
 - `cultnet.snapshot_request.v0`
 - `cultnet.snapshot_response.v0`
 - `cultnet.snapshot_response_raw.v0`
+- `cultnet.snapshot_request.v1`, `cultnet.database_subscribe.v1`, `cultnet.snapshot_response_raw.v1` (typed-selection carriers; no selection engine yet)
 - `cultnet.sample.change_name.v0`
 - `cultnet.sample.chat.v0`
 

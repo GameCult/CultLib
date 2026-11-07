@@ -1,0 +1,346 @@
+{
+  "vectors": [
+    {
+      "name": "snapshot_request_v1_defaults",
+      "schemaVersion": "cultnet.snapshot_request.v1",
+      "messagePackBase64": "ha1zY2hlbWFWZXJzaW9uu2N1bHRuZXQuc25hcHNob3RfcmVxdWVzdC52MaltZXNzYWdlSWShbalzZWxlY3Rpb26Jp3NjaGVtYXPApGtleXPApmZpZWxkc8ClY2l0ZXPApWNpdGVkwKpwcm9qZWN0aW9upmhlYWRlcqpkZXNjZW5kaW5nwqVsaW1pdMCmY3Vyc29ywKdzaGFyZElkwKpzaGFyZEVwb2NowA==",
+      "expected": {
+        "schemaVersion": "cultnet.snapshot_request.v1",
+        "messageId": "m",
+        "selection": {
+          "schemas": null,
+          "keys": null,
+          "fields": null,
+          "cites": null,
+          "cited": null,
+          "projection": "header",
+          "descending": false,
+          "limit": null,
+          "cursor": null
+        },
+        "shardId": null,
+        "shardEpoch": null
+      }
+    },
+    {
+      "name": "snapshot_request_v1_full_selection_and_shard",
+      "schemaVersion": "cultnet.snapshot_request.v1",
+      "messagePackBase64": "ha1zY2hlbWFWZXJzaW9uu2N1bHRuZXQuc25hcHNob3RfcmVxdWVzdC52MaltZXNzYWdlSWSmbS1mdWxsqXNlbGVjdGlvbomnc2NoZW1hc5KpbGVhZl9hLnY52UdzaGEyNTY6ZmYzNWYzZDlkNmRlM2YxMDY2YjkzNjllNzNmZTZjNzY0OGU4ODM2OGQxOGVmYzIyNzVjOTk0NzMwY2Q4NGNmZqRrZXlzkqRhLWVxqPCfmIAtcm93pmZpZWxkc5KEpWluZGV4pGtpbmSib3CmYW55X29mpnZhbHVlc5Kmd2VhcG9upHRvb2ymbnVtYmVywISlaW5kZXikbWFzc6JvcKJnZaZ2YWx1ZXPApm51bWJlcqstMjIzMzc1OS4yNaVjaXRlc4KmdGFyZ2V0gqhzY2hlbWFJZNlHc2hhMjU2OmZmMzVmM2Q5ZDZkZTNmMTA2NmI5MzY5ZTczZmU2Yzc2NDhlODgzNjhkMThlZmMyMjc1Yzk5NDczMGNkODRjZmapcmVjb3JkS2V5pGEtZXGkcm9sZaZEZXNpZ26lY2l0ZWSCpHJvbGWmRGVzaWdupmV4aXN0c8KqcHJvamVjdGlvbqhkb2N1bWVudKpkZXNjZW5kaW5nw6VsaW1pdMzIpmN1cnNvcq1vcGFxdWUtY3Vyc29yp3NoYXJkSWSnc2hhcmQtMapzaGFyZEVwb2NoBw==",
+      "expected": {
+        "schemaVersion": "cultnet.snapshot_request.v1",
+        "messageId": "m-full",
+        "selection": {
+          "schemas": [
+            "leaf_a.v9",
+            "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff"
+          ],
+          "keys": [
+            "a-eq",
+            "\uD83D\uDE00-row"
+          ],
+          "fields": [
+            {
+              "index": "kind",
+              "op": "any_of",
+              "values": [
+                "weapon",
+                "tool"
+              ],
+              "number": null
+            },
+            {
+              "index": "mass",
+              "op": "ge",
+              "values": null,
+              "number": "-2233759.25"
+            }
+          ],
+          "cites": {
+            "target": {
+              "schemaId": "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff",
+              "recordKey": "a-eq"
+            },
+            "role": "Design"
+          },
+          "cited": {
+            "role": "Design",
+            "exists": false
+          },
+          "projection": "document",
+          "descending": true,
+          "limit": 200,
+          "cursor": "opaque-cursor"
+        },
+        "shardId": "shard-1",
+        "shardEpoch": 7
+      }
+    },
+    {
+      "name": "database_subscribe_v1_defaults",
+      "schemaVersion": "cultnet.database_subscribe.v1",
+      "messagePackBase64": "iK1zY2hlbWFWZXJzaW9uvWN1bHRuZXQuZGF0YWJhc2Vfc3Vic2NyaWJlLnYxqW1lc3NhZ2VJZKFtrnN1YnNjcmlwdGlvbklko3N1YqlzZWxlY3Rpb26Jp3NjaGVtYXPApGtleXPApmZpZWxkc8ClY2l0ZXPApWNpdGVkwKpwcm9qZWN0aW9upmhlYWRlcqpkZXNjZW5kaW5nwqVsaW1pdMCmY3Vyc29ywK9pbmNsdWRlU25hcHNob3TDsWNvbnN1bWVyUnVudGltZUlkwKdib2R5SWRzwLdzdXBwb3J0ZWRCb2R5VHJhbnNwb3J0c8A=",
+      "expected": {
+        "schemaVersion": "cultnet.database_subscribe.v1",
+        "messageId": "m",
+        "subscriptionId": "sub",
+        "selection": {
+          "schemas": null,
+          "keys": null,
+          "fields": null,
+          "cites": null,
+          "cited": null,
+          "projection": "header",
+          "descending": false,
+          "limit": null,
+          "cursor": null
+        },
+        "includeSnapshot": true,
+        "consumerRuntimeId": null,
+        "bodyIds": null,
+        "supportedBodyTransports": null
+      }
+    },
+    {
+      "name": "database_subscribe_v1_full",
+      "schemaVersion": "cultnet.database_subscribe.v1",
+      "messagePackBase64": "iK1zY2hlbWFWZXJzaW9uvWN1bHRuZXQuZGF0YWJhc2Vfc3Vic2NyaWJlLnYxqW1lc3NhZ2VJZKZtLWZ1bGyuc3Vic2NyaXB0aW9uSWSoc3ViLWZ1bGypc2VsZWN0aW9uiadzY2hlbWFzkqlsZWFmX2EudjnZR3NoYTI1NjpmZjM1ZjNkOWQ2ZGUzZjEwNjZiOTM2OWU3M2ZlNmM3NjQ4ZTg4MzY4ZDE4ZWZjMjI3NWM5OTQ3MzBjZDg0Y2ZmpGtleXOSpGEtZXGo8J\u002BYgC1yb3emZmllbGRzkoSlaW5kZXika2luZKJvcKZhbnlfb2amdmFsdWVzkqZ3ZWFwb26kdG9vbKZudW1iZXLAhKVpbmRleKRtYXNzom9womdlpnZhbHVlc8CmbnVtYmVyqy0yMjMzNzU5LjI1pWNpdGVzgqZ0YXJnZXSCqHNjaGVtYUlk2UdzaGEyNTY6ZmYzNWYzZDlkNmRlM2YxMDY2YjkzNjllNzNmZTZjNzY0OGU4ODM2OGQxOGVmYzIyNzVjOTk0NzMwY2Q4NGNmZqlyZWNvcmRLZXmkYS1lcaRyb2xlpkRlc2lnbqVjaXRlZIKkcm9sZaZEZXNpZ26mZXhpc3Rzwqpwcm9qZWN0aW9uqGRvY3VtZW50qmRlc2NlbmRpbmfDpWxpbWl0zMimY3Vyc29yrW9wYXF1ZS1jdXJzb3KvaW5jbHVkZVNuYXBzaG90wrFjb25zdW1lclJ1bnRpbWVJZKhjb25zdW1lcqdib2R5SWRzkaZib2R5LWG3c3VwcG9ydGVkQm9keVRyYW5zcG9ydHOSpHJ1ZHCkcXVpYw==",
+      "expected": {
+        "schemaVersion": "cultnet.database_subscribe.v1",
+        "messageId": "m-full",
+        "subscriptionId": "sub-full",
+        "selection": {
+          "schemas": [
+            "leaf_a.v9",
+            "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff"
+          ],
+          "keys": [
+            "a-eq",
+            "\uD83D\uDE00-row"
+          ],
+          "fields": [
+            {
+              "index": "kind",
+              "op": "any_of",
+              "values": [
+                "weapon",
+                "tool"
+              ],
+              "number": null
+            },
+            {
+              "index": "mass",
+              "op": "ge",
+              "values": null,
+              "number": "-2233759.25"
+            }
+          ],
+          "cites": {
+            "target": {
+              "schemaId": "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff",
+              "recordKey": "a-eq"
+            },
+            "role": "Design"
+          },
+          "cited": {
+            "role": "Design",
+            "exists": false
+          },
+          "projection": "document",
+          "descending": true,
+          "limit": 200,
+          "cursor": "opaque-cursor"
+        },
+        "includeSnapshot": false,
+        "consumerRuntimeId": "consumer",
+        "bodyIds": [
+          "body-a"
+        ],
+        "supportedBodyTransports": [
+          "rudp",
+          "quic"
+        ]
+      }
+    },
+    {
+      "name": "snapshot_response_raw_v1_headers",
+      "schemaVersion": "cultnet.snapshot_response_raw.v1",
+      "messagePackBase64": "i61zY2hlbWFWZXJzaW9u2SBjdWx0bmV0LnNuYXBzaG90X3Jlc3BvbnNlX3Jhdy52MaltZXNzYWdlSWShbadtYXRjaGVkAqRhc09mBaRuZXh0q25leHQtY3Vyc29yp2hlYWRlcnOSiqhzY2hlbWFJZNlHc2hhMjU2OmZmMzVmM2Q5ZDZkZTNmMTA2NmI5MzY5ZTczZmU2Yzc2NDhlODgzNjhkMThlZmMyMjc1Yzk5NDczMGNkODRjZmaqc2NoZW1hTmFtZaZsZWFmX2Gtc2NoZW1hVmVyc2lvbqExsXNjaGVtYUNvbnRlbnRIYXNoo2FiY6lyZWNvcmRLZXmkYS1lcahzdG9yZWRBdLgxOTcwLTAxLTAxVDAwOjAwOjAwLjAwMFqvc291cmNlUnVudGltZUlkonJ0rXNvdXJjZUFnZW50SWSlYWdlbnSqc291cmNlUm9sZaRyb2xlpHRhZ3PAiqhzY2hlbWFJZNlHc2hhMjU2OmZmMzVmM2Q5ZDZkZTNmMTA2NmI5MzY5ZTczZmU2Yzc2NDhlODgzNjhkMThlZmMyMjc1Yzk5NDczMGNkODRjZmaqc2NoZW1hTmFtZaZsZWFmX2Gtc2NoZW1hVmVyc2lvbqExsXNjaGVtYUNvbnRlbnRIYXNoo2FiY6lyZWNvcmRLZXmkYS1sb6hzdG9yZWRBdLgxOTcwLTAxLTAxVDAwOjAwOjAwLjAwMFqvc291cmNlUnVudGltZUlkonJ0rXNvdXJjZUFnZW50SWSlYWdlbnSqc291cmNlUm9sZaRyb2xlpHRhZ3OSpWFscGhhpGJldGGpZG9jdW1lbnRzwKVlZGdlc8Cnc2hhcmRJZKdzaGFyZC0xqnNoYXJkRXBvY2gDsHNoYXJkTG9nU2VxdWVuY2Up",
+      "expected": {
+        "schemaVersion": "cultnet.snapshot_response_raw.v1",
+        "messageId": "m",
+        "matched": 2,
+        "asOf": 5,
+        "next": "next-cursor",
+        "headers": [
+          {
+            "schemaId": "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff",
+            "schemaName": "leaf_a",
+            "schemaVersion": "1",
+            "schemaContentHash": "abc",
+            "recordKey": "a-eq",
+            "storedAt": "1970-01-01T00:00:00.000Z",
+            "sourceRuntimeId": "rt",
+            "sourceAgentId": "agent",
+            "sourceRole": "role",
+            "tags": null
+          },
+          {
+            "schemaId": "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff",
+            "schemaName": "leaf_a",
+            "schemaVersion": "1",
+            "schemaContentHash": "abc",
+            "recordKey": "a-lo",
+            "storedAt": "1970-01-01T00:00:00.000Z",
+            "sourceRuntimeId": "rt",
+            "sourceAgentId": "agent",
+            "sourceRole": "role",
+            "tags": [
+              "alpha",
+              "beta"
+            ]
+          }
+        ],
+        "documents": null,
+        "edges": null,
+        "shardId": "shard-1",
+        "shardEpoch": 3,
+        "shardLogSequence": 41
+      }
+    },
+    {
+      "name": "snapshot_response_raw_v1_documents_and_edges",
+      "schemaVersion": "cultnet.snapshot_response_raw.v1",
+      "messagePackBase64": "i61zY2hlbWFWZXJzaW9u2SBjdWx0bmV0LnNuYXBzaG90X3Jlc3BvbnNlX3Jhdy52MaltZXNzYWdlSWShbadtYXRjaGVkAaRhc09mBaRuZXh0wKdoZWFkZXJzwKlkb2N1bWVudHORjKhzY2hlbWFJZNlHc2hhMjU2OmZmMzVmM2Q5ZDZkZTNmMTA2NmI5MzY5ZTczZmU2Yzc2NDhlODgzNjhkMThlZmMyMjc1Yzk5NDczMGNkODRjZmaqc2NoZW1hTmFtZcCtc2NoZW1hVmVyc2lvbsCxc2NoZW1hQ29udGVudEhhc2jAqXJlY29yZEtleaRhLWVxqHN0b3JlZEF0uDE5NzAtMDEtMDFUMDA6MDA6MDAuMDAwWq9wYXlsb2FkRW5jb2RpbmerbWVzc2FnZXBhY2uncGF5bG9hZMQEgaFrAa9zb3VyY2VSdW50aW1lSWTArXNvdXJjZUFnZW50SWTAqnNvdXJjZVJvbGXApHRhZ3PApWVkZ2VzkoWkZnJvbYKoc2NoZW1hSWTZR3NoYTI1Njo5ZDBiYzlhZWJjMzYxOWIwN2FhYmY1NjRmOTg2NjdhZmRlNDE0NDRjMWI4NjY2NjFkNzc3Njg3ZDQ0MzYwOGRjqXJlY29yZEtleadjaXRlci0xpHJvbGWmRGVzaWduonRvgqhzY2hlbWFJZNlHc2hhMjU2OmZmMzVmM2Q5ZDZkZTNmMTA2NmI5MzY5ZTczZmU2Yzc2NDhlODgzNjhkMThlZmMyMjc1Yzk5NDczMGNkODRjZmapcmVjb3JkS2V5pGEtZXGvcGF5bG9hZEVuY29kaW5nwKdwYXlsb2FkwIWkZnJvbYKoc2NoZW1hSWTZR3NoYTI1Njo5ZDBiYzlhZWJjMzYxOWIwN2FhYmY1NjRmOTg2NjdhZmRlNDE0NDRjMWI4NjY2NjFkNzc3Njg3ZDQ0MzYwOGRjqXJlY29yZEtleadjaXRlci0xpHJvbGWmRGVzaWduonRvgqhzY2hlbWFJZNlHc2hhMjU2OmZmMzVmM2Q5ZDZkZTNmMTA2NmI5MzY5ZTczZmU2Yzc2NDhlODgzNjhkMThlZmMyMjc1Yzk5NDczMGNkODRjZmapcmVjb3JkS2V5pGEtZXGvcGF5bG9hZEVuY29kaW5nq21lc3NhZ2VwYWNrp3BheWxvYWTEAwECA6dzaGFyZElkwKpzaGFyZEVwb2NowLBzaGFyZExvZ1NlcXVlbmNlwA==",
+      "expected": {
+        "schemaVersion": "cultnet.snapshot_response_raw.v1",
+        "messageId": "m",
+        "matched": 1,
+        "asOf": 5,
+        "next": null,
+        "headers": null,
+        "documents": [
+          {
+            "schemaId": "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff",
+            "schemaName": null,
+            "schemaVersion": null,
+            "schemaContentHash": null,
+            "recordKey": "a-eq",
+            "storedAt": "1970-01-01T00:00:00.000Z",
+            "payloadEncoding": "messagepack",
+            "payload": "gaFrAQ==",
+            "sourceRuntimeId": null,
+            "sourceAgentId": null,
+            "sourceRole": null,
+            "tags": null
+          }
+        ],
+        "edges": [
+          {
+            "from": {
+              "schemaId": "sha256:9d0bc9aebc3619b07aabf564f98667afde41444c1b866661d777687d443608dc",
+              "recordKey": "citer-1"
+            },
+            "role": "Design",
+            "to": {
+              "schemaId": "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff",
+              "recordKey": "a-eq"
+            },
+            "payloadEncoding": null,
+            "payload": null
+          },
+          {
+            "from": {
+              "schemaId": "sha256:9d0bc9aebc3619b07aabf564f98667afde41444c1b866661d777687d443608dc",
+              "recordKey": "citer-1"
+            },
+            "role": "Design",
+            "to": {
+              "schemaId": "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff",
+              "recordKey": "a-eq"
+            },
+            "payloadEncoding": "messagepack",
+            "payload": "AQID"
+          }
+        ],
+        "shardId": null,
+        "shardEpoch": null,
+        "shardLogSequence": null
+      }
+    },
+    {
+      "name": "error_plain",
+      "schemaVersion": "cultnet.error.v0",
+      "messagePackBase64": "ha1zY2hlbWFWZXJzaW9usGN1bHRuZXQuZXJyb3IudjClZXJyb3KkYm9vbatyb3V0aW5nSGludMCkY29kZcCnZGV0YWlsc8A=",
+      "expected": {
+        "schemaVersion": "cultnet.error.v0",
+        "error": "boom",
+        "routingHint": null,
+        "code": null,
+        "details": null
+      }
+    },
+    {
+      "name": "error_selection_invalid",
+      "schemaVersion": "cultnet.error.v0",
+      "messagePackBase64": "ha1zY2hlbWFWZXJzaW9usGN1bHRuZXQuZXJyb3IudjClZXJyb3LZOnNlbGVjdGlvbl9pbnZhbGlkOiBmaWVsZHNbMF0uaW5kZXggImtpbmQiIGlzIG5vdCBkZWNsYXJlZC6rcm91dGluZ0hpbnTApGNvZGWxc2VsZWN0aW9uX2ludmFsaWSnZGV0YWlsc4SlZmllbGSvZmllbGRzWzBdLmluZGV4pXZhbHVlpGtpbmSkYXNPZsCnY3VycmVudMA=",
+      "expected": {
+        "schemaVersion": "cultnet.error.v0",
+        "error": "selection_invalid: fields[0].index \u0022kind\u0022 is not declared.",
+        "routingHint": null,
+        "code": "selection_invalid",
+        "details": {
+          "field": "fields[0].index",
+          "value": "kind",
+          "asOf": null,
+          "current": null
+        }
+      }
+    },
+    {
+      "name": "error_cursor_stale",
+      "schemaVersion": "cultnet.error.v0",
+      "messagePackBase64": "ha1zY2hlbWFWZXJzaW9usGN1bHRuZXQuZXJyb3IudjClZXJyb3KzY3Vyc29yX3N0YWxlOiBzdGFsZatyb3V0aW5nSGludMCkY29kZaxjdXJzb3Jfc3RhbGWnZGV0YWlsc4SlZmllbGTApXZhbHVlwKRhc09mA6djdXJyZW50CQ==",
+      "expected": {
+        "schemaVersion": "cultnet.error.v0",
+        "error": "cursor_stale: stale",
+        "routingHint": null,
+        "code": "cursor_stale",
+        "details": {
+          "field": null,
+          "value": null,
+          "asOf": 3,
+          "current": 9
+        }
+      }
+    },
+    {
+      "name": "error_cursor_invalid_no_details",
+      "schemaVersion": "cultnet.error.v0",
+      "messagePackBase64": "ha1zY2hlbWFWZXJzaW9usGN1bHRuZXQuZXJyb3IudjClZXJyb3KzY3Vyc29yX2ludmFsaWQ6IGJhZKtyb3V0aW5nSGludMCkY29kZa5jdXJzb3JfaW52YWxpZKdkZXRhaWxzwA==",
+      "expected": {
+        "schemaVersion": "cultnet.error.v0",
+        "error": "cursor_invalid: bad",
+        "routingHint": null,
+        "code": "cursor_invalid",
+        "details": null
+      }
+    },
+    {
+      "name": "error_write_not_authorized",
+      "schemaVersion": "cultnet.error.v0",
+      "messagePackBase64": "ha1zY2hlbWFWZXJzaW9usGN1bHRuZXQuZXJyb3IudjClZXJyb3K0d3JpdGVfbm90X2F1dGhvcml6ZWSrcm91dGluZ0hpbnTApGNvZGW0d3JpdGVfbm90X2F1dGhvcml6ZWSnZGV0YWlsc4SlZmllbGSpcmVjb3JkS2V5pXZhbHVloWukYXNPZsCnY3VycmVudMA=",
+      "expected": {
+        "schemaVersion": "cultnet.error.v0",
+        "error": "write_not_authorized",
+        "routingHint": null,
+        "code": "write_not_authorized",
+        "details": {
+          "field": "recordKey",
+          "value": "k",
+          "asOf": null,
+          "current": null
+        }
+      }
+    }
+  ]
+}

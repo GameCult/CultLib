@@ -25,6 +25,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 mod rudp_document_server;
+pub mod authority;
 
 pub use rudp_document_server::*;
 
