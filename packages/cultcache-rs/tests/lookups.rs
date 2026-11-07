@@ -2,7 +2,8 @@
 //! (`src/GameCult.Caching/CultCache.cs`) and the one-global rule its commit enforces.
 
 use cultcache_rs::{
-    CacheBackingStore, CultCache, CultCacheSecondGlobal, DatabaseEntry, SingleFileMessagePackBackingStore,
+    CacheBackingStore, CultCache, CultCacheSecondGlobal, CultCacheSoaTable, DatabaseEntry,
+    SingleFileMessagePackBackingStore,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -320,4 +321,32 @@ fn loading_a_store_that_holds_two_globals_is_refused() {
     loading.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
     assert!(loading.pull_all_backing_stores().unwrap_err().is::<CultCacheSecondGlobal>());
     assert_eq!(loading.get_global::<Settings>().unwrap(), None, "a refused load installs nothing");
+}
+
+// load_soa installs a whole table at once, so the one-global rule has to hold there too: a table holding two
+// records of a global type is refused whole and the prior view survives.
+#[test]
+fn loading_an_soa_table_that_holds_two_globals_is_refused() {
+    let source = cache();
+    let (first, _) = source.prepare_entry("g1", &settings("one")).unwrap();
+    let (second, _) = source.prepare_entry("g2", &settings("two")).unwrap();
+
+    let mut loading = cache();
+    loading.put("g0", &settings("prior")).unwrap();
+    loading.put("plain:1", &Plain { value: "prior".into() }).unwrap();
+
+    let refusal = loading
+        .load_soa(CultCacheSoaTable::from_envelopes(vec![first.clone(), second]))
+        .unwrap_err();
+    let second_global = refusal.downcast_ref::<CultCacheSecondGlobal>().expect("a typed refusal");
+    let mut named = [second_global.existing_key.as_str(), second_global.key.as_str()];
+    named.sort();
+    assert_eq!(named, ["g1", "g2"], "the refusal names both records");
+    assert_eq!(loading.get_global::<Settings>().unwrap(), Some(settings("prior")), "a refused load keeps the prior view");
+    assert_eq!(loading.get::<Plain>("plain:1").unwrap(), Some(Plain { value: "prior".into() }));
+
+    // One global in the table is the rule's own case, not a second.
+    loading.load_soa(CultCacheSoaTable::from_envelopes(vec![first])).unwrap();
+    assert_eq!(loading.get_global::<Settings>().unwrap(), Some(settings("one")));
+    assert_eq!(loading.get::<Plain>("plain:1").unwrap(), None, "a load replaces the view");
 }
