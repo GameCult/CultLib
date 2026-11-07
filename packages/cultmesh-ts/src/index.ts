@@ -5648,7 +5648,7 @@ export class CultMesh {
         message = parseCultNetMessage(decoded, wireContract);
       } catch (error) {
         // A frame the server cannot read is judged as the write it looks like (a put when it does not even decode), so
-        // an ungranted peer hears the same refusal for it as for any other write, never silence or a parse error.
+        // an ungranted peer hears the same refusal for it as for any other write, not a parse error.
         const write = readableWrite(decoded);
         if (decoded !== undefined && !write) throw error;
         if (await writeRefused(record, write?.operation ?? "put", write?.schemaId ?? "", write?.recordKey ?? "", null, null)) return;
@@ -5689,16 +5689,22 @@ export class CultMesh {
           return;
         case "cultnet.document_put_raw.v0":
           {
-            // The parser passes shard fields of any type through a put; a wrong-typed one is refused before the authority.
+            // The parser passes shard fields of any type through a put. The authority is asked first, with the shard
+            // fields it can trust (null when wrong-typed), so an ungranted peer hears only the refusal; a granted peer
+            // whose shard fields are wrong-typed is then refused as malformed.
             const { shardId, shardEpoch } = message as { shardId?: unknown; shardEpoch?: unknown };
-            if (
+            const malformedShard =
               (shardId !== undefined && typeof shardId !== "string") ||
-              (shardEpoch !== undefined && !Number.isSafeInteger(shardEpoch))
-            ) {
+              (shardEpoch !== undefined && !Number.isSafeInteger(shardEpoch));
+            if (await writeRefused(
+              record, "put", message.document.schemaId, message.document.recordKey,
+              malformedShard ? null : (shardId as string | undefined) ?? null,
+              malformedShard ? null : (shardEpoch as number | undefined) ?? null,
+            )) return;
+            if (malformedShard) {
               sendSchemaMessage(record, malformedWriteError("put", "Raw put messages must carry a string shardId and an integer shardEpoch."));
               return;
             }
-            if (await writeRefused(record, "put", message.document.schemaId, message.document.recordKey, (shardId as string | undefined) ?? null, (shardEpoch as number | undefined) ?? null)) return;
           }
           if (options.onDocumentPutRaw) {
             const unservable = unservablePut(message);
@@ -5743,6 +5749,11 @@ export class CultMesh {
         default:
           sendSchemaMessage(record, cultNetTextError(`Unsupported CultMesh RUDP document request ${message.schemaVersion}.`));
       }
+    }
+
+    function clipUtf8(text: string, maxBytes: number): string {
+      const bytes = Buffer.from(text, "utf8");
+      return bytes.byteLength <= maxBytes ? text : new TextDecoder().decode(bytes.subarray(0, maxBytes)).replace(/\uFFFD+$/, "");
     }
 
     /** The put or delete a decoded frame claims to be, with the ids it carries when they are strings. */
@@ -5802,7 +5813,9 @@ export class CultMesh {
         }
       }
       try {
-        sendSchemaMessage(record, cultNetWriteNotAuthorizedError(recordKey, reason));
+        // The key is the peer's and the reason the authority's: both are clipped so the refusal fits `maxPayloadBytes`
+        // whatever they are (the peer is told the clipped key; a `maxPayloadBytes` under about 512 can still not carry it).
+        sendSchemaMessage(record, cultNetWriteNotAuthorizedError(clipUtf8(recordKey, 64), reason === undefined ? undefined : clipUtf8(reason, 96)));
       } catch (error) {
         reportError(error);
       }

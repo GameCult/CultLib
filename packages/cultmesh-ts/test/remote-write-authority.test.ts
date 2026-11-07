@@ -264,7 +264,7 @@ test("the refusal on the wire is the pinned error-vectors bytes", async () => {
   });
 });
 
-test("wrong-typed shard fields on a put are refused before the authority and reach no handler", async () => {
+test("wrong-typed shard fields on a put are judged with null shard fields, then refused as malformed once granted", async () => {
   const authority = new Recording(grant);
   await using(await rig(authority), async (r) => {
     const bad: Record<string, unknown>[] = [
@@ -274,8 +274,30 @@ test("wrong-typed shard fields on a put are refused before the authority and rea
     await r.settle();
     assert.equal(r.replies.length, bad.length);
     assert.ok(r.replies.every((reply) => reply.schemaVersion === "cultnet.error.v0" && reply.code === null && reply.error.startsWith("malformed_document_put:")));
-    assert.deepEqual(authority.requests, [], "the authority was never asked");
+    assert.equal(authority.requests.length, bad.length, "the authority is asked first");
+    assert.ok(authority.requests.every((q) => q.shardId === null && q.shardEpoch === null), "with null shard fields");
     assert.equal(r.puts.length, 0);
+  });
+  await using(await rig(undefined), async (r) => {
+    r.peer.send(put(KEY_A, { shardId: 5 }));
+    await r.settle();
+    assertRefused(r.replies[0], KEY_A);
+  });
+});
+
+test("a refusal fits maxPayloadBytes however long the record key and reason are", async () => {
+  const longKey = "k".repeat(3_000) + "é";
+  await using(await rig(new Recording(() => ({ granted: false, reason: "r".repeat(100_000) })), { maxPayloadBytes: 1024 }), async (r) => {
+    r.peer.send(put(longKey));
+    r.peer.send(del(longKey));
+    await r.settle();
+    assert.equal(r.replies.length, 2);
+    for (const reply of r.replies) {
+      assert.equal((reply as { code?: string }).code, "write_not_authorized");
+      assert.ok(encodeWireValue(reply).byteLength <= 1024);
+      assert.ok(longKey.startsWith((reply as { details: { value: string } }).details.value));
+    }
+    assert.deepEqual(r.errors, []);
   });
 });
 
@@ -332,11 +354,12 @@ function rawPut(payloadBytes: number[], key = KEY_A): Uint8Array {
 async function rawRig(writeAuthority?: CultMeshRemoteWriteAuthority) {
   const connectionId = nextConnection++;
   const puts: CultMeshRudpDocumentPut[] = [];
+  const deletes: CultMeshRudpDocumentDelete[] = [];
   const errors: Error[] = [];
   const server = CultMesh.createRudpDocumentServer("authority-raw", connectionId, {
     documents: new CultNetDocumentRegistry([defineCultNetDocumentBinding({ definition: note })]),
     writeAuthority, bindHost: "127.0.0.1", bindPort: 0, resendDelayMs: 25, resendPollMs: 5,
-    onDocumentPutRaw: (d) => { puts.push(d); }, onError: (e) => errors.push(e),
+    onDocumentPutRaw: (d) => { puts.push(d); }, onDocumentDeleteRaw: (d) => { deletes.push(d); }, onError: (e) => errors.push(e),
   });
   await server.start();
   const client = await CultMesh.createRudpClient("raw", connectionId, `rudp://127.0.0.1:${server.bind.port}`, { resendDelayMs: 25, resendPollMs: 5 });
@@ -348,54 +371,91 @@ async function rawRig(writeAuthority?: CultMeshRemoteWriteAuthority) {
   }
   const replies: CultNetMessage[] = [];
   new CultNetPeer(client, { wireContract: "cultnet.schema.v0" }).on("message", (m) => replies.push(m));
-  return { puts, errors, replies, send: (b: Uint8Array) => client.send("schema", b), close: () => { client.close(); server.close(); } };
+  return { puts, deletes, errors, replies, send: (b: Uint8Array) => client.send("schema", b), close: () => { client.close(); server.close(); } };
 }
 
-const hostile: [string, Uint8Array][] = [
-  ["an int payload", rawPut([0x2a])],
-  ["a 2**70-sized integer payload", rawPut([0xcf, 255, 255, 255, 255, 255, 255, 255, 255])],
-  ["a bin whose claimed length exceeds the frame", rawPut(bin(1_000_000_000, 1, 2, 3))],
-  ["a frame that does not decode at all", Uint8Array.from([0xc1])],
-  ["a put whose document is not a map", Uint8Array.from([0x82, ...str("schemaVersion"), ...str("cultnet.document_put_raw.v0"), ...str("document"), 0x05])],
+const float64 = (v: number) => { const b = Buffer.alloc(9); b[0] = 0xcb; b.writeDoubleBE(v, 1); return [...b]; };
+
+// Each hostile frame, the operation it is judged as, and the ids the authority is told (empty when the frame does not carry them).
+const hostile: { name: string; frame: Uint8Array; operation: "put" | "delete"; schemaId: string; recordKey: string }[] = [
+  { name: "an int payload", frame: rawPut([0x2a]), operation: "put", schemaId: SCHEMA_ID, recordKey: KEY_A },
+  { name: "a uint64-max integer payload", frame: rawPut([0xcf, 255, 255, 255, 255, 255, 255, 255, 255]), operation: "put", schemaId: SCHEMA_ID, recordKey: KEY_A },
+  { name: "a float64 2**70 payload", frame: rawPut(float64(2 ** 70)), operation: "put", schemaId: SCHEMA_ID, recordKey: KEY_A },
+  { name: "a bin whose claimed length exceeds the frame", frame: rawPut(bin(1_000_000_000, 1, 2, 3)), operation: "put", schemaId: "", recordKey: "" },
+  { name: "a frame that does not decode at all", frame: Uint8Array.from([0xc1]), operation: "put", schemaId: "", recordKey: "" },
+  { name: "a put whose document is not a map", frame: Uint8Array.from([0x82, ...str("schemaVersion"), ...str("cultnet.document_put_raw.v0"), ...str("document"), 0x05]), operation: "put", schemaId: "", recordKey: "" },
+  { name: "a delete whose recordKey is not a string", frame: Uint8Array.from([0x84, ...str("schemaVersion"), ...str("cultnet.document_delete.v0"), ...str("messageId"), ...str("d"), ...str("schemaId"), ...str(SCHEMA_ID), ...str("recordKey"), 0x07]), operation: "delete", schemaId: SCHEMA_ID, recordKey: "" },
 ];
 
-test("an ungranted peer's unreadable put is refused with write_not_authorized, never silence, and nothing is allocated for it", async () => {
-  for (const [name, frame] of hostile) {
-    const r = await rawRig(undefined);
-    try {
-      const before = process.memoryUsage().arrayBuffers;
-      r.send(frame);
-      await sleep(250);
-      assert.equal(r.replies.length, 1, name);
-      assert.equal((r.replies[0] as { code?: string }).code, "write_not_authorized", name);
-      assert.ok(process.memoryUsage().arrayBuffers - before < 50_000_000, `${name}: the claimed length was not allocated`);
-      assert.deepEqual([r.puts.length, r.errors.length], [0, 0], name);
-    } finally { r.close(); }
+/** Records the size of every buffer a frame makes the process allocate, so a transient allocation is seen after it is freed. */
+function watchAllocations(): { largest: () => number; stop: () => void } {
+  let largest = 0;
+  const note = (n: unknown) => { if (typeof n === "number" && n > largest) largest = n; };
+  const originals = { alloc: Buffer.alloc, unsafe: Buffer.allocUnsafe, slow: Buffer.allocUnsafeSlow, u8: globalThis.Uint8Array, ab: globalThis.ArrayBuffer };
+  Buffer.alloc = ((n: number, ...rest: never[]) => { note(n); return originals.alloc.call(Buffer, n, ...rest); }) as typeof Buffer.alloc;
+  Buffer.allocUnsafe = ((n: number) => { note(n); return originals.unsafe.call(Buffer, n); }) as typeof Buffer.allocUnsafe;
+  Buffer.allocUnsafeSlow = ((n: number) => { note(n); return originals.slow.call(Buffer, n); }) as typeof Buffer.allocUnsafeSlow;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const watched = (ctor: any): any => new Proxy(ctor, { construct: (target, args, newTarget) => { note(args[0]); return Reflect.construct(target, args, newTarget); } });
+  (globalThis as { Uint8Array: unknown }).Uint8Array = watched(originals.u8);
+  (globalThis as { ArrayBuffer: unknown }).ArrayBuffer = watched(originals.ab);
+  return {
+    largest: () => largest,
+    stop: () => {
+      Buffer.alloc = originals.alloc; Buffer.allocUnsafe = originals.unsafe; Buffer.allocUnsafeSlow = originals.slow;
+      (globalThis as { Uint8Array: unknown }).Uint8Array = originals.u8;
+      (globalThis as { ArrayBuffer: unknown }).ArrayBuffer = originals.ab;
+    },
+  };
+}
+
+test("an ungranted peer's unreadable write is refused with write_not_authorized naming what it carried, and nothing is allocated for it", async () => {
+  for (const h of hostile) {
+    const authority = new Recording(() => ({ granted: false }));
+    for (const withAuthority of [false, true]) {
+      const r = await rawRig(withAuthority ? authority : undefined);
+      const watch = watchAllocations();
+      try {
+        r.send(h.frame);
+        await sleep(250);
+      } finally { watch.stop(); }
+      try {
+        assert.equal(r.replies.length, 1, h.name);
+        assertRefused(r.replies[0], h.recordKey);
+        assert.ok(watch.largest() < 10_000_000, `${h.name}: allocated ${watch.largest()} bytes`);
+        assert.deepEqual([r.puts.length, r.deletes.length, r.errors.length], [0, 0, 0], h.name);
+      } finally { r.close(); }
+    }
+    assert.equal(authority.requests.length, 1, h.name);
+    assert.deepEqual(
+      [authority.requests[0]!.operation, authority.requests[0]!.schemaId, authority.requests[0]!.recordKey],
+      [h.operation, h.schemaId, h.recordKey], h.name);
   }
 });
 
-test("a granted peer's unreadable put reaches onError and gets a malformed_document_put refusal", async () => {
-  for (const [name, frame] of hostile) {
-    const r = await rawRig(new CultMeshGrantAllWrites());
-    try {
-      r.send(frame);
-      await sleep(250);
-      assert.equal(r.replies.length, 1, name);
-      assert.ok((r.replies[0] as { error: string }).error.startsWith("malformed_document_put:"), name);
-      assert.equal(r.errors.length, 1, name);
-      assert.equal(r.puts.length, 0, name);
-    } finally { r.close(); }
-  }
+test("the allocation watch sees a transient allocation", () => {
+  const watch = watchAllocations();
+  try { void Buffer.alloc(20_000_000); } finally { watch.stop(); }
+  assert.ok(watch.largest() >= 20_000_000);
+  const typed = watchAllocations();
+  try { void new Uint8Array(20_000_000); } finally { typed.stop(); }
+  assert.ok(typed.largest() >= 20_000_000);
 });
 
-test("an ungranted peer's malformed delete is refused with write_not_authorized, a granted one gets malformed_document_delete", async () => {
-  const frame = Uint8Array.from([0x84, ...str("schemaVersion"), ...str("cultnet.document_delete.v0"), ...str("messageId"), ...str("d"), ...str("schemaId"), ...str(SCHEMA_ID), ...str("recordKey"), 0x07]);
-  for (const [authority, code] of [[undefined, "write_not_authorized"], [new CultMeshGrantAllWrites(), "malformed_document_delete:"]] as const) {
+test("a granted peer's unreadable write reaches onError and gets a malformed refusal, and no handler runs", async () => {
+  for (const h of hostile) {
+    const authority = new Recording(grant);
     const r = await rawRig(authority);
     try {
-      r.send(frame);
+      r.send(h.frame);
       await sleep(250);
-      assert.ok((r.replies[0] as { error: string })?.error.startsWith(code), code);
+      assert.equal(r.replies.length, 1, h.name);
+      const reply = r.replies[0] as { code: unknown; error: string };
+      assert.equal(reply.code, null, h.name);
+      assert.ok(reply.error.startsWith(`malformed_document_${h.operation}:`), h.name);
+      assert.equal(r.errors.length, 1, h.name);
+      assert.deepEqual([r.puts.length, r.deletes.length], [0, 0], h.name);
+      assert.deepEqual([authority.requests.length, authority.requests[0]!.operation, authority.requests[0]!.recordKey], [1, h.operation, h.recordKey], h.name);
     } finally { r.close(); }
   }
 });

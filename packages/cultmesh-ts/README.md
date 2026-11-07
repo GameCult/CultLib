@@ -345,7 +345,7 @@ evidence for the requested provider identity.
 
 ## RUDP Helpers
 
-`createRudpDocumentServer` refuses every peer put and delete unless given a `writeAuthority` (`new CultMeshGrantAllWrites()` accepts all). The authority is asked before a write's payload is read or its schema resolved, and a refusal is the typed `write_not_authorized`. Residual: ungranted peers can still distinguish registered from unregistered schemas by timing.
+`createRudpDocumentServer` refuses every peer put and delete unless given a `writeAuthority` (`new CultMeshGrantAllWrites()` accepts all). The authority is asked before a write's payload is sized or decoded and before any handler runs, and a refusal is the typed `write_not_authorized`. Residual: ungranted peers can still distinguish registered from unregistered schemas by timing.
 
 Node runtimes can build the shared CultNet reliable-UDP transport from the
 branded CultMesh entrypoint while the transport semantics stay owned by
