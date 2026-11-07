@@ -1,5 +1,5 @@
 //! Typed CultCache records for Heimdall's answer collector, cut from `docs/answer-collector-consent.md`
-//! in GameCult/Heimdall PR #6 (doc commit 4e99bfa): the notice acceptance record, the answer record,
+//! in GameCult/Heimdall PR #6 (doc commit aaeb175): the notice acceptance record, the answer record,
 //! and the typed shape of the terms pair on the member record. Field names and types follow the
 //! doc's tables and its Representation section; README.md cites the doc lines.
 
@@ -116,7 +116,7 @@ pub struct Answer {
     /// One-way: set by redaction, never cleared.
     #[cultcache(key = 6, default)]
     pub exited: bool,
-    /// Assigned by the collector on receipt, unix milliseconds UTC, not copied from the reply (doc L75);
+    /// Assigned by the collector on receipt, unix milliseconds UTC, not copied from the reply (doc L95);
     /// ties are broken by `supersedes`.
     #[cultcache(key = 7)]
     pub received_at: i64,

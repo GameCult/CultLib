@@ -3,29 +3,34 @@
 Typed CultCache records for Heimdall's answer collector: `NoticeAcceptance`, `Answer` and `MemberTerms`,
 plus the rules that need no store to state (`Answer::is_training_data`, `Answer::redacted`,
 `validate`). Cut from `docs/answer-collector-consent.md` in GameCult/Heimdall PR #6 at doc commit
-`4e99bfa`; the doc's tables and Representation section are the contract, and its rulings are on the PR
+`aaeb175` (PR head); the doc's tables and Representation section are the contract, and its rulings are on the PR
 (comments 682 and 759). Specification only: no collector, tally, export or tombstone hashing lives here.
 
 Entry points: `src/lib.rs`; golden vectors `tests/vectors/consent_golden.csv`, run by `tests/golden.rs`
 (`cargo test`). Planned, not live: the collector, the tally, the training export.
 
-## Where each ruling lands (doc lines at 4e99bfa)
+## Where each ruling lands (doc lines at aaeb175)
 
 | Ruling | Doc | Crate |
 |---|---|---|
-| Timestamps are Unix ms UTC, signed 64-bit | L98-99; `received_at` is collector-assigned, L75 | `i64` on `accepted_at`, `received_at`, `terms_accepted_at` |
-| Ids are non-empty opaque strings, `event_id` verbatim; every version field (`notice_version`, the `@N` of a sample id, `terms_version`) is a positive integer, no leading zeros, no sign, at most 4294967295 (Heimdall ruling 2026-11-07, one rule; doc line "Version rule" under Representation, Heimdall PR #6 commit d6a8d42) | L100-103 | `check_version` is the single rule; `check_sample_id` and `MemberTerms::validate` call it; `notice_version: u32` with `validate()` refusing 0; golden vector `newcomer` carries `terms_version` 4294967295, and case `one-version-rule` pins 4294967295 accepted, 4294967296 and `01` refused for `notice_version`, the sample id `@N` and `terms_version` |
-| Key parts joined with U+001F; empty part or part containing it refused | L104-105 | `key()` |
-| Tombstone is the exited `Answer` with `text_hash` (32 bytes); HMAC-SHA-256 keyed by a per-member salt held by the member-side service; the collector cannot compute it | L74, L132-152, L186-193 | `Answer.text_hash`; `redacted([u8; 32])` takes the service's output and refuses an answer with no `text` (L148-149); `validate()` requires 32 bytes and `exited` |
-| A reply with no established notice version or scope is stored with both absent, writes no acceptance, is excluded from every use | L87-94 | `notice_version`/`scope` optional and absent together (`validate()`); vector case `no-scope` |
-| A reply's version is the one pinned at its `origin_server_ts`; changed version needs a fresh first reply | L32-34, L47, L92-94 | acceptance key includes the version; `is_training_data` accepts only the acceptance for the answer's own version; vector case `version-change` |
-| `MemberTerms` is the typed shape of the member record's `terms_version`/`terms_accepted_at`, not a second store | L51-56 | `MemberTerms` doc comment; the collector does not hold it |
-| Training needs acceptance `scope = train` equal to the answer's `scope`, and `accepted_at <= received_at` | L116-123 | `is_training_data` |
-| One store per scope plus a store for scopeless replies | L125-130 | not modelled; the collector's layout owns it |
+| Timestamps are Unix ms UTC, signed 64-bit | L118-119; `received_at` is collector-assigned, L95, L208-209 | `i64` on `accepted_at`, `received_at`, `terms_accepted_at` |
+| Ids are non-empty opaque strings, `event_id` verbatim; every version field (`notice_version`, the `@N` of a sample id, `terms_version`) is a positive integer, no leading zeros, no sign, at most 4294967295 (Heimdall ruling 2026-11-07, one rule; doc line "Version rule" under Representation, Heimdall PR #6 commit d6a8d42, now in the doc at aaeb175) | L120-136 | `check_version` is the single rule; `check_sample_id` and `MemberTerms::validate` call it; `notice_version: u32` with `validate()` refusing 0; golden vector `newcomer` carries `terms_version` 4294967295, and case `one-version-rule` pins 4294967295 accepted, 4294967296 and `01` refused for `notice_version`, the sample id `@N` and `terms_version` |
+| Key parts joined with U+001F; empty part or part containing it refused | L137-138 | `key()` |
+| Tombstone is the exited `Answer` with `text_hash` (32 bytes); HMAC-SHA-256 keyed by a per-member salt held by the member-side service; the collector cannot compute it | L94, L165-185, L221-226 | `Answer.text_hash`; `redacted([u8; 32])` takes the service's output and refuses an answer with no `text` (L181-182); `validate()` requires 32 bytes and `exited` |
+| A reply with no established notice version or scope is stored with both absent, writes no acceptance, is excluded from every use | L107-114 | `notice_version`/`scope` optional and absent together (`validate()`); vector case `no-scope` |
+| A reply's version is the one pinned at its `origin_server_ts`; changed version needs a fresh first reply | L19-20, L49-51, L112-114 | acceptance key includes the version; `is_training_data` accepts only the acceptance for the answer's own version; vector case `version-change` |
+| `MemberTerms` is the typed shape of the member record's `terms_version`/`terms_accepted_at`, not a second store | L68-76 | `MemberTerms` doc comment; the collector does not hold it |
+| Training needs acceptance `scope = train` equal to the answer's `scope`, and `accepted_at <= received_at` | L149-156 | `is_training_data` |
+| One store per scope plus a store for scopeless replies | L158-163 | not modelled; the collector's layout owns it |
 
-Rulings of comment 759 (doc L72, L78-85; no open questions remain):
+Rulings of comment 759 (doc L92, L98-105; no open questions remain):
 
 | Ruling | Doc | Crate |
 |---|---|---|
-| A live answer must have non-empty `text` and is rejected otherwise; empty text is valid only on an exited answer (text cleared, hash-only tombstone) | L72, L83-85 | `Answer::validate()` refuses a non-exited answer whose `text` is absent or empty; an exited answer holds no text. Vector cases `empty-live-rejected`, `empty-revoked` |
-| `received_at` is assigned by the collector; a tie on it breaks by `event_id` compared bytewise, the greater wins as the later reply | L75, L78-81 | `Answer::supersedes`: `(received_at, event_id bytes)` order; the vector harness replaces a stored answer only when the incoming one supersedes it. Vector cases `tie-greater-first`, `tie-greater-last` |
+| A live answer must have non-empty `text` and is rejected otherwise; empty text is valid only on an exited answer (text cleared, hash-only tombstone) | L92, L103-105 | `Answer::validate()` refuses a non-exited answer whose `text` is absent or empty; an exited answer holds no text. Vector cases `empty-live-rejected`, `empty-revoked` |
+| `received_at` is assigned by the collector; a tie on it breaks by `event_id` compared bytewise, the greater wins as the later reply | L95, L98-101 | `Answer::supersedes`: `(received_at, event_id bytes)` order; the vector harness replaces a stored answer only when the incoming one supersedes it. Vector cases `tie-greater-first`, `tie-greater-last` |
+
+Not modelled (doc at aaeb175):
+
+- The `org.gamecult.notice` room state event (L24-37, L132-136): its content is `{version, scope}` with `version` a JSON number, and a string (including `"01"`) is malformed. The crate checks the version only as decimal text (`check_version`); reading, power-level checks and the malformed-means-`show` fallback belong to the collector.
+- The registration-checkbox gap (L78-79): the `m.login.terms` checkbox records no version. The doc rules nothing on it; the crate takes `terms_version` as given.
