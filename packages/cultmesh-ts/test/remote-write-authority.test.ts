@@ -9,10 +9,10 @@ import { documentPayloadFromBytes, defineDocumentType } from "@gamecult/cultcach
 import { encodeWireValue } from "@gamecult/cultnet-ts/wire";
 import {
   CultNetDocumentRegistry,
+  CultNetPeer,
   cultNetWriteNotAuthorizedError,
   defineCultNetDocumentBinding,
   type CultNetMessage,
-  type CultNetPeer,
 } from "@gamecult/cultnet-ts";
 import {
   CultMesh,
@@ -99,7 +99,7 @@ async function rig(writeAuthority?: CultMeshRemoteWriteAuthority, extra: { maxPa
     ...extra,
   });
   await server.start();
-  const peer = await CultMesh.createRudpPeer("authority-peer", connectionId, `rudp://127.0.0.1:${server.bind.port}`, {
+  const peer: CultNetPeer = await CultMesh.createRudpPeer("authority-peer", connectionId, `rudp://127.0.0.1:${server.bind.port}`, {
     resendDelayMs: 25,
     resendPollMs: 5,
     connectTimeoutMs: 2_000,
@@ -273,7 +273,7 @@ test("wrong-typed shard fields on a put are refused before the authority and rea
     for (const fields of bad) r.peer.send(put(KEY_A, fields));
     await r.settle();
     assert.equal(r.replies.length, bad.length);
-    assert.ok(r.replies.every((reply) => reply.schemaVersion === "cultnet.error.v0"));
+    assert.ok(r.replies.every((reply) => reply.schemaVersion === "cultnet.error.v0" && reply.code === null && reply.error.startsWith("malformed_document_put:")));
     assert.deepEqual(authority.requests, [], "the authority was never asked");
     assert.equal(r.puts.length, 0);
   });
@@ -314,4 +314,88 @@ test("a granted delete with no delete handler is answered with a text refusal", 
     assert.equal(replies.length, 1);
     assert.notEqual((replies[0] as { code?: string }).code, "write_not_authorized");
   } finally { peer.close(); server.close(); }
+});
+
+// Hostile frames, sent as raw bytes the typed peer would never build.
+const bin = (n: number, ...tail: number[]) => [0xc6, (n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255, ...tail]; // bin32 header
+const str = (t: string) => [0xa0 | t.length, ...Buffer.from(t)];
+function rawPut(payloadBytes: number[], key = KEY_A): Uint8Array {
+  // {schemaVersion, messageId, document: {schemaId, recordKey, storedAt, payloadEncoding, payload: <payloadBytes>}}
+  return Uint8Array.from([
+    0x83, ...str("schemaVersion"), ...str("cultnet.document_put_raw.v0"), ...str("messageId"), ...str("raw"),
+    ...str("document"), 0x85, ...str("schemaId"), ...str(SCHEMA_ID), ...str("recordKey"), ...str(key),
+    ...str("storedAt"), ...str("2026-11-07T00:00:00Z"), ...str("payloadEncoding"), ...str("messagepack"),
+    ...str("payload"), ...payloadBytes,
+  ]);
+}
+
+async function rawRig(writeAuthority?: CultMeshRemoteWriteAuthority) {
+  const connectionId = nextConnection++;
+  const puts: CultMeshRudpDocumentPut[] = [];
+  const errors: Error[] = [];
+  const server = CultMesh.createRudpDocumentServer("authority-raw", connectionId, {
+    documents: new CultNetDocumentRegistry([defineCultNetDocumentBinding({ definition: note })]),
+    writeAuthority, bindHost: "127.0.0.1", bindPort: 0, resendDelayMs: 25, resendPollMs: 5,
+    onDocumentPutRaw: (d) => { puts.push(d); }, onError: (e) => errors.push(e),
+  });
+  await server.start();
+  const client = await CultMesh.createRudpClient("raw", connectionId, `rudp://127.0.0.1:${server.bind.port}`, { resendDelayMs: 25, resendPollMs: 5 });
+  client.connect();
+  const started = Date.now();
+  while (!client.connected) {
+    if (Date.now() - started > 2_000) throw new Error("not connected");
+    await sleep(5);
+  }
+  const replies: CultNetMessage[] = [];
+  new CultNetPeer(client, { wireContract: "cultnet.schema.v0" }).on("message", (m) => replies.push(m));
+  return { puts, errors, replies, send: (b: Uint8Array) => client.send("schema", b), close: () => { client.close(); server.close(); } };
+}
+
+const hostile: [string, Uint8Array][] = [
+  ["an int payload", rawPut([0x2a])],
+  ["a 2**70-sized integer payload", rawPut([0xcf, 255, 255, 255, 255, 255, 255, 255, 255])],
+  ["a bin whose claimed length exceeds the frame", rawPut(bin(1_000_000_000, 1, 2, 3))],
+  ["a frame that does not decode at all", Uint8Array.from([0xc1])],
+  ["a put whose document is not a map", Uint8Array.from([0x82, ...str("schemaVersion"), ...str("cultnet.document_put_raw.v0"), ...str("document"), 0x05])],
+];
+
+test("an ungranted peer's unreadable put is refused with write_not_authorized, never silence, and nothing is allocated for it", async () => {
+  for (const [name, frame] of hostile) {
+    const r = await rawRig(undefined);
+    try {
+      const before = process.memoryUsage().arrayBuffers;
+      r.send(frame);
+      await sleep(250);
+      assert.equal(r.replies.length, 1, name);
+      assert.equal((r.replies[0] as { code?: string }).code, "write_not_authorized", name);
+      assert.ok(process.memoryUsage().arrayBuffers - before < 50_000_000, `${name}: the claimed length was not allocated`);
+      assert.deepEqual([r.puts.length, r.errors.length], [0, 0], name);
+    } finally { r.close(); }
+  }
+});
+
+test("a granted peer's unreadable put reaches onError and gets a malformed_document_put refusal", async () => {
+  for (const [name, frame] of hostile) {
+    const r = await rawRig(new CultMeshGrantAllWrites());
+    try {
+      r.send(frame);
+      await sleep(250);
+      assert.equal(r.replies.length, 1, name);
+      assert.ok((r.replies[0] as { error: string }).error.startsWith("malformed_document_put:"), name);
+      assert.equal(r.errors.length, 1, name);
+      assert.equal(r.puts.length, 0, name);
+    } finally { r.close(); }
+  }
+});
+
+test("an ungranted peer's malformed delete is refused with write_not_authorized, a granted one gets malformed_document_delete", async () => {
+  const frame = Uint8Array.from([0x84, ...str("schemaVersion"), ...str("cultnet.document_delete.v0"), ...str("messageId"), ...str("d"), ...str("schemaId"), ...str(SCHEMA_ID), ...str("recordKey"), 0x07]);
+  for (const [authority, code] of [[undefined, "write_not_authorized"], [new CultMeshGrantAllWrites(), "malformed_document_delete:"]] as const) {
+    const r = await rawRig(authority);
+    try {
+      r.send(frame);
+      await sleep(250);
+      assert.ok((r.replies[0] as { error: string })?.error.startsWith(code), code);
+    } finally { r.close(); }
+  }
 });

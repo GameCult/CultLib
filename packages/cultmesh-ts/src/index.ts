@@ -5641,7 +5641,21 @@ export class CultMesh {
       payload: Uint8Array,
     ): Promise<void> {
       if (record.closed) return;
-      const message = parseCultNetMessage(decodeWireValue(payload), wireContract);
+      let decoded: unknown;
+      let message: CultNetMessage;
+      try {
+        decoded = decodeWireValue(payload);
+        message = parseCultNetMessage(decoded, wireContract);
+      } catch (error) {
+        // A frame the server cannot read is judged as the write it looks like (a put when it does not even decode), so
+        // an ungranted peer hears the same refusal for it as for any other write, never silence or a parse error.
+        const write = readableWrite(decoded);
+        if (decoded !== undefined && !write) throw error;
+        if (await writeRefused(record, write?.operation ?? "put", write?.schemaId ?? "", write?.recordKey ?? "", null, null)) return;
+        reportError(error);
+        sendSchemaMessage(record, malformedWriteError(write?.operation ?? "put", "CultMesh RUDP document server could not read the write."));
+        return;
+      }
       switch (message.schemaVersion) {
         case "cultnet.snapshot_request.v0": {
           if (!options.getCache) {
@@ -5681,7 +5695,7 @@ export class CultMesh {
               (shardId !== undefined && typeof shardId !== "string") ||
               (shardEpoch !== undefined && !Number.isSafeInteger(shardEpoch))
             ) {
-              sendSchemaMessage(record, cultNetTextError("CultMesh RUDP document put carries malformed shard fields."));
+              sendSchemaMessage(record, malformedWriteError("put", "Raw put messages must carry a string shardId and an integer shardEpoch."));
               return;
             }
             if (await writeRefused(record, "put", message.document.schemaId, message.document.recordKey, (shardId as string | undefined) ?? null, (shardEpoch as number | undefined) ?? null)) return;
@@ -5729,6 +5743,27 @@ export class CultMesh {
         default:
           sendSchemaMessage(record, cultNetTextError(`Unsupported CultMesh RUDP document request ${message.schemaVersion}.`));
       }
+    }
+
+    /** The put or delete a decoded frame claims to be, with the ids it carries when they are strings. */
+    function readableWrite(value: unknown): { operation: CultMeshRemoteWriteOperation; schemaId: string; recordKey: string } | undefined {
+      if (typeof value !== "object" || value === null) return undefined;
+      const frame = value as { schemaVersion?: unknown; schemaId?: unknown; recordKey?: unknown; document?: unknown };
+      const str = (v: unknown): string => (typeof v === "string" ? v : "");
+      if (frame.schemaVersion === "cultnet.document_delete.v0") {
+        return { operation: "delete", schemaId: str(frame.schemaId), recordKey: str(frame.recordKey) };
+      }
+      if (frame.schemaVersion === "cultnet.document_put_raw.v0") {
+        const document = (typeof frame.document === "object" && frame.document !== null ? frame.document : {}) as { schemaId?: unknown; recordKey?: unknown };
+        return { operation: "put", schemaId: str(document.schemaId), recordKey: str(document.recordKey) };
+      }
+      return undefined;
+    }
+
+    // Not a `code`: malformed_document_put/delete are outside the schema's closed code enum, which TS and Rust peers
+    // refuse to decode (docs/cultnet-error-contract-cut.md), so the name leads the text of a codeless error instead.
+    function malformedWriteError(operation: CultMeshRemoteWriteOperation, text: string): CultNetMessage {
+      return cultNetTextError(`malformed_document_${operation}: ${text}`);
     }
 
     /**
