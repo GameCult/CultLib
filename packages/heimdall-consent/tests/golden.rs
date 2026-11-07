@@ -68,7 +68,7 @@ fn golden_vectors() {
             _ => cases.push((f[0], vec![f])),
         }
     }
-    assert_eq!(cases.len(), 9, "fixture shrank");
+    assert_eq!(cases.len(), 10, "fixture shrank");
     for (name, rows) in cases {
         let dir = tempfile::tempdir().unwrap();
         let mut cache = new_cache(&dir);
@@ -184,6 +184,29 @@ fn golden_vectors() {
                         .unwrap();
                     assert_eq!((a.notice_version, Some(a.scope), a.accepted_at), (nv.unwrap(), scope(sc), ts), "{ctx}");
                     assert_eq!(a.event_id, payload, "{ctx}");
+                }
+                "version_ok" | "version_refused" => {
+                    // member column names the field; payload is the version text as it arrives
+                    let ok = match member {
+                        "notice_version" => check_version(payload).is_ok_and(|v| {
+                            NoticeAcceptance {
+                                member_id: "m".into(),
+                                experiment_id: room.into(),
+                                notice_version: v,
+                                scope: Scope::Train,
+                                accepted_at: 1,
+                                event_id: "e".into(),
+                            }
+                            .validate()
+                            .is_ok()
+                        }),
+                        "sample_id" => check_sample_id(&format!("s@{payload}")).is_ok(),
+                        "terms_version" => {
+                            MemberTerms { member_id: "m".into(), terms_version: payload.into(), terms_accepted_at: 1 }.validate().is_ok()
+                        }
+                        other => panic!("unknown version field {other}"),
+                    };
+                    assert_eq!(ok, op == "version_ok", "{ctx} field {member} version {payload}");
                 }
                 other => panic!("unknown op {other}"),
             }

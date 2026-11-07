@@ -6,6 +6,7 @@
 # reply_rejected: validate must refuse the answer (nothing stored). answer_revoked: stores an exited answer with no text; payload is the tombstone hash (empty means none). expect_winner: the stored answer's event_id and text must equal event and payload.
 # Replacement at one key: the later reply is the greater (received_at, event_id), event_id compared bytewise; input order never decides (doc L78-81 and Heimdall PR #6 comment 759).
 # terms: member field terms_version (payload) and terms_accepted_at (ts). expect_terms: the stored pair for that member reads back as payload and ts; expect_no_terms: the member has none. expect_*: payload is what must hold.
+# version_ok / version_refused: the member column names the field (notice_version, sample_id, terms_version), payload is the version text; a sample id is checked as s@<payload>. One rule for all three: positive integer, no leading zeros, at most 4294967295 (Heimdall PR #6 cafdc52).
 # Expected values are written by hand from docs/answer-collector-consent.md (Heimdall PR #6, doc commit 4e99bfa), not computed by the crate.
 versioned-key,reply,m1,room1,1,train,s1@1,first,100,e1
 versioned-key,reply,m1,room1,1,train,s1@2,second,200,e2
@@ -66,3 +67,12 @@ tie-greater-last,reply,m15,room1,,,s1@1,long-aa,500,aa
 tie-greater-last,reply,m15,room1,,,s1@1,short-z,500,z
 tie-greater-last,expect_winner,m14,room1,,,s1@1,lower-a,,a
 tie-greater-last,expect_winner,m15,room1,,,s1@1,short-z,,z
+one-version-rule,version_ok,notice_version,room1,,,,4294967295,,version_ok-notice_version-4294967295
+one-version-rule,version_refused,notice_version,room1,,,,4294967296,,version_refused-notice_version-4294967296
+one-version-rule,version_refused,notice_version,room1,,,,01,,version_refused-notice_version-01
+one-version-rule,version_ok,sample_id,room1,,,,4294967295,,version_ok-sample_id-4294967295
+one-version-rule,version_refused,sample_id,room1,,,,4294967296,,version_refused-sample_id-4294967296
+one-version-rule,version_refused,sample_id,room1,,,,01,,version_refused-sample_id-01
+one-version-rule,version_ok,terms_version,room1,,,,4294967295,,version_ok-terms_version-4294967295
+one-version-rule,version_refused,terms_version,room1,,,,4294967296,,version_refused-terms_version-4294967296
+one-version-rule,version_refused,terms_version,room1,,,,01,,version_refused-terms_version-01
