@@ -211,3 +211,22 @@ fn round_trip_is_stable() {
         assert_eq!(decoded, message, "{}: round trip mismatch", case.name);
     }
 }
+
+/// `contracts/cultnet/interop/error-vectors.json` is the file the TypeScript and Python runtimes
+/// decode; it must stay byte-identical to the inline C# captures above, or those runtimes would be
+/// pinned to bytes this crate no longer pins.
+#[test]
+fn error_vectors_file_matches_the_inline_csharp_captures() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../contracts/cultnet/interop/error-vectors.json");
+    let file: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("read error-vectors.json"))
+            .expect("parse error-vectors.json");
+    let vectors = file["vectors"].as_array().expect("vectors array");
+    let all = cases();
+    assert_eq!(vectors.len(), all.len(), "vector count differs from the inline cases");
+    for (vector, case) in vectors.iter().zip(all.iter()) {
+        assert_eq!(vector["name"].as_str(), Some(case.name));
+        assert_eq!(vector["messagePackHex"].as_str(), Some(case.csharp_hex), "{}", case.name);
+    }
+}
