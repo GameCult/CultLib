@@ -10,6 +10,7 @@ from typing import Any
 import msgpack
 
 from cultnet_py import (
+    error_message,
     unsupported_schema_version_error,
     CultNetRawSnapshotResponse,
     CultNetSimulationObservationHub,
@@ -28,6 +29,12 @@ from cultnet_py import (
 )
 
 from .node import CultMeshNode
+from .write_authority import (
+    CultMeshRemoteWriteAuthority,
+    CultMeshRemoteWriteOperation,
+    CultMeshRemoteWriteRequest,
+    CultMeshServerPeer,
+)
 
 # The shortest message id this server answers a snapshot request under. It takes a
 # request's messageId as given, an empty one included, so no response it sends is smaller.
@@ -88,6 +95,9 @@ class CultMeshLocalServer:
     verse_catalog: CultMeshVerseCatalog = field(default_factory=CultMeshVerseCatalog)
     peer_catalog: CultMeshPeerCatalog = field(default_factory=CultMeshPeerCatalog)
     observation_hub: CultNetSimulationObservationHub | None = None
+    # Asked once per peer put and delete. None refuses every one of them (write_not_authorized); a node's own
+    # writes never come through here.
+    write_authority: CultMeshRemoteWriteAuthority | None = None
     host: str = "127.0.0.1"
     port: int = 0
     display_name: str | None = None
@@ -238,14 +248,15 @@ class CultMeshLocalServer:
             if server is None:
                 return
             try:
-                client, _ = server.accept()
+                client, address = server.accept()
             except TimeoutError:
                 continue
             except OSError:
                 return
-            threading.Thread(target=self._handle_connection, args=(client,), daemon=True).start()
+            peer = CultMeshServerPeer(f"{address[0]}:{address[1]}", "tcp")
+            threading.Thread(target=self._handle_connection, args=(client, peer), daemon=True).start()
 
-    def _handle_connection(self, client: socket.socket) -> None:
+    def _handle_connection(self, client: socket.socket, peer: CultMeshServerPeer) -> None:
         with client:
             stream = client.makefile("rwb")
             transport = TcpFramedTransportConnection(
@@ -267,7 +278,7 @@ class CultMeshLocalServer:
                 if not isinstance(message, dict):
                     continue
                 try:
-                    responses = self._handle_connection_message(message, subscriptions)
+                    responses = self._handle_connection_message(message, subscriptions, peer=peer)
                 except Exception as error:  # noqa: BLE001 - one message never ends the connection
                     # Whatever a peer's message makes the handling raise is that peer's failure:
                     # it is refused with fixed text and the connection serves on. The log names
@@ -363,7 +374,12 @@ class CultMeshLocalServer:
                         continue
                     if not isinstance(message, dict):
                         continue
-                    responses = self._handle_connection_message(message, peer.subscriptions, over_rudp=True)
+                    responses = self._handle_connection_message(
+                        message,
+                        peer.subscriptions,
+                        over_rudp=True,
+                        peer=CultMeshServerPeer(f"{remote_addr[0]}:{remote_addr[1]}", "rudp"),
+                    )
                     for response in responses:
                         if unsendable is None:
                             unsendable = self._send_rudp_schema_frame(
@@ -519,6 +535,7 @@ class CultMeshLocalServer:
         subscriptions: dict[str, _DatabaseSubscription],
         *,
         over_rudp: bool = False,
+        peer: CultMeshServerPeer | None = None,
     ) -> list[dict[str, Any]]:
         schema_version = message.get("schemaVersion")
         if schema_version == "cultnet.database_subscribe.v0":
@@ -542,9 +559,9 @@ class CultMeshLocalServer:
             subscriptions.pop(str(message.get("subscriptionId") or ""), None)
             return []
         if schema_version == "cultnet.document_put_raw.v0":
-            return self._handle_raw_put(message, subscriptions, over_rudp=over_rudp)
+            return self._handle_raw_put(message, subscriptions, over_rudp=over_rudp, peer=peer)
         if schema_version == "cultnet.document_delete.v0":
-            return self._handle_raw_delete(message, subscriptions)
+            return self._handle_raw_delete(message, subscriptions, peer=peer)
         if schema_version == "cultnet.simulation_observation.v0":
             return self._candidate_responses(message)
         response = self.handle_message(message)
@@ -556,6 +573,7 @@ class CultMeshLocalServer:
         subscriptions: dict[str, _DatabaseSubscription],
         *,
         over_rudp: bool = False,
+        peer: CultMeshServerPeer | None = None,
     ) -> list[dict[str, Any]]:
         document_record = message.get("document")
         if not isinstance(document_record, dict):
@@ -564,6 +582,11 @@ class CultMeshLocalServer:
                 message_id=str(message.get("messageId") or ""),
                 code="malformed_document_put",
             )]
+        target = self.node.database.raw_put_target(message)
+        if target is not None:
+            refusal = self._refuse_unauthorized_write(peer, CultMeshRemoteWriteOperation.PUT, target, message)
+            if refusal is not None:
+                return [refusal]
         unservable = self._unservable_put(message, over_rudp=over_rudp)
         if unservable is not None:
             return [unservable]
@@ -598,6 +621,8 @@ class CultMeshLocalServer:
         self,
         message: dict[str, Any],
         subscriptions: dict[str, _DatabaseSubscription],
+        *,
+        peer: CultMeshServerPeer | None = None,
     ) -> list[dict[str, Any]]:
         schema_id = str(message.get("schemaId") or "")
         record_key = str(message.get("recordKey") or "")
@@ -607,6 +632,11 @@ class CultMeshLocalServer:
                 message_id=str(message.get("messageId") or ""),
                 code="malformed_document_delete",
             )]
+        target = self.node.database.raw_delete_target(message)
+        if target is not None:
+            refusal = self._refuse_unauthorized_write(peer, CultMeshRemoteWriteOperation.DELETE, target, message)
+            if refusal is not None:
+                return [refusal]
         change = self.node.database.apply_raw_delete_message(message)
         if change is None:
             return [self._error_response(
@@ -615,6 +645,48 @@ class CultMeshLocalServer:
                 code="unregistered_document_delete",
             )]
         return self._database_delete_notifications(message, subscriptions, resolved_schema_id=change.schema_id)
+
+    def _refuse_unauthorized_write(
+        self,
+        peer: CultMeshServerPeer | None,
+        operation: CultMeshRemoteWriteOperation,
+        target: tuple[str, str],
+        message: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """None when the write may proceed, else the typed refusal for the sending peer.
+
+        No authority configured refuses; an authority that raises refuses too (fail closed) and is logged.
+        """
+        schema_id, record_key = target
+        reason: str | None
+        authority = self.write_authority
+        if authority is None:
+            reason = "no remote write authority is configured"
+        else:
+            request = CultMeshRemoteWriteRequest(
+                peer=peer or CultMeshServerPeer("", "unknown"),
+                operation=operation,
+                schema_id=schema_id,
+                record_key=record_key,
+                shard_id=message.get("shardId"),
+                shard_epoch=message.get("shardEpoch"),
+            )
+            try:
+                decision = authority.decide(request)
+            except Exception as error:  # noqa: BLE001 - a failing authority refuses
+                _LOGGER.error("CultMesh remote write authority failed (%s); the write was refused.", type(error).__name__)
+                decision = None
+                reason = "the write authority failed"
+            else:
+                reason = getattr(decision, "reason", None)
+            if decision is not None and getattr(decision, "is_granted", False) is True:
+                return None
+        _LOGGER.warning("CultMesh %s of %s refused: write not authorized.", operation.value, schema_id)
+        return error_message(
+            f"write_not_authorized: {reason}" if reason and reason.strip() else "write_not_authorized",
+            code="write_not_authorized",
+            details={"field": "recordKey", "value": record_key},
+        ).to_wire()
 
     def _database_change_notifications(
         self,

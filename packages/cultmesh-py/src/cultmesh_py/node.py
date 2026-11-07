@@ -650,6 +650,17 @@ class CultMeshDatabase:
         self._append_shard_log_delete(message)
         return message
 
+    def raw_put_target(self, message: dict[str, Any]) -> tuple[str, str] | None:
+        """The canonical schema id and record key a raw put would write, or None when it would not apply."""
+        prepared = self._raw_put_envelope(message)
+        return None if prepared is None else (prepared[0].catalog_entry().schema_id, prepared[1].key)
+
+    def raw_delete_target(self, message: dict[str, Any]) -> tuple[str, str] | None:
+        """The canonical schema id and record key a raw delete names, or None when its schema is not registered."""
+        document = self._document_for_schema(str(message.get("schemaId") or ""))
+        record_key = str(message.get("recordKey") or "")
+        return None if document is None or not record_key else (document.catalog_entry().schema_id, record_key)
+
     def apply_raw_put_message(self, message: dict[str, Any]) -> CultMeshDatabaseChange | None:
         prepared = self._raw_put_envelope(message)
         if prepared is None:
