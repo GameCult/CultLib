@@ -42,6 +42,11 @@ class ServerBindTests(unittest.TestCase):
         holder = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         holder.bind(("127.0.0.1", 0))
         port = holder.getsockname()[1]
+        free = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            free.bind(("127.0.0.1", port))  # the TCP number is free: only the UDP one is taken
+        finally:
+            free.close()
         threads_before = threading.active_count()
         try:
             failing = server(port=port)
