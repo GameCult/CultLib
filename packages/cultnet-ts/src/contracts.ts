@@ -33,7 +33,24 @@ import verseCatalogRequestSchema from "../contracts/cultnet/cultmesh.verse-catal
 import verseCatalogResponseSchema from "../contracts/cultnet/cultmesh.verse-catalog-response.schema.json";
 import sessionOpenSchema from "../contracts/cultnet/cultmesh.session-open.schema.json";
 import sessionAcceptedSchema from "../contracts/cultnet/cultmesh.session-accepted.schema.json";
+import selectionSchema from "../contracts/cultnet/cultnet.selection.schema.json";
+import rawDocumentHeaderSchema from "../contracts/cultnet/cultnet.raw-document-header.schema.json";
+import snapshotRequestV1Schema from "../contracts/cultnet/cultnet.snapshot-request.v1.schema.json";
+import snapshotResponseRawV1Schema from "../contracts/cultnet/cultnet.snapshot-response-raw.v1.schema.json";
+import databaseSubscribeV1Schema from "../contracts/cultnet/cultnet.database-subscribe.v1.schema.json";
 import ghostlightAgentStateSchema from "../contracts/cultnet/ghostlight.agent-state.schema.json";
+
+import {
+  encodeSelectionCarrierForWire,
+  normalizeSelectionCarrierNulls,
+  type CultNetSelectionCarrier,
+} from "./selection-carriers";
+import {
+  validateSelectionShape,
+  type CultNetEdge,
+  type CultNetRawDocumentHeader,
+  type CultNetSelection,
+} from "./selection";
 
 export type CultNetWireContract = "cultnet.schema.v0" | "gamecult.networking.v0";
 
@@ -53,6 +70,9 @@ export type CultNetSchemaVersion =
   | "cultnet.snapshot_response.v0"
   | "cultnet.snapshot_response_raw.v0"
   | "cultnet.database_subscribe.v0"
+  | "cultnet.snapshot_request.v1"
+  | "cultnet.snapshot_response_raw.v1"
+  | "cultnet.database_subscribe.v1"
   | "cultnet.database_unsubscribe.v0"
   | "cultnet.database_change_raw.v0"
   | "cultnet.schema_catalog_request.v0"
@@ -273,6 +293,46 @@ export interface CultNetDatabaseSubscribeMessage {
   consumerRuntimeId?: string;
   bodyIds?: string[];
   supportedBodyTransports?: string[];
+}
+
+/** A document snapshot through a typed selection (docs/cultnet-selection-cut.md). */
+export interface CultNetSnapshotRequestV1Message {
+  schemaVersion: "cultnet.snapshot_request.v1";
+  messageId: string;
+  selection: CultNetSelection;
+  shardId?: string;
+  shardEpoch?: number;
+}
+
+/** A live subscription through a typed selection. */
+export interface CultNetDatabaseSubscribeV1Message {
+  schemaVersion: "cultnet.database_subscribe.v1";
+  messageId: string;
+  subscriptionId: string;
+  selection: CultNetSelection;
+  /** Default true. */
+  includeSnapshot?: boolean;
+  consumerRuntimeId?: string;
+  bodyIds?: string[];
+  supportedBodyTransports?: string[];
+}
+
+/** One selection page: exactly one of `headers` / `documents` is present, by projection. */
+export interface CultNetSnapshotResponseRawV1Message {
+  schemaVersion: "cultnet.snapshot_response_raw.v1";
+  messageId: string;
+  /** Rows on this page. */
+  matched: number;
+  /** The snapshot this page is exact as of. */
+  asOf: number;
+  /** Cursor for the next page, absent on the last page. */
+  next?: string;
+  headers?: CultNetRawDocumentHeader[];
+  documents?: CultNetRawDocumentRecord[];
+  edges?: CultNetEdge[];
+  shardId?: string;
+  shardEpoch?: number;
+  shardLogSequence?: number;
 }
 
 export interface CultNetDatabaseUnsubscribeMessage {
@@ -687,6 +747,9 @@ export type CultNetMessage =
   | CultNetSnapshotResponseMessage
   | CultNetSnapshotResponseRawMessage
   | CultNetDatabaseSubscribeMessage
+  | CultNetSnapshotRequestV1Message
+  | CultNetSnapshotResponseRawV1Message
+  | CultNetDatabaseSubscribeV1Message
   | CultNetDatabaseUnsubscribeMessage
   | CultNetDatabaseChangeRawMessage
   | CultNetSchemaCatalogRequestMessage
@@ -721,6 +784,9 @@ const CULTNET_MESSAGE_SCHEMAS = [
   snapshotResponseSchema,
   snapshotResponseRawSchema,
   databaseSubscribeSchema,
+  snapshotRequestV1Schema,
+  snapshotResponseRawV1Schema,
+  databaseSubscribeV1Schema,
   databaseUnsubscribeSchema,
   databaseChangeRawSchema,
   schemaCatalogRequestSchema,
@@ -739,6 +805,8 @@ const cultNetValidators = new Map<CultNetSchemaVersion, ValidateFunction>();
 for (const schema of [
   documentRecordSchema,
   rawDocumentRecordSchema,
+  rawDocumentHeaderSchema,
+  selectionSchema,
   documentMutationContractSchema,
   transportProfileSchema,
   schemaDescriptorSchema,
@@ -785,6 +853,20 @@ export function parseCultNetMessage(input: unknown, wireContract: CultNetWireCon
     return input as CultNetSnapshotResponseRawMessage;
   }
 
+  if (schemaVersion === "cultnet.snapshot_response_raw.v1") {
+    validateSnapshotResponseRawV1Message(input);
+    return input as CultNetSnapshotResponseRawV1Message;
+  }
+
+  if (schemaVersion === "cultnet.snapshot_request.v1" || schemaVersion === "cultnet.database_subscribe.v1") {
+    // The door first, so an empty or blank schemas/keys entry is a typed refusal naming its field
+    // rather than a generic schema-validation failure.
+    const selection = (input as { selection?: unknown }).selection;
+    if (selection && typeof selection === "object") {
+      validateSelectionShape(selection as CultNetSelection);
+    }
+  }
+
   if (schemaVersion === "cultnet.database_change_raw.v0") {
     validateDatabaseChangeRawMessage(input);
     return input as CultNetDatabaseChangeRawMessage;
@@ -806,7 +888,14 @@ export function encodeCultNetMessageForWire(
     return encodeGameCultNetworkingMessage(message);
   }
 
-  return message;
+  switch (message.schemaVersion) {
+    case "cultnet.snapshot_request.v1":
+    case "cultnet.database_subscribe.v1":
+    case "cultnet.snapshot_response_raw.v1":
+      return encodeSelectionCarrierForWire(message as CultNetSelectionCarrier);
+    default:
+      return message;
+  }
 }
 
 export function validateGhostlightAgentState(input: unknown): GhostlightAgentStateDocument {
@@ -1134,6 +1223,89 @@ function validateSnapshotResponseRawMessage(
   });
 }
 
+function validateSnapshotResponseRawV1Message(
+  input: unknown,
+): asserts input is CultNetSnapshotResponseRawV1Message {
+  const candidate = validateBinaryMessageRoot(input, "cultnet.snapshot_response_raw.v1");
+  const fail = (path: string, problem: string): never => {
+    throw new Error(`Validation failed for cultnet.snapshot_response_raw.v1: ${path}: ${problem}`);
+  };
+  for (const counter of ["matched", "asOf"] as const) {
+    const value = candidate[counter];
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      fail(`/${counter}`, "must be a non-negative integer");
+    }
+  }
+  if (typeof candidate.next !== "undefined" && typeof candidate.next !== "string") {
+    fail("/next", "must be a string");
+  }
+  const hasHeaders = typeof candidate.headers !== "undefined";
+  const hasDocuments = typeof candidate.documents !== "undefined";
+  if (hasHeaders === hasDocuments) {
+    fail("/", "exactly one of headers and documents must be present");
+  }
+  if (hasHeaders) {
+    if (!Array.isArray(candidate.headers)) fail("/headers", "must be an array");
+    (candidate.headers as unknown[]).forEach((header, index) => validateRawDocumentHeader(header, `/headers/${index}`));
+  } else {
+    if (!Array.isArray(candidate.documents)) fail("/documents", "must be an array");
+    (candidate.documents as unknown[]).forEach((document, index) => validateRawDocumentRecord(document, `/documents/${index}`));
+  }
+  if (typeof candidate.edges !== "undefined") {
+    if (!Array.isArray(candidate.edges)) fail("/edges", "must be an array");
+    (candidate.edges as unknown[]).forEach((edge, index) => validateEdge(edge, `/edges/${index}`));
+  }
+  requireOptionalNonEmptyString(candidate.shardId, "/shardId");
+  for (const counter of ["shardEpoch", "shardLogSequence"] as const) {
+    const value = candidate[counter];
+    if (typeof value !== "undefined" && (typeof value !== "number" || !Number.isSafeInteger(value))) {
+      fail(`/${counter}`, "must be an integer");
+    }
+  }
+}
+
+function validateRawDocumentHeader(input: unknown, instancePath: string): void {
+  if (!input || typeof input !== "object") {
+    throw new Error(`Validation failed for raw CultNet document header: ${instancePath}: must be an object`);
+  }
+  const candidate = input as Record<string, unknown>;
+  requireNonEmptyString(candidate.schemaId, `${instancePath}/schemaId`);
+  requireOptionalNonEmptyString(candidate.schemaName, `${instancePath}/schemaName`);
+  requireOptionalNonEmptyString(candidate.schemaVersion, `${instancePath}/schemaVersion`);
+  requireOptionalNonEmptyString(candidate.schemaContentHash, `${instancePath}/schemaContentHash`);
+  requireNonEmptyString(candidate.recordKey, `${instancePath}/recordKey`);
+  requireNonEmptyString(candidate.storedAt, `${instancePath}/storedAt`);
+  requireOptionalNonEmptyString(candidate.sourceRuntimeId, `${instancePath}/sourceRuntimeId`);
+  requireOptionalNonEmptyString(candidate.sourceAgentId, `${instancePath}/sourceAgentId`);
+  requireOptionalNonEmptyString(candidate.sourceRole, `${instancePath}/sourceRole`);
+  requireOptionalStringArray(candidate.tags, `${instancePath}/tags`);
+}
+
+function validateEdge(input: unknown, instancePath: string): void {
+  const fail = (path: string, problem: string): never => {
+    throw new Error(`Validation failed for cultnet.snapshot_response_raw.v1: ${path}: ${problem}`);
+  };
+  if (!input || typeof input !== "object") {
+    fail(instancePath, "must be an object");
+  }
+  const candidate = input as Record<string, unknown>;
+  for (const end of ["from", "to"] as const) {
+    const ref = candidate[end] as Record<string, unknown> | undefined;
+    if (!ref || typeof ref !== "object") {
+      fail(`${instancePath}/${end}`, "must be an object");
+    }
+    requireNonEmptyString(ref!.schemaId, `${instancePath}/${end}/schemaId`);
+    requireNonEmptyString(ref!.recordKey, `${instancePath}/${end}/recordKey`);
+  }
+  requireNonEmptyString(candidate.role, `${instancePath}/role`);
+  if (typeof candidate.payloadEncoding !== "undefined" && candidate.payloadEncoding !== "messagepack") {
+    fail(`${instancePath}/payloadEncoding`, "must equal messagepack");
+  }
+  if (typeof candidate.payload !== "undefined" && !(candidate.payload instanceof Uint8Array)) {
+    fail(`${instancePath}/payload`, "must be a Uint8Array");
+  }
+}
+
 function validateDatabaseChangeRawMessage(
   input: unknown,
 ): asserts input is CultNetDatabaseChangeRawMessage {
@@ -1166,6 +1338,7 @@ function validateBinaryMessageRoot(
   schemaVersion:
     | "cultnet.document_put_raw.v0"
     | "cultnet.snapshot_response_raw.v0"
+    | "cultnet.snapshot_response_raw.v1"
     | "cultnet.database_change_raw.v0",
 ): Record<string, unknown> {
   if (!input || typeof input !== "object") {
@@ -1268,6 +1441,11 @@ function normalizeCultNetOptionalNulls(
         "supportedBodyTransports",
       ]);
       return;
+    case "cultnet.snapshot_request.v1":
+    case "cultnet.database_subscribe.v1":
+    case "cultnet.snapshot_response_raw.v1":
+      normalizeSelectionCarrierNulls(schemaVersion, candidate);
+      return;
     case "cultnet.operation_request.v0":
       stripNullProperties(candidate, ["payloadEncoding", "sourceRuntimeId", "targetRuntimeId"]);
       return;
@@ -1337,6 +1515,11 @@ export const cultNetSchemas = {
   snapshotResponseSchema,
   snapshotResponseRawSchema,
   databaseSubscribeSchema,
+  selectionSchema,
+  rawDocumentHeaderSchema,
+  snapshotRequestV1Schema,
+  snapshotResponseRawV1Schema,
+  databaseSubscribeV1Schema,
   databaseUnsubscribeSchema,
   databaseChangeRawSchema,
   schemaDescriptorSchema,
