@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using MessagePack;
 using NUnit.Framework;
 
@@ -120,8 +121,24 @@ namespace GameCult.Networking.Tests
                 name,
                 schemaVersion = message.SchemaVersion,
                 messagePackBase64 = Convert.ToBase64String(bytes),
-                expected = JsonSerializer.SerializeToElement(message, message.GetType(), JsonOptions)
+                expected = WithoutDerivedMembers(JsonSerializer.SerializeToNode(message, message.GetType(), JsonOptions))
             };
+        }
+
+        // CultNetSelection.HasHop is an [IgnoreMember] convenience, not wire; System.Text.Json would emit it.
+        private static JsonNode? WithoutDerivedMembers(JsonNode? node)
+        {
+            switch (node)
+            {
+                case JsonObject obj:
+                    obj.Remove("hasHop");
+                    foreach (var child in obj.Select(pair => pair.Value).ToArray()) WithoutDerivedMembers(child);
+                    break;
+                case JsonArray array:
+                    foreach (var child in array) WithoutDerivedMembers(child);
+                    break;
+            }
+            return node;
         }
 
         private static string VectorPath()

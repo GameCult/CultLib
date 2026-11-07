@@ -16,8 +16,7 @@
           "projection": "header",
           "descending": false,
           "limit": null,
-          "cursor": null,
-          "hasHop": false
+          "cursor": null
         },
         "shardId": null,
         "shardEpoch": null
@@ -70,8 +69,7 @@
           "projection": "document",
           "descending": true,
           "limit": 200,
-          "cursor": "opaque-cursor",
-          "hasHop": true
+          "cursor": "opaque-cursor"
         },
         "shardId": "shard-1",
         "shardEpoch": 7
@@ -94,8 +92,7 @@
           "projection": "header",
           "descending": false,
           "limit": null,
-          "cursor": null,
-          "hasHop": false
+          "cursor": null
         },
         "includeSnapshot": true,
         "consumerRuntimeId": null,
@@ -151,8 +148,7 @@
           "projection": "document",
           "descending": true,
           "limit": 200,
-          "cursor": "opaque-cursor",
-          "hasHop": true
+          "cursor": "opaque-cursor"
         },
         "includeSnapshot": false,
         "consumerRuntimeId": "consumer",
