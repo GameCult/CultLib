@@ -68,7 +68,7 @@ from cultnet_py import (
     snapshot_request,
 )
 from cultnet_py.cultmesh_contracts import VERSE_CATALOG_REQUEST
-from cultmesh_py import create_node
+from cultmesh_py import CultMeshGrantAllWrites, create_node
 from cultmesh_py import (
     CultMesh,
     CultMeshDatabase,
@@ -1631,7 +1631,7 @@ class CultMeshTests(unittest.TestCase):
         )
         primary = CultMesh.create_node(runtime_id="forward-primary")
         primary.database.register_document(document)
-        server = CultMesh.serve_node(primary)
+        server = CultMesh.serve_node(primary, write_authority=CultMeshGrantAllWrites())
         try:
             shard = CultNetShardDescriptor(
                 shard_id="forward",
@@ -3015,7 +3015,7 @@ class CultMeshTests(unittest.TestCase):
         source.database.put_raw_message(document, "note:live", CanonicalNote("initial"))
         target = CultMesh.create_node(runtime_id="subscription-alias-target")
         target.database.register_document(document)
-        server = CultMesh.serve_node(source)
+        server = CultMesh.serve_node(source, write_authority=CultMeshGrantAllWrites())
         try:
             raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
             with CultMesh.subscribe_document(target, raw_client, alias, "note:live") as subscription:
@@ -3533,6 +3533,7 @@ class CultMeshTests(unittest.TestCase):
                     sys.executable,
                     "-m",
                     "cultmesh_py.daemon",
+                    "--allow-peer-writes",
                     "--runtime-id",
                     "live-daemon-peer",
                     "--port",
@@ -3723,6 +3724,7 @@ class CultMeshTests(unittest.TestCase):
                     sys.executable,
                     "-m",
                     "cultmesh_py.daemon",
+                    "--allow-peer-writes",
                     "--runtime-id",
                     "forwarder-daemon-peer",
                     "--port",
@@ -3998,6 +4000,7 @@ class CultMeshTests(unittest.TestCase):
         server = CultMesh.serve_node(
             node,
             verse_catalog=verses,
+            write_authority=CultMeshGrantAllWrites(),
             peer_catalog=peers,
             observation_hub=observation_hub,
             display_name="Mesh Server",
@@ -4274,7 +4277,7 @@ class CultMeshTests(unittest.TestCase):
         node = CultMesh.create_node(runtime_id="mesh-alias-sub-server")
         node.database.register_document(document)
 
-        server = CultMesh.serve_node(node)
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
         try:
             raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
             with raw_client.subscribe_database(
@@ -4323,7 +4326,7 @@ class CultMeshTests(unittest.TestCase):
             shard_epoch=1,
         )
 
-        server = CultMesh.serve_node(node)
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
         try:
             raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
             with raw_client.subscribe_database(
@@ -4420,7 +4423,7 @@ class CultMeshTests(unittest.TestCase):
         def served_alone_bytes(key: str, body_length: int) -> int:
             node = CultMesh.create_node(runtime_id="mesh-served-bound-probe")
             node.database.register_document(document)
-            server = CultMesh.serve_node(node, enable_rudp=False)
+            server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites(), enable_rudp=False)
             try:
                 response, payload = exchange(server, put("probe", key, body_length), empty_id_snapshot)
             finally:
@@ -4434,7 +4437,7 @@ class CultMeshTests(unittest.TestCase):
 
         node = CultMesh.create_node(runtime_id="mesh-served-bound")
         node.database.register_document(document)
-        server = CultMesh.serve_node(node, max_snapshot_bytes=limit, enable_rudp=False)
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites(), max_snapshot_bytes=limit, enable_rudp=False)
         try:
             refused, _ = exchange(server, put("put-over", "note:over", 101))
             stored_after_refusal = node.database.get(document, "note:over")
@@ -4498,7 +4501,7 @@ class CultMeshTests(unittest.TestCase):
         document = self._rudp_bound_note()
         node = CultMesh.create_node(runtime_id="mesh-rudp-large")
         node.database.register_document(document)
-        server = CultMesh.serve_node(node)
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
         try:
             served, payload = self._rudp_exchange(
                 server,
@@ -4524,7 +4527,7 @@ class CultMeshTests(unittest.TestCase):
         def served_alone_bytes(body_length: int) -> int:
             node = CultMesh.create_node(runtime_id="mesh-rudp-bound-probe")
             node.database.register_document(document)
-            server = CultMesh.serve_node(node)
+            server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
             try:
                 _, payload = self._rudp_exchange(
                     server, self._rudp_note_put(document, "probe", key, body_length),
@@ -4554,7 +4557,7 @@ class CultMeshTests(unittest.TestCase):
 
         node = CultMesh.create_node(runtime_id="mesh-rudp-bound")
         node.database.register_document(document)
-        server = CultMesh.serve_node(node, rudp_max_fragment_bytes=100, rudp_max_pending_reliable_packets=8)
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites(), rudp_max_fragment_bytes=100, rudp_max_pending_reliable_packets=8)
         try:
             refusals = [
                 self._rudp_exchange(server, self._rudp_note_put(document, f"put-{served}", "note:q", body_for(served)))[0]
@@ -4792,7 +4795,7 @@ class CultMeshTests(unittest.TestCase):
         body_for = self._rudp_body_for(document, "note:w")
         node = CultMesh.create_node(runtime_id="mesh-rudp-wide")
         node.database.register_document(document)
-        server = CultMesh.serve_node(node, rudp_max_fragment_bytes=1)
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites(), rudp_max_fragment_bytes=1)
         try:
             transport = create_rudp_schema_transport(
                 host="127.0.0.1", port=server.port, connection_id=server.rudp_connection_id,
@@ -4857,7 +4860,7 @@ class CultMeshTests(unittest.TestCase):
         document = self._rudp_bound_note()
         node = CultMesh.create_node(runtime_id="mesh-rudp-malformed")
         node.database.register_document(document)
-        server = CultMesh.serve_node(node)
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
         try:
             refusals = []
             for field_name, value in (
@@ -4917,7 +4920,7 @@ class CultMeshTests(unittest.TestCase):
         node = CultMesh.create_node(runtime_id="mesh-unstorable-put")
         node.database.register_document(document)
         node.database.register_document(global_document)
-        server = CultMesh.serve_node(node)
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
         try:
             rudp_refusals = [(put["messageId"], self._rudp_exchange(server, put)[0]) for put in cases()]
             rudp_after, _ = self._rudp_exchange(server, hello(runtime_id="rudp-after").to_wire())

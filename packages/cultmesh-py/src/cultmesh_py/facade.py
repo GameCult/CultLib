@@ -35,6 +35,7 @@ from .node import (
 from .server import CULTMESH_RUDP_DEFAULT_MAX_FRAGMENT_BYTES, CultMeshLocalServer
 from .session import CultMeshGameSession, CultMeshGameSessionOptions
 from .simulation import CultMeshSimulationFactCommitter
+from .write_authority import CultMeshRemoteWriteAuthority
 from cultnet_py.cultmesh_contracts import (
     AuthorityLeaseVerifier,
     CultMeshAuthorityLeaseCatalog,
@@ -400,6 +401,7 @@ class CultMesh:
         verse_catalog: CultMeshVerseCatalog | None = None,
         peer_catalog: CultMeshPeerCatalog | None = None,
         observation_hub: CultNetSimulationObservationHub | None = None,
+        write_authority: CultMeshRemoteWriteAuthority | None = None,
         host: str = "127.0.0.1",
         port: int = 0,
         display_name: str | None = None,
@@ -416,6 +418,7 @@ class CultMesh:
             verse_catalog=verse_catalog or CultMeshVerseCatalog(),
             peer_catalog=peer_catalog or CultMeshPeerCatalog(),
             observation_hub=observation_hub,
+            write_authority=write_authority,
             host=host,
             port=port,
             display_name=display_name,

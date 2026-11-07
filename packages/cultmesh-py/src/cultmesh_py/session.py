@@ -27,6 +27,7 @@ from cultnet_py.cultmesh_contracts import CultMeshAuthorityLeaseCatalog, CultMes
 
 if TYPE_CHECKING:
     from .server import CultMeshLocalServer
+    from .write_authority import CultMeshRemoteWriteAuthority
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,7 @@ class CultMeshGameSession:
     def serve(
         self,
         *,
+        write_authority: CultMeshRemoteWriteAuthority | None = None,
         host: str = "127.0.0.1",
         port: int = 0,
         display_name: str | None = None,
@@ -96,6 +98,7 @@ class CultMeshGameSession:
             verse_catalog=self.verse_catalog if self._serve_verse_discovery else CultMeshVerseCatalog(),
             peer_catalog=self.peer_catalog if self._serve_peer_exchange else CultMeshPeerCatalog(),
             observation_hub=self.observation_hub if self._serve_simulation_observations else None,
+            write_authority=write_authority,
             host=host,
             port=port,
             display_name=display_name,

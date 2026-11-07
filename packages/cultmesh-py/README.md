@@ -122,6 +122,33 @@ server = CultMesh.serve_node(
 )
 ```
 
+## Peer writes
+
+**Breaking (0.x):** a served node refuses every peer `document_put_raw` and `document_delete` unless a write
+authority grants it, mirroring C# `ICultNetRemoteWriteAuthority`. Before this, any connected peer could overwrite
+or delete the node's documents. The refusal is a typed `cultnet.error.v0` with code `write_not_authorized` and the
+record key in `details`; an authority that raises, or returns no decision, refuses too.
+
+Known residual: ungranted peers can still distinguish registered from unregistered schemas by timing (the node resolves the
+schema before the gate so the authority sees the canonical id); the refusal itself is identical.
+
+```python
+from cultmesh_py import CultMeshGrantAllWrites, CultMeshRemoteWriteDecision, CultMeshRemoteWriteRequest
+
+class OwnKeysOnly:
+    def decide(self, request: CultMeshRemoteWriteRequest) -> CultMeshRemoteWriteDecision:
+        if request.record_key.startswith("input:python:"):
+            return CultMeshRemoteWriteDecision.grant()
+        return CultMeshRemoteWriteDecision.refuse("not your key")
+
+server = CultMesh.serve_node(node, write_authority=OwnKeysOnly())
+```
+
+The request carries the peer (`endpoint`, `transport`), the operation, the canonical schema id the node
+resolved (never the alias the peer sent), the record key and the shard id and epoch as sent. `session.serve(...)`
+takes the same `write_authority`. A host that already authenticates its peers, or a test rig, opts in to
+`CultMeshGrantAllWrites()`; the daemon's equivalent is `--allow-peer-writes`. Without it the daemon is read-only to peers.
+
 The same local server can be launched as a package daemon when another runtime
 or operator process needs a CultNet endpoint without embedding Python glue:
 
