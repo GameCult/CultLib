@@ -352,10 +352,21 @@ own path into the DLL. No `global.json` pins the .NET SDK, so the same refusal
 at unchanged source and CRLF checkout means this SDK or host differs from the
 one that built the tracked DLL.
 
+### Before pushing a tag
+
+A tag run uses the workflow files at the tagged commit, not the ones on main, and
+the forge's GitHub mirror forwards the tag. Read `.github/workflows/publish-packages.yml`
+(and any workflow that triggers on tags) at the tagged sha before pushing any tag:
+a guard merged after that commit does not protect a tag that points before it.
+`cultcache-ts-v0.15.0` sits on `7d292085`, which predates the guard, and its push
+started a publish run (it failed; nothing reached npm).
+
 ### Coverage gaps
 
-`publish-packages.yml` only triggers on `cultcache-ts-v*`, `cultcache-py-v*`,
-`cultnet-py-v*`, and `cultmesh-py-v*` tag pushes — it does not build or gate
+`publish-packages.yml` only triggers on `cultcache-py-v*`, `cultnet-py-v*`, and
+`cultmesh-py-v*` tag pushes (`cultcache-ts-v*` is deliberately not a trigger: npm
+publishing is off until ruled on, and the cultcache-ts job runs from
+`workflow_dispatch` only, publishing nothing) — it does not build or gate
 the Unity UPM packages at all; those are consumed directly by git tag
 (`unity/org.gamecult.cultlib`, `packages/cultmath/unity/org.gamecult.cultmath`,
 `src/GameCult.Unity/Assets/Caching`), so a workflow trigger on their tags
