@@ -61,7 +61,7 @@ const note = decodeDocumentPayload(noteDocument, envelope.payload); // parsed No
 const payload = encodeDocumentPayload(noteDocument, note); // DocumentPayload
 ```
 
-Browsers import the same names from `@gamecult/cultcache-ts/document`, which holds no Node built-ins.
+Browsers import the same names from `@gamecult/cultcache-ts/document`, which holds no Node built-ins. The whole cache without the single-file store is `@gamecult/cultcache-ts/browser`, which is also what bundlers resolve for the package root (`browser` condition); bring your own `CacheBackingStore`.
 
 ## `.cc` Inspection
 
