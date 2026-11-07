@@ -43,6 +43,7 @@ CULTNET_ERROR_CODES: tuple[str, ...] = (
     "variant_unsupported",
     "unowned_schema",
     "write_not_authorized",
+    "unsupported_schema_version",
 )
 
 _ERROR_DETAILS_KEYS = ("field", "value", "asOf", "current")
@@ -172,6 +173,16 @@ def error_message(
         raise ValueError(f"cultnet.error.v0 details has unknown keys {sorted(set(details) - set(_ERROR_DETAILS_KEYS))}")
     _validate_error_body(body)
     return CultNetMessage("cultnet.error.v0", body)
+
+
+def unsupported_schema_version_error(schema_version: Any) -> CultNetMessage:
+    """The refusal for a message whose schemaVersion this peer does not speak (C# ForUnsupportedSchemaVersion)."""
+    value = None if schema_version is None else str(schema_version)
+    return error_message(
+        f"unsupported_schema_version: {value or ''}",
+        code="unsupported_schema_version",
+        details={"field": "schemaVersion", "value": value},
+    )
 
 
 def login_success(

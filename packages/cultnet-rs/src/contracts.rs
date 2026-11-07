@@ -247,6 +247,7 @@ pub enum CultNetErrorCode {
     VariantUnsupported,
     UnownedSchema,
     WriteNotAuthorized,
+    UnsupportedSchemaVersion,
 }
 
 impl CultNetErrorCode {
@@ -259,6 +260,7 @@ impl CultNetErrorCode {
             Self::VariantUnsupported => "variant_unsupported",
             Self::UnownedSchema => "unowned_schema",
             Self::WriteNotAuthorized => "write_not_authorized",
+            Self::UnsupportedSchemaVersion => "unsupported_schema_version",
         }
     }
 
@@ -271,6 +273,7 @@ impl CultNetErrorCode {
             "variant_unsupported" => Ok(Self::VariantUnsupported),
             "unowned_schema" => Ok(Self::UnownedSchema),
             "write_not_authorized" => Ok(Self::WriteNotAuthorized),
+            "unsupported_schema_version" => Ok(Self::UnsupportedSchemaVersion),
             _ => Err(anyhow!("ErrorMessage.Code is not a recognized cultnet.error.v0 code")),
         }
     }

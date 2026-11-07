@@ -6,7 +6,7 @@ from pathlib import Path
 
 import msgpack
 
-from cultnet_py import CULTNET_ERROR_CODES, error_message, parse_message
+from cultnet_py import CULTNET_ERROR_CODES, error_message, parse_message, unsupported_schema_version_error
 
 # contracts/cultnet/interop/error-vectors.json: bytes captured from MessagePack C# 3.1.7 and pinned
 # by cultnet-rs/tests/error_message.rs (Rust encodes to exactly these bytes).
@@ -50,6 +50,7 @@ class CultNetErrorMessageTests(unittest.TestCase):
             details={"field": "keys", "value": "   "},
         )
         self.assertEqual(selection.to_bytes(), by_name["selection_invalid_field_value"])
+        self.assertEqual(unsupported_schema_version_error("cultnet.hello.v1").to_bytes(), by_name["unsupported_schema_version"])
 
     def test_builder_writes_nil_keys_and_accepts_a_null_code(self) -> None:
         wire = error_message("boom").to_wire()
@@ -57,7 +58,7 @@ class CultNetErrorMessageTests(unittest.TestCase):
 
     def test_unknown_code_is_refused_by_builder_and_decoder(self) -> None:
         with self.assertRaises(ValueError):
-            error_message("x", code="unsupported_schema_version")
+            error_message("x", code="not_a_code")
         bad = msgpack.packb(
             {"schemaVersion": "cultnet.error.v0", "error": "x", "routingHint": None, "code": "nope", "details": None},
             use_bin_type=True,

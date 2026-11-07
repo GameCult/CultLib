@@ -21,6 +21,7 @@ CULTNET_ERROR_CODES = (
     "variant_unsupported",
     "unowned_schema",
     "write_not_authorized",
+    "unsupported_schema_version",
 )
 
 WIRE_MESSAGE_SCHEMA_VERSIONS = (

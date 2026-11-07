@@ -511,7 +511,7 @@ namespace GameCult.Networking
         [Key("routingHint")] public CultNetShardRoutingHint? RoutingHint { get; set; }
         /// <summary>
         /// Gets or sets the machine-readable refusal code (R-N), e.g. <c>selection_invalid</c>,
-        /// <c>cursor_stale</c>, <c>cursor_invalid</c>, <c>reference_outside_target</c>, <c>unowned_schema</c>, <c>write_not_authorized</c>. Additive to
+        /// <c>cursor_stale</c>, <c>cursor_invalid</c>, <c>reference_outside_target</c>, <c>unowned_schema</c>, <c>write_not_authorized</c>, <c>unsupported_schema_version</c>. Additive to
         /// <c>cultnet.error.v0</c>; a v0 peer that does not know this field ignores it.
         /// </summary>
         [Key("code")] public string? Code { get; set; }
@@ -553,6 +553,18 @@ namespace GameCult.Networking
                 Error = string.IsNullOrWhiteSpace(reason) ? "write_not_authorized" : $"write_not_authorized: {reason}",
                 Code = "write_not_authorized",
                 Details = new CultNetErrorDetails { Field = "recordKey", Value = request.RecordKey.Value }
+            };
+
+        /// <summary>
+        /// Builds the wire error for a message whose <c>schemaVersion</c> this peer does not speak: code
+        /// <c>unsupported_schema_version</c>, details <c>{ field: "schemaVersion", value }</c>.
+        /// </summary>
+        public static CultNetErrorMessage ForUnsupportedSchemaVersion(string? schemaVersion) =>
+            new CultNetErrorMessage
+            {
+                Error = $"unsupported_schema_version: {schemaVersion}",
+                Code = "unsupported_schema_version",
+                Details = new CultNetErrorDetails { Field = "schemaVersion", Value = schemaVersion }
             };
 
         /// <summary>

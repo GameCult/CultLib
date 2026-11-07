@@ -10,6 +10,7 @@ from typing import Any
 import msgpack
 
 from cultnet_py import (
+    unsupported_schema_version_error,
     CultNetRawSnapshotResponse,
     CultNetSimulationObservationHub,
     CultNetRudpPacket,
@@ -229,12 +230,7 @@ class CultMeshLocalServer:
         if schema_version == "cultnet.simulation_observation.v0":
             candidates = self._candidate_responses(message)
             return candidates[0] if candidates else None
-        return self._error_response(
-            f"Unsupported CultNet message schema: {schema_version!r}.",
-            message_id=str(message.get("messageId") or ""),
-            code="unsupported_schema_version",
-            details={"schemaVersion": schema_version},
-        )
+        return unsupported_schema_version_error(schema_version).to_wire()
 
     def _accept_loop(self) -> None:
         while not self._stop.is_set():
