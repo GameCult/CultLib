@@ -58,7 +58,8 @@ source-tree fallbacks into application code.
 
 The process harness lives in
 [`samples/eve-browser-network`](../../../../samples/eve-browser-network/README.md).
-Application code should copy the typed state, operation, and Eve composition
+Running it needs a sibling Eve checkout (`--eve-root`); it does not build
+standalone. Application code should copy the typed state, operation, and Eve composition
 shape—not its benchmark flags or fixture orchestration.
 
 For a TypeScript provider daemon, continue with the
