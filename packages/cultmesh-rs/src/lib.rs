@@ -865,6 +865,7 @@ pub fn request_raw_snapshot_from_rudp_catalog(
 /// fixed refusals a CultMesh catalog sends; any other text could carry
 /// anything, so it is left out.
 fn recognised_refusal(text: &str) -> String {
+    let text = text.strip_prefix("write_not_authorized: ").unwrap_or(text);
     if REFUSAL_TEXTS.contains(&text) {
         format!(": {text}")
     } else {
