@@ -16,7 +16,9 @@ name: Publish packages
 on:
   push:
     tags:
-      - "cultcache-ts-v*"
+      # cultcache-ts-v* is deliberately not a trigger: publishing @gamecult/cultcache-ts is disabled
+      # until it is ruled on, and whether NPM_TOKEN is set is unknown, so a pushed tag must not reach
+      # `npm publish`. The cultcache-ts jobs below still run from workflow_dispatch, which publishes nothing.
       - "cultcache-py-v*"
       - "cultnet-py-v*"
       - "cultmesh-py-v*"
