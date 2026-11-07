@@ -4006,8 +4006,8 @@ export type CultMeshRemoteWriteOperation = "put" | "delete";
 /**
  * One peer write as the authority sees it. `schemaId` is the canonical id the registry resolved for the write (the id
  * as sent when no binding takes it), never an alias the peer used when a binding resolves it. `shardId` and
- * `shardEpoch` are as the peer sent them, `null` when it sent none; a message carrying either with the wrong type
- * is refused when it is read, before any authority is asked.
+ * `shardEpoch` are as a put carried them, `null` when it sent none (always `null` for a delete, which has none); a
+ * put carrying either with the wrong type is refused before any authority is asked.
  */
 export interface CultMeshRemoteWriteRequest {
   peer: CultMeshRemoteWritePeer;
@@ -4048,8 +4048,6 @@ export interface CultMeshRudpDocumentDelete {
   messageId: string;
   schemaId: string;
   recordKey: string;
-  shardId: string | null;
-  shardEpoch: number | null;
   remote: CultMeshRemoteWritePeer;
 }
 
@@ -5676,7 +5674,18 @@ export class CultMesh {
           sendSchemaMessage(record, cultNetBuiltinSchemaRegistry.createCatalogResponse(message));
           return;
         case "cultnet.document_put_raw.v0":
-          if (await writeRefused(record, "put", message.document.schemaId, message.document.recordKey, message)) return;
+          {
+            // The parser passes shard fields of any type through a put; a wrong-typed one is refused before the authority.
+            const { shardId, shardEpoch } = message as { shardId?: unknown; shardEpoch?: unknown };
+            if (
+              (shardId !== undefined && typeof shardId !== "string") ||
+              (shardEpoch !== undefined && !Number.isSafeInteger(shardEpoch))
+            ) {
+              sendSchemaMessage(record, cultNetTextError("CultMesh RUDP document put carries malformed shard fields."));
+              return;
+            }
+            if (await writeRefused(record, "put", message.document.schemaId, message.document.recordKey, (shardId as string | undefined) ?? null, (shardEpoch as number | undefined) ?? null)) return;
+          }
           if (options.onDocumentPutRaw) {
             const unservable = unservablePut(message);
             if (unservable) {
@@ -5697,7 +5706,7 @@ export class CultMesh {
           }
           return;
         case "cultnet.document_delete.v0": {
-          if (await writeRefused(record, "delete", message.schemaId, message.recordKey, message)) return;
+          if (await writeRefused(record, "delete", message.schemaId, message.recordKey, null, null)) return;
           if (!options.onDocumentDeleteRaw) {
             sendSchemaMessage(record, cultNetTextError("CultMesh RUDP document server has no delete handler."));
             return;
@@ -5706,8 +5715,6 @@ export class CultMesh {
             messageId: message.messageId,
             schemaId: message.schemaId,
             recordKey: message.recordKey,
-            shardId: message.shardId ?? null,
-            shardEpoch: message.shardEpoch ?? null,
             remote: { ...record.remote },
           });
           return;
@@ -5735,7 +5742,8 @@ export class CultMesh {
       operation: CultMeshRemoteWriteOperation,
       schemaId: string,
       recordKey: string,
-      message: { shardId?: string; shardEpoch?: number },
+      shardId: string | null,
+      shardEpoch: number | null,
     ): Promise<boolean> {
       let reason: string | undefined;
       const authority = options.writeAuthority;
@@ -5748,8 +5756,8 @@ export class CultMesh {
             operation,
             schemaId: options.documents.canonicalSchemaId(schemaId) ?? schemaId,
             recordKey,
-            shardId: message.shardId ?? null,
-            shardEpoch: message.shardEpoch ?? null,
+            shardId,
+            shardEpoch,
           });
           if (decision?.granted === true) return false;
           reason = typeof decision?.reason === "string" ? decision.reason : undefined;

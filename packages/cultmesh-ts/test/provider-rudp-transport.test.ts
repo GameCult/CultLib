@@ -14,6 +14,7 @@ import {
 
 import {
   CultMesh,
+  CultMeshGrantAllWrites,
   CultMeshProviderRudpTransport,
   CultMeshProviderSessionBroker,
   CULTMESH_PROVIDER_SESSION_SERVICE_ID,
@@ -64,6 +65,7 @@ test("RUDP provider transport requires broker acceptance for the full lifecycle"
     },
   });
   const server = CultMesh.createRudpDocumentServer("odin-test", 0x43554c54, {
+    writeAuthority: new CultMeshGrantAllWrites(),
     bindPort: 0,
     documents: new CultNetDocumentRegistry(),
     onOperationRequest: (request, session) => broker.handle(request, session),
@@ -256,6 +258,7 @@ test("a replaced RUDP generation drops operations queued behind an active handle
   let handlerCalls = 0;
   let closedSessions = 0;
   const server = CultMesh.createRudpDocumentServer("odin-queue-test", connectionId, {
+    writeAuthority: new CultMeshGrantAllWrites(),
     bindPort: 0,
     documents: new CultNetDocumentRegistry(),
     onOperationRequest: async request => {
@@ -326,6 +329,7 @@ test("a client restarted on the same address with the same Connect payload repla
   const connectionId = 0x43554c54;
   let closedSessions = 0;
   const server = CultMesh.createRudpDocumentServer("odin-restart-test", connectionId, {
+    writeAuthority: new CultMeshGrantAllWrites(),
     bindPort: 0,
     documents: new CultNetDocumentRegistry(),
     onSessionClosed: () => { closedSessions += 1; },
@@ -364,6 +368,7 @@ test("a client restarted on the same address with the same Connect payload repla
 test("the RUDP document server does not acknowledge by name a reliable packet its session did not receive", async () => {
   const connectionId = 0x43554c55;
   const server = CultMesh.createRudpDocumentServer("odin-ack-test", connectionId, {
+    writeAuthority: new CultMeshGrantAllWrites(),
     bindPort: 0,
     documents: new CultNetDocumentRegistry(),
     onError: () => undefined,
