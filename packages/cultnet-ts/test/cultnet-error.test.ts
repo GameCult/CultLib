@@ -8,6 +8,7 @@ import { decode, encode } from "@msgpack/msgpack";
 import {
   CULTNET_ERROR_CODES,
   cultNetSchemas,
+  cultNetWriteNotAuthorizedError,
   encodeCultNetMessageForWire,
   parseCultNetMessage,
   type CultNetErrorMessage,
@@ -80,4 +81,16 @@ test("a code outside the closed enum is refused, as is a malformed details objec
     () => parseCultNetMessage({ ...base, details: { field: null, value: null, asOf: -1, current: 2 } }),
     /cultnet\.error\.v0/,
   );
+});
+
+test("the write_not_authorized factory writes the C# vector's bytes and names the key", () => {
+  const vector = vectors.find((v) => v.name === "write_not_authorized")!;
+  assert.equal(hexOf(wireOf(cultNetWriteNotAuthorizedError("some:key", "not granted"))), vector.messagePackHex);
+  assert.deepEqual(cultNetWriteNotAuthorizedError("some:key", "not granted"), vector.message);
+});
+
+test("a write_not_authorized refusal with no reason, or a blank one, says only the code", () => {
+  assert.equal(cultNetWriteNotAuthorizedError("k").error, "write_not_authorized");
+  assert.equal(cultNetWriteNotAuthorizedError("k", "  ").error, "write_not_authorized");
+  assert.equal(cultNetWriteNotAuthorizedError("k", null).error, "write_not_authorized");
 });

@@ -204,6 +204,20 @@ export function cultNetTextError(error: string): CultNetErrorMessage {
   return { schemaVersion: "cultnet.error.v0", error, routingHint: null, code: null, details: null };
 }
 
+/**
+ * The refusal for a peer write its server's authority did not grant (C# `CultNetErrorMessage.ForRemoteWriteRefused`):
+ * code `write_not_authorized`, `details` naming the record in `recordKey`. A blank `reason` leaves the text bare.
+ */
+export function cultNetWriteNotAuthorizedError(recordKey: string, reason?: string | null): CultNetErrorMessage {
+  return {
+    schemaVersion: "cultnet.error.v0",
+    error: reason && reason.trim() ? `write_not_authorized: ${reason}` : "write_not_authorized",
+    routingHint: null,
+    code: "write_not_authorized",
+    details: { field: "recordKey", value: recordKey, asOf: null, current: null },
+  };
+}
+
 export interface CultNetErrorRoutingHint {
   shard: Record<string, unknown> | null;
   reason: string;

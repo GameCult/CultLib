@@ -18,6 +18,7 @@ export {
   type CultNetRawPayloadEncoding,
   CULTNET_ERROR_CODES,
   cultNetTextError,
+  cultNetWriteNotAuthorizedError,
   type CultNetErrorCode,
   type CultNetErrorDetails,
   type CultNetErrorMessage,
