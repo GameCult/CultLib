@@ -93,4 +93,7 @@ test("a write_not_authorized refusal with no reason, or a blank one, says only t
   assert.equal(cultNetWriteNotAuthorizedError("k").error, "write_not_authorized");
   assert.equal(cultNetWriteNotAuthorizedError("k", "  ").error, "write_not_authorized");
   assert.equal(cultNetWriteNotAuthorizedError("k", null).error, "write_not_authorized");
+  // C# string.IsNullOrWhiteSpace counts U+0085 as white space and not U+FEFF; JS trim() disagrees on both.
+  assert.equal(cultNetWriteNotAuthorizedError("k", "\u0085").error, "write_not_authorized");
+  assert.equal(cultNetWriteNotAuthorizedError("k", "\ufeff").error, "write_not_authorized: \ufeff");
 });
