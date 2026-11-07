@@ -17,7 +17,7 @@ this page.
 | | CultCache | CultMath | Geometry | CultNet | CultMesh |
 | --- | --- | --- | --- | --- | --- |
 | **C#** | [first call, tested](#c-first-call) | [package](../../packages/cultmath/README.md); snippet not yet | [package](../../src/GameCult.Geometry/README.md); snippet not yet | [first call, tested](#c-cultnet-first-call); [package](../../src/GameCult.Networking) | [quickstart](../../src/GameCult.Mesh/docs/durable-node-quickstart.md); run by `scripts/verify-eve-getting-started.ps1` |
-| **TypeScript** | [first call, tested](#typescript-first-call) | not yet | not yet | [first call, tested](#typescript-cultnet-first-call); [package](../../packages/cultnet-ts/README.md) | [package](../../packages/cultmesh-ts/README.md); snippet not yet |
+| **TypeScript** | [first call, tested](#typescript-first-call) | not yet | not yet | [first call, tested](#typescript-cultnet-first-call); [package](../../packages/cultnet-ts/README.md) | [package](../../packages/cultmesh-ts/README.md); snippet not yet; [recipe: two-client .io game](io-game.md), tested with two live clients, browser page not yet run |
 | **Rust** | [first call, tested](#rust-first-call) | [native core](../../packages/cultmath/native/cultmath-core); snippet not yet | not yet | [first call, tested](#rust-cultnet-first-call); [package](../../packages/cultnet-rs/README.md), [examples](../../packages/cultnet-rs/examples) | [package](../../packages/cultmesh-rs); snippet not yet |
 | **Python** | [first call, tested](#python-first-call) | not yet | not yet | [first call, tested](#python-cultnet-first-call); [package](../../packages/cultnet-py/README.md) | [package](../../packages/cultmesh-py/README.md); snippet not yet |
 

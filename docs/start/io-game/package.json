@@ -1,0 +1,9 @@
+{
+  "name": "cultlib-start-io-game",
+  "private": true,
+  "type": "module",
+  "description": "docs/start recipe: a tiny two-client browser game over CultCache + CultMesh (TypeScript).",
+  "scripts": { "test": "node --test arena.test.ts" },
+  "dependencies": { "ws": "^8.18.0" },
+  "devDependencies": { "@types/ws": "^8.5.0" }
+}
