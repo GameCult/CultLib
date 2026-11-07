@@ -182,6 +182,15 @@ class AuthorityRouteVectorTests(unittest.TestCase):
             refusal(self, lambda: v.trust.validate(v.verse_id, short, v.now)),
         )
 
+    def test_high_s_signature_verifies_as_it_does_in_dotnet(self) -> None:
+        v = Vector("authority-route-vectors.json")
+        order = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+        raw = base64.b64decode(v.certificate.signature)
+        s = int.from_bytes(raw[32:], "big")
+        flipped = raw[:32] + (order - s).to_bytes(32, "big")
+        high = v.with_certificate(signature=base64.b64encode(flipped).decode())
+        v.trust.validate(v.verse_id, high, v.now)
+
     def test_session_proof_rejects_replay_wrong_key_and_forgery(self) -> None:
         v = Vector("authority-route-vectors.json")
         replayed = replace(v.request, client_nonce="replayed")
