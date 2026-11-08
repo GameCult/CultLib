@@ -1224,6 +1224,12 @@ namespace GameCult.Networking.Tests
                 Assert.That(error.Details!.Field, Is.EqualTo("recordKey"));
                 Assert.That(error.Details.Value, Is.Null);
             }
+
+            var unowned = new CultNetReceiptedWrite(session, sent.Add, "delete", "m2", null, null, null);
+            Assert.That(unowned.Begin(), Is.True);
+            unowned.Refused(CultNetErrorMessage.ForUnownedSchema(new CultNetUnownedSchemaException("x", new CultRecordKey("k"))));
+            Assert.That(((CultNetErrorV1Message)sent[^1]).Details!.Field, Is.EqualTo("schemaId"));
+            Assert.That(((CultNetErrorV1Message)sent[^1]).Details!.Value, Is.Null);
         }
     }
 }
