@@ -4096,6 +4096,12 @@ export interface CultMeshRudpDocumentServerOptions extends CultMeshRudpSocketOpt
    * asked before the document is sized, resolved or decoded.
    */
   writeAuthority?: CultMeshRemoteWriteAuthority;
+  /**
+   * How long the write authority has to answer before the write is refused (default
+   * `CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_DECIDE_TIMEOUT_MS`). A `decide()` that never settles is a refusal like any
+   * other, so it cannot hold up the frames that follow it on the session.
+   */
+  writeAuthorityTimeoutMs?: number;
   onDocumentPutRaw?: (document: CultMeshRudpDocumentPut) =>
     | CultMeshRudpDocumentReceipt
     | void
@@ -4110,6 +4116,9 @@ export interface CultMeshRudpDocumentServerOptions extends CultMeshRudpSocketOpt
   wireContract?: CultNetWireContract;
   sessionTimeoutMs?: number;
 }
+
+/** A write authority that has not answered in this long has refused the write. */
+export const CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_DECIDE_TIMEOUT_MS = 5_000;
 
 /** Replies larger than one fragment are split into fragments of at most this many bytes. */
 export const CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_MAX_FRAGMENT_BYTES = 1200;
@@ -5534,6 +5543,11 @@ export class CultMesh {
     let sendFailures = 0;
     const resendPollMs = Math.max(10, options.resendPollMs ?? 25);
     const sessionTimeoutMs = Math.max(1_000, options.sessionTimeoutMs ?? 30_000);
+    const decideTimeoutMs = options.writeAuthorityTimeoutMs ?? CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_DECIDE_TIMEOUT_MS;
+    // A timer past 2^31-1 ms (or NaN) fires after 1 ms in Node, which would refuse every write that is not instant.
+    if (!(decideTimeoutMs > 0 && decideTimeoutMs <= 0x7fffffff)) {
+      throw new RangeError("CultMesh RUDP document server writeAuthorityTimeoutMs must be greater than zero and at most 2147483647.");
+    }
     const wireContract = options.wireContract ?? "cultnet.schema.v0";
     const maxFragmentBytes = options.maxFragmentBytes ?? CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_MAX_FRAGMENT_BYTES;
     if (!(maxFragmentBytes > 0)) {
@@ -5796,20 +5810,32 @@ export class CultMesh {
       if (!authority) {
         reason = "no remote write authority is configured";
       } else {
+        let timer: ReturnType<typeof setTimeout> | undefined;
         try {
-          const decision = await authority.decide({
-            peer: { ...record.remote },
-            operation,
-            schemaId: options.documents.canonicalSchemaId(schemaId) ?? schemaId,
-            recordKey,
-            shardId,
-            shardEpoch,
-          });
-          if (decision?.granted === true) return false;
-          reason = typeof decision?.reason === "string" ? decision.reason : undefined;
+          const timedOut = Symbol("decide timeout");
+          const decision = await Promise.race([
+            Promise.resolve().then(() => authority.decide({
+              peer: { ...record.remote },
+              operation,
+              schemaId: options.documents.canonicalSchemaId(schemaId) ?? schemaId,
+              recordKey,
+              shardId,
+              shardEpoch,
+            })),
+            new Promise<typeof timedOut>((resolve) => { timer = setTimeout(() => resolve(timedOut), decideTimeoutMs); }),
+          ]);
+          if (decision === timedOut) {
+            reportError(new Error(`CultMesh remote write authority did not answer within ${decideTimeoutMs} ms; the write was refused.`));
+            reason = "the write authority timed out";
+          } else {
+            if (decision?.granted === true) return false;
+            reason = typeof decision?.reason === "string" ? decision.reason : undefined;
+          }
         } catch (error) {
           reportError(new Error(`CultMesh remote write authority failed (${error instanceof Error ? error.name : typeof error}); the write was refused.`));
           reason = "the write authority failed";
+        } finally {
+          clearTimeout(timer);
         }
       }
       try {

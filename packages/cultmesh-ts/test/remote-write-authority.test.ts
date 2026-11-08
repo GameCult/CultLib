@@ -81,7 +81,7 @@ interface Rig {
 
 let nextConnection = 0x10204000;
 
-async function rig(writeAuthority?: CultMeshRemoteWriteAuthority, extra: { maxPayloadBytes?: number } = {}): Promise<Rig> {
+async function rig(writeAuthority?: CultMeshRemoteWriteAuthority, extra: { maxPayloadBytes?: number; writeAuthorityTimeoutMs?: number } = {}): Promise<Rig> {
   const connectionId = nextConnection++;
   const puts: CultMeshRudpDocumentPut[] = [];
   const deletes: CultMeshRudpDocumentDelete[] = [];
@@ -154,6 +154,7 @@ test("a granted put and delete reach their handlers, send nothing back, and the 
     for (const request of authority.requests) {
       assert.equal(request.peer.address, "127.0.0.1");
       assert.ok(request.peer.port > 0);
+      assert.equal(request.schemaId, SCHEMA_ID, "a granted write was judged under the canonical schema id");
     }
     assert.deepEqual(authority.requests[1]!.peer, r.deletes[0]!.remote, "the delete handler sees the peer the authority was asked about");
   });
@@ -231,6 +232,48 @@ test("an authority that throws or rejects refuses, fails closed, and is reported
       assert.equal(r.errors.length, 2);
       assert.ok(r.errors.every((e) => e.message.includes("Error") && !e.message.includes("exploded")));
     });
+  }
+});
+
+test("an authority that never settles refuses after the timeout and does not block the frames behind it", async () => {
+  // The first put hangs forever; later frames from the same session must still be judged.
+  const authority = new Recording((request) => request.recordKey === KEY_A ? new Promise(() => {}) : { granted: true });
+  await using(await rig(authority, { writeAuthorityTimeoutMs: 100 }), async (r) => {
+    r.peer.send(put(KEY_A));
+    r.peer.send(put(KEY_B));
+    await sleep(600);
+    assert.deepEqual(r.puts.map((p) => p.recordKey), [KEY_B], "the granted put behind the hung one was applied");
+    assert.equal(r.replies.length, 1);
+    assertRefused(r.replies[0], KEY_A);
+    assert.equal((r.replies[0] as { error: string }).error.includes("timed out"), true);
+    assert.equal(r.errors.length, 1);
+    assert.ok(r.errors[0]!.message.includes("did not answer within 100 ms"));
+  });
+});
+
+test("an authority that settles GRANTED after the timeout is still refused and the write never reaches the handler", async () => {
+  const authority = new Recording((request) => request.recordKey === KEY_A
+    ? new Promise((resolve) => setTimeout(() => resolve({ granted: true }), 300))
+    : { granted: true });
+  await using(await rig(authority, { writeAuthorityTimeoutMs: 100 }), async (r) => {
+    r.peer.send(put(KEY_A));
+    r.peer.send(del(KEY_A));
+    await sleep(700);
+    assert.equal(r.replies.length, 2, "one refusal per frame, no late second reply");
+    assertRefused(r.replies[0], KEY_A);
+    assertRefused(r.replies[1], KEY_A);
+    assert.deepEqual([r.puts.length, r.deletes.length], [0, 0], "the late grant never reached the handler");
+  });
+});
+
+test("a write authority timeout that is not a usable timer delay is refused at construction", () => {
+  for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 31]) {
+    assert.throws(() => CultMesh.createRudpDocumentServer("authority-server", 1, {
+      documents: new CultNetDocumentRegistry([defineCultNetDocumentBinding({ definition: note })]),
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      writeAuthorityTimeoutMs: bad,
+    }), RangeError, String(bad));
   }
 });
 
