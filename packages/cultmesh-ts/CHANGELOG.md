@@ -16,6 +16,7 @@ All notable changes to `@gamecult/cultmesh-ts` are recorded here, following
 
 ### Added
 
+- `createRudpDocumentServer` ends a session after `CULTMESH_RUDP_DOCUMENT_SERVER_MAX_CONSECUTIVE_REFUSED_FRAMES` (8) consecutive undecodable frames or consecutive deletes the write authority refuses; fewer are answered and the session is kept. Any decoded frame resets the undecodable run, any decoded non-refused-delete frame resets the delete run. The same cap holds in every runtime.
 - `CultMeshCatalogValue<TDocument, TSchema>`, exported.
 - `documentById` and `tryDocumentById` on `CultMeshDocumentCatalog`, which address one document by its document id when a catalog holds several documents of one type.
 
