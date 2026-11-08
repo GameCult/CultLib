@@ -251,6 +251,21 @@ test("an authority that never settles refuses after the timeout and does not blo
   });
 });
 
+test("an authority that settles GRANTED after the timeout is still refused and the write never reaches the handler", async () => {
+  const authority = new Recording((request) => request.recordKey === KEY_A
+    ? new Promise((resolve) => setTimeout(() => resolve({ granted: true }), 300))
+    : { granted: true });
+  await using(await rig(authority, { writeAuthorityTimeoutMs: 100 }), async (r) => {
+    r.peer.send(put(KEY_A));
+    r.peer.send(del(KEY_A));
+    await sleep(700);
+    assert.equal(r.replies.length, 2, "one refusal per frame, no late second reply");
+    assertRefused(r.replies[0], KEY_A);
+    assertRefused(r.replies[1], KEY_A);
+    assert.deepEqual([r.puts.length, r.deletes.length], [0, 0], "the late grant never reached the handler");
+  });
+});
+
 test("a write authority timeout that is not a usable timer delay is refused at construction", () => {
   for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 31]) {
     assert.throws(() => CultMesh.createRudpDocumentServer("authority-server", 1, {
