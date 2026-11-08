@@ -342,7 +342,7 @@ test("the Odin publisher publishes the signer's document to the endpoint Expecte
   assert.equal(peer.failure, undefined, peer.failure?.message);
 });
 
-for (const order of ["refusal-then-ack"] as const) {
+for (const order of ["ack-then-refusal", "refusal-then-ack"] as const) {
   test(`the Odin publisher does not complete on the ack of a refused presence (${order})`, async (context) => {
     const endpoint = expectedFacts("service").odinEndpoint!;
     const peer = await startOdinPeer(context, endpoint);
