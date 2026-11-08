@@ -2759,6 +2759,11 @@ namespace GameCult.Networking
         // under SessionGate by whichever thread's send found the failure; the polling thread reads
         // it when it retires the peer.
         internal byte[]? UnsendableReason { get; set; }
+
+        // Set once the peer's capped frame has been answered: the session ends with this reason when the
+        // peer has acknowledged every answer, or at the deadline. Under SessionGate.
+        internal byte[]? EndingReason { get; set; }
+        internal long EndingDeadlineMs { get; set; }
     }
 
     /// <summary>
@@ -2928,6 +2933,7 @@ namespace GameCult.Networking
         public bool TryReceiveOnce(out CultNetRudpSocketServerFrame? delivered)
         {
             RetireUnsendablePeers();
+            EndAnsweredPeers();
             if (_deliveredFrames.Count > 0)
             {
                 delivered = _deliveredFrames.Dequeue();
@@ -3146,6 +3152,7 @@ namespace GameCult.Networking
         public void PollResends()
         {
             RetireUnsendablePeers();
+            EndAnsweredPeers();
             if (_socket.Poll(0, SelectMode.SelectRead))
                 return;
             foreach (var peer in _peers.Values.ToArray())
@@ -3242,6 +3249,44 @@ namespace GameCult.Networking
             peer.DisconnectReason = reason;
             PeerDisconnected?.Invoke(peer);
             return true;
+        }
+
+        // Polling thread only. The application answered a peer's capped frame: the answer is reliable, so a
+        // lost datagram is resent, and the session ends with `reason` once the peer has acknowledged every
+        // answer or `graceMs` have passed (EndAnsweredPeers). Frames of the peer still queued are not delivered.
+        internal void EndPeerSessionWhenAnswered(CultNetRudpSocketServerPeer peer, byte[] reason, long graceMs)
+        {
+            if (peer == null) throw new ArgumentNullException(nameof(peer));
+            if (reason == null) throw new ArgumentNullException(nameof(reason));
+            lock (peer.SessionGate)
+            {
+                if (peer.Session.Ended || peer.EndingReason != null)
+                    return;
+                peer.EndingReason = reason;
+                peer.EndingDeadlineMs = NowMs() + graceMs;
+            }
+            var kept = _deliveredFrames.Where(frame => !ReferenceEquals(frame.Peer, peer)).ToArray();
+            _deliveredFrames.Clear();
+            foreach (var frame in kept)
+                _deliveredFrames.Enqueue(frame);
+        }
+
+        // Polling thread only.
+        private void EndAnsweredPeers()
+        {
+            foreach (var peer in _peers.Values.ToArray())
+            {
+                byte[]? reason;
+                lock (peer.SessionGate)
+                {
+                    reason = peer.EndingReason != null
+                        && (peer.Session.OutstandingReliablePacketCount == 0 || NowMs() >= peer.EndingDeadlineMs)
+                        ? peer.EndingReason
+                        : null;
+                }
+                if (reason != null)
+                    EndPeerSession(peer, reason);
+            }
         }
 
         // Polling thread only. A peer a new Connect already replaced was reported then, and its key now

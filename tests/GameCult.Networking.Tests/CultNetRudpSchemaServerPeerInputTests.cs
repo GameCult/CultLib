@@ -191,6 +191,95 @@ namespace GameCult.Networking.Tests
             return errors;
         }
 
+        // The bad peer acknowledges what it received and the server polls on.
+        private static async Task Acknowledge(Scene scene)
+        {
+            scene.Bad.Socket.SendTo(CultNetRudpPacketCodec.Encode(scene.Bad.Session.CreateAck()), scene.Server.LocalEndPoint);
+            await scene.Server.PollAvailableAsync(16);
+        }
+
+        // The bad peer has sent seven undecodable frames (BadThenGood sent the first), each answered.
+        private static async Task<Scene> AtTheCap()
+        {
+            var scene = await BadThenGood(Malformed());
+            await scene.Server.PollAvailableAsync(16);
+            ErrorsReceivedBy(scene.Bad);
+            for (var i = 0; i < 6; i++)
+            {
+                SendSchema(scene.Server, scene.Bad, Malformed());
+                await scene.Server.PollAvailableAsync(16);
+                ErrorsReceivedBy(scene.Bad);
+            }
+            Assert.That(scene.Ended, Is.Empty);
+            return scene;
+        }
+
+        // The capped frame's answer is lost on the wire: the server resends it, and the goodbye follows only
+        // once the peer has acknowledged it.
+        [Test]
+        public async Task ALostCappedAnswerIsResentAndTheGoodbyeWaitsForItsAcknowledgement()
+        {
+            using var scene = await AtTheCap();
+            SendSchema(scene.Server, scene.Bad, Malformed());
+            await scene.Server.PollAvailableAsync(16);
+
+            var lost = Drain(scene.Bad.Socket);
+            Assert.That(lost.Where(p => p.PacketType == CultNetRudpPacketType.Data), Is.Not.Empty, "fixture: the answer was sent and is lost here");
+            Assert.That(lost.Select(p => p.PacketType), Has.None.EqualTo(CultNetRudpPacketType.Disconnect), "no goodbye before the answer is acknowledged");
+            Assert.That(scene.Ended, Is.Empty);
+
+            var resent = new List<CultNetRudpPacket>();
+            for (var attempt = 0; attempt < 40 && resent.Count == 0; attempt++)
+            {
+                await Task.Delay(50);
+                scene.Server.PollResends();
+                resent = Drain(scene.Bad.Socket);
+            }
+            Assert.That(resent.Select(p => p.PacketType), Has.None.EqualTo(CultNetRudpPacketType.Disconnect), "still no goodbye");
+            var answers = new List<CultNetErrorMessage>();
+            foreach (var packet in resent)
+                foreach (var frame in scene.Bad.Session.Receive(packet, 1).Delivered)
+                    if (CultNetSchemaMessageSerialization.Deserialize(frame.Payload) is CultNetErrorMessage error)
+                        answers.Add(error);
+            Assert.That(answers.Select(e => e.Code), Is.EqualTo(new[] { "message_invalid" }), "the lost answer arrived by resend");
+            Assert.That(scene.Ended, Is.Empty);
+
+            await Acknowledge(scene);
+            Assert.That(scene.Ended, Is.EqualTo(new[] { scene.Bad.EndPoint }), "acknowledged: the session ends");
+            Assert.That(Drain(scene.Bad.Socket).Select(p => p.PacketType), Has.Some.EqualTo(CultNetRudpPacketType.Disconnect));
+        }
+
+        // A peer that never acknowledges the answer is not kept for ever: the session ends after the grace.
+        [Test]
+        public async Task ACappedSessionWhoseAnswerIsNeverAcknowledgedEndsAfterTheGrace()
+        {
+            using var scene = await AtTheCap();
+            SendSchema(scene.Server, scene.Bad, Malformed());
+            await scene.Server.PollAvailableAsync(16);
+            Drain(scene.Bad.Socket);
+
+            await Task.Delay(1500); // the grace is two seconds
+            scene.Server.PollResends();
+            Assert.That(scene.Ended, Is.Empty, "inside the grace");
+            await Task.Delay(700);
+            scene.Server.PollResends();
+            Assert.That(scene.Ended, Is.EqualTo(new[] { scene.Bad.EndPoint }), "the grace ran out");
+        }
+
+        // Nothing behind the capped frame is served while its answer is delivered.
+        [Test]
+        public async Task NothingBehindTheCappedFrameIsServed()
+        {
+            using var scene = await AtTheCap();
+            SendSchema(scene.Server, scene.Bad, Malformed());
+            SendSchema(scene.Server, scene.Bad, CultNetSchemaMessageSerialization.Serialize(
+                new CultNetShardCatalogRequestMessage { MessageId = "behind-the-cap" }));
+            await scene.Server.PollAvailableAsync(16);
+            await scene.Server.PollAvailableAsync(16);
+
+            Assert.That(scene.Served.Select(s => s.MessageId), Does.Not.Contain("behind-the-cap"));
+        }
+
         // The numbers are the shared cross-runtime cap, spelled out so changing the constant fails here.
         [Test]
         public async Task EightConsecutiveUndecodableFramesEndTheSessionAfterTheEighthIsAnswered()
@@ -221,6 +310,8 @@ namespace GameCult.Networking.Tests
 
             await Refuse(1);
             Assert.That(ErrorsReceivedBy(scene.Bad).Select(e => e.Code), Is.EqualTo(new[] { "message_invalid" }), "the eighth is answered too");
+            Assert.That(scene.Ended, Is.Empty, "the session ends once the answer is acknowledged");
+            await Acknowledge(scene);
             Assert.That(scene.Ended, Is.EqualTo(new[] { scene.Bad.EndPoint }));
             Assert.That(scene.Server.Peers.Select(peer => peer.RemoteEndPoint), Is.EqualTo(new[] { scene.Good.EndPoint }));
         }

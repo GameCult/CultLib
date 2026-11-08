@@ -127,6 +127,12 @@ namespace GameCult.Networking
         public const int MaxConsecutiveRefusedFrames = 8;
 
         /// <summary>
+        /// How long a session whose capped frame was answered waits for the peer to acknowledge the answer
+        /// before it ends anyway.
+        /// </summary>
+        internal const long CappedAnswerGraceMs = 2000;
+
+        /// <summary>
         /// Gets or sets the logger used by the server. R-AM: the dispatch backstop in DispatchAsync
         /// logs every untyped fault through this instead of swallowing it silently.
         /// </summary>
@@ -310,6 +316,9 @@ namespace GameCult.Networking
         {
             if (!string.Equals(delivered.Frame.ChannelId, "schema", StringComparison.Ordinal))
                 return false;
+            // The capped frame was answered: nothing after it is served while the answer is delivered.
+            if (delivered.Peer.EndingReason != null)
+                return false;
 
             // A peer's message that cannot be decoded (malformed bytes, an unknown schemaVersion) or
             // handled ends that peer's session, never the poll: the drain goes on serving every other
@@ -337,8 +346,10 @@ namespace GameCult.Networking
                     Logger.LogError($"CultNet RUDP schema server could not decode a peer's message ({ex.GetType().Name}); it was refused and that peer's session kept.");
                     return false;
                 }
-                var ended = _transport.EndPeerSession(delivered.Peer, CultNetRudpSession.RefusedPacketReason);
-                Logger.LogError($"CultNet RUDP schema server could not decode a peer's message ({ex.GetType().Name}); {SessionOutcome(ended)}");
+                // The answer was sent reliably: the session ends once the peer has acknowledged it (a lost
+                // datagram is resent first), or after the grace.
+                _transport.EndPeerSessionWhenAnswered(delivered.Peer, CultNetRudpSession.RefusedPacketReason, CappedAnswerGraceMs);
+                Logger.LogError($"CultNet RUDP schema server could not decode a peer's message ({ex.GetType().Name}); that peer's session ends once its answer is acknowledged.");
                 return false;
             }
             _undecodableFramesInARow.GetOrCreateValue(delivered.Peer).Value = 0;
