@@ -103,9 +103,9 @@ export class WriteTracker {
 
   /** This client's own send of `messageId` failed: that write settles unconfirmed; the others are untouched. */
   sendFailed(messageId: string, atMs: number): void {
-    this.tick(atMs);
     const entry = this.#writes.get(messageId);
     if (entry?.state.outcome === "pending") this.#settle(messageId, entry, { outcome: "unconfirmed", reason: "local_send_failed" });
+    this.tick(atMs);
   }
 
   state(messageId: string): WriteState | undefined {

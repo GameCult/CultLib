@@ -4224,8 +4224,9 @@ export interface CultMeshRudpDocumentPublishOptions extends CultMeshRudpPeerOpti
    * How long, counted from the send, the put may wait for its result frame. A reliable-transport ack is not
    * admission; the outcome is the peer's result frame. Default: 5000 ms against a server whose hello lists the
    * write-receipt frames, 500 ms otherwise. A put nothing settled within the window is unconfirmed, never
-   * published, whatever the server advertised; a legacy server's success reply (the put's id echoed back) ends
-   * the wait early as admitted.
+   * published, whatever the server advertised: only a `write_admitted` is admission. The send itself is also
+   * bounded by the window (`flushTimeoutMs` is the upper bound); a send not acknowledged by then is
+   * unconfirmed as `local_send_failed`.
    */
   resultWindowMs?: number;
   /**
@@ -6225,10 +6226,6 @@ export class CultMesh {
         if (message.schemaVersion === "cultnet.hello.v0") {
           receiptCapable = helloAdvertisesWriteReceipts(message);
           serverHello?.();
-        } else if (!receiptCapable && "messageId" in message && message.messageId === messageId
-          && message.schemaVersion !== "cultnet.error.v1") {
-          // A server that did not advertise receipts may echo the id back as its success reply.
-          tracker?.frame({ schemaVersion: "cultnet.write_admitted.v0", messageId, operation: "put", schemaId: binding.definition.schemaId ?? "", recordKey }, Date.now());
         } else {
           tracker?.frame(message, Date.now());
         }
@@ -6263,7 +6260,9 @@ export class CultMesh {
             tags: options.tags,
           },
         ));
-        await peer.flush(options.flushTimeoutMs ?? 30_000);
+        // The flush may not outlast the result window: a send nobody acknowledged by then is a local send failure.
+        const windowRemaining = writeTracker.nextDeadlineMs(Date.now()) ?? 0;
+        await peer.flush(Math.min(options.flushTimeoutMs ?? 30_000, Math.max(windowRemaining, 1)));
       } catch {
         // Our own send failed or was never acknowledged: the put may or may not have left. Never a refusal.
         writeTracker.sendFailed(messageId, Date.now());

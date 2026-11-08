@@ -220,3 +220,10 @@ test("a failed local send advances the clock: other writes whose windows have ru
   assert.deepEqual(tracker.state("w1"), { outcome: "unconfirmed", reason: "window_elapsed" });
   assert.deepEqual(tracker.state("w2"), { outcome: "unconfirmed", reason: "local_send_failed" });
 });
+
+test("a write whose own send failed settles local_send_failed even when its window has also run", () => {
+  const tracker = new WriteTracker({ windowMs: 1000 });
+  tracker.send("w1", 0);
+  tracker.sendFailed("w1", 1000);
+  assert.deepEqual(tracker.state("w1"), { outcome: "unconfirmed", reason: "local_send_failed" });
+});

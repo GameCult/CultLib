@@ -31,7 +31,7 @@ interface Script {
   /** Does the server's hello list both receipt frames? */
   advertise: boolean;
   /** What the server answers a put with, `delayMs` after it arrives. */
-  answer: "admit" | "refuse" | "wrong-id" | "silence" | "goodbye";
+  answer: "admit" | "refuse" | "wrong-id" | "silence" | "goodbye" | "echo";
   delayMs?: number;
   /** Acknowledge the reliable packets it receives? Default true. */
   ack?: boolean;
@@ -74,7 +74,9 @@ async function fakeServer(connectionId: number, script: Script) {
       if (message.schemaVersion !== "cultnet.document_put_raw.v0" || script.answer === "silence") continue;
       const timer = setTimeout(() => {
         timers.delete(timer);
-        if (script.answer === "goodbye") {
+        if (script.answer === "echo") {
+          say({ schemaVersion: "cultnet.document_put_raw.v0", messageId: message.messageId!, document: { schemaId: "cultmesh.receipt_note.v0", recordKey: "tests:receipt:a", storedAt: "t", payloadEncoding: "messagepack", payload: new Uint8Array([1]) } } as unknown as CultNetMessage, remote.port, remote.address);
+        } else if (script.answer === "goodbye") {
           send(session.endUnsendableSession(new Error("scripted goodbye")), remote.port, remote.address);
         } else if (script.answer === "refuse") {
           say({ schemaVersion: "cultnet.error.v1", error: "write_not_authorized", routingHint: null, code: "write_not_authorized", details: null, messageId: message.messageId! }, remote.port, remote.address);
@@ -150,6 +152,24 @@ test("a put whose send is never acknowledged is unconfirmed as local_send_failed
   try {
     await assert.rejects(publish(server, { writeReceipts: true, flushTimeoutMs: 300 }), (error: unknown) =>
       error instanceof CultMeshRudpWriteUnconfirmedError && error.reason === "local_send_failed");
+  } finally { server.close(); }
+});
+
+test("the flush is bounded by the result window: a send nobody acknowledges is local_send_failed at the window, not at the flush timeout", async () => {
+  const server = await fakeServer(nextConnection, { advertise: true, answer: "silence", ack: false });
+  const started = Date.now();
+  try {
+    await assert.rejects(publish(server, { writeReceipts: true, resultWindowMs: 300, flushTimeoutMs: 20_000 }), (error: unknown) =>
+      error instanceof CultMeshRudpWriteUnconfirmedError && error.reason === "local_send_failed");
+    assert.ok(Date.now() - started < 3_000, "it did not wait out the 20 s flush timeout");
+  } finally { server.close(); }
+});
+
+test("a server that does not advertise receipts and echoes the put's id back has not admitted it", async () => {
+  const server = await fakeServer(nextConnection, { advertise: false, answer: "echo" });
+  try {
+    await assert.rejects(publish(server, { writeReceipts: true, resultWindowMs: 300 }), (error: unknown) =>
+      error instanceof CultMeshRudpWriteUnconfirmedError && error.reason === "window_elapsed");
   } finally { server.close(); }
 });
 
