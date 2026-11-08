@@ -355,11 +355,30 @@ one that built the tracked DLL.
 ### Before pushing a tag
 
 A tag run uses the workflow files at the tagged commit, not the ones on main, and
-the forge's GitHub mirror forwards the tag. Read `.github/workflows/publish-packages.yml`
-(and any workflow that triggers on tags) at the tagged sha before pushing any tag:
-a guard merged after that commit does not protect a tag that points before it.
-`cultcache-ts-v0.15.0` sits on `7d292085`, which predates the guard, and its push
-started a publish run (it failed; nothing reached npm).
+the forge's GitHub mirror forwards the tag, so both CI systems run it. Before
+pushing any tag, resolve the commit it will point at and read the tag-triggering
+workflows as they are at that commit:
+
+```
+sha=$(git rev-parse <commit-the-tag-will-point-at>)
+git ls-tree -r --name-only "$sha" .github/workflows
+git show "$sha":.github/workflows/publish-packages.yml | sed -n '/^on:/,/^jobs:/p'
+```
+
+Confirm that the tag's prefix is a trigger there if you mean it to publish, and
+is not if you do not. Do the same for every other workflow listed that has a
+`tags:` trigger. A guard merged after that commit does not protect a tag that
+points before it.
+
+`cultcache-ts-v0.15.0` was pushed on `7d292085`, which predates the guard, and
+its push started a publish run on both systems (GitHub run 42392334869, forge run
+454). The forge job log shows how it ended: the Publish step ran
+`release-after-suite.mjs`, whose `npm test` failed (11 cross-runtime tests,
+`cargo: not found` on the runner), so it printed "@gamecult/cultcache-ts's own
+tests failed; not releasing." and never reached `npm publish`. Neither
+`cultcache-ts` nor `@gamecult/cultcache-ts` exists on the npm registry
+(both return 404, checked 2026-11-08). The GitHub run's own log needs a login
+to read, so its failure cause is inferred from the identical workflow and sha.
 
 ### Coverage gaps
 
