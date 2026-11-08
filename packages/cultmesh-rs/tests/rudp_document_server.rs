@@ -2922,6 +2922,97 @@ fn a_disconnected_or_server_ended_session_frees_its_remembered_writes() -> Resul
     Ok(())
 }
 
+/// Receipts need a channel that is reliable and not sequenced: a reliable-sequenced write is refused like an
+/// unreliable one, a reliable-unordered write is admitted, and a legacy session's sequenced write is left alone.
+#[test]
+fn only_reliable_non_sequenced_writes_are_accepted_on_a_receipt_session() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = RawPeer::connect(&mut server, 248)?;
+    peer.send(&receipt_hello())?;
+    server.poll_once()?;
+    let send_with = |peer: &mut RawPeer, server: &mut Server, id: &str, ordered: bool, sequenced: bool| -> Result<Vec<CultNetMessage>> {
+        let payload = encode_cultnet_message_to_vec(&put(id, "note:1", vec![1]), CultNetWireContract::CultNetSchemaV0)?;
+        let packets = peer.session.send_many(
+            "schema",
+            payload,
+            cultnet_rs::CultNetRudpSendOptions { reliable: true, ordered, sequenced, now_ms: 3, reliable_expire_after_ms: None },
+            Some(1200),
+        )?;
+        for packet in &packets {
+            peer.send_packet(packet)?;
+        }
+        server.poll_once()?;
+        let mut answers = Vec::new();
+        for packet in peer.drain() {
+            for frame in peer.session.receive(&packet, 4)?.delivered {
+                answers.push(decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)?);
+            }
+        }
+        Ok(answers)
+    };
+    let sequenced = send_with(&mut peer, &mut server, "s1", false, true)?;
+    let refusals: Vec<_> = sequenced.iter().filter(|a| matches!(a, CultNetMessage::ErrorV1 { .. })).collect();
+    assert_eq!(refusals.len(), 1, "the sequenced write is answered: {sequenced:?}");
+    assert_eq!(refusal_of(refusals[0]), (Some(CultNetErrorCode::MessageInvalid), Some("s1".into())));
+    assert_eq!(
+        error_text_and_field(refusals[0]),
+        ("message_invalid: receipt sessions require the reliable channel".into(), Some("channel".into()))
+    );
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 0, "nothing was applied");
+
+    let unordered = send_with(&mut peer, &mut server, "s1", false, false)?;
+    assert!(unordered.contains(&admitted("s1", "note:1")), "reliable unordered is accepted, and the id was not consumed: {unordered:?}");
+    // A fresh peer: an ordered stream waits on the sequence numbers the refused packet used.
+    let mut ordered_peer = RawPeer::connect(&mut server, 251)?;
+    ordered_peer.send(&receipt_hello())?;
+    server.poll_once()?;
+    let ordered = send_with(&mut ordered_peer, &mut server, "o1", true, false)?;
+    assert!(ordered.contains(&admitted("o1", "note:1")), "reliable ordered is accepted: {ordered:?}");
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 2);
+
+    let legacy_sink = Sink::default();
+    let mut legacy_server: Server = CultMeshRudpDocumentServer::new(
+        UdpSocket::bind("127.0.0.1:0")?,
+        legacy_sink.clone(),
+        Source::default(),
+        Clock::new(70_000),
+        Default::default(),
+    )?;
+    let mut legacy = RawPeer::connect(&mut legacy_server, 249)?;
+    let none = send_with(&mut legacy, &mut legacy_server, "l1", false, true)?;
+    assert!(none.is_empty(), "a legacy session is sent nothing: {none:?}");
+    assert_eq!(legacy_sink.0.lock().unwrap().receipts.len(), 1, "and its reliable-sequenced write is applied as before");
+    Ok(())
+}
+
+/// A Connect that does not repeat the accepted one is a new client session: it starts with nothing remembered, so
+/// the id a receipt session already used is a new write on it, and the old session's entries leave the budget.
+#[test]
+fn a_reconnect_is_a_new_receipt_session_that_remembers_nothing_of_the_old() -> Result<()> {
+    let options = CultMeshRudpDocumentServerOptions { max_remembered_write_bytes: 65, ..Default::default() };
+    let sink = Sink::default();
+    let mut server = server(options, Clock::new(70_000), sink.clone(), Source::default())?;
+    let target = server.local_addr()?;
+    let shared = UdpSocket::bind("127.0.0.1:0")?;
+    let twin = shared.try_clone()?;
+    let mut first = client_on(shared, target, 250, 50_000)?;
+    connect(&mut server, &mut [&mut first])?;
+    send_reliable(&mut first, &receipt_hello())?;
+    send_reliable(&mut first, &put("m1", "note:a", vec![1]))?;
+    assert_eq!(frames_after(&mut server, &mut first, 2)?[1], admitted("m1", "note:a"));
+
+    let mut restarted = client_on(twin, target, 250, 7)?;
+    connect(&mut server, &mut [&mut restarted])?;
+    assert_eq!(server.session_count(), 1);
+    send_reliable(&mut restarted, &receipt_hello())?;
+    send_reliable(&mut restarted, &put("m1", "note:b", vec![2]))?;
+    let answers = frames_after(&mut server, &mut restarted, 2)?;
+    assert_eq!(answers[1], admitted("m1", "note:b"), "same id, other content: a new write on a new session, within a one-entry budget");
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 2);
+    Ok(())
+}
+
 /// A session that never declared the capability gets no refusal for an unreliable write: it is dropped as before.
 #[test]
 fn an_unreliable_write_on_a_legacy_session_is_dropped_silently() -> Result<()> {

@@ -755,10 +755,11 @@ where
         }
         if packet.packet_type == CultNetRudpPacketType::Data
             && packet.channel_id == "schema"
-            && !packet.reliable
+            && (!packet.reliable || (packet.sequenced && self.receipts(key)))
         {
-            // A receipt session's write that could be lost without trace cannot be answered once: it is
-            // refused on the reliable channel, never applied. Anything else unreliable is dropped as before.
+            // A receipt session's write that could be lost without trace (unreliable, or on a sequenced channel
+            // that drops superseded packets) cannot be answered once: it is refused, never applied. Anything
+            // else unreliable is dropped as before.
             return self.refuse_unreliable_write(key, &packet.payload);
         }
         let payload_charge = if packet.packet_type == CultNetRudpPacketType::Data {
@@ -1006,7 +1007,7 @@ where
         })
     }
 
-    /// Refuses a put or delete that arrived on an unreliable channel of a receipt session with
+    /// Refuses a put or delete that arrived on an unreliable or sequenced channel of a receipt session with
     /// `message_invalid` (`details.field` `channel`) naming its id. Nothing is remembered or applied: the id
     /// stays free for the same write sent reliably.
     fn refuse_unreliable_write(
