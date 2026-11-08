@@ -1,11 +1,13 @@
 // A peer's put or delete is applied only when the server's write authority grants it. Ports the behaviours of
 // cultmesh-py test_remote_write_authority.py (no forwarding: this server does not forward non-primary writes).
 import assert from "node:assert/strict";
+import { createSocket, type Socket } from "node:dgram";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { z } from "zod";
 import { documentPayloadFromBytes, defineDocumentType } from "@gamecult/cultcache-ts";
+import { decodeRudpPacket } from "@gamecult/cultnet-ts";
 import { encodeWireValue } from "@gamecult/cultnet-ts/wire";
 import {
   CultNetDocumentRegistry,
@@ -588,5 +590,96 @@ test("a frame that decodes but is no message the parser takes is answered, count
       assert.equal((reply as { details: { field: string } }).details.field, "message");
     }
     assert.throws(() => r.send(unknown()), /before the session is connected/, "then the session ended");
+  } finally { r.close(); }
+});
+
+/** A UDP relay between a client and a server that drops the first (or, with `dropEvery`, every) server datagram carrying `payloadContains` once armed. */
+async function lossyRelay(serverPort: number, payloadContains: string, dropEvery = false) {
+  const dropped: unknown[] = [];
+  let armed = false;
+  let clientAddress: { port: number; address: string } | undefined;
+  const toClient: Socket = createSocket("udp4");
+  const toServer: Socket = createSocket("udp4");
+  toServer.on("message", (wire) => {
+    if (!clientAddress) return;
+    if (armed && (dropEvery || dropped.length === 0)) {
+      const packet = decodeRudpPacket(wire);
+      if (packet.packetType === "data" && Buffer.from(packet.payload ?? []).includes(payloadContains)) {
+        dropped.push(packet);
+        return;
+      }
+    }
+    toClient.send(wire, clientAddress.port, clientAddress.address);
+  });
+  toClient.on("message", (wire, remote) => {
+    clientAddress = remote;
+    toServer.send(wire, serverPort, "127.0.0.1");
+  });
+  await new Promise<void>((resolve) => toClient.bind(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => toServer.bind(0, "127.0.0.1", resolve));
+  return {
+    port: toClient.address().port,
+    dropped,
+    arm: () => { armed = true; },
+    close: () => { toClient.close(); toServer.close(); },
+  };
+}
+
+async function cappedOverRelay(dropEvery: boolean, body: (x: { relay: Awaited<ReturnType<typeof lossyRelay>>; client: { send(channel: string, payload: Uint8Array): void }; replies: CultNetMessage[] }) => Promise<void>) {
+  const connectionId = nextConnection++;
+  const server = CultMesh.createRudpDocumentServer("authority-lossy", connectionId, {
+    documents: new CultNetDocumentRegistry([defineCultNetDocumentBinding({ definition: note })]),
+    writeAuthority: new Recording(grant), bindHost: "127.0.0.1", bindPort: 0, resendDelayMs: 25, resendPollMs: 5,
+    onDocumentPutRaw: () => {}, onError: () => {},
+  });
+  await server.start();
+  const relay = await lossyRelay(server.bind.port, "message_invalid", dropEvery);
+  const client = await CultMesh.createRudpClient("lossy", connectionId, `rudp://127.0.0.1:${relay.port}`, { resendDelayMs: 25, resendPollMs: 5 });
+  try {
+    client.connect();
+    const started = Date.now();
+    while (!client.connected) {
+      if (Date.now() - started > 2_000) throw new Error("not connected");
+      await sleep(5);
+    }
+    const replies: CultNetMessage[] = [];
+    new CultNetPeer(client, { wireContract: "cultnet.schema.v0" }).on("message", (m) => replies.push(m));
+    for (let i = 0; i < CAP - 1; i++) client.send("schema", Uint8Array.from([0xc1]));
+    await sleep(300);
+    assert.equal(replies.length, CAP - 1);
+    relay.arm();
+    client.send("schema", Uint8Array.from([0xc1]));
+    await body({ relay, client, replies });
+  } finally { client.close(); server.close(); relay.close(); }
+}
+
+test("the capped frame's answer is resent when its datagram is lost, and the goodbye follows only after it arrived", async () => {
+  await cappedOverRelay(false, async ({ relay, client, replies }) => {
+    await sleep(600);
+    assert.equal(relay.dropped.length, 1, "fixture: the first transmission of the last answer was lost");
+    assert.equal(replies.length, CAP, "the lost answer was resent and arrived");
+    assert.equal((replies[CAP - 1] as { code?: string }).code, "message_invalid");
+    assert.throws(() => client.send("schema", Uint8Array.from([0xc1])), /before the session is connected/, "then the session ended");
+  });
+});
+
+test("a capped session whose answer is never acknowledged still ends, after the grace", async () => {
+  await cappedOverRelay(true, async ({ client, replies }) => {
+    await sleep(1200);
+    assert.equal(replies.length, CAP - 1, "fixture: the last answer never arrives");
+    client.send("schema", Uint8Array.from([0xc1])); // still connected: the server is waiting for the acknowledgement
+    await sleep(1500);
+    assert.throws(() => client.send("schema", Uint8Array.from([0xc1])), /before the session is connected/, "the grace ran out and the goodbye went out");
+  });
+});
+
+test("nothing behind the capped frame is served while its answer is delivered", async () => {
+  const r = await rawRig(new Recording(grant));
+  try {
+    for (let i = 0; i < CAP; i++) r.send(Uint8Array.from([0xc1]));
+    r.send(encodeWireValue(put(KEY_A)));
+    await sleep(500);
+    assert.equal(r.replies.length, CAP);
+    assert.deepEqual(r.puts, [], "the put behind the cap was not served");
   } finally { r.close(); }
 });

@@ -4128,6 +4128,8 @@ export const CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_DECIDE_TIMEOUT_MS = 5_000;
  * frame that reaches this number is answered too, then the session ends. The same number is the cap in every runtime.
  */
 export const CULTMESH_RUDP_DOCUMENT_SERVER_MAX_CONSECUTIVE_REFUSED_FRAMES = 8;
+/** How long a session whose capped frame was answered waits for the peer to acknowledge the answers before it ends anyway. */
+const CULTMESH_RUDP_DOCUMENT_SERVER_CAPPED_ANSWER_GRACE_MS = 2000;
 
 /** Replies larger than one fragment are split into fragments of at most this many bytes. */
 export const CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_MAX_FRAGMENT_BYTES = 1200;
@@ -5548,6 +5550,8 @@ export class CultMesh {
       /** Consecutive undecodable frames, and consecutive deletes the authority refused. */
       unreadableInARow: number;
       refusedDeletesInARow: number;
+      /** Set once the peer's capped frame is answered: the session ends when the answers are acknowledged, or at this time. */
+      endingDeadlineMs?: number;
       work: Promise<void>;
     };
     const sessions = new Map<string, SessionRecord>();
@@ -5668,7 +5672,8 @@ export class CultMesh {
       record: SessionRecord,
       payload: Uint8Array,
     ): Promise<void> {
-      if (record.closed) return;
+      // Nothing after the capped frame is served while its answer is delivered.
+      if (record.closed || record.endingDeadlineMs !== undefined) return;
       let decoded: unknown;
       let message: CultNetMessage;
       try {
@@ -5922,11 +5927,15 @@ export class CultMesh {
       sendRudpDatagram(socket, goodbye, record.remote.port, record.remote.address, () => {});
     }
 
-    /** A session that reached the cap of consecutive refused frames: its last refusal is sent, then it ends. */
+    /**
+     * A session that reached the cap of consecutive refused frames: its last refusal went out like any reply
+     * (reliable, so a lost datagram is resent), and the session ends once the peer has acknowledged every reply or
+     * the grace runs out. The resend timer ends it.
+     */
     function endCappedSession(record: SessionRecord): void {
       const key = `${record.remote.address}:${record.remote.port}`;
       if (sessions.get(key) !== record) return;
-      endRefusedSession(key, record);
+      record.endingDeadlineMs ??= Date.now() + CULTMESH_RUDP_DOCUMENT_SERVER_CAPPED_ANSWER_GRACE_MS;
     }
 
     /** The session owes its peer a packet that can never be sent as built. */
@@ -6060,6 +6069,11 @@ export class CultMesh {
             if (record.session.checkTimeout(nowMs, sessionTimeoutMs)) {
               sessions.delete(key);
               closeSession(record);
+              continue;
+            }
+            if (record.endingDeadlineMs !== undefined
+              && (record.session.outstandingReliablePacketCount === 0 || nowMs >= record.endingDeadlineMs)) {
+              endRefusedSession(key, record);
               continue;
             }
             for (const packet of record.session.dueResends(nowMs)) {
