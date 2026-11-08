@@ -580,6 +580,10 @@ struct SessionEntry {
     /// Writes refused `limit_reached`, kept so their resend replays the refusal. A bounded set outside the
     /// entry budget (`MAX_REMEMBERED_WRITES_PER_SESSION`); past it a new write is refused unremembered.
     limit_refusals: HashMap<[u8; 32], [u8; 32]>,
+    /// A limit refusal was answered that `limit_refusals` had no room to remember. That id's resend cannot be
+    /// told from a new write, so the session refuses every id it has not seen for the rest of its life, even once
+    /// the server-wide budget has freed: an id refused at a bound is never admitted later.
+    limit_overflowed: bool,
 }
 
 /// What the server remembers of a write it answered: digests only, so an entry costs
@@ -619,6 +623,9 @@ pub struct CultMeshRudpDocumentServer<S, Q, C> {
     snapshot_source: Q,
     clock: C,
     options: CultMeshRudpDocumentServerOptions,
+    /// Entries remembered across all live sessions (`answered_writes`), kept in step by `remember` and
+    /// `drop_session`, so the server-wide budget is a comparison, not a sum over sessions per write.
+    remembered_writes: usize,
     packets_dropped: u64,
     send_failures: u64,
     /// Peers whose every datagram fails to send, standing in for an unroutable
@@ -655,6 +662,7 @@ where
             snapshot_source,
             clock,
             options,
+            remembered_writes: 0,
             packets_dropped: 0,
             send_failures: 0,
             #[cfg(test)]
@@ -803,7 +811,7 @@ where
         };
 
         if result.disconnected {
-            self.sessions.remove(&key);
+            self.drop_session(key);
             return Ok(CultMeshRudpPollOutcome::Handled);
         }
 
@@ -1037,10 +1045,16 @@ where
         let idle_timeout_ms = duration_millis(self.options.session_idle_timeout);
         let lifetime_ms = duration_millis(self.options.session_max_lifetime);
         let before = self.sessions.len();
+        let mut freed = 0;
         self.sessions.retain(|_, entry| {
-            now.saturating_sub(entry.last_activity_monotonic_millis) <= idle_timeout_ms
-                && now.saturating_sub(entry.created_at_monotonic_millis) <= lifetime_ms
+            let live = now.saturating_sub(entry.last_activity_monotonic_millis) <= idle_timeout_ms
+                && now.saturating_sub(entry.created_at_monotonic_millis) <= lifetime_ms;
+            if !live {
+                freed += entry.answered_writes.len();
+            }
+            live
         });
+        self.remembered_writes -= freed;
         let expired = before - self.sessions.len();
         self.end_answered_sessions()?;
 
@@ -1106,7 +1120,7 @@ where
             .get(&key)
             .is_some_and(|entry| !entry.session.connect_repeats(packet))
         {
-            self.sessions.remove(&key);
+            self.drop_session(key);
         }
         let reply = match self.sessions.get_mut(&key) {
             Some(entry) => {
@@ -1146,6 +1160,7 @@ where
                         capability_settled: false,
                         answered_writes: HashMap::new(),
                         limit_refusals: HashMap::new(),
+                        limit_overflowed: false,
                     },
                 );
                 accept
@@ -1455,7 +1470,8 @@ where
     /// (rebuilt from this resend, whose content hash is the original's), a repeat with other content is
     /// `MessageIdReused`. A first sighting past the session table or the server-wide budget is refused
     /// `limit_reached` for that write alone, and that refusal is remembered (`limit_refusals`) so its resend
-    /// replays it; no slot is freed, so the id is never admitted later in the session.
+    /// replays it; no slot is freed, so the id is never admitted later in the session. A refusal the bounded set had no
+    /// room for sets `limit_overflowed`, after which the session refuses every unseen id, budget or no budget.
     fn seen_write(
         &mut self,
         key: CultMeshRudpSessionKey,
@@ -1476,8 +1492,8 @@ where
         });
         let session_full = entry.answered_writes.len() >= MAX_REMEMBERED_WRITES_PER_SESSION;
         let refusal_room = entry.limit_refusals.len() < MAX_REMEMBERED_WRITES_PER_SESSION;
-        let remembered_total: usize = self.sessions.values().map(|entry| entry.answered_writes.len()).sum();
-        let budget_full = remembered_total
+        let overflowed = entry.limit_overflowed;
+        let budget_full = self.remembered_writes
             .checked_add(1)
             .and_then(|entries| entries.checked_mul(CultMeshRudpDocumentServerOptions::REMEMBERED_ENTRY_BYTES))
             .is_none_or(|bytes| bytes > self.options.max_remembered_write_bytes);
@@ -1492,10 +1508,12 @@ where
                 self.answer_sent(key, now, &answer, rejection)?
             }
             Some(_) => Some(rejection(CultMeshRudpRejectionReason::MessageIdReused)),
-            None if session_full || budget_full => {
-                if refusal_room {
-                    if let Some(entry) = self.sessions.get_mut(&key) {
+            None if session_full || budget_full || overflowed => {
+                if let Some(entry) = self.sessions.get_mut(&key) {
+                    if refusal_room {
                         entry.limit_refusals.insert(id_digest, content_hash);
+                    } else {
+                        entry.limit_overflowed = true;
                     }
                 }
                 Some(rejection(CultMeshRudpRejectionReason::WriteLimitReached))
@@ -1506,8 +1524,18 @@ where
 
     fn remember(&mut self, key: CultMeshRudpSessionKey, id_digest: [u8; 32], content_hash: [u8; 32], answer: StoredAnswer) {
         if let Some(entry) = self.sessions.get_mut(&key) {
-            entry.answered_writes.insert(id_digest, RememberedWrite { content_hash, answer });
+            if entry.answered_writes.insert(id_digest, RememberedWrite { content_hash, answer }).is_none() {
+                self.remembered_writes += 1;
+            }
         }
+    }
+
+    /// Removes a session for good and gives its remembered writes back to the server-wide budget. A session taken
+    /// out and put back within one call is not dropped.
+    fn drop_session(&mut self, key: CultMeshRudpSessionKey) -> Option<SessionEntry> {
+        let entry = self.sessions.remove(&key)?;
+        self.remembered_writes -= entry.answered_writes.len();
+        Some(entry)
     }
 
     /// Sends the answer owed a write. An answer that cannot be queued or sent would leave the write
@@ -1637,7 +1665,7 @@ where
     /// that can never be sent as built is not dropped: the goodbye names its
     /// error instead. A refusal that cannot be encoded is not sent.
     fn end_session(&mut self, key: CultMeshRudpSessionKey, end: SessionEnd) -> Result<()> {
-        let Some(mut entry) = self.sessions.remove(&key) else {
+        let Some(mut entry) = self.drop_session(key) else {
             return Ok(());
         };
         let local_failure = matches!(end, SessionEnd::LocalFailure);

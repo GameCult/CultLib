@@ -2785,6 +2785,143 @@ fn limit_refusals_are_remembered_in_a_bounded_set() -> Result<()> {
     Ok(())
 }
 
+/// A refusal the bounded set could not hold is still the session's first answer for that id: when the budget
+/// frees (another session ends), the id is not admitted later in the session, and neither is any id the session
+/// has not been seen to use, because the refusal that was not remembered cannot be told from a new write.
+#[test]
+fn a_session_whose_limit_refusals_overflowed_refuses_new_ids_after_the_budget_frees() -> Result<()> {
+    let clock = Clock::new(70_000);
+    let options = CultMeshRudpDocumentServerOptions {
+        max_remembered_write_bytes: 65,
+        session_max_lifetime: Duration::from_millis(100),
+        ..Default::default()
+    };
+    let sink = Sink::default();
+    let mut server = server(options, clock.clone(), sink.clone(), Source::default())?;
+    let mut holder = client(server.local_addr()?, 240)?;
+    connect(&mut server, &mut [&mut holder])?;
+    send_reliable(&mut holder, &receipt_hello())?;
+    send_reliable(&mut holder, &put("held", "note:held", vec![1]))?;
+    assert_eq!(frames_after(&mut server, &mut holder, 2)?[1], admitted("held", "note:held"), "after the server's hello");
+
+    clock.set_monotonic(70_050);
+    let mut peer = client(server.local_addr()?, 241)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    for index in 0..1024 {
+        send_reliable(&mut peer, &put(&format!("r{index}"), "note:r", vec![1]))?;
+        if index % 16 == 15 {
+            for _ in 0..40 {
+                server.poll_once()?;
+                peer.poll_resends()?;
+                while peer.receive_once()?.is_some() {}
+            }
+        }
+    }
+    send_reliable(&mut peer, &put("over", "note:over", vec![1]))?;
+    let answers = frames_after(&mut server, &mut peer, 1)?;
+    assert_eq!(refusal_of(&answers[0]), (Some(CultNetErrorCode::LimitReached), Some("over".into())));
+
+    clock.set_monotonic(70_101);
+    assert_eq!(server.maintain()?.sessions_expired, 1, "the holder ended and freed the budget");
+    assert_eq!(server.session_count(), 1);
+    send_reliable(&mut peer, &put("over", "note:over", vec![1]))?;
+    send_reliable(&mut peer, &put("fresh", "note:fresh", vec![1]))?;
+    let answers = frames_after(&mut server, &mut peer, 2)?;
+    assert_eq!(refusal_of(&answers[0]), (Some(CultNetErrorCode::LimitReached), Some("over".into())), "never admitted later");
+    assert_eq!(refusal_of(&answers[1]), (Some(CultNetErrorCode::LimitReached), Some("fresh".into())));
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 1, "only the holder's write was applied");
+    Ok(())
+}
+
+/// A session that ends gives its remembered entries back to the server-wide budget, whichever way it ends.
+#[test]
+fn a_session_that_ends_frees_its_remembered_writes_from_the_budget() -> Result<()> {
+    let clock = Clock::new(70_000);
+    let options = CultMeshRudpDocumentServerOptions {
+        max_remembered_write_bytes: 65,
+        session_max_lifetime: Duration::from_millis(100),
+        ..Default::default()
+    };
+    let sink = Sink::default();
+    let mut server = server(options, clock.clone(), sink.clone(), Source::default())?;
+    let mut first = client(server.local_addr()?, 242)?;
+    connect(&mut server, &mut [&mut first])?;
+    send_reliable(&mut first, &receipt_hello())?;
+    send_reliable(&mut first, &put("a", "note:a", vec![1]))?;
+    assert_eq!(frames_after(&mut server, &mut first, 2)?[1], admitted("a", "note:a"), "after the server's hello");
+
+    clock.set_monotonic(70_050);
+    let mut second = client(server.local_addr()?, 243)?;
+    connect(&mut server, &mut [&mut second])?;
+    send_reliable(&mut second, &receipt_hello())?;
+    send_reliable(&mut second, &put("b", "note:b", vec![1]))?;
+    assert_eq!(refusal_of(&frames_after(&mut server, &mut second, 2)?[1]).0, Some(CultNetErrorCode::LimitReached));
+
+    clock.set_monotonic(70_101);
+    assert_eq!(server.maintain()?.sessions_expired, 1);
+    send_reliable(&mut second, &put("c", "note:c", vec![1]))?;
+    assert_eq!(frames_after(&mut server, &mut second, 1)?, vec![admitted("c", "note:c")], "the ended session's entry was freed");
+    clock.set_monotonic(70_152);
+    assert_eq!(server.maintain()?.sessions_expired, 1);
+    assert_eq!(server.session_count(), 0);
+    let mut third = client(server.local_addr()?, 244)?;
+    connect(&mut server, &mut [&mut third])?;
+    send_reliable(&mut third, &receipt_hello())?;
+    send_reliable(&mut third, &put("d", "note:d", vec![1]))?;
+    assert_eq!(frames_after(&mut server, &mut third, 2)?[1], admitted("d", "note:d"), "and so was the second's");
+    Ok(())
+}
+
+/// Whichever way a session ends, its remembered writes go back to the budget: here the peer says goodbye, and
+/// here the server ends it itself (an unreliable write whose refusal the reliable queue cannot take).
+#[test]
+fn a_disconnected_or_server_ended_session_frees_its_remembered_writes() -> Result<()> {
+    let options = CultMeshRudpDocumentServerOptions {
+        max_remembered_write_bytes: 65,
+        max_pending_reliable_packets_per_session: 3,
+        ..Default::default()
+    };
+    let mut server = server(options, Clock::new(70_000), Sink::default(), Source::default())?;
+    let mut first = client(server.local_addr()?, 245)?;
+    connect(&mut server, &mut [&mut first])?;
+    send_reliable(&mut first, &receipt_hello())?;
+    send_reliable(&mut first, &put("a", "note:a", vec![1]))?;
+    assert_eq!(frames_after(&mut server, &mut first, 2)?[1], admitted("a", "note:a"));
+    first.disconnect(Vec::new())?;
+    for _ in 0..20 {
+        server.poll_once()?;
+    }
+    assert_eq!(server.session_count(), 0, "the goodbye ended the session");
+
+    // The budget holds one entry. A raw peer is admitted into it, then ended by the server.
+    let mut second = RawPeer::connect(&mut server, 246)?;
+    second.send(&receipt_hello())?;
+    second.send(&put("b", "note:b", vec![1]))?;
+    server.poll_once()?;
+    for index in 0..8 {
+        let payload = encode_cultnet_message_to_vec(&put(&format!("u{index}"), "note:1", vec![1]), CultNetWireContract::CultNetSchemaV0)?;
+        let packets = second.session.send_many(
+            "schema",
+            payload,
+            cultnet_rs::CultNetRudpSendOptions { reliable: false, ordered: false, sequenced: false, now_ms: 3, reliable_expire_after_ms: None },
+            Some(1200),
+        )?;
+        for packet in &packets {
+            second.send_packet(packet)?;
+        }
+        server.poll_once()?;
+    }
+    assert_eq!(server.session_count(), 0, "the server ended the session");
+
+    let mut third = client(server.local_addr()?, 247)?;
+    connect(&mut server, &mut [&mut third])?;
+    send_reliable(&mut third, &receipt_hello())?;
+    send_reliable(&mut third, &put("c", "note:c", vec![1]))?;
+    assert_eq!(frames_after(&mut server, &mut third, 2)?[1], admitted("c", "note:c"), "both ended sessions' entries were freed");
+    Ok(())
+}
+
 /// A session that never declared the capability gets no refusal for an unreliable write: it is dropped as before.
 #[test]
 fn an_unreliable_write_on_a_legacy_session_is_dropped_silently() -> Result<()> {
