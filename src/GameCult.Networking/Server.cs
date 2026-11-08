@@ -406,7 +406,19 @@ namespace GameCult.Networking
                     var frame = transport.Receive(bytes);
                     if (string.Equals(frame.ChannelId, "schema", StringComparison.Ordinal))
                     {
-                        var cultNetMessage = LiteNetLibTransportConnection.DecodeSchema(frame);
+                        ICultNetSchemaMessage cultNetMessage;
+                        try
+                        {
+                            cultNetMessage = LiteNetLibTransportConnection.DecodeSchema(frame);
+                        }
+                        catch (Exception ex) when (transport.WriteReceipts != null)
+                        {
+                            // A receipt-capable peer is told which frame was unreadable (by its id, if the frame still holds one).
+                            Logger.LogWarning($"CultNet schema frame unreadable: {ex.Message}");
+                            transport.AnswerUnreadableSchemaFrame(frame.Payload);
+                            return;
+                        }
+
                         Logger.LogDebug($"Received CultNet schema message {cultNetMessage.SchemaVersion}");
                         await HandleCultNetSchemaMessageAsync(peer, user, cultNetMessage).ConfigureAwait(false);
                         return;

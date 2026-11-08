@@ -22,6 +22,7 @@ namespace GameCult.Networking
         private readonly Func<CultNetSnapshotRequestV1Message, CultNetServerPeer, Task> _snapshotHandlerV1;
         private readonly Func<CultNetDocumentPutRawMessage, CultNetServerPeer, Task> _putHandler;
         private readonly Func<CultNetDocumentDeleteMessage, CultNetServerPeer, Task> _deleteHandler;
+        private readonly Func<CultNetHelloMessage, CultNetServerPeer, Task> _helloHandler;
         private readonly Func<CultNetShardCatalogRequestMessage, CultNetServerPeer, Task> _shardCatalogHandler;
         private readonly Func<CultNetShardLogRequestMessage, CultNetServerPeer, Task> _shardLogHandler;
         private readonly Func<CultNetDatabaseSubscribeMessage, CultNetServerPeer, Task> _subscribeHandler;
@@ -45,6 +46,7 @@ namespace GameCult.Networking
             _snapshotHandlerV1 = HandleSnapshotRequestV1Async;
             _putHandler = HandlePutAsync;
             _deleteHandler = HandleDeleteAsync;
+            _helloHandler = HandleHelloAsync;
             _shardCatalogHandler = HandleShardCatalogRequestAsync;
             _shardLogHandler = HandleShardLogRequestAsync;
             _subscribeHandler = HandleSubscribeAsync;
@@ -55,6 +57,7 @@ namespace GameCult.Networking
             _server.OnCultNet(_snapshotHandlerV1);
             _server.OnCultNet(_putHandler);
             _server.OnCultNet(_deleteHandler);
+            _server.OnCultNet(_helloHandler);
             _server.OnCultNet(_shardCatalogHandler);
             _server.OnCultNet(_shardLogHandler);
             _server.OnCultNet(_subscribeHandler);
@@ -217,6 +220,7 @@ namespace GameCult.Networking
             _server.RemoveCultNetMessageListener<CultNetSnapshotRequestV1Message>(_snapshotHandlerV1);
             _server.RemoveCultNetMessageListener<CultNetDocumentPutRawMessage>(_putHandler);
             _server.RemoveCultNetMessageListener<CultNetDocumentDeleteMessage>(_deleteHandler);
+            _server.RemoveCultNetMessageListener<CultNetHelloMessage>(_helloHandler);
             _server.RemoveCultNetMessageListener<CultNetShardCatalogRequestMessage>(_shardCatalogHandler);
             _server.RemoveCultNetMessageListener<CultNetShardLogRequestMessage>(_shardLogHandler);
             _server.RemoveCultNetMessageListener<CultNetDatabaseSubscribeMessage>(_subscribeHandler);
@@ -323,74 +327,208 @@ namespace GameCult.Networking
             };
         }
 
+        // A hello decides the connection's write framing if it is the first thing to (write-receipt.md, "Capability"). The
+        // server answers a receipt-capable hello with its own, so the client can tell a receipt server from a legacy one.
+        private Task HandleHelloAsync(CultNetHelloMessage hello, CultNetServerPeer peer)
+        {
+            if (peer.Transport != null && peer.Transport.SettleWriteFraming(hello))
+            {
+                Answer(peer, new CultNetHelloMessage
+                {
+                    RuntimeId = "gamecult-networking-database-server",
+                    RuntimeKind = "dotnet",
+                    SupportedMessageVersions = [CultNetSchemaVersions.WriteAdmitted, CultNetSchemaVersions.ErrorV1]
+                });
+            }
+
+            return Task.CompletedTask;
+        }
+
+        // The write's receipt state, or null when its connection did not opt in (it is then answered exactly as before).
+        private static CultNetReceiptedWrite? BeginReceipted(
+            CultNetServerPeer peer,
+            string operation,
+            string? messageId,
+            string? schemaId,
+            string? recordKey,
+            byte[]? payload)
+        {
+            var transport = peer.Transport;
+            if (transport == null) return null;
+            transport.SettleWriteFraming(null);
+            var session = transport.WriteReceipts;
+            return session == null
+                ? null
+                : new CultNetReceiptedWrite(session, message => Answer(peer, message), operation, messageId, schemaId, recordKey, payload);
+        }
+
+        // Every frame a write can be answered with. Mock point for tests: the answer leaves through the peer's transport.
+        internal static void Answer(CultNetServerPeer peer, ICultNetSchemaMessage message)
+        {
+            switch (message)
+            {
+                case CultNetWriteAdmittedMessage admitted: peer.SendCultNet(admitted); break;
+                case CultNetErrorV1Message error: peer.SendCultNet(error); break;
+                case CultNetErrorMessage error: peer.SendCultNet(error); break;
+                case CultNetHelloMessage hello: peer.SendCultNet(hello); break;
+                default: throw new ArgumentException($"{message.GetType().Name} is not a write answer.", nameof(message));
+            }
+        }
+
+        // A refusal: error.v1 carrying the write's id for a receipt-capable connection, the v0 error for any other.
+        private static void Refuse(CultNetServerPeer peer, CultNetReceiptedWrite? write, CultNetErrorMessage error)
+        {
+            if (write != null) write.Refused(error);
+            else peer.SendCultNet(error);
+        }
+
+        // Rule 6: a forward is answered with what the primary answered, under the original id. A refusal the primary sent is
+        // relayed; silence or any other failure relays nothing, so the client settles it unconfirmed.
+        private void RelayForwardFailure(CultNetReceiptedWrite write, Exception failure)
+        {
+            if (failure is CultNetWriteRefusedException refused)
+            {
+                write.Refused(refused.Refusal);
+                return;
+            }
+
+            _server.Logger.LogWarning($"CultNet forwarded write was not answered by its primary: {failure.Message}");
+            write.Unanswered();
+        }
+
         private async Task HandlePutAsync(CultNetDocumentPutRawMessage message, CultNetServerPeer peer)
         {
+            var write = BeginReceipted(peer, "put", message.MessageId, message.Document?.SchemaId, message.Document?.RecordKey, message.Document?.Payload);
+            if (write != null && !write.HasId)
+            {
+                write.Refused(CultNetErrorMessage.ForMessageInvalid("messageId", "a write needs a messageId"));
+                return;
+            }
+
+            var authorize = Authorize(peer, CultNetRemoteWriteOperation.Put, message.ShardId, message.ShardEpoch);
             try
             {
-                await _database.ApplyPutAsync(message, Authorize(peer, CultNetRemoteWriteOperation.Put, message.ShardId, message.ShardEpoch))
-                    .ConfigureAwait(false);
+                await _database.ApplyPutAsync(message, write == null ? authorize : write.Guard(authorize)).ConfigureAwait(false);
+                write?.Admitted();
+            }
+            catch (CultNetWriteResendException resend) when (write != null)
+            {
+                write.Resent(resend);
             }
             catch (CultNetRemoteWriteRefusedException ex)
             {
                 _server.Logger.LogWarning($"CultNet raw put refused: {ex.Message}");
-                peer.SendCultNet(CultNetErrorMessage.ForRemoteWriteRefused(ex.Request, ex.Reason));
+                Refuse(peer, write, CultNetErrorMessage.ForRemoteWriteRefused(ex.Request, ex.Reason));
             }
             catch (CultNetShardAuthorityException ex)
             {
-                if (!await TryForwardPutAsync(ex, message).ConfigureAwait(false))
+                bool forwarded;
+                try
+                {
+                    forwarded = await TryForwardPutAsync(ex, message).ConfigureAwait(false);
+                }
+                catch (CultNetWriteUnconfirmedException) when (write == null)
+                {
+                    // A peer that did not opt in is told nothing of a forward its primary left unanswered.
+                    return;
+                }
+                catch (Exception failure) when (write != null)
+                {
+                    RelayForwardFailure(write, failure);
+                    return;
+                }
+
+                if (forwarded)
+                {
+                    write?.Admitted();
+                }
+                else
                 {
                     _server.Logger.LogError($"CultNet raw put authority failed: {ex.Message}");
-                    peer.SendCultNet(CreateRoutingError(ex));
+                    Refuse(peer, write, CreateRoutingError(ex));
                 }
             }
             catch (CultNetUnownedSchemaException ex)
             {
                 _server.Logger.LogWarning($"CultNet raw put refused: {ex.Message}");
-                peer.SendCultNet(CultNetErrorMessage.ForUnownedSchema(ex));
+                Refuse(peer, write, CultNetErrorMessage.ForUnownedSchema(ex));
             }
             catch (Exception ex) when (CommittedWithLogFailure(ex))
             {
                 // The write committed and was published; only its shard log failed, so the peer is not told it was refused.
                 _server.Logger.LogWarning($"CultNet raw put committed but its shard log failed: {ex.Message}");
+                write?.Admitted();
             }
             catch (Exception ex)
             {
                 _server.Logger.LogError($"CultNet raw put failed: {ex.Message}");
-                peer.SendCultNet(new CultNetErrorMessage { Error = ex.Message });
+                Refuse(peer, write, new CultNetErrorMessage { Error = ex.Message });
             }
         }
 
         private async Task HandleDeleteAsync(CultNetDocumentDeleteMessage message, CultNetServerPeer peer)
         {
+            var write = BeginReceipted(peer, "delete", message.MessageId, message.SchemaId, message.RecordKey, null);
+            if (write != null && !write.HasId)
+            {
+                write.Refused(CultNetErrorMessage.ForMessageInvalid("messageId", "a write needs a messageId"));
+                return;
+            }
+
+            var authorize = Authorize(peer, CultNetRemoteWriteOperation.Delete, message.ShardId, message.ShardEpoch);
             try
             {
-                await _database.ApplyDeleteAsync(message, Authorize(peer, CultNetRemoteWriteOperation.Delete, message.ShardId, message.ShardEpoch))
-                    .ConfigureAwait(false);
+                await _database.ApplyDeleteAsync(message, write == null ? authorize : write.Guard(authorize)).ConfigureAwait(false);
+                write?.Admitted();
+            }
+            catch (CultNetWriteResendException resend) when (write != null)
+            {
+                write.Resent(resend);
             }
             catch (CultNetRemoteWriteRefusedException ex)
             {
                 _server.Logger.LogWarning($"CultNet raw delete refused: {ex.Message}");
-                peer.SendCultNet(CultNetErrorMessage.ForRemoteWriteRefused(ex.Request, ex.Reason));
+                Refuse(peer, write, CultNetErrorMessage.ForRemoteWriteRefused(ex.Request, ex.Reason));
             }
             catch (CultNetShardAuthorityException ex)
             {
-                if (!await TryForwardDeleteAsync(ex, message).ConfigureAwait(false))
+                bool forwarded;
+                try
                 {
-                    peer.SendCultNet(CreateRoutingError(ex));
+                    forwarded = await TryForwardDeleteAsync(ex, message).ConfigureAwait(false);
+                }
+                catch (CultNetWriteUnconfirmedException) when (write == null)
+                {
+                    return;
+                }
+                catch (Exception failure) when (write != null)
+                {
+                    RelayForwardFailure(write, failure);
+                    return;
+                }
+
+                if (forwarded)
+                {
+                    write?.Admitted();
+                }
+                else
+                {
+                    Refuse(peer, write, CreateRoutingError(ex));
                 }
             }
             catch (CultNetUnownedSchemaException ex)
             {
                 _server.Logger.LogWarning($"CultNet raw delete refused: {ex.Message}");
-                peer.SendCultNet(CultNetErrorMessage.ForUnownedSchema(ex));
+                Refuse(peer, write, CultNetErrorMessage.ForUnownedSchema(ex));
             }
             catch (Exception ex) when (CommittedWithLogFailure(ex))
             {
                 _server.Logger.LogWarning($"CultNet raw delete committed but its shard log failed: {ex.Message}");
+                write?.Admitted();
             }
             catch (Exception ex)
             {
-                peer.SendCultNet(new CultNetErrorMessage { Error = ex.Message });
+                Refuse(peer, write, new CultNetErrorMessage { Error = ex.Message });
             }
         }
 

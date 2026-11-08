@@ -3533,7 +3533,7 @@ namespace GameCult.Networking
     /// </summary>
     public sealed class LiteNetLibTransportConnection
     {
-        private readonly NetPeer? _peer;
+        private readonly Action<byte[]>? _deliver;
         private readonly CultNetTransportStats _stats = new CultNetTransportStats();
 
         /// <summary>
@@ -3541,8 +3541,48 @@ namespace GameCult.Networking
         /// </summary>
         public LiteNetLibTransportConnection(NetPeer peer, CultNetTransportProfile? profile = null)
         {
-            _peer = peer ?? throw new ArgumentNullException(nameof(peer));
+            if (peer == null) throw new ArgumentNullException(nameof(peer));
+            _deliver = payload => peer.Send(payload, DeliveryMethod.ReliableOrdered);
             Profile = profile ?? CultNetTransportProfiles.CreateLiteNetLib("csharp-litenetlib-peer");
+        }
+
+        // The mock point for what leaves the connection: the peer's reliable ordered send.
+        internal LiteNetLibTransportConnection(Action<byte[]> deliver)
+        {
+            _deliver = deliver ?? throw new ArgumentNullException(nameof(deliver));
+            Profile = CultNetTransportProfiles.CreateLiteNetLib("csharp-litenetlib-peer");
+        }
+
+        /// <summary>Answers a schema frame that did not decode with a <c>message_invalid</c> error.v1 naming its id when it holds one.</summary>
+        internal void AnswerUnreadableSchemaFrame(byte[] payload) =>
+            SendSchema(CultNetErrorV1Message.From(
+                CultNetErrorMessage.ForMessageInvalid("message", "the message could not be read"),
+                CultNetReadableMessageId.From(payload)));
+
+        private readonly object _writeFramingGate = new();
+        private bool _writeFramingSettled;
+
+        /// <summary>
+        /// The write-receipt state of a connection that opted in (write-receipt.md); null for every other connection, which is
+        /// answered exactly as before.
+        /// </summary>
+        internal CultNetWriteReceiptSession? WriteReceipts { get; private set; }
+
+        /// <summary>
+        /// Decides this connection's write framing once: by its first hello, or by its first write if no hello came first. A
+        /// later hello changes nothing. The capability changes framing only; it never authorizes. Returns true when this call
+        /// opted the connection in.
+        /// </summary>
+        internal bool SettleWriteFraming(CultNetHelloMessage? hello)
+        {
+            lock (_writeFramingGate)
+            {
+                if (_writeFramingSettled) return false;
+                _writeFramingSettled = true;
+                if (hello == null || !CultNetWriteReceiptCapability.Declares(hello)) return false;
+                WriteReceipts = new CultNetWriteReceiptSession();
+                return true;
+            }
         }
 
         /// <summary>
@@ -3580,14 +3620,14 @@ namespace GameCult.Networking
         public void Send(string channelId, byte[] payload)
         {
             if (payload == null) throw new ArgumentNullException(nameof(payload));
-            if (_peer == null) throw new InvalidOperationException("A LiteNetLib peer is required to send through this transport.");
+            if (_deliver == null) throw new InvalidOperationException("A LiteNetLib peer is required to send through this transport.");
             if (!string.Equals(channelId, "schema", StringComparison.Ordinal)
                 && !string.Equals(channelId, "legacy", StringComparison.Ordinal))
             {
                 throw new InvalidOperationException($"litenetlib transport only supports schema and legacy channels, got \"{channelId}\".");
             }
 
-            _peer.Send(payload, DeliveryMethod.ReliableOrdered);
+            _deliver(payload);
             _stats.BytesSent += payload.Length;
             _stats.FramesSent++;
         }

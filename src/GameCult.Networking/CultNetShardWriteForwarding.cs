@@ -10,12 +10,15 @@ namespace GameCult.Networking
     public interface ICultNetShardWriteForwarder
     {
         /// <summary>
-        /// Forwards a raw document put to the shard owner.
+        /// Forwards a raw document put to the shard owner. Completes only when the owner answered that it admitted the write;
+        /// throws <see cref="CultNetWriteRefusedException"/> when it refused and <see cref="CultNetWriteUnconfirmedException"/>
+        /// when it answered nothing. The server relays to the original peer exactly what the owner answered.
         /// </summary>
         Task ForwardPutAsync(CultNetShardDescriptor shard, CultNetDocumentPutRawMessage message);
 
         /// <summary>
-        /// Forwards a raw document delete to the shard owner.
+        /// Forwards a raw document delete to the shard owner; completes, refuses and goes unconfirmed as
+        /// <see cref="ForwardPutAsync"/> does.
         /// </summary>
         Task ForwardDeleteAsync(CultNetShardDescriptor shard, CultNetDocumentDeleteMessage message);
     }
@@ -70,10 +73,12 @@ namespace GameCult.Networking
         public Func<ICultNetSchemaClient>? CreateClient { get; set; }
 
         /// <summary>
-        /// Gets or sets how long after a forwarded write the primary's refusal may still arrive; a refusal fails the
-        /// forward with <see cref="CultNetWriteRefusedException"/>. Defaults to <see cref="CultNetWriteCompletion.DefaultResultWindow"/>.
+        /// Gets or sets how long the primary has to answer a forwarded write (from the send). Its receipt completes the forward,
+        /// its refusal fails it with <see cref="CultNetWriteRefusedException"/>, and silence fails it with
+        /// <see cref="CultNetWriteUnconfirmedException"/>. Defaults to <see cref="CultNetWriteCompletion.ReceiptResultWindow"/>; a
+        /// primary that predates write receipts never answers, so forwarding to one is unconfirmed after this window.
         /// </summary>
-        public TimeSpan ResultWindow { get; set; } = CultNetWriteCompletion.DefaultResultWindow;
+        public TimeSpan ResultWindow { get; set; } = CultNetWriteCompletion.ReceiptResultWindow;
     }
 
     /// <summary>
@@ -92,8 +97,8 @@ namespace GameCult.Networking
         }
 
         /// <summary>
-        /// Forwards a put and completes on the primary's result frame: a refusal throws
-        /// <see cref="CultNetWriteRefusedException"/>, the same failure path as an unreachable primary.
+        /// Forwards a put under its original message id and completes on the primary's result frame: a receipt returns, a refusal
+        /// throws <see cref="CultNetWriteRefusedException"/> and silence throws <see cref="CultNetWriteUnconfirmedException"/>.
         /// </summary>
         public async Task ForwardPutAsync(CultNetShardDescriptor shard, CultNetDocumentPutRawMessage message)
         {
@@ -101,12 +106,12 @@ namespace GameCult.Networking
             var endpoint = ResolvePrimaryEndpoint(shard);
             message.ShardId ??= shard.ShardId;
             message.ShardEpoch ??= shard.Epoch;
-            await SendAsync(endpoint, message).ConfigureAwait(false);
+            await SendAsync(endpoint, message, message.MessageId).ConfigureAwait(false);
         }
 
         /// <summary>
-        /// Forwards a delete and completes on the primary's result frame: a refusal throws
-        /// <see cref="CultNetWriteRefusedException"/>.
+        /// Forwards a delete under its original message id; completes, refuses and goes unconfirmed as
+        /// <see cref="ForwardPutAsync"/> does.
         /// </summary>
         public async Task ForwardDeleteAsync(CultNetShardDescriptor shard, CultNetDocumentDeleteMessage message)
         {
@@ -114,7 +119,7 @@ namespace GameCult.Networking
             var endpoint = ResolvePrimaryEndpoint(shard);
             message.ShardId ??= shard.ShardId;
             message.ShardEpoch ??= shard.Epoch;
-            await SendAsync(endpoint, message).ConfigureAwait(false);
+            await SendAsync(endpoint, message, message.MessageId).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -138,19 +143,29 @@ namespace GameCult.Networking
             return (uri.Host, uri.IsDefaultPort ? 3075 : uri.Port);
         }
 
-        private async Task SendAsync<T>(string endpoint, T message) where T : ICultNetSchemaMessage
+        private async Task SendAsync<T>(string endpoint, T message, string messageId) where T : ICultNetSchemaMessage
         {
             var (host, port) = ParseEndpoint(endpoint);
             using var client = CreateClient(endpoint);
             client.Connect(host, port);
             await WaitForConnectionAsync(client, endpoint).ConfigureAwait(false);
-            await CultNetWriteCompletion.SendAndAwaitResultAsync(
-                refuse =>
+            // The hello comes first on the ordered schema channel: it opts this connection in to the primary's receipts.
+            client.SendCultNet(new CultNetHelloMessage
+            {
+                RuntimeId = "gamecult-networking-shard-forwarder",
+                RuntimeKind = "dotnet",
+                SupportedMessageVersions = [CultNetSchemaVersions.WriteAdmitted, CultNetSchemaVersions.ErrorV1]
+            });
+            await CultNetWriteCompletion.SendAndAwaitReceiptAsync(
+                (admitted, refuse, refuseV1) =>
                 {
+                    client.OnCultNet(admitted);
                     client.OnCultNet(refuse);
+                    client.OnCultNet(refuseV1);
                     return null;
                 },
                 () => client.SendCultNet(message),
+                messageId,
                 _options.ResultWindow).ConfigureAwait(false);
         }
 
