@@ -3052,6 +3052,51 @@ fn a_write_whose_schema_id_or_record_key_names_nothing_is_refused_and_never_hand
     Ok(())
 }
 
+/// The sequenced-channel refusal belongs to the frame that arrived sequenced. A reliable-sequenced packet that
+/// fills the gap an earlier ordered packet was held behind delivers both frames in one go: the sequenced write is
+/// refused, the ordered write it released is admitted.
+#[test]
+fn a_sequenced_packet_releasing_a_held_ordered_write_refuses_only_its_own() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = RawPeer::connect(&mut server, 250)?;
+    peer.send(&receipt_hello())?;
+    server.poll_once()?;
+    let mut packet_for = |peer: &mut RawPeer, id: &str, ordered: bool, sequenced: bool| -> Result<Vec<cultnet_rs::CultNetRudpPacket>> {
+        let payload = encode_cultnet_message_to_vec(&put(id, &format!("note:{id}"), vec![1]), CultNetWireContract::CultNetSchemaV0)?;
+        peer.session.send_many(
+            "schema",
+            payload,
+            cultnet_rs::CultNetRudpSendOptions { reliable: true, ordered, sequenced, now_ms: 3, reliable_expire_after_ms: None },
+            Some(1200),
+        )
+    };
+    let sequenced = packet_for(&mut peer, "s1", false, true)?;
+    let ordered = packet_for(&mut peer, "o1", true, false)?;
+    // The ordered write arrives first, one sequence ahead of the gap, and is held.
+    for packet in &ordered {
+        peer.send_packet(packet)?;
+    }
+    server.poll_once()?;
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 0, "the ordered write waits behind the gap");
+    for packet in &sequenced {
+        peer.send_packet(packet)?;
+    }
+    server.poll_once()?;
+    let mut answers = Vec::new();
+    for packet in peer.drain() {
+        for frame in peer.session.receive(&packet, 4)?.delivered {
+            answers.push(decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)?);
+        }
+    }
+    let refusals: Vec<_> = answers.iter().filter(|a| matches!(a, CultNetMessage::ErrorV1 { .. })).collect();
+    assert_eq!(refusals.len(), 1, "only the sequenced write is refused: {answers:?}");
+    assert_eq!(refusal_of(refusals[0]), (Some(CultNetErrorCode::MessageInvalid), Some("s1".into())));
+    assert!(answers.contains(&admitted("o1", "note:o1")), "the released ordered write is admitted: {answers:?}");
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 1, "and applied");
+    Ok(())
+}
+
 /// A refused write is traffic: the peer that sends it is not idle, so its session outlives the idle timeout measured
 /// from the refusal and not from the packet before it.
 #[test]

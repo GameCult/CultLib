@@ -825,7 +825,9 @@ where
             if frame.channel_id != "schema" {
                 continue;
             }
-            if refuse_sequenced {
+            // `delivered` also holds the ordered frames this packet's arrival released from the hold; those were
+            // not sent on the sequenced channel. They sit above the packet's own sequence, its own frame at or below.
+            if refuse_sequenced && frame.sequence <= packet.sequence {
                 if let CultMeshRudpPollOutcome::ApplicationRejected(rejection) =
                     self.refuse_unreliable_write(key, &frame.payload)?
                 {
