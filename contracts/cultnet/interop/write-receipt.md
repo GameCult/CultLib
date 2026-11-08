@@ -78,6 +78,8 @@ Those clients complete *successfully* when the window ends with no refusal. Unde
 
 Advertising is per server class, not per transport. A class advertises both frames in its hello only if it implements the receipt rules end to end; the C# RUDP schema server stays "no" until it answers writes with receipts.
 
+Cross-runtime check: `packages/cultmesh-ts/test/interop/write-receipt-interop.test.ts` (`npm run test:interop` in `packages/cultmesh-ts`) runs the TypeScript client (`WriteTracker`, the decoder, the one-shot writer) against the real Rust RUDP document server and the real `CultNetDatabaseServer` over loopback, one scenario set against both. Known gap it records as a todo: the Rust RUDP document server refuses every delete (`write_not_authorized: the server does not take deletes`), where this spec has an admitted delete receipted like a put.
+
 ## Conformance follow-ups (not in this PR)
 
 C# server and client, Rust, TypeScript, Python, Kotlin: emit and parse the two frames; hello capability; tri-state client outcome; replace the #55 to #58 window-success; re-capture the wire vectors in each runtime. Server write paths include the shard write forwarder (rule 6) and the Odin catalog.
