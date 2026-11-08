@@ -3,7 +3,7 @@ use cultnet_rs::{
     CultNetErrorCode, CultNetErrorDetails, CultNetMessage, CultNetRawDocumentRecord, CultNetRudpPacket, CultNetRudpPacketType,
     CultNetRudpSendOptions, CultNetRudpSession, CultNetRudpSessionOptions, CultNetWireContract,
     decode_cultnet_message_from_slice, decode_rudp_packet, encode_cultnet_message_to_vec,
-    encode_rudp_packet, is_permanent_send_error, readable_message_id, send_error_code, write_content_hash,
+    encode_rudp_packet, is_permanent_send_error, readable_message_id, message_id_digest, send_error_code, write_content_hash,
 };
 use std::collections::{BTreeMap, HashMap};
 #[cfg(test)]
@@ -189,6 +189,15 @@ pub struct CultMeshRudpDocumentServerOptions {
     pub resend_delay: Duration,
     pub max_pending_reliable_packets_per_session: usize,
     pub max_fragment_bytes: usize,
+    /// Server-wide memory budget for the remembered writes of all receipt sessions
+    /// (write-receipt.md, "Remembered-write limits"): at most this many bytes, counted as
+    /// `REMEMBERED_ENTRY_BYTES` per entry. A new write over it is refused `limit_reached`, the session kept.
+    pub max_remembered_write_bytes: usize,
+}
+
+impl CultMeshRudpDocumentServerOptions {
+    /// What one remembered write is charged: the digests of its id and content, and its answer.
+    pub const REMEMBERED_ENTRY_BYTES: usize = 32 + 32 + 1;
 }
 
 impl Default for CultMeshRudpDocumentServerOptions {
@@ -204,6 +213,7 @@ impl Default for CultMeshRudpDocumentServerOptions {
             resend_delay: Duration::from_millis(50),
             max_pending_reliable_packets_per_session: 1024,
             max_fragment_bytes: 1200,
+            max_remembered_write_bytes: 32 * 1024 * 1024,
         }
     }
 }
@@ -275,6 +285,10 @@ pub enum CultMeshRudpRejectionReason {
     /// A receipt-capable session already remembers `MAX_REMEMBERED_WRITES_PER_SESSION` writes and takes no new
     /// id. Nothing reached the sink.
     WriteLimitReached,
+    /// A receipt-capable session sent a message id over `MAX_MESSAGE_ID_BYTES`. Nothing was remembered.
+    MessageIdTooLong,
+    /// A receipt-capable session sent a write on an unreliable channel, where no answer could be owed once.
+    ChannelNotReliable,
 }
 
 impl std::fmt::Display for CultMeshRudpRejectionReason {
@@ -285,6 +299,8 @@ impl std::fmt::Display for CultMeshRudpRejectionReason {
             Self::MessageUnreadable(error) => write!(f, "message could not be read: {error}"),
             Self::MessageIdReused => f.write_str("the message id was already used for different content"),
             Self::WriteLimitReached => f.write_str("the session remembers as many writes as it will"),
+            Self::MessageIdTooLong => f.write_str("the message id is longer than 256 bytes"),
+            Self::ChannelNotReliable => f.write_str("a receipt session's write arrived on an unreliable channel"),
             Self::DocumentUnservable {
                 response_bytes,
                 max_snapshot_response_bytes,
@@ -325,7 +341,7 @@ impl std::fmt::Display for CultMeshRudpRejectionReason {
 /// The texts a refused peer is sent, one per rejection variant. They are fixed:
 /// a sink's or source's error text can quote what a peer sent, so it stays with
 /// the caller that receives the rejection and never reaches the wire.
-pub(crate) const REFUSAL_TEXTS: [&str; 13] = [
+pub(crate) const REFUSAL_TEXTS: [&str; 15] = [
     "the catalog refused the document",
     "the document can never be served",
     "the snapshot source failed",
@@ -339,12 +355,40 @@ pub(crate) const REFUSAL_TEXTS: [&str; 13] = [
     "the message could not be read",
     "the message id was already used for different content",
     "the session's remembered-write limit is full",
+    "messageId exceeds 256 bytes",
+    "receipt sessions require the reliable channel",
 ];
 
 impl CultMeshRudpRejectionReason {
     /// The fixed text the refused peer is sent for this variant.
     fn refusal_text(&self) -> &'static str {
-        REFUSAL_TEXTS[match self {
+        REFUSAL_TEXTS[usize::from(self.refusal_index())]
+    }
+
+    /// The reason a remembered refusal replays as. Its payload (a sink's text, a size) is not remembered: the
+    /// peer is only ever sent the variant's fixed text, and the caller's rejection is reported once, at first sight.
+    fn from_refusal_index(index: u8) -> Self {
+        match index {
+            0 => Self::SinkRefused(String::new()),
+            1 => Self::DocumentUnservable { response_bytes: 0, max_snapshot_response_bytes: 0, fragment_count: 0, max_fragment_count: 0 },
+            2 => Self::SnapshotSourceFailed(String::new()),
+            3 => Self::SnapshotTooManyDocuments { documents: 0, max_snapshot_documents: 0 },
+            4 => Self::SnapshotResponseTooLarge { response_bytes: 0, max_snapshot_response_bytes: 0 },
+            5 => Self::ResponseEncodingFailed(String::new()),
+            6 => Self::PayloadBudgetFull,
+            7 => Self::ResponseQueueFailed(String::new()),
+            8 => Self::ResponseSendFailed(""),
+            9 => Self::DeleteNotSupported,
+            10 => Self::MessageUnreadable(String::new()),
+            11 => Self::MessageIdReused,
+            12 => Self::WriteLimitReached,
+            13 => Self::MessageIdTooLong,
+            _ => Self::ChannelNotReliable,
+        }
+    }
+
+    fn refusal_index(&self) -> u8 {
+        match self {
             Self::SinkRefused(_) => 0,
             Self::DocumentUnservable { .. } => 1,
             Self::SnapshotSourceFailed(_) => 2,
@@ -358,7 +402,9 @@ impl CultMeshRudpRejectionReason {
             Self::MessageUnreadable(_) => 10,
             Self::MessageIdReused => 11,
             Self::WriteLimitReached => 12,
-        }]
+            Self::MessageIdTooLong => 13,
+            Self::ChannelNotReliable => 14,
+        }
     }
 }
 
@@ -437,6 +483,8 @@ impl CultMeshRudpApplicationRejection {
             (CultMeshRudpRejectionReason::MessageIdReused, _) => {
                 message_invalid_message("messageId", text)
             }
+            (CultMeshRudpRejectionReason::MessageIdTooLong, _) => message_invalid_message("messageId", text),
+            (CultMeshRudpRejectionReason::ChannelNotReliable, _) => message_invalid_message("channel", text),
             (CultMeshRudpRejectionReason::WriteLimitReached, _) => CultNetMessage::Error {
                 error: format!("limit_reached: {text}"),
                 code: Some(CultNetErrorCode::LimitReached),
@@ -475,6 +523,8 @@ enum SessionEnd {
     Rejected(CultNetMessage),
     /// The session owes its peer a packet that can never be sent as built.
     Unsendable(std::io::Error),
+    /// The server could not answer a write it owed an answer to. Not a refusal of anything the peer sent.
+    LocalFailure,
 }
 
 fn write_rejection(
@@ -512,8 +562,30 @@ struct SessionEntry {
     /// Answered writes of a receipt-capable session: message id -> (content hash, the answer given), refusals
     /// included, so a resend of the same content is answered again without being decided again and the same
     /// id with other content is refused.
-    answered_writes: HashMap<String, ([u8; 32], CultNetMessage)>,
+    answered_writes: HashMap<[u8; 32], RememberedWrite>,
+    /// Writes refused `limit_reached`, kept so their resend replays the refusal. A bounded set outside the
+    /// entry budget (`MAX_REMEMBERED_WRITES_PER_SESSION`); past it a new write is refused unremembered.
+    limit_refusals: HashMap<[u8; 32], [u8; 32]>,
 }
+
+/// What the server remembers of a write it answered: digests only, so an entry costs
+/// `REMEMBERED_ENTRY_BYTES` whatever the id or payload size. The answer's body is rebuilt from the resend,
+/// whose content hash has been checked equal to the original's.
+#[derive(Clone, Copy)]
+struct RememberedWrite {
+    content_hash: [u8; 32],
+    answer: StoredAnswer,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StoredAnswer {
+    Admitted,
+    /// A refusal, by its `REFUSAL_TEXTS` index (`CultMeshRudpRejectionReason::refusal_index`).
+    Refused(u8),
+}
+
+/// The longest `messageId` a receipt session may send, in UTF-8 bytes.
+const MAX_MESSAGE_ID_BYTES: usize = 256;
 
 /// The most answered writes a receipt-capable session remembers; a session at the limit refuses new writes
 /// (`WriteLimitReached`) rather than forget an id it promised to answer idempotently.
@@ -663,7 +735,9 @@ where
             && packet.channel_id == "schema"
             && !packet.reliable
         {
-            return Ok(CultMeshRudpPollOutcome::Handled);
+            // A receipt session's write that could be lost without trace cannot be answered once: it is
+            // refused on the reliable channel, never applied. Anything else unreliable is dropped as before.
+            return self.refuse_unreliable_write(key, &packet.payload);
         }
         let payload_charge = if packet.packet_type == CultNetRudpPacketType::Data {
             packet.payload.len()
@@ -789,7 +863,7 @@ where
                         Answered::Sent => {}
                         Answered::Unsendable(error) => unsendable = Some(error),
                         Answered::Unqueueable => {
-                            self.end_session(key, SessionEnd::Refused)?;
+                            self.end_session(key, SessionEnd::LocalFailure)?;
                             return Ok(CultMeshRudpPollOutcome::ApplicationRejected(rejection));
                         }
                     }
@@ -814,7 +888,7 @@ where
                         // An unanswerable write is answered by ending the session: its peer settles it
                         // as `session_ended`, never as silence.
                         Answered::Unqueueable => {
-                            self.end_session(key, SessionEnd::Refused)?;
+                            self.end_session(key, SessionEnd::LocalFailure)?;
                             return Ok(CultMeshRudpPollOutcome::ApplicationRejected(rejection));
                         }
                     }
@@ -895,6 +969,39 @@ where
             Some(rejection) => CultMeshRudpPollOutcome::ApplicationRejected(rejection),
             None => CultMeshRudpPollOutcome::Handled,
         })
+    }
+
+    /// Refuses a put or delete that arrived on an unreliable channel of a receipt session with
+    /// `message_invalid` (`details.field` `channel`) naming its id. Nothing is remembered or applied: the id
+    /// stays free for the same write sent reliably.
+    fn refuse_unreliable_write(
+        &mut self,
+        key: CultMeshRudpSessionKey,
+        payload: &[u8],
+    ) -> Result<CultMeshRudpPollOutcome> {
+        if !self.receipts(key) {
+            return Ok(CultMeshRudpPollOutcome::Handled);
+        }
+        let Ok(message) = decode_cultnet_message_from_slice(payload, CultNetWireContract::CultNetSchemaV0) else {
+            return Ok(CultMeshRudpPollOutcome::Handled);
+        };
+        let (operation, message_id, record_key) = match message {
+            CultNetMessage::DocumentPutRaw { message_id, document } => {
+                (CultMeshRudpApplicationOperation::DocumentPutRaw, message_id, document.record_key)
+            }
+            CultNetMessage::DocumentDelete { message_id, record_key, .. } => {
+                (CultMeshRudpApplicationOperation::DocumentDelete, message_id, record_key)
+            }
+            _ => return Ok(CultMeshRudpPollOutcome::Handled),
+        };
+        let rejection = write_rejection(key, operation, &message_id, &record_key, CultMeshRudpRejectionReason::ChannelNotReliable);
+        let refusal = rejection.refusal_message(true);
+        match self.send_on_live_session(key, &refusal, true)? {
+            Answered::Sent => {}
+            Answered::Unsendable(error) => self.end_session(key, SessionEnd::Unsendable(error))?,
+            Answered::Unqueueable => self.end_session(key, SessionEnd::LocalFailure)?,
+        }
+        Ok(CultMeshRudpPollOutcome::ApplicationRejected(rejection))
     }
 
     /// Expire idle sessions and resend reliable packets whose deadline passed.
@@ -1011,6 +1118,7 @@ where
                         receipts: false,
                         capability_settled: false,
                         answered_writes: HashMap::new(),
+                        limit_refusals: HashMap::new(),
                     },
                 );
                 accept
@@ -1067,6 +1175,9 @@ where
                     schema_id: receipt.document.schema_id.clone(),
                     record_key: receipt.document.record_key.clone(),
                 };
+                if message_id.len() > MAX_MESSAGE_ID_BYTES {
+                    return Ok(Some(rejection(CultMeshRudpRejectionReason::MessageIdTooLong)));
+                }
                 let content_hash = match write_content_hash(
                     "put",
                     &receipt.document.schema_id,
@@ -1082,20 +1193,21 @@ where
                 };
                 // The id is looked up first: a resend is answered with what the session already said, and
                 // the sink is asked only about an id the session has not seen.
+                let id_digest = message_id_digest(&message_id);
                 if let ControlFlow::Break(outcome) =
-                    self.seen_write(key, now, &message_id, content_hash, &rejection)?
+                    self.seen_write(key, now, id_digest, content_hash, &admitted, &rejection)?
                 {
                     return Ok(outcome);
                 }
                 match self.admit_put(receipt, true) {
                     Ok(()) => {
                         // Admitted: the sink holds it. Only now is a receipt owed, never before the commit point.
-                        self.remember(key, &message_id, content_hash, admitted.clone());
+                        self.remember(key, id_digest, content_hash, StoredAnswer::Admitted);
                         return self.answer_sent(key, now, &admitted, &rejection);
                     }
                     Err(reason) => {
                         let refused = rejection(reason);
-                        self.remember(key, &message_id, content_hash, refused.refusal_message(true));
+                        self.remember(key, id_digest, content_hash, StoredAnswer::Refused(refused.reason.refusal_index()));
                         return Ok(Some(refused));
                     }
                 }
@@ -1278,6 +1390,9 @@ where
                 if !self.receipts(key) {
                     return Ok(Some(rejection(CultMeshRudpRejectionReason::DeleteNotSupported)));
                 }
+                if message_id.len() > MAX_MESSAGE_ID_BYTES {
+                    return Ok(Some(rejection(CultMeshRudpRejectionReason::MessageIdTooLong)));
+                }
                 let content_hash = match write_content_hash("delete", &schema_id, &record_key, None) {
                     Ok(hash) => hash,
                     Err(error) => {
@@ -1286,13 +1401,21 @@ where
                         ))));
                     }
                 };
+                let id_digest = message_id_digest(&message_id);
+                // A delete is never admitted; the body is the receipt it would be answered with.
+                let would_admit = CultNetMessage::WriteAdmitted {
+                    message_id: message_id.clone(),
+                    operation: "delete".into(),
+                    schema_id: schema_id.clone(),
+                    record_key: record_key.clone(),
+                };
                 if let ControlFlow::Break(outcome) =
-                    self.seen_write(key, now, &message_id, content_hash, &rejection)?
+                    self.seen_write(key, now, id_digest, content_hash, &would_admit, &rejection)?
                 {
                     return Ok(outcome);
                 }
                 let refused = rejection(CultMeshRudpRejectionReason::DeleteNotSupported);
-                self.remember(key, &message_id, content_hash, refused.refusal_message(true));
+                self.remember(key, id_digest, content_hash, StoredAnswer::Refused(refused.reason.refusal_index()));
                 return Ok(Some(refused));
             }
             _ => {}
@@ -1300,36 +1423,63 @@ where
         Ok(None)
     }
 
-    /// What a receipt-capable session already knows of `message_id`. `Continue` is a first sighting that
-    /// the session has room to remember. A repeat with the same content is answered with the stored answer,
-    /// a repeat with other content (a put or a delete of any record) is `MessageIdReused`, and a session
-    /// that remembers its limit takes no new id.
+    /// What a receipt-capable session already knows of a write, by the digest of its id. `Continue` is a first
+    /// sighting that fits both bounds. A repeat with the same content is answered with its remembered answer
+    /// (rebuilt from this resend, whose content hash is the original's), a repeat with other content is
+    /// `MessageIdReused`. A first sighting past the session table or the server-wide budget is refused
+    /// `limit_reached` for that write alone, and that refusal is remembered (`limit_refusals`) so its resend
+    /// replays it; no slot is freed, so the id is never admitted later in the session.
     fn seen_write(
         &mut self,
         key: CultMeshRudpSessionKey,
         now: u64,
-        message_id: &str,
+        id_digest: [u8; 32],
         content_hash: [u8; 32],
+        admitted: &CultNetMessage,
         rejection: &impl Fn(CultMeshRudpRejectionReason) -> CultMeshRudpApplicationRejection,
     ) -> Result<ControlFlow<Option<CultMeshRudpApplicationRejection>>> {
-        let (prior, remembered) = self
-            .sessions
-            .get(&key)
-            .map(|entry| (entry.answered_writes.get(message_id).cloned(), entry.answered_writes.len()))
-            .unwrap_or_default();
+        let Some(entry) = self.sessions.get(&key) else {
+            return Ok(ControlFlow::Continue(()));
+        };
+        let prior = entry.answered_writes.get(&id_digest).copied().or_else(|| {
+            entry.limit_refusals.get(&id_digest).map(|&content_hash| RememberedWrite {
+                content_hash,
+                answer: StoredAnswer::Refused(CultMeshRudpRejectionReason::WriteLimitReached.refusal_index()),
+            })
+        });
+        let session_full = entry.answered_writes.len() >= MAX_REMEMBERED_WRITES_PER_SESSION;
+        let refusal_room = entry.limit_refusals.len() < MAX_REMEMBERED_WRITES_PER_SESSION;
+        let remembered_total: usize = self.sessions.values().map(|entry| entry.answered_writes.len()).sum();
+        let budget_full = remembered_total
+            .checked_add(1)
+            .and_then(|entries| entries.checked_mul(CultMeshRudpDocumentServerOptions::REMEMBERED_ENTRY_BYTES))
+            .is_none_or(|bytes| bytes > self.options.max_remembered_write_bytes);
         Ok(ControlFlow::Break(match prior {
-            Some((hash, answer)) if hash == content_hash => self.answer_sent(key, now, &answer, rejection)?,
+            Some(remembered) if remembered.content_hash == content_hash => {
+                let answer = match remembered.answer {
+                    StoredAnswer::Admitted => admitted.clone(),
+                    StoredAnswer::Refused(index) => {
+                        rejection(CultMeshRudpRejectionReason::from_refusal_index(index)).refusal_message(true)
+                    }
+                };
+                self.answer_sent(key, now, &answer, rejection)?
+            }
             Some(_) => Some(rejection(CultMeshRudpRejectionReason::MessageIdReused)),
-            None if remembered >= MAX_REMEMBERED_WRITES_PER_SESSION => {
+            None if session_full || budget_full => {
+                if refusal_room {
+                    if let Some(entry) = self.sessions.get_mut(&key) {
+                        entry.limit_refusals.insert(id_digest, content_hash);
+                    }
+                }
                 Some(rejection(CultMeshRudpRejectionReason::WriteLimitReached))
             }
             None => return Ok(ControlFlow::Continue(())),
         }))
     }
 
-    fn remember(&mut self, key: CultMeshRudpSessionKey, message_id: &str, content_hash: [u8; 32], answer: CultNetMessage) {
+    fn remember(&mut self, key: CultMeshRudpSessionKey, id_digest: [u8; 32], content_hash: [u8; 32], answer: StoredAnswer) {
         if let Some(entry) = self.sessions.get_mut(&key) {
-            entry.answered_writes.insert(message_id.to_owned(), (content_hash, answer));
+            entry.answered_writes.insert(id_digest, RememberedWrite { content_hash, answer });
         }
     }
 
@@ -1346,7 +1496,7 @@ where
         if self.send_reliable_schema(key, now, answer) {
             return Ok(None);
         }
-        self.end_session(key, SessionEnd::Refused)?;
+        self.end_session(key, SessionEnd::LocalFailure)?;
         Ok(Some(rejection(CultMeshRudpRejectionReason::ResponseSendFailed(
             "the write answer could not be sent".into(),
         ))))
@@ -1463,10 +1613,12 @@ where
         let Some(mut entry) = self.sessions.remove(&key) else {
             return Ok(());
         };
+        let local_failure = matches!(end, SessionEnd::LocalFailure);
         let (refusal, mut unsendable) = match end {
             SessionEnd::Refused => (Vec::new(), None),
             SessionEnd::Rejected(refusal) => (self.refusal_packets(&mut entry.session, &refusal, false), None),
             SessionEnd::Unsendable(error) => (Vec::new(), Some(error)),
+            SessionEnd::LocalFailure => (Vec::new(), None),
         };
         entry.session.reset_peer_state();
         let nothing = entry.session.create_ack();
@@ -1478,9 +1630,10 @@ where
                 break;
             }
         }
-        let goodbye = match &unsendable {
-            Some(error) => entry.session.end_unsendable_session(error),
-            None => entry.session.end_refused_session(),
+        let goodbye = match (&unsendable, local_failure) {
+            (Some(error), _) => entry.session.end_unsendable_session(error),
+            (None, true) => entry.session.end_local_failure_session(),
+            (None, false) => entry.session.end_refused_session(),
         };
         // The goodbye is the session's last datagram. If it too can never be
         // sent, nobody is left to tell.
@@ -1602,6 +1755,9 @@ fn validate_options(options: &CultMeshRudpDocumentServerOptions) -> Result<()> {
     }
     if options.session_max_lifetime.is_zero() {
         return Err(anyhow!("session_max_lifetime must be greater than zero"));
+    }
+    if options.max_remembered_write_bytes == 0 {
+        return Err(anyhow!("max_remembered_write_bytes must be greater than zero"));
     }
     if options.max_admitted_payload_bytes == 0 {
         return Err(anyhow!(

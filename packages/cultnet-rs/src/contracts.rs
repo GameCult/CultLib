@@ -569,7 +569,8 @@ pub fn encode_cultnet_message_for_wire(
             | CultNetMessage::ContentChunkRequest { .. }
             | CultNetMessage::ContentChunkResponse { .. }
             | CultNetMessage::Error { .. }
-            | CultNetMessage::ErrorV1 { .. } => encode_raw_cultnet_schema_message(message),
+            | CultNetMessage::ErrorV1 { .. }
+            | CultNetMessage::WriteAdmitted { .. } => encode_raw_cultnet_schema_message(message),
             _ => Ok(cultcache_rs::decode_payload(&rmp_serde::to_vec(
                 &serde_json::to_value(message)?,
             )?)?),
@@ -1146,6 +1147,14 @@ fn encode_raw_cultnet_schema_message(message: &CultNetMessage) -> Result<rmpv::V
         return Err(anyhow!("limit_reached is a cultnet.error.v1 code; cultnet.error.v0 cannot carry it"));
     }
     Ok(rmpv::Value::Map(match message {
+        // Spec field order (write-receipt.md), not serde_json's sorted map.
+        CultNetMessage::WriteAdmitted { message_id, operation, schema_id, record_key } => vec![
+            (rmpv::Value::from("schemaVersion"), rmpv::Value::from("cultnet.write_admitted.v0")),
+            (rmpv::Value::from("messageId"), rmpv::Value::from(message_id.as_str())),
+            (rmpv::Value::from("operation"), rmpv::Value::from(operation.as_str())),
+            (rmpv::Value::from("schemaId"), rmpv::Value::from(schema_id.as_str())),
+            (rmpv::Value::from("recordKey"), rmpv::Value::from(record_key.as_str())),
+        ],
         CultNetMessage::DocumentPutRaw {
             message_id,
             document,
@@ -1989,6 +1998,13 @@ pub fn write_content_hash(
     let mut bytes = Vec::new();
     rmpv::encode::write_value(&mut bytes, &value)?;
     Ok(Sha256::digest(&bytes).into())
+}
+
+/// SHA-256 of a write's `messageId`: what a receipt server remembers in place of the id itself, so an
+/// entry's memory does not depend on the id's length (write-receipt.md, "What is remembered").
+pub fn message_id_digest(message_id: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(message_id.as_bytes()).into()
 }
 
 /// The `messageId` of a schema frame that does not decode as a message (write-receipt.md, rule 3: a refusal

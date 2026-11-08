@@ -468,6 +468,14 @@ impl CultNetRudpSession {
         self.create_disconnect(RUDP_REFUSED_PACKET_REASON.to_vec())
     }
 
+    /// Ends a session because the server itself could not answer a write it owes an answer to (its answer
+    /// could not be encoded, queued or sent). The peer did nothing wrong: this goodbye is not the
+    /// "session refused a packet" of a protocol refusal.
+    pub fn end_local_failure_session(&mut self) -> CultNetRudpPacket {
+        self.reset_peer_state();
+        self.create_disconnect(RUDP_LOCAL_FAILURE_REASON.to_vec())
+    }
+
     /// Ends a session that owes its peer a packet that can never be sent as
     /// built (see `is_permanent_send_error`). Resending it would fail forever,
     /// and dropping it would leave a reliable sequence the peer waits on for
@@ -2609,6 +2617,8 @@ where
 /// Sent to a peer whose session refused one of its packets, and reported to
 /// the local caller as the disconnect reason.
 const RUDP_REFUSED_PACKET_REASON: &[u8] = b"session refused a packet";
+/// Goodbye reason of a session whose server could not answer a write (`end_local_failure_session`).
+const RUDP_LOCAL_FAILURE_REASON: &[u8] = b"server could not answer a write";
 const SESSION_TIMED_OUT_REASON: &[u8] = b"session timed out";
 /// Prefix of the goodbye reason for a session that owed a packet which can
 /// never be sent; the failure's fixed name (`send_error_code`) follows it.

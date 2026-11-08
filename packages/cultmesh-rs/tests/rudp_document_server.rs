@@ -2332,8 +2332,9 @@ fn a_full_dedupe_table_refuses_new_writes_and_keeps_the_session_and_its_receipts
     send_reliable(&mut peer, &put("w0", "note:0", vec![1]))?;
     let answers = frames_after(&mut server, &mut peer, 2)?;
     assert_eq!(refusal_of(&answers[0]), (Some(CultNetErrorCode::LimitReached), Some("over".into())));
-    let CultNetMessage::ErrorV1 { error, .. } = &answers[0] else { unreachable!() };
+    let CultNetMessage::ErrorV1 { error, details, .. } = &answers[0] else { unreachable!() };
     assert_eq!(error, "limit_reached: the session's remembered-write limit is full", "the cap has its own fixed text");
+    assert_eq!(details, &Some(CultNetErrorDetails::default()), "limit_reached names no field: details all null");
     assert_eq!(answers[1], admitted("w0", "note:0"), "a remembered id is still answered idempotently");
     assert_eq!(server.session_count(), 1);
     Ok(())
@@ -2423,6 +2424,17 @@ fn a_receipt_that_cannot_be_queued_ends_the_session_instead_of_leaving_the_write
         }
     }
     assert_eq!(server.session_count(), 0, "a receipt the queue could not take ended the session");
+    // The goodbye names a local failure: it is not the "session refused a packet" goodbye of a protocol refusal.
+    let mut reason = None;
+    for _ in 0..200 {
+        while peer.receive_once()?.is_some() {}
+        if let Some(found) = peer.disconnect_reason() {
+            reason = Some(found.to_vec());
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(reason.expect("the peer was told the session ended"), b"server could not answer a write".to_vec());
     Ok(())
 }
 
@@ -2621,5 +2633,117 @@ fn a_put_that_reuses_a_deletes_id_is_message_invalid() -> Result<()> {
     let answers = answers_after(&mut server, &mut peer, 2)?;
     assert_eq!(refusal_of(&answers[1]), (Some(CultNetErrorCode::MessageInvalid), Some("d1".into())));
     assert_eq!(sink.0.lock().unwrap().receipts.len(), 0, "the reusing put was not applied");
+    Ok(())
+}
+
+fn error_text_and_field(message: &CultNetMessage) -> (String, Option<String>) {
+    let CultNetMessage::ErrorV1 { error, details, .. } = message else { panic!("expected error.v1, got {message:?}") };
+    (error.clone(), details.as_ref().and_then(|d| d.field.clone()))
+}
+
+/// The server-wide budget counts fixed-size entries across sessions; a write over it is refused for that write
+/// alone, the refusal is remembered (a resend replays it, no slot is freed), and every session is kept.
+#[test]
+fn a_server_wide_memory_budget_refuses_the_write_over_it_and_keeps_the_sessions() -> Result<()> {
+    let options = CultMeshRudpDocumentServerOptions {
+        max_remembered_write_bytes: 2 * CultMeshRudpDocumentServerOptions::REMEMBERED_ENTRY_BYTES,
+        ..Default::default()
+    };
+    let sink = Sink::default();
+    let mut server = server(options, Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut a = client(server.local_addr()?, 230)?;
+    let mut b = client(server.local_addr()?, 231)?;
+    connect(&mut server, &mut [&mut a, &mut b])?;
+    send_reliable(&mut a, &receipt_hello())?;
+    send_reliable(&mut b, &receipt_hello())?;
+    send_reliable(&mut a, &put("a1", "note:a1", vec![1]))?;
+    send_reliable(&mut b, &put("b1", "note:b1", vec![1]))?;
+    for _ in 0..200 {
+        server.poll_once()?;
+        a.poll_resends()?;
+        b.poll_resends()?;
+        while a.receive_once()?.is_some() {}
+        while b.receive_once()?.is_some() {}
+    }
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 2);
+    send_reliable(&mut a, &put("a2", "note:a2", vec![1]))?;
+    send_reliable(&mut a, &put("a2", "note:a2", vec![1]))?;
+    let answers = frames_after(&mut server, &mut a, 2)?;
+    for answer in &answers {
+        assert_eq!(refusal_of(answer), (Some(CultNetErrorCode::LimitReached), Some("a2".into())), "the resend replays the refusal");
+        let CultNetMessage::ErrorV1 { details, .. } = answer else { unreachable!() };
+        assert_eq!(details, &Some(CultNetErrorDetails::default()));
+    }
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 2, "the refused write was not applied");
+    assert_eq!(server.session_count(), 2, "both sessions are kept");
+    send_reliable(&mut a, &put("a1", "note:a1", vec![1]))?;
+    assert_eq!(frames_after(&mut server, &mut a, 1)?, vec![admitted("a1", "note:a1")], "a remembered id is still answered");
+    Ok(())
+}
+
+/// A message id over 256 bytes is refused before anything is remembered: no entry, no budget charge.
+#[test]
+fn a_message_id_over_256_bytes_is_refused_before_anything_is_remembered() -> Result<()> {
+    let options = CultMeshRudpDocumentServerOptions {
+        max_remembered_write_bytes: CultMeshRudpDocumentServerOptions::REMEMBERED_ENTRY_BYTES,
+        ..Default::default()
+    };
+    let sink = Sink::default();
+    let mut server = server(options, Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 232)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    let long = "x".repeat(257);
+    send_reliable(&mut peer, &put(&long, "note:1", vec![1]))?;
+    send_reliable(&mut peer, &put(&long, "note:1", vec![1]))?;
+    send_reliable(&mut peer, &put(&"y".repeat(256), "note:2", vec![1]))?;
+    let answers = answers_after(&mut server, &mut peer, 3)?;
+    for answer in &answers[..2] {
+        assert_eq!(refusal_of(answer), (Some(CultNetErrorCode::MessageInvalid), Some(long.clone())));
+        assert_eq!(error_text_and_field(answer), ("message_invalid: messageId exceeds 256 bytes".into(), Some("messageId".into())));
+    }
+    assert_eq!(answers[2], admitted(&"y".repeat(256), "note:2"), "256 bytes is allowed, and the long id charged no budget");
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 1, "the long-id writes were never applied");
+    Ok(())
+}
+
+/// A write on an unreliable channel of a receipt session is refused, not dropped and not accepted.
+#[test]
+fn an_unreliable_write_on_a_receipt_session_is_refused_message_invalid_naming_the_channel() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = RawPeer::connect(&mut server, 233)?;
+    peer.send(&receipt_hello())?;
+    server.poll_once()?;
+    let payload = encode_cultnet_message_to_vec(&put("u1", "note:1", vec![1]), CultNetWireContract::CultNetSchemaV0)?;
+    let packets = peer.session.send_many(
+        "schema",
+        payload,
+        cultnet_rs::CultNetRudpSendOptions { reliable: false, ordered: false, sequenced: false, now_ms: 3, reliable_expire_after_ms: None },
+        Some(1200),
+    )?;
+    for packet in &packets {
+        peer.send_packet(packet)?;
+    }
+    server.poll_once()?;
+    let mut answers = Vec::new();
+    for packet in peer.drain() {
+        for frame in peer.session.receive(&packet, 4)?.delivered {
+            answers.push(decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)?);
+        }
+    }
+    let refusals: Vec<_> = answers.iter().filter(|answer| matches!(answer, CultNetMessage::ErrorV1 { .. })).collect();
+    assert_eq!(refusals.len(), 1, "the unreliable write is answered, not dropped: {answers:?}");
+    assert_eq!(refusal_of(refusals[0]), (Some(CultNetErrorCode::MessageInvalid), Some("u1".into())));
+    assert_eq!(
+        error_text_and_field(refusals[0]),
+        ("message_invalid: receipt sessions require the reliable channel".into(), Some("channel".into()))
+    );
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 0, "nothing was applied");
+    assert_eq!(server.session_count(), 1);
+    // The id was not consumed: the same write on the reliable channel is admitted.
+    peer.send(&put("u1", "note:1", vec![1]))?;
+    server.poll_once()?;
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 1);
     Ok(())
 }

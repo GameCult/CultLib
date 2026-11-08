@@ -101,7 +101,7 @@ fn error_v1_limit_reached_is_the_spec_vector() {
         message_id: Some("put-1025".into()),
     };
     let bytes = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0).unwrap();
-    assert_eq!(hex(&bytes), vector);
+    assert_eq!(bytes, unhex(vector), "encoded bytes must equal the spec vector");
     let CultNetMessage::ErrorV1 { error, code, details, message_id } =
         decode_cultnet_message_from_slice(&unhex(vector), CultNetWireContract::CultNetSchemaV0).unwrap()
     else {
@@ -111,6 +111,25 @@ fn error_v1_limit_reached_is_the_spec_vector() {
     assert_eq!(code, Some(CultNetErrorCode::LimitReached));
     assert_eq!(message_id.as_deref(), Some("put-1025"));
     assert_eq!(details, Some(CultNetErrorDetails::default()));
+}
+
+/// Spec vectors `write_admitted_put` and `write_admitted_delete`: the encoder emits the spec's field order.
+#[test]
+fn write_admitted_encodes_to_the_spec_vector_bytes() {
+    let cases = [
+        ("put-1", "put", "85AD736368656D6156657273696F6EB963756C746E65742E77726974655F61646D69747465642E7630A96D6573736167654964A57075742D31A96F7065726174696F6EA3707574A8736368656D614964A76E6F74652E7630A97265636F72644B6579A66E6F74653A31"),
+        ("del-1", "delete", "85AD736368656D6156657273696F6EB963756C746E65742E77726974655F61646D69747465642E7630A96D6573736167654964A564656C2D31A96F7065726174696F6EA664656C657465A8736368656D614964A76E6F74652E7630A97265636F72644B6579A66E6F74653A31"),
+    ];
+    for (id, operation, vector) in cases {
+        let message = CultNetMessage::WriteAdmitted {
+            message_id: id.into(),
+            operation: operation.into(),
+            schema_id: "note.v0".into(),
+            record_key: "note:1".into(),
+        };
+        let bytes = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0).unwrap();
+        assert_eq!(bytes, unhex(vector));
+    }
 }
 
 /// `limit_reached` is in the error.v1 enum only: a v0 error neither encodes nor decodes it.
