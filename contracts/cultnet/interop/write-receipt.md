@@ -12,7 +12,7 @@ A put or delete today has two answers on the wire: nothing (admitted, or the ser
 
 **`cultnet.write_admitted.v0`**: `{ schemaVersion, messageId, operation: "put"|"delete", schemaId, recordKey }`, every key written, none nil. Sent once a put or delete is admitted. The id echoes the write's `messageId` byte for byte; `operation`, `schemaId`, `recordKey` echo the write.
 
-**`cultnet.error.v1`**: `cultnet.error.v0` plus a required `messageId` (string or nil). The code enum is v0's. Sent in place of `error.v0` to a receipt-capable connection. `messageId` is the id of the request the error answers; nil only when the frame was unreadable or carried no id.
+**`cultnet.error.v1`**: `cultnet.error.v0` plus a required `messageId` (string or nil). The code enum is v0's plus `limit_reached` (see Remembered-write limits); `cultnet.error.v1.schema.json` is the authority for the closed set. Sent in place of `error.v0` to a receipt-capable connection. `messageId` is the id of the request the error answers; nil only when the frame was unreadable or carried no id.
 
 Why a new error version and not an extra key on v0: the v0 schema is closed (`additionalProperties: false`) and the TypeScript decoder (Ajv over the closed schemas) rejects unknown keys and unknown `schemaVersion`s, and `parseCultNetMessage` throws on an unknown version; Rust's decoder errors on an unknown version too. Unknown-key tolerance of the Rust, Python and Kotlin error decoders was not checked, so none is assumed, so a surprise key or frame breaks an old client's whole receive path. Old clients are therefore never sent either new frame. This reverses the "old clients ignore it" assumption, which is false for today's decoders.
 
@@ -35,7 +35,7 @@ A connection is receipt-capable when its `cultnet.hello.v0` (sent before its fir
    - **Id size.** A write's `messageId` is at most 256 bytes of UTF-8. A longer id is refused `message_invalid` (`details.field: "messageId"`, the refusal's `messageId` the id as received, text fixed per Fixed texts) BEFORE anything is remembered: no table entry, no digest, no budget charge. Such a refusal is therefore not replayed from the table; a resend is refused afresh, identically.
    - **What is remembered.** Per entry a server keeps only fixed-size digests (SHA-256) of the `messageId` and of the content hash, plus the answer (`admitted`, or the refusal's code and details). Memory per entry is bounded independent of id length and payload size. Lookup compares digests.
    - **Remembered-write limits.** The per-session table holds at most 1024 entries. A server MAY also enforce a server-wide memory budget across all sessions (reference: 32 MiB of remembered entries). A NEW write (a key not already in the table) that would exceed either bound is refused `limit_reached` for that write alone, `messageId` the write's id, `details` all null; the write is not applied and the session continues. A resend of a remembered key is still answered from the table.
-   - **Limit refusals are remembered.** A `limit_reached` refusal is remembered like any other: a resend of the same id and content hash replays `limit_reached`. No slot is freed mid-session, so an id refused at a bound never becomes admitted later in that session (a server at the cap keeps the refused digest pair in a bounded refusal set of at most 1024 per session, outside the entry budget; past it, a further new write is refused `limit_reached` without being remembered, and its resend is refused identically). The client mints a new id on a new session.
+   - **Limit refusals are remembered.** A `limit_reached` refusal is remembered like any other: a resend of the same id and content hash replays `limit_reached`. No slot is freed mid-session, so an id refused at a bound never becomes admitted later in that session (a server at the cap keeps the refused digest pair in a bounded refusal set of at most 1024 per session, outside the entry budget; past it, a further new write is refused `limit_reached` without being remembered, and the session refuses every id it has not seen for the rest of its life, even if a server-wide budget has since freed, so a refusal that was not remembered is never followed by an admission of the same id). The client mints a new id on a new session.
    - **Required fields.** A put or delete whose document or `schemaId` is null or missing is refused `message_invalid` with `details.field` `"document"` or `"schemaId"` (the first missing in that order) and fixed text; the write is not applied.
    - **Fixed texts.** The `error` string of these refusals is fixed, so vectors can compare it: `message_invalid: messageId exceeds 256 bytes`, `message_invalid: document is required`, `message_invalid: schemaId is required`, `message_invalid: receipt sessions require the reliable channel`, `limit_reached: the session's remembered-write limit is full`.
    - **Reliable channel only.** A write arriving on an unreliable channel on a receipt session is refused `message_invalid` with `details.field: "channel"` (the transport profile's word for it) and fixed text. Receipts and refusals travel the reliable channel; a write that could be lost without trace cannot be answered once.
@@ -69,12 +69,12 @@ Those clients complete *successfully* when the window ends with no refusal. Unde
 
 ## Conformance status
 
-| Server class | Advertises both frames |
-|---|---|
-| `CultNetDatabaseServer` | yes |
-| Shard write forwarder | yes |
-| Rust RUDP document server | yes |
-| C# RUDP schema server (`CultNetRudpSchemaServer`, `src/GameCult.Networking/CultNetRudpSchemaServer.cs`) | no |
+| Server class | Advertises both frames | Server-wide memory budget (MAY, Remembered-write limits) |
+|---|---|---|
+| `CultNetDatabaseServer` | yes | not implemented: only the per-session limit of 1024 applies |
+| Shard write forwarder | yes | not implemented: only the per-session limit of 1024 applies |
+| Rust RUDP document server | yes | implemented (32 MiB default, `max_remembered_write_bytes`) |
+| C# RUDP schema server (`CultNetRudpSchemaServer`, `src/GameCult.Networking/CultNetRudpSchemaServer.cs`) | no | n/a |
 
 Advertising is per server class, not per transport. A class advertises both frames in its hello only if it implements the receipt rules end to end; the C# RUDP schema server stays "no" until it answers writes with receipts.
 
