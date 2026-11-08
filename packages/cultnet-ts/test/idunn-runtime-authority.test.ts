@@ -309,10 +309,10 @@ async function startOdinPeer(context: TestContext, endpoint: string) {
       state.responseAck = response.ack;
       if (state.reject && state.order === "ack-then-refusal") {
         peer.send(encodeRudpPacket(serverSession.createAckForReceived(packet.sequence)), remote.port, remote.address);
-        setTimeout(() => peer.send(encodeRudpPacket(response), remote.port, remote.address), 120);
+        setTimeout(() => { try { peer.send(encodeRudpPacket(response), remote.port, remote.address); } catch { /* the test ended */ } }, 120);
       } else if (state.reject && state.order === "refusal-then-ack") {
         peer.send(encodeRudpPacket({ ...response, ack: 0, ackMask: 0 }), remote.port, remote.address);
-        setTimeout(() => peer.send(encodeRudpPacket(serverSession!.createAckForReceived(packet.sequence)), remote.port, remote.address), 120);
+        setTimeout(() => { try { peer.send(encodeRudpPacket(serverSession!.createAckForReceived(packet.sequence)), remote.port, remote.address); } catch { /* the test ended */ } }, 120);
       } else {
         peer.send(encodeRudpPacket(response), remote.port, remote.address);
       }

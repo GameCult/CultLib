@@ -107,23 +107,33 @@ async function publishDocument(
     const wirePayload = encode(encodeCultNetMessageForWire(message as never, "cultnet.schema.v0"));
     const packets = session.sendMany("schema", wirePayload, { reliable: true, ordered: true, nowMs: Date.now() });
     for (const packet of packets) await sendPacket(socket, endpoint, packet);
-    await receiveUntil(
-      receiver,
-      session,
-      endpoint,
-      () => session.outstandingReliablePacketCount === 0,
-      2000,
-      (frame) => {
-        if (frame.channelId !== "schema") return;
-        const response = parseCultNetMessage(decode(frame.payload));
-        if (response.schemaVersion === "cultnet.error.v0") {
-          throw new Error(`Odin rejected runtime presence: ${response.error}`);
-        }
-      },
-    );
+    // The transport ack is not admission: the put completes on Odin's result frame. A refusal rejects whether
+    // it arrives before the ack, after it, or inside the result window; a success reply ends the wait early.
+    let succeeded = false;
+    const onFrame = (frame: { channelId: string; payload: Uint8Array }) => {
+      if (frame.channelId !== "schema") return;
+      const response = parseCultNetMessage(decode(frame.payload));
+      if (response.schemaVersion === "cultnet.error.v0") throw new IdunnPresenceRefusedError(response);
+      succeeded = true;
+    };
+    await receiveUntil(receiver, session, endpoint, () => session.outstandingReliablePacketCount === 0, 2000, onFrame);
+    if (!succeeded) await receiveUntil(receiver, session, endpoint, () => succeeded, RESULT_WINDOW_MS, onFrame, true);
   } finally {
     receiver.close();
     socket.close();
+  }
+}
+
+/** How long after the transport ack Odin's refusal may still arrive; a success reply ends the wait early. */
+const RESULT_WINDOW_MS = 500;
+
+/** Odin refused the presence put: the typed `cultnet.error.v0` it answered with. */
+export class IdunnPresenceRefusedError extends Error {
+  readonly code: string | undefined;
+  constructor(readonly response: { error: string; code?: string | null }) {
+    super(`Odin rejected runtime presence: ${response.error}`);
+    this.name = "IdunnPresenceRefusedError";
+    this.code = response.code ?? undefined;
   }
 }
 
@@ -190,6 +200,7 @@ async function receiveUntil(
   predicate: (packet: CultNetRudpPacket) => boolean,
   timeoutMs: number,
   onDelivered?: (frame: { channelId: string; payload: Uint8Array; sequence: number }) => void,
+  returnOnTimeout = false,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -204,6 +215,7 @@ async function receiveUntil(
     }
     for (const packet of session.dueResends(Date.now())) await sendPacket(receiver.socket, endpoint, packet);
   }
+  if (returnOnTimeout) return;
   throw new Error(`Timed out waiting for CultNet RUDP response after ${timeoutMs} ms.`);
 }
 
