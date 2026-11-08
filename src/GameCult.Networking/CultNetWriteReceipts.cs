@@ -90,6 +90,8 @@ namespace GameCult.Networking
         public static CultNetRememberedRefusal Of(CultNetErrorMessage error) =>
             new(error.Code, error.Details != null, error.Details?.Field, error.RoutingHint);
 
+        private static string? NullIfEmpty(string value) => value.Length == 0 ? null : value;
+
         /// <summary>The refusal, in fixed text, naming the write's own record key or schema id where its details do.</summary>
         public CultNetErrorMessage ToError(string schemaId, string recordKey) => new()
         {
@@ -105,7 +107,7 @@ namespace GameCult.Networking
                 ? new CultNetErrorDetails
                 {
                     Field = Field,
-                    Value = Field switch { "recordKey" => recordKey, "schemaId" => schemaId, _ => null }
+                    Value = Field switch { "recordKey" => NullIfEmpty(recordKey), "schemaId" => NullIfEmpty(schemaId), _ => null }
                 }
                 : null
         };

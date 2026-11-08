@@ -1205,5 +1205,25 @@ namespace GameCult.Networking.Tests
             Assert.That(routedAgain.RoutingHint!.Reason, Is.EqualTo("not_primary"));
             Assert.That(routedAgain.Error, Is.EqualTo(CultNetDatabaseServer.RoutingRefusalText));
         }
+
+        // A write that carries no record key or schema id has none to echo: the detail value is null, not an empty string.
+        [Test]
+        public void AReplayedRefusalOfAWriteWithoutTheNamedFieldCarriesANullValue()
+        {
+            var session = new CultNetWriteReceiptSession();
+            var sent = new List<ICultNetSchemaMessage>();
+            CultNetReceiptedWrite Write() => new(session, sent.Add, "delete", "m1", null, null, null);
+            var first = Write();
+            Assert.That(first.Begin(), Is.True);
+            first.Refused(DeniedWith("ignored", "reason"));
+            Assert.That(Write().Begin(), Is.False);
+
+            foreach (var message in sent)
+            {
+                var error = (CultNetErrorV1Message)message;
+                Assert.That(error.Details!.Field, Is.EqualTo("recordKey"));
+                Assert.That(error.Details.Value, Is.Null);
+            }
+        }
     }
 }

@@ -50,6 +50,9 @@ namespace GameCult.Networking.Tests
             public void SendUnreliable<T>(T message) where T : ICultNetSchemaMessage =>
                 _peer.Send(CultNetSchemaMessageSerialization.Serialize(message), DeliveryMethod.Unreliable);
 
+            public void Send<T>(T message, DeliveryMethod method) where T : ICultNetSchemaMessage =>
+                _peer.Send(CultNetSchemaMessageSerialization.Serialize(message), method);
+
             public void SendRaw(byte[] bytes) => _peer.Send(bytes, DeliveryMethod.ReliableOrdered);
 
             public T Next<T>() where T : ICultNetSchemaMessage
@@ -200,6 +203,36 @@ namespace GameCult.Networking.Tests
             client.Send(running.PutOf("u1", KeyA, "kept"));
             Assert.That(client.Next<CultNetWriteAdmittedMessage>().MessageId, Is.EqualTo("u1"));
             await WaitFor(() => running.Cache.Get<NetworkSchemaNote>(KeyA)?.Text == "kept");
+        }
+
+        // write-receipt.md, Reliable channel only: reliable and not sequenced. Reliable ordered and unordered qualify; reliable
+        // sequenced does not, and nor does any unreliable method.
+        [TestCase(DeliveryMethod.ReliableSequenced, true)]
+        [TestCase(DeliveryMethod.Sequenced, true)]
+        [TestCase(DeliveryMethod.Unreliable, true)]
+        [TestCase(DeliveryMethod.ReliableUnordered, false)]
+        [TestCase(DeliveryMethod.ReliableOrdered, false)]
+        public async Task OnlyAReliableNonSequencedChannelCarriesAWriteOfAReceiptPeer(DeliveryMethod method, bool refused)
+        {
+            using var running = Running.Start();
+            using var client = running.Connect();
+            client.Send(HelloOf(BothFrames));
+            client.Next<CultNetHelloMessage>();
+
+            client.Send(running.PutOf("c1", KeyA, "text"), method);
+
+            if (refused)
+            {
+                var error = client.Next<CultNetErrorV1Message>();
+                Assert.That(error.Details!.Field, Is.EqualTo("channel"));
+                Assert.That(error.MessageId, Is.EqualTo("c1"));
+                Assert.That(running.Cache.Get<NetworkSchemaNote>(KeyA), Is.Null);
+            }
+            else
+            {
+                Assert.That(client.Next<CultNetWriteAdmittedMessage>().MessageId, Is.EqualTo("c1"));
+                await WaitFor(() => running.Cache.Get<NetworkSchemaNote>(KeyA)?.Text == "text");
+            }
         }
 
         [Test]
