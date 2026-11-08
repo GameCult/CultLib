@@ -231,6 +231,9 @@ namespace GameCult.Networking.Tests
             receipt.SendUnreliable(HelloOf(BothFrames)); // not a write: answered with nothing on the unreliable channel
             receipt.Send(running.PutOf("r1", KeyA, "one"));
             Assert.That(receipt.Next<CultNetWriteAdmittedMessage>().MessageId, Is.EqualTo("r1"), "nothing else was sent ahead of the receipt");
+            receipt.Send(running.PutOf("r2", KeyA, "two"));
+            Assert.That(receipt.Next<CultNetWriteAdmittedMessage>().MessageId, Is.EqualTo("r2"));
+            receipt.ExpectNothingMore("the unreliable hello was answered with nothing");
 
             using var legacy = running.Connect();
             legacy.Send(HelloOf());

@@ -1171,5 +1171,39 @@ namespace GameCult.Networking.Tests
             GC.KeepAlive(session);
             Assert.That(growth, Is.LessThan(8L * 1024 * 1024));
         }
+
+        // A remembered refusal is replayed with the details its code carries: the schema id of an unowned write, no details
+        // at all for the routing refusal.
+        [Test]
+        public void AReplayedRefusalCarriesTheDetailsOfItsCodeAndNoOthers()
+        {
+            var session = new CultNetWriteReceiptSession();
+            var sent = new List<ICultNetSchemaMessage>();
+            CultNetReceiptedWrite Write(string id) => new(session, sent.Add, "put", id, "schema.v1", "note:1", [1]);
+
+            var unowned = Write("u1");
+            Assert.That(unowned.Begin(), Is.True);
+            unowned.Refused(CultNetErrorMessage.ForUnownedSchema(new CultNetUnownedSchemaException("schema.v1", new CultRecordKey("note:1"))));
+            Assert.That(Write("u1").Begin(), Is.False);
+
+            var routed = Write("g1");
+            Assert.That(routed.Begin(), Is.True);
+            routed.Refused(new CultNetErrorMessage
+            {
+                Error = CultNetDatabaseServer.RoutingRefusalText,
+                RoutingHint = new CultNetShardRoutingHint { Reason = "not_primary" }
+            });
+            Assert.That(Write("g1").Begin(), Is.False);
+
+            var unownedAgain = (CultNetErrorV1Message)sent[1];
+            Assert.That(unownedAgain.Code, Is.EqualTo("unowned_schema"));
+            Assert.That(unownedAgain.Details!.Field, Is.EqualTo("schemaId"));
+            Assert.That(unownedAgain.Details.Value, Is.EqualTo("schema.v1"));
+            Assert.That(unownedAgain.Error, Is.EqualTo(((CultNetErrorV1Message)sent[0]).Error));
+            var routedAgain = (CultNetErrorV1Message)sent[3];
+            Assert.That(routedAgain.Details, Is.Null);
+            Assert.That(routedAgain.RoutingHint!.Reason, Is.EqualTo("not_primary"));
+            Assert.That(routedAgain.Error, Is.EqualTo(CultNetDatabaseServer.RoutingRefusalText));
+        }
     }
 }
