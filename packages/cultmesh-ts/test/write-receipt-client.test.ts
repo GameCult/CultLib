@@ -149,9 +149,11 @@ test("a session that ends before any result leaves the put unconfirmed (session_
 
 test("a put whose send is never acknowledged is unconfirmed as local_send_failed, not an untyped error", async () => {
   const server = await fakeServer(nextConnection, { advertise: true, answer: "silence", ack: false });
+  const started = Date.now();
   try {
     await assert.rejects(publish(server, { writeReceipts: true, flushTimeoutMs: 300 }), (error: unknown) =>
       error instanceof CultMeshRudpWriteUnconfirmedError && error.reason === "local_send_failed");
+    assert.ok(Date.now() - started < 2_500, "flushTimeoutMs bounds the send inside the 5 s window");
   } finally { server.close(); }
 });
 
