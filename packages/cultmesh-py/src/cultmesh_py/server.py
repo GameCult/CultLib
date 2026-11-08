@@ -59,6 +59,13 @@ from cultnet_py.cultmesh_contracts import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# How many consecutive refused frames of one kind a RUDP session may send before it is ended: undecodable
+# frames (reset by any frame that decodes) and deletes the write authority refuses (reset by any decoded
+# frame that is not a refused delete). Fewer are answered with a typed refusal and the session is kept; the
+# frame that reaches this number is answered too, then the session ends. The same number is the cap in every
+# runtime.
+MAX_CONSECUTIVE_REFUSED_FRAMES = 8
 _EPHEMERAL_PAIR_ATTEMPTS = 64
 
 
@@ -90,6 +97,8 @@ class _DatabaseSubscription:
 class _RudpPeerConnection:
     session: CultNetRudpSession
     subscriptions: dict[str, _DatabaseSubscription] = field(default_factory=dict)
+    undecodable_frames_in_a_row: int = 0
+    refused_deletes_in_a_row: int = 0
 
 
 @dataclass
@@ -390,6 +399,7 @@ class CultMeshLocalServer:
             if result.disconnected:
                 peers.pop(remote_addr, None)
                 continue
+            capped = False
             try:
                 for delivered in result.delivered:
                     if delivered.channel_id != "schema":
@@ -397,15 +407,30 @@ class CultMeshLocalServer:
                     try:
                         message = msgpack.unpackb(delivered.payload, raw=False)
                     except (msgpack.ExtraData, msgpack.FormatError, msgpack.StackError, ValueError):
-                        continue
-                    if not isinstance(message, dict):
-                        continue
-                    responses = self._handle_connection_message(
-                        message,
-                        peer.subscriptions,
-                        over_rudp=True,
-                        peer=CultMeshServerPeer(f"{remote_addr[0]}:{remote_addr[1]}", "rudp"),
-                    )
+                        message = None
+                    if isinstance(message, dict):
+                        peer.undecodable_frames_in_a_row = 0
+                        responses = self._handle_connection_message(
+                            message,
+                            peer.subscriptions,
+                            over_rudp=True,
+                            peer=CultMeshServerPeer(f"{remote_addr[0]}:{remote_addr[1]}", "rudp"),
+                        )
+                        refused_delete = message.get("schemaVersion") == "cultnet.document_delete.v0" and any(
+                            response.get("code") == "write_not_authorized" for response in responses
+                        )
+                        peer.refused_deletes_in_a_row = peer.refused_deletes_in_a_row + 1 if refused_delete else 0
+                        refused, run = refused_delete, peer.refused_deletes_in_a_row
+                    else:
+                        # A frame that is no CultNet message is answered, not dropped, and the session kept.
+                        peer.undecodable_frames_in_a_row += 1
+                        refused, run = True, peer.undecodable_frames_in_a_row
+                        responses = [self._message_invalid({}, "message", "CultMesh RUDP server could not read the message.")]
+                    if refused and run >= MAX_CONSECUTIVE_REFUSED_FRAMES:
+                        # The capped frame's refusal goes out with the goodbye; the session ends.
+                        self._end_refused_peer(rudp_socket, peers, remote_addr, refusal=responses[0])
+                        capped = True
+                        break
                     for response in responses:
                         if unsendable is None:
                             unsendable = self._send_rudp_schema_frame(
@@ -433,6 +458,8 @@ class CultMeshLocalServer:
                         code="response_unqueueable",
                     )
                 self._end_refused_peer(rudp_socket, peers, remote_addr, refusal=refusal)
+                continue
+            if capped:
                 continue
             if unsendable is None and (
                 packet.reliable or packet.packet_type == CultNetRudpPacketType.DATA or result.delivered
