@@ -208,6 +208,17 @@ test("sendOnly fails local_send_failed when the send is never acknowledged", asy
   } finally { server.close(); }
 });
 
+test("sendOnly keeps the cause of a put that cannot be built: it is not reported as local_send_failed", async () => {
+  const server = await fakeServer(nextConnection, { advertise: false, answer: "silence" });
+  try {
+    await assert.rejects(
+      CultMesh.publishRudpDocumentOnce("receipt-client", nextConnection++, server.endpoint, binding, "tests:receipt:a", { noteId: 1 } as unknown as { noteId: string; text: string }, { ...transport, sendOnly: true }),
+      (error: unknown) => !(error instanceof CultMeshRudpWriteUnconfirmedError) && error instanceof Error,
+    );
+    assert.deepEqual(server.seen, [], "nothing was sent");
+  } finally { server.close(); }
+});
+
 test("sendOnly cannot be combined with writeReceipts", async () => {
   await assert.rejects(publish({ endpoint: "rudp://127.0.0.1:9" }, { sendOnly: true, writeReceipts: true }), TypeError);
 });

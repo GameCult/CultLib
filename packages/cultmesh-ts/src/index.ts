@@ -6237,8 +6237,10 @@ export class CultMesh {
     const peer = await CultMesh.createRudpPeer(runtimeId, connectionId, endpoint, options);
     try {
       if (options.sendOnly) {
+        // Built outside the try: a message that cannot be serialized is the caller's error, with its cause, not a send failure.
+        const put = putMessage();
         try {
-          peer.send(putMessage());
+          peer.send(put);
           await peer.flush(options.flushTimeoutMs ?? 30_000);
         } catch {
           throw new CultMeshRudpWriteUnconfirmedError(messageId, "local_send_failed");

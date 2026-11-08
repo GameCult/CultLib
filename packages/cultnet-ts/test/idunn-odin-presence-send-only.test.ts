@@ -10,7 +10,7 @@ import { IdunnPresenceRefusedError, sendPresenceDocument } from "../src/idunn-od
 import { CultNetRudpSession, decodeRudpPacket, encodeRudpPacket } from "../src/rudp";
 
 interface Script {
-  answer: "silence" | "echo" | "admitted" | "refuse-v0" | "refuse-v1-other";
+  answer: "silence" | "echo" | "admitted" | "refuse-v0" | "refuse-v1-other" | "refuse-v1-same" | "refuse-v1-none";
   /** Acknowledge the put? Default true. */
   ack?: boolean;
 }
@@ -42,6 +42,8 @@ async function fakeOdin(connectionId: number, script: Script) {
       else if (script.answer === "admitted") say({ schemaVersion: "cultnet.write_admitted.v0", messageId: put.messageId, operation: "put", schemaId: "s", recordKey: "k" }, remote.port, remote.address);
       else if (script.answer === "refuse-v0") say({ schemaVersion: "cultnet.error.v0", error: "no", routingHint: null, code: "write_not_authorized", details: null }, remote.port, remote.address);
       else if (script.answer === "refuse-v1-other") say({ schemaVersion: "cultnet.error.v1", error: "no", routingHint: null, code: "write_not_authorized", details: null, messageId: "someone-else" }, remote.port, remote.address);
+      else if (script.answer === "refuse-v1-same") say({ schemaVersion: "cultnet.error.v1", error: "no", routingHint: null, code: "write_not_authorized", details: null, messageId: put.messageId }, remote.port, remote.address);
+      else if (script.answer === "refuse-v1-none") say({ schemaVersion: "cultnet.error.v1", error: "no", routingHint: null, code: "write_not_authorized", details: null, messageId: null }, remote.port, remote.address);
     }
     if (packet.reliable && script.ack !== false) send(session.createAckForReceived(packet.sequence), remote.port, remote.address);
   });
@@ -72,6 +74,16 @@ test("a refusal that arrives by the transport ack rejects the put", async () => 
     await assert.rejects(sendTo(server, "presence-1", connectionId), IdunnPresenceRefusedError);
   } finally { server.close(); }
 });
+
+for (const answer of ["refuse-v1-same", "refuse-v1-none"] as const) {
+  test(`an error.v1 refusal that ${answer === "refuse-v1-same" ? "names this put" : "names no put"} rejects the put`, async () => {
+    const connectionId = nextConnection++;
+    const server = await fakeOdin(connectionId, { answer });
+    try {
+      await assert.rejects(sendTo(server, "presence-1", connectionId), IdunnPresenceRefusedError);
+    } finally { server.close(); }
+  });
+}
 
 test("a put the transport never acknowledges is an error, not sent", async () => {
   const connectionId = nextConnection++;

@@ -17,6 +17,7 @@ All notable changes to `@gamecult/cultnet-ts` are recorded here, following
 
 ### Breaking
 
+- The Idunn runtime presence publisher is send-only (`sendPresenceDocument`): it returns `"sent"` once Odin's transport has acknowledged the put and no longer waits up to 500 ms for a success reply, which was never admission. It rejects `IdunnPresenceRefusedError` for a `cultnet.error.v0`, or a `cultnet.error.v1` naming the put or nothing, that arrives by the ack; a refusal after the ack is not awaited, and no other frame, one carrying the put's id included, counts as success.
 - The package is renamed `cultnet-ts` to `@gamecult/cultnet-ts` (the repo already scopes `@gamecult/cultcache-ts`), so the unscoped name cannot be claimed by someone else. Import from `@gamecult/cultnet-ts` and its subpaths; the API is unchanged.
 - `CultNetErrorMessage` carries `routingHint`, `code` and `details` (null when absent), as the reference writes them and `cultnet.error.schema.json` requires; the interface previously dropped them. New `CultNetErrorCode`, `CultNetErrorDetails` and `CultNetShardRoutingHint` types.
 
