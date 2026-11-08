@@ -71,6 +71,16 @@ const orders: Order[] = ["ack-then-refusal", "refusal-then-ack"];
 let nextConnection = 0x10205000;
 
 for (const order of orders) {
+  test(`publishRudpDocumentOnce does not complete on the ack of a refused put (${order})`, async () => {
+    const peer = await refusingPeer(nextConnection, order);
+    try {
+      await assert.rejects(
+        CultMesh.publishRudpDocumentOnce("completion-once", nextConnection++, peer.endpoint, binding, "tests:completion:a", { noteId: "a", text: "x" }, { resendDelayMs: 50, resendPollMs: 5, flushTimeoutMs: 2_000 }),
+        /./,
+      );
+    } finally { peer.close(); }
+  });
+
   test(`publishRudpDocumentAndWaitForReceipt reports a refused put as refused, never as success (${order})`, async () => {
     const peer = await refusingPeer(nextConnection, order);
     try {
