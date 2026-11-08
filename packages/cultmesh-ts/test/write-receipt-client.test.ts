@@ -175,6 +175,37 @@ test("a server that does not advertise receipts and echoes the put's id back has
   } finally { server.close(); }
 });
 
+test("a silent server never yields admitted, in either mode: the default is unconfirmed, sendOnly is the distinct outcome sent", async () => {
+  const server = await fakeServer(nextConnection, { advertise: false, answer: "silence" });
+  try {
+    await assert.rejects(publish(server, { resultWindowMs: 200 }), CultMeshRudpWriteUnconfirmedError);
+    const outcome = await publish(server, { sendOnly: true });
+    assert.equal(outcome, "sent");
+    assert.notEqual(outcome, "admitted");
+    assert.deepEqual(server.seen, ["cultnet.document_put_raw.v0", "cultnet.document_put_raw.v0"], "sendOnly sends no hello");
+  } finally { server.close(); }
+});
+
+test("only a write_admitted resolves admitted, and sendOnly does not wait for or act on an answer", async () => {
+  const admitting = await fakeServer(nextConnection, { advertise: true, answer: "admit" });
+  try {
+    assert.equal(await publish(admitting, { writeReceipts: true }), "admitted");
+  } finally { admitting.close(); }
+  const refusing = await fakeServer(nextConnection, { advertise: true, answer: "refuse", delayMs: 1 });
+  try {
+    assert.equal(await publish(refusing, { sendOnly: true }), "sent", "a refusal is not awaited: sendOnly says only that the put was sent");
+  } finally { refusing.close(); }
+});
+
+test("sendOnly fails local_send_failed when the send is never acknowledged, and cannot be combined with writeReceipts", async () => {
+  const server = await fakeServer(nextConnection, { advertise: true, answer: "admit", ack: false });
+  try {
+    await assert.rejects(publish(server, { sendOnly: true, flushTimeoutMs: 300 }), (error: unknown) =>
+      error instanceof CultMeshRudpWriteUnconfirmedError && error.reason === "local_send_failed");
+    await assert.rejects(publish(server, { sendOnly: true, writeReceipts: true }), TypeError);
+  } finally { server.close(); }
+});
+
 test("without writeReceipts no hello is sent and the receipt frames are never asked for", async () => {
   const server = await fakeServer(nextConnection, { advertise: true, answer: "silence" });
   try {

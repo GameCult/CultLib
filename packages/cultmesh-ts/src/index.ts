@@ -4239,6 +4239,14 @@ export interface CultMeshRudpDocumentPublishOptions extends CultMeshRudpPeerOpti
   writeReceipts?: boolean;
   /** With `writeReceipts`, how long to wait for the server's hello before treating it as legacy. Default 500 ms. */
   helloWaitMs?: number;
+  /**
+   * Send the put and report only that it was sent: no hello, no wait for a result frame. Resolves `"sent"` once the
+   * transport has acknowledged the put (`flushTimeoutMs`), rejects `CultMeshRudpWriteUnconfirmedError`
+   * (`local_send_failed`) if it cannot be sent, and never resolves `"admitted"`: whether the server applied or
+   * refused it is unknown. For callers whose server cannot answer a write yet. Opt-in per call; not combinable with
+   * `writeReceipts`.
+   */
+  sendOnly?: boolean;
   messageId?: string;
   sourceRuntimeId?: string;
   sourceAgentId?: string;
@@ -6208,13 +6216,35 @@ export class CultMesh {
     recordKey: string,
     value: CultCacheDocumentValue<TDefinition>,
     options: CultMeshRudpDocumentPublishOptions = {},
-  ): Promise<void> {
+  ): Promise<"admitted" | "sent"> {
     requireNonEmpty(runtimeId, "runtimeId");
     requireNonEmpty(recordKey, "recordKey");
+    if (options.sendOnly && options.writeReceipts) throw new TypeError("sendOnly and writeReceipts cannot be combined.");
     const registry = new CultNetDocumentRegistry([binding]);
     const messageId = options.messageId ?? `${runtimeId}:${binding.definition.type}:${recordKey}`;
+    const putMessage = () => registry.createRawDocumentPutMessage(
+      binding,
+      messageId,
+      recordKey,
+      value,
+      {
+        sourceRuntimeId: options.sourceRuntimeId ?? runtimeId,
+        sourceAgentId: options.sourceAgentId,
+        sourceRole: options.sourceRole,
+        tags: options.tags,
+      },
+    );
     const peer = await CultMesh.createRudpPeer(runtimeId, connectionId, endpoint, options);
     try {
+      if (options.sendOnly) {
+        try {
+          peer.send(putMessage());
+          await peer.flush(options.flushTimeoutMs ?? 30_000);
+        } catch {
+          throw new CultMeshRudpWriteUnconfirmedError(messageId, "local_send_failed");
+        }
+        return "sent";
+      }
       // A transport ack is not admission: the put completes on its result frame, and the WriteTracker alone decides
       // how it settles (write-receipt.md, "Client rules"). This function only maps the settlement to resolve/throw.
       let receiptCapable = false;
@@ -6248,18 +6278,7 @@ export class CultMesh {
       tracker = writeTracker;
       writeTracker.send(messageId, Date.now());
       try {
-        peer.send(registry.createRawDocumentPutMessage(
-          binding,
-          messageId,
-          recordKey,
-          value,
-          {
-            sourceRuntimeId: options.sourceRuntimeId ?? runtimeId,
-            sourceAgentId: options.sourceAgentId,
-            sourceRole: options.sourceRole,
-            tags: options.tags,
-          },
-        ));
+        peer.send(putMessage());
         // The flush may not outlast the result window: a send nobody acknowledged by then is a local send failure.
         const windowRemaining = writeTracker.nextDeadlineMs(Date.now()) ?? 0;
         await peer.flush(Math.min(options.flushTimeoutMs ?? 30_000, Math.max(windowRemaining, 1)));
@@ -6277,6 +6296,7 @@ export class CultMesh {
       }
       if (settlement.outcome === "refused") throw new CultMeshRudpWriteRefusedError(settlement.response);
       if (settlement.outcome === "unconfirmed") throw new CultMeshRudpWriteUnconfirmedError(messageId, settlement.reason);
+      return "admitted";
     } finally {
       peer.close();
     }
