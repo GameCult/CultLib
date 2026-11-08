@@ -276,9 +276,9 @@ remains:
      history (Keep a Changelog headings).
    - A Soul pass over the release diff, then four tags: `cultcache-ts-v…`,
      `cultnet-ts-v0.3.0`, `cultmesh-ts-v0.2.0` and `cultmesh-browser-v0.4.0`.
-     These go in **two pushes** (at most three tags per push, SKILL.md):
-     `cultcache-ts` first, then the three plane tags. No `-ts-v*` tag triggers
-     `publish-packages.yml` on main (F16), so these tags publish nothing;
+     These go in **two pushes** (at most three tags per push, SKILL.md). No
+     `-ts-v*` tag triggers `publish-packages.yml` on main (F16), so these tags
+     publish nothing;
      follow-up `npm-publish-ts-packages` owns npm publishing.
    - The consumer's pickup (StreamPixels bumping `vendor/CultLib` to the
      tagged commit) is StreamPixels' B-cuts, not this campaign.

@@ -26,7 +26,7 @@ caught before it ships instead of written up afterward.
 | `org.gamecult.cultlib` | Unity UPM | `scripts/build-unity-package.ps1`, consumed by git tag |
 | `org.gamecult.caching.unity` | Unity UPM | tagged directly (no build script; see "Coverage gaps") |
 | `org.gamecult.cultmath` | Unity UPM | `packages/cultmath/scripts/build-unity-package.ps1`, consumed by git tag |
-| `@gamecult/cultcache-ts` | npm | `.github/workflows/publish-packages.yml` |
+| `@gamecult/cultcache-ts` | npm | `.github/workflows/publish-packages.yml`, `workflow_dispatch` only; npm publishing is off (see "Coverage gaps") |
 | `cultcache-py` | PyPI | `.github/workflows/publish-packages.yml` |
 | `cultnet-py` | PyPI | `.github/workflows/publish-packages.yml` |
 | `cultmesh-py` | PyPI | `.github/workflows/publish-packages.yml` |
@@ -198,8 +198,8 @@ or a missing declaration refuses), and:
    proof: with no tag of its own prefix it is a first release. The suite test
    that pins every declared prefix guards it: each prefix is declared once, each
    workflow tag trigger must be a declared prefix, and each such package's prefix
-   must be a workflow trigger or, for the Caching Unity package the workflow does
-   not build, the prefix of tags that hold its own manifest at the tag's own
+   must be a workflow trigger or, for a package the workflow does not tag-trigger
+   (the Caching Unity package, `cultcache-ts`), the prefix of tags that hold its own manifest at the tag's own
    version, so a typo or a copied prefix fails the suite. Nothing releases
    without the suite passing; see below for how each release path runs it.
    Releases run from a full clone with every tag (`fetch-depth: 0` in CI), the
