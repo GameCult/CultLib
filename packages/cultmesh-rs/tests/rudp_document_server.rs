@@ -2963,11 +2963,8 @@ fn only_reliable_non_sequenced_writes_are_accepted_on_a_receipt_session() -> Res
 
     let unordered = send_with(&mut peer, &mut server, "s1", false, false)?;
     assert!(unordered.contains(&admitted("s1", "note:1")), "reliable unordered is accepted, and the id was not consumed: {unordered:?}");
-    // A fresh peer: an ordered stream waits on the sequence numbers the refused packet used.
-    let mut ordered_peer = RawPeer::connect(&mut server, 251)?;
-    ordered_peer.send(&receipt_hello())?;
-    server.poll_once()?;
-    let ordered = send_with(&mut ordered_peer, &mut server, "o1", true, false)?;
+    // The same peer: the refused packet was acknowledged, so an ordered stream does not wait on its sequence number.
+    let ordered = send_with(&mut peer, &mut server, "o1", true, false)?;
     assert!(ordered.contains(&admitted("o1", "note:1")), "reliable ordered is accepted: {ordered:?}");
     assert_eq!(sink.0.lock().unwrap().receipts.len(), 2);
 
@@ -2983,6 +2980,35 @@ fn only_reliable_non_sequenced_writes_are_accepted_on_a_receipt_session() -> Res
     let none = send_with(&mut legacy, &mut legacy_server, "l1", false, true)?;
     assert!(none.is_empty(), "a legacy session is sent nothing: {none:?}");
     assert_eq!(legacy_sink.0.lock().unwrap().receipts.len(), 1, "and its reliable-sequenced write is applied as before");
+    Ok(())
+}
+
+/// A refused write is traffic: the peer that sends it is not idle, so its session outlives the idle timeout measured
+/// from the refusal and not from the packet before it.
+#[test]
+fn a_refused_write_keeps_the_session_from_going_idle() -> Result<()> {
+    let clock = Clock::new(70_000);
+    let options = CultMeshRudpDocumentServerOptions { session_idle_timeout: Duration::from_secs(1), ..Default::default() };
+    let mut server = server(options, clock.clone(), Sink::default(), Source::default())?;
+    let mut peer = RawPeer::connect(&mut server, 252)?;
+    peer.send(&receipt_hello())?;
+    server.poll_once()?;
+    for (at, reliable, sequenced) in [(70_700, false, false), (71_400, true, true)] {
+        clock.set(at);
+        let payload = encode_cultnet_message_to_vec(&put("idle", "note:1", vec![1]), CultNetWireContract::CultNetSchemaV0)?;
+        let packets = peer.session.send_many(
+            "schema",
+            payload,
+            cultnet_rs::CultNetRudpSendOptions { reliable, ordered: false, sequenced, now_ms: at, reliable_expire_after_ms: None },
+            Some(1200),
+        )?;
+        for packet in &packets {
+            peer.send_packet(packet)?;
+        }
+        server.poll_once()?;
+        assert_eq!(server.maintain()?.sessions_expired, 0, "the refused write at {at} is activity");
+    }
+    assert_eq!(server.session_count(), 1);
     Ok(())
 }
 

@@ -753,15 +753,19 @@ where
             self.packets_dropped += 1;
             return Ok(CultMeshRudpPollOutcome::Handled);
         }
-        if packet.packet_type == CultNetRudpPacketType::Data
-            && packet.channel_id == "schema"
-            && (!packet.reliable || (packet.sequenced && self.receipts(key)))
-        {
-            // A receipt session's write that could be lost without trace (unreliable, or on a sequenced channel
-            // that drops superseded packets) cannot be answered once: it is refused, never applied. Anything
-            // else unreliable is dropped as before.
+        let is_schema_data = packet.packet_type == CultNetRudpPacketType::Data && packet.channel_id == "schema";
+        if is_schema_data && !packet.reliable {
+            // An unreliable write cannot be answered once: a receipt session is refused, never applied, and
+            // anything else unreliable is dropped as before. Either way the peer is not idle.
+            if let Some(entry) = self.sessions.get_mut(&key) {
+                entry.last_activity_monotonic_millis = now_monotonic;
+            }
             return self.refuse_unreliable_write(key, &packet.payload);
         }
+        // A receipt session's write on a sequenced channel (which drops superseded packets) is refused too, but
+        // only after the session has received and acknowledged it: an unacknowledged packet is resent forever
+        // and stalls every later ordered write.
+        let refuse_sequenced = is_schema_data && packet.sequenced && self.receipts(key);
         let payload_charge = if packet.packet_type == CultNetRudpPacketType::Data {
             packet.payload.len()
         } else {
@@ -819,6 +823,14 @@ where
         let mut kept_rejection = None;
         for frame in result.delivered {
             if frame.channel_id != "schema" {
+                continue;
+            }
+            if refuse_sequenced {
+                if let CultMeshRudpPollOutcome::ApplicationRejected(rejection) =
+                    self.refuse_unreliable_write(key, &frame.payload)?
+                {
+                    kept_rejection = Some(rejection);
+                }
                 continue;
             }
             // The capped frame was answered: nothing after it is served while the answer is delivered.
