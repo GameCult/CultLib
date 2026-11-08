@@ -159,6 +159,21 @@ test("tracker: re-sending a known id is the same write and does not restart its 
   assert.equal(t.state("w1")?.outcome, "unconfirmed");
 });
 
+test("tracker: a send past another write's window settles that write at once", () => {
+  const { t, told } = tracker();
+  t.send("w1", 0);
+  t.send("w2", 600);
+  assert.deepEqual(told, [["w1", { outcome: "unconfirmed", reason: "window_elapsed" }]]);
+});
+
+test("tracker: only receipt and error frames answer; any other frame naming the id settles nothing", () => {
+  const { t } = tracker();
+  t.send("w1", 0);
+  t.frame({ schemaVersion: "cultnet.hello.v0", runtimeId: "r", runtimeKind: "k" }, 1);
+  t.frame({ schemaVersion: "cultnet.document_put_raw.v0", messageId: "w1" } as unknown as CultNetMessage, 2);
+  assert.equal(t.state("w1")?.outcome, "pending");
+});
+
 test("tracker: nextDeadlineMs reports the nearest unanswered window, none when all settled", () => {
   const { t } = tracker();
   assert.equal(t.nextDeadlineMs(0), undefined);
