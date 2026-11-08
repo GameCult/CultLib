@@ -17,6 +17,12 @@ export {
   type CultNetRawDocumentRecord,
   type CultNetRawPayloadEncoding,
   CULTNET_ERROR_CODES,
+  CULTNET_ERROR_V1_CODES,
+  CULTNET_WRITE_RECEIPT_MESSAGE_VERSIONS,
+  helloAdvertisesWriteReceipts,
+  type CultNetErrorV1Code,
+  type CultNetErrorV1Message,
+  type CultNetWriteAdmittedMessage,
   cultNetTextError,
   cultNetMessageInvalidError,
   cultNetWriteNotAuthorizedError,
@@ -249,3 +255,15 @@ export {
   type IdunnRuntimePresencePublisher,
   type IdunnRuntimePresencePublisherOptions,
 } from "./idunn-odin-presence-publisher";
+
+export {
+  LEGACY_RESULT_WINDOW_MS,
+  RECEIPT_RESULT_WINDOW_MS,
+  WriteTracker,
+  resultWindowMs,
+  type WriteRecorded,
+  type WriteSettlement,
+  type WriteState,
+  type WriteTrackerOptions,
+  type WriteUnconfirmedReason,
+} from "./write-tracker";

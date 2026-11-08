@@ -9,6 +9,8 @@ import registerSchema from "../contracts/cultnet/cultnet.register.schema.json";
 import verifySchema from "../contracts/cultnet/cultnet.verify.schema.json";
 import loginSuccessSchema from "../contracts/cultnet/cultnet.login-success.schema.json";
 import errorSchema from "../contracts/cultnet/cultnet.error.schema.json";
+import errorV1Schema from "../contracts/cultnet/interop/cultnet.error.v1.schema.json";
+import writeAdmittedSchema from "../contracts/cultnet/interop/cultnet.write-admitted.schema.json";
 import sampleChangeNameSchema from "../contracts/cultnet/cultnet.sample-change-name.schema.json";
 import sampleChatSchema from "../contracts/cultnet/cultnet.sample-chat.schema.json";
 import documentPutSchema from "../contracts/cultnet/cultnet.document-put.schema.json";
@@ -62,6 +64,8 @@ export type CultNetSchemaVersion =
   | "cultnet.verify.v0"
   | "cultnet.login_success.v0"
   | "cultnet.error.v0"
+  | "cultnet.error.v1"
+  | "cultnet.write_admitted.v0"
   | "cultnet.sample.change_name.v0"
   | "cultnet.sample.chat.v0"
   | "cultnet.document_put.v0"
@@ -201,6 +205,11 @@ export const CULTNET_ERROR_CODES = [
 
 export type CultNetErrorCode = (typeof CULTNET_ERROR_CODES)[number];
 
+/** The closed refusal-code set of cultnet.error.v1 (contracts/cultnet/interop/cultnet.error.v1.schema.json): v0's codes plus `limit_reached`. */
+export const CULTNET_ERROR_V1_CODES = [...CULTNET_ERROR_CODES, "limit_reached"] as const;
+
+export type CultNetErrorV1Code = (typeof CULTNET_ERROR_V1_CODES)[number];
+
 /** A refusal that carries text only: `routingHint`, `code` and `details` are written as null, as the reference writes an absent member. */
 export function cultNetTextError(error: string): CultNetErrorMessage {
   return { schemaVersion: "cultnet.error.v0", error, routingHint: null, code: null, details: null };
@@ -253,6 +262,34 @@ export interface CultNetErrorMessage {
   routingHint: CultNetErrorRoutingHint | null;
   code: CultNetErrorCode | null;
   details: CultNetErrorDetails | null;
+}
+
+/**
+ * cultnet.error.v0 plus the `messageId` of the request it answers (nil when no id could be read). Sent only to a
+ * connection whose hello listed both receipt frames (contracts/cultnet/interop/write-receipt.md).
+ */
+export interface CultNetErrorV1Message extends Omit<CultNetErrorMessage, "schemaVersion" | "code"> {
+  schemaVersion: "cultnet.error.v1";
+  code: CultNetErrorV1Code | null;
+  messageId: string | null;
+}
+
+/** The receipt for one admitted put or delete: every key written, the write's `messageId` echoed byte for byte. */
+export interface CultNetWriteAdmittedMessage {
+  schemaVersion: "cultnet.write_admitted.v0";
+  messageId: string;
+  operation: "put" | "delete";
+  schemaId: string;
+  recordKey: string;
+}
+
+/** The two frames a receipt-capable hello lists in `supportedMessageVersions`; a peer lists both or neither. */
+export const CULTNET_WRITE_RECEIPT_MESSAGE_VERSIONS = ["cultnet.write_admitted.v0", "cultnet.error.v1"] as const;
+
+/** True when a hello lists both receipt frames: the only thing that makes a connection receipt-capable. */
+export function helloAdvertisesWriteReceipts(hello: Pick<CultNetHelloMessage, "supportedMessageVersions">): boolean {
+  const listed = hello.supportedMessageVersions ?? [];
+  return CULTNET_WRITE_RECEIPT_MESSAGE_VERSIONS.every((version) => listed.includes(version));
 }
 
 export interface CultNetSampleChangeNameMessage {
@@ -770,6 +807,8 @@ export interface GhostlightAgentStateDocument {
 
 export type CultNetMessage =
   | CultNetHelloMessage
+  | CultNetErrorV1Message
+  | CultNetWriteAdmittedMessage
   | CultNetLoginMessage
   | CultNetRegisterMessage
   | CultNetVerifyMessage
@@ -812,6 +851,8 @@ const CULTNET_MESSAGE_SCHEMAS = [
   verifySchema,
   loginSuccessSchema,
   errorSchema,
+  errorV1Schema,
+  writeAdmittedSchema,
   sampleChangeNameSchema,
   sampleChatSchema,
   documentPutSchema,
@@ -1535,6 +1576,8 @@ export const cultNetSchemas = {
   verifySchema,
   loginSuccessSchema,
   errorSchema,
+  errorV1Schema,
+  writeAdmittedSchema,
   sampleChangeNameSchema,
   sampleChatSchema,
   documentPutSchema,

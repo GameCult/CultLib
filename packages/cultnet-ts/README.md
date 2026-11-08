@@ -289,6 +289,33 @@ maps them back to the exact C# union payload shape at the wire boundary.
   serve and dial commands also exercise schema-v0 over the shared RUDP socket
   transport and advertise both transport profiles.
 
+## Write receipt replay runner
+
+`WriteTracker` is the client half of `contracts/cultnet/interop/write-receipt.md`: a pure state machine on an abstract
+clock that owns one decision, how each sent write settles. `tools/replay-write-receipt-vectors.mjs` replays
+`write-receipt-vectors.json` against it (build first, then `node tools/replay-write-receipt-vectors.mjs`): it prints
+`PASS`/`FAIL` per case and exits nonzero on any failure. Rust and C# port the same runner by implementing this interface
+and replaying the same file.
+
+Tracker interface (times are integer milliseconds on the vector's clock; the constructor takes the window):
+
+| Call | Meaning |
+| --- | --- |
+| `new WriteTracker({ windowMs, onSettle })` | `windowMs` = 5000 when the server's hello lists both `cultnet.write_admitted.v0` and `cultnet.error.v1`, else 500. `onSettle(id, settlement)` fires once per write. |
+| `send(id, atMs)` | A write with that `messageId` was sent. Its window runs from here, not from any transport ack. |
+| `frame(message, atMs)` | A decoded frame arrived. `write_admitted` and `error.v1` settle the write they name; `error.v0`, or `error.v1` with nil `messageId`, refuses a write only when exactly one is unanswered; an id not in flight settles nothing. |
+| `tick(atMs)` | Advance the clock. Every unanswered write with `atMs - sentAt >= windowMs` settles `unconfirmed(window_elapsed)`. `send`, `frame` and `sessionEnd` tick first. |
+| `sessionEnd(atMs)` | Every unanswered write settles `unconfirmed(session_ended)`. |
+| `state(id)` | `pending`, or the settlement plus `recorded`: `admitted_late` / `refused_late`, set by the first answer that arrives after `unconfirmed`. A settlement never changes. |
+
+Runner, per case in `scenarios.cases` (the transport ack is not an input: delivery is not an answer):
+
+1. The fake server states its capability the only way a real one does, in a hello (`server: "receipt"` lists both frames, `"legacy"` lists none); the window comes from that hello and must equal `constants[case.window]`.
+2. Events run in `atMs` order: `send` -> `send(id)`, `frame` -> encode the frame to MessagePack, decode and validate it as the client would, then `frame(message)`, `tick` -> `tick`, `sessionEnd` -> `sessionEnd`, `transportAck` -> nothing.
+3. For each id in `expect`, the settlement given to the caller has the expected `outcome` (and `code` or `reason` when given), `state(id).recorded` equals the expected `recorded` (absent when absent), and nothing settled twice or outside `expect`.
+
+The runner also decodes each `wire[].messagePackHex` and compares the fields and the re-encoded bytes to the vector, and requires every `schemaInvalid[]` frame to be refused by the decoder. `dedupe.cases` and `contentHash` are server vectors and not replayed here.
+
 ## Development
 
 ```bash

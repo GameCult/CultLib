@@ -5,6 +5,10 @@ All notable changes to `@gamecult/cultmesh-ts` are recorded here, following
 
 ## Unreleased
 
+### Added
+
+- `publishRudpDocumentOnce` takes `writeReceipts: true`: it sends a hello listing `cultnet.write_admitted.v0` and `cultnet.error.v1` and, against a server that lists both back, resolves only on that write's `write_admitted`, rejects with `CultMeshRudpWriteRefusedError` (now also carrying an `error.v1`) on its refusal and with the new `CultMeshRudpWriteUnconfirmedError` (`reason`: `window_elapsed` after 5000 ms, or `session_ended`) when nothing settles it. Without the option, or against a server that did not advertise, nothing changes: no hello, a 500 ms window, and a window with no refusal still reads as published (interim; not admission). `resultWindowMs` overrides either window. `publishRudpDocumentAndWaitForReceipt` is not changed.
+
 ### Breaking
 
 - The package is renamed `cultmesh-ts` to `@gamecult/cultmesh-ts` (the repo already scopes `@gamecult/cultcache-ts`), so the unscoped name cannot be claimed by someone else. Import from `@gamecult/cultmesh-ts` and its subpaths; the API is unchanged. Depends on `@gamecult/cultnet-ts`.
