@@ -3424,6 +3424,7 @@ fun main(args: Array<String>) {
         "rudp-dial-message-once" -> rudpDialSchemaMessageOnce(options)
         "serve" -> interopServe(options)
         "dial" -> interopDial(options)
+        "write-receipt-vectors" -> if (!replayWriteReceiptVectors(args.getOrNull(1) ?: error("usage: write-receipt-vectors <vectors.json>"))) kotlin.system.exitProcess(1)
         else -> error("Unknown mode ${args[0]}")
     }
 }

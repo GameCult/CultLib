@@ -1,0 +1,232 @@
+package org.gamecult.cultmesh
+
+// The write receipt (contracts/cultnet/interop/write-receipt.md): the two frames, their strict decode, the dedupe
+// content hash, the hello capability test and the client settle rules. Mirrors packages/cultnet-ts (contracts.ts,
+// write-tracker.ts) and packages/cultnet-rs (write_content_hash). The replay of write-receipt-vectors.json lives in
+// WriteReceiptVectors.kt. Server rules (dedupe, limits, blank fields) are not a decoder's business and are not here.
+
+import java.io.IOException
+import java.security.MessageDigest
+
+const val WRITE_ADMITTED_VERSION = "cultnet.write_admitted.v0"
+const val ERROR_V1_VERSION = "cultnet.error.v1"
+const val ERROR_V0_VERSION = "cultnet.error.v0"
+
+/** A connection is receipt-capable only when its hello lists both frames. */
+val CULTNET_WRITE_RECEIPT_MESSAGE_VERSIONS: List<String> = listOf(WRITE_ADMITTED_VERSION, ERROR_V1_VERSION)
+
+const val RECEIPT_RESULT_WINDOW_MS = 5000L
+const val LEGACY_RESULT_WINDOW_MS = 500L
+
+fun resultWindowMs(serverAdvertisesReceipts: Boolean): Long =
+    if (serverAdvertisesReceipts) RECEIPT_RESULT_WINDOW_MS else LEGACY_RESULT_WINDOW_MS
+
+/** The closed refusal-code set of error.v0; error.v1 adds `limit_reached`. */
+val CULTNET_ERROR_V0_CODES: Set<String> = setOf(
+    "selection_invalid", "cursor_stale", "cursor_invalid", "reference_outside_target", "variant_unsupported",
+    "unowned_schema", "write_not_authorized", "unsupported_schema_version", "message_invalid",
+)
+val CULTNET_ERROR_V1_CODES: Set<String> = CULTNET_ERROR_V0_CODES + "limit_reached"
+
+fun helloAdvertisesWriteReceipts(hello: CultNetMessage): Boolean {
+    val versions = hello.body["supportedMessageVersions"] as? List<*> ?: return false
+    return CULTNET_WRITE_RECEIPT_MESSAGE_VERSIONS.all { it in versions }
+}
+
+data class CultNetWriteAdmitted(val messageId: String, val operation: String, val schemaId: String, val recordKey: String) {
+    fun toMessage() = CultNetMessage(
+        WRITE_ADMITTED_VERSION,
+        linkedMapOf("messageId" to messageId, "operation" to operation, "schemaId" to schemaId, "recordKey" to recordKey),
+    )
+}
+
+data class CultNetErrorDetails(val field: String?, val value: String?, val asOf: Long?, val current: Long?)
+
+/** error.v0 (`messageId` always null, `version` 0) or error.v1 (`version` 1). */
+data class CultNetErrorFrame(
+    val version: Int,
+    val error: String,
+    val routingHint: Map<String, Any?>?,
+    val code: String?,
+    val details: CultNetErrorDetails?,
+    val messageId: String?,
+) {
+    fun toMessage(): CultNetMessage {
+        val body = linkedMapOf<String, Any?>(
+            "error" to error,
+            "routingHint" to routingHint,
+            "code" to code,
+            "details" to details?.let {
+                linkedMapOf("field" to it.field, "value" to it.value, "asOf" to it.asOf, "current" to it.current)
+            },
+        )
+        if (version == 1) body["messageId"] = messageId
+        return CultNetMessage(if (version == 1) ERROR_V1_VERSION else ERROR_V0_VERSION, body)
+    }
+}
+
+/**
+ * Strict decode of a write_admitted.v0 message against its closed schema: exactly five keys, a non-empty string each,
+ * operation put|delete.
+ */
+fun decodeWriteAdmitted(message: CultNetMessage): CultNetWriteAdmitted {
+    if (message.schemaVersion != WRITE_ADMITTED_VERSION) throw IOException("not a $WRITE_ADMITTED_VERSION message")
+    closedKeys(message, setOf("messageId", "operation", "schemaId", "recordKey"))
+    val operation = nonEmpty(message, "operation")
+    if (operation != "put" && operation != "delete") throw IOException("operation must be put or delete")
+    return CultNetWriteAdmitted(nonEmpty(message, "messageId"), operation, nonEmpty(message, "schemaId"), nonEmpty(message, "recordKey"))
+}
+
+/** Strict decode of error.v0 (no messageId, no limit_reached) or error.v1 (messageId required, string or nil, never empty). */
+fun decodeErrorFrame(message: CultNetMessage): CultNetErrorFrame {
+    val version = when (message.schemaVersion) {
+        ERROR_V1_VERSION -> 1
+        ERROR_V0_VERSION -> 0
+        else -> throw IOException("not an error message")
+    }
+    closedKeys(message, setOf("error", "routingHint", "code", "details") + if (version == 1) setOf("messageId") else emptySet())
+    val error = nonEmpty(message, "error")
+    val codeValue = message.body["code"]
+    if (codeValue != null && (codeValue !is String || codeValue !in (if (version == 1) CULTNET_ERROR_V1_CODES else CULTNET_ERROR_V0_CODES))) {
+        throw IOException("unknown error code")
+    }
+    var messageId: String? = null
+    if (version == 1) {
+        val id = message.body["messageId"]
+        if (id != null && (id !is String || id.isEmpty())) throw IOException("messageId must be a non-empty string or nil")
+        messageId = id as String?
+    }
+    return CultNetErrorFrame(version, error, routingHintOf(message.body["routingHint"]), codeValue as String?, detailsOf(message.body["details"]), messageId)
+}
+
+private fun closedKeys(message: CultNetMessage, required: Set<String>) {
+    if (!message.body.keys.containsAll(required)) throw IOException("${message.schemaVersion} is missing ${required - message.body.keys}")
+    val unknown = message.body.keys - required
+    if (unknown.isNotEmpty()) throw IOException("${message.schemaVersion} carries unknown keys $unknown")
+}
+
+private fun nonEmpty(message: CultNetMessage, key: String): String {
+    val value = message.body[key]
+    if (value !is String || value.isEmpty()) throw IOException("$key must be a non-empty string")
+    return value
+}
+
+private fun routingHintOf(value: Any?): Map<String, Any?>? {
+    if (value == null) return null
+    if (value !is Map<*, *> || value.keys != setOf("shard", "reason")) throw IOException("routingHint must be nil or {shard, reason}")
+    if (value["shard"] != null && value["shard"] !is Map<*, *>) throw IOException("routingHint.shard must be an object or nil")
+    if (value["reason"] !is String) throw IOException("routingHint.reason must be a string")
+    @Suppress("UNCHECKED_CAST")
+    return value as Map<String, Any?>
+}
+
+private fun detailsOf(value: Any?): CultNetErrorDetails? {
+    if (value == null) return null
+    if (value !is Map<*, *> || value.keys != setOf("field", "value", "asOf", "current")) {
+        throw IOException("details must be nil or {field, value, asOf, current}")
+    }
+    fun text(key: String): String? = value[key].let { if (it == null || it is String) it as String? else throw IOException("details.$key must be a string or nil") }
+    fun cursor(key: String): Long? = value[key].let {
+        if (it == null) null else if (it is Long && it >= 0) it else throw IOException("details.$key must be a non-negative integer or nil")
+    }
+    return CultNetErrorDetails(text("field"), text("value"), cursor("asOf"), cursor("current"))
+}
+
+/** sha256 of the MessagePack array [operation, schemaId, recordKey, payload]: payload a bin for a put, nil for a delete. Lowercase hex. */
+fun writeContentHash(operation: String, schemaId: String, recordKey: String, payload: ByteArray?): String {
+    val writer = MessagePackWriter().array(4).string(operation).string(schemaId).string(recordKey)
+    if (payload == null) writer.nil() else writer.binary(payload)
+    return MessageDigest.getInstance("SHA-256").digest(writer.toByteArray()).joinToString("") { "%02x".format(it) }
+}
+
+/** Why nothing settled a write. */
+enum class WriteUnconfirmedReason(val wire: String) { WINDOW_ELAPSED("window_elapsed"), SESSION_ENDED("session_ended"), LOCAL_SEND_FAILED("local_send_failed") }
+
+/** What a late answer is recorded as on a write that already settled unconfirmed. */
+enum class WriteRecorded(val wire: String) { ADMITTED_LATE("admitted_late"), REFUSED_LATE("refused_late") }
+
+/** What the caller was told. Settled once; never changed by a later frame. */
+sealed class WriteSettlement {
+    object Admitted : WriteSettlement()
+    data class Refused(val code: String?, val error: String, val response: CultNetErrorFrame) : WriteSettlement()
+    data class Unconfirmed(val reason: WriteUnconfirmedReason) : WriteSettlement()
+}
+
+/**
+ * The client half of the receipt rules: a pure state machine with an abstract clock, one decision, how each sent write
+ * settles. Transport, timers and decoding belong to the caller; `frame` takes a message and decodes it strictly.
+ */
+class WriteTracker(private val windowMs: Long, private val onSettle: (String, WriteSettlement) -> Unit = { _, _ -> }) {
+    private class Entry(val sentAtMs: Long) {
+        var settlement: WriteSettlement? = null
+        var recorded: WriteRecorded? = null
+    }
+
+    private val writes = linkedMapOf<String, Entry>()
+
+    /** Registers a write sent at [atMs]. Re-sending a known id is the same write and does not restart its window. */
+    fun send(messageId: String, atMs: Long) {
+        tick(atMs)
+        writes.getOrPut(messageId) { Entry(atMs) }
+    }
+
+    /** Feeds one received message. Only write_admitted, error.v1 and error.v0 answer; anything else is ignored. */
+    fun frame(message: CultNetMessage, atMs: Long) {
+        tick(atMs)
+        when (message.schemaVersion) {
+            WRITE_ADMITTED_VERSION -> {
+                answer(decodeWriteAdmitted(message).messageId, WriteSettlement.Admitted, WriteRecorded.ADMITTED_LATE)
+                return
+            }
+            ERROR_V1_VERSION, ERROR_V0_VERSION -> {
+                val error = decodeErrorFrame(message)
+                val refusal = WriteSettlement.Refused(error.code, error.error, error)
+                if (error.messageId != null) {
+                    answer(error.messageId, refusal, WriteRecorded.REFUSED_LATE)
+                    return
+                }
+                // An error that names no write is attributable only when exactly one write is unanswered.
+                val unanswered = writes.filterValues { it.settlement == null }
+                if (unanswered.size == 1) settle(unanswered.keys.first(), unanswered.values.first(), refusal)
+            }
+            else -> return
+        }
+    }
+
+    /** Every unanswered write whose window, counted from its own send, has run settles unconfirmed. */
+    fun tick(atMs: Long) {
+        for ((id, entry) in writes) {
+            if (entry.settlement == null && atMs - entry.sentAtMs >= windowMs) settle(id, entry, WriteSettlement.Unconfirmed(WriteUnconfirmedReason.WINDOW_ELAPSED))
+        }
+    }
+
+    fun sessionEnd(atMs: Long) {
+        tick(atMs)
+        for ((id, entry) in writes) if (entry.settlement == null) settle(id, entry, WriteSettlement.Unconfirmed(WriteUnconfirmedReason.SESSION_ENDED))
+    }
+
+    /** This client's own send of [messageId] failed: that write settles unconfirmed; the others are untouched. */
+    fun sendFailed(messageId: String, atMs: Long) {
+        val entry = writes[messageId]
+        if (entry != null && entry.settlement == null) settle(messageId, entry, WriteSettlement.Unconfirmed(WriteUnconfirmedReason.LOCAL_SEND_FAILED))
+        tick(atMs)
+    }
+
+    /** The settlement told to the caller, or null while unanswered or unknown. */
+    fun settlement(messageId: String): WriteSettlement? = writes[messageId]?.settlement
+
+    /** The late answer recorded on an unconfirmed write. */
+    fun recorded(messageId: String): WriteRecorded? = writes[messageId]?.recorded
+
+    private fun answer(messageId: String, settlement: WriteSettlement, late: WriteRecorded) {
+        val entry = writes[messageId] ?: return // names a write that is not in flight: settles nothing
+        val current = entry.settlement
+        if (current == null) settle(messageId, entry, settlement)
+        else if (current is WriteSettlement.Unconfirmed && entry.recorded == null) entry.recorded = late
+    }
+
+    private fun settle(messageId: String, entry: Entry, settlement: WriteSettlement) {
+        entry.settlement = settlement
+        onSettle(messageId, settlement)
+    }
+}
