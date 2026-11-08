@@ -18,7 +18,7 @@ Why a new error version and not an extra key on v0: the v0 schema is closed (`ad
 
 ## Capability: opting in
 
-A connection is receipt-capable when its `cultnet.hello.v0` (sent before its first write; the schema channel is reliable and ordered) lists both `cultnet.write_admitted.v0` and `cultnet.error.v1` in `supportedMessageVersions`. A server MUST NOT send either new frame to any other connection, and answers it exactly as before (no receipt, `error.v0`). A receipt-capable server lists both in its own hello, so a client can tell a legacy server from a receipt server that has not answered yet. A client that sends no hello gets legacy behaviour.
+A connection is receipt-capable when its `cultnet.hello.v0` (sent before its first write; the schema channel is reliable and ordered) lists both `cultnet.write_admitted.v0` and `cultnet.error.v1` in `supportedMessageVersions`. A server MUST NOT send either new frame to any other connection, and answers it exactly as before (no receipt, `error.v0`). A receipt-capable server lists both in its own hello, so a client can tell a legacy server from a receipt server that has not answered yet. A client that sends no hello gets legacy behaviour. A server advertises the two frames in its hello only if it implements the receipt rules end to end.
 
 **The capability changes framing only; it never authorizes.** A hello authenticates nothing and grants nothing: who may write, and which keys, is decided by the server from the transport-authenticated actor exactly as without the capability. Declaring the capability never makes a refused write admitted, never widens an actor's authority, and never changes what a write does; it selects only which frame the answer arrives in.
 
@@ -60,6 +60,14 @@ Those clients complete *successfully* when the window ends with no refusal. Unde
 ## Vectors
 
 `write-receipt-vectors.json`: `constants` (the named windows and retention), `contentHash` (worked dedupe hashes), `dedupe` (server replay cases for rule 5), `wire` (MessagePack hex plus the decoded message for each new frame; the bytes are spec-authored with msgpack-python and every runtime's first conformance PR re-captures them with its own encoder and must match), `schemaInvalid` (frames that must be refused by a validator, each with why), and `scenarios` (event replays with the outcome each write must settle as; the clock is abstract; each case names its window constant). A conformant client passes every scenario; a conformant server's answers for the same inputs satisfy server rules 1 to 7.
+
+## Conformance status
+
+| Implementation | Receipt-capable | Hello advertises the frames |
+|---|---|---|
+| C# RUDP schema server (`src/GameCult.Networking/CultNetRudpSchemaServer.cs`) | no | no |
+
+It is not receipt-capable and must not advertise the frames until it implements the rules end to end.
 
 ## Conformance follow-ups (not in this PR)
 
