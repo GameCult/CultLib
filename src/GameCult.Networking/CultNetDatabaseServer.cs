@@ -390,15 +390,24 @@ namespace GameCult.Networking
             }
         }
 
-        // A refusal: error.v1 carrying the write's id for a receipt-capable connection, the v0 error for any other.
-        // An empty or blank schemaId or recordKey names no record: refused as a frame that does not read, exactly as the Rust
-        // server's decoder refuses it (write-receipt.md, "Required fields"), never handed to the store.
+        // A write that names nothing is refused as a frame that does not read, exactly as the Rust server's decoder refuses it
+        // (write-receipt.md, "Required fields"), never handed to the store: a blank schemaId, recordKey or storedAt, an empty
+        // payload, and a source id or tag that is present but blank.
         private static bool IsUnreadableWriteTarget(string? schemaId, string? recordKey) =>
             string.IsNullOrWhiteSpace(schemaId) || string.IsNullOrWhiteSpace(recordKey);
 
-        private static CultNetErrorMessage UnreadableWriteTarget() =>
-            CultNetErrorMessage.ForMessageInvalid("message", "the message could not be read");
+        private static bool IsUnreadableDocument(CultNetRawDocumentRecord document) =>
+            IsUnreadableWriteTarget(document.SchemaId, document.RecordKey)
+            || string.IsNullOrWhiteSpace(document.StoredAt)
+            || document.Payload == null || document.Payload.Length == 0
+            || IsPresentButBlank(document.SourceRuntimeId)
+            || IsPresentButBlank(document.SourceAgentId)
+            || IsPresentButBlank(document.SourceRole)
+            || document.Tags != null && document.Tags.Any(tag => string.IsNullOrWhiteSpace(tag));
 
+        private static bool IsPresentButBlank(string? value) => value != null && string.IsNullOrWhiteSpace(value);
+
+        // A refusal: error.v1 carrying the write's id for a receipt-capable connection, the v0 error for any other.
         private static void Refuse(CultNetServerPeer peer, CultNetReceiptedWrite? write, CultNetErrorMessage error)
         {
             if (write != null) write.Refused(error);
@@ -439,9 +448,9 @@ namespace GameCult.Networking
                 return;
             }
 
-            if (IsUnreadableWriteTarget(message.Document!.SchemaId, message.Document.RecordKey))
+            if (IsUnreadableDocument(message.Document!))
             {
-                Refuse(peer, write, UnreadableWriteTarget());
+                Refuse(peer, write, CultNetErrorMessage.ForUnreadableMessage());
                 return;
             }
 
@@ -522,7 +531,7 @@ namespace GameCult.Networking
 
             if (IsUnreadableWriteTarget(message.SchemaId, message.RecordKey))
             {
-                Refuse(peer, write, UnreadableWriteTarget());
+                Refuse(peer, write, CultNetErrorMessage.ForUnreadableMessage());
                 return;
             }
 

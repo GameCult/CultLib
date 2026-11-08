@@ -588,6 +588,13 @@ namespace GameCult.Networking
             };
 
         /// <summary>
+        /// The refusal of a frame that does not read, or whose write names nothing (write-receipt.md, Fixed texts):
+        /// <c>message_invalid</c>, details <c>{ field: "message" }</c>, and the one fixed text. A decoder's own text never reaches the wire.
+        /// </summary>
+        public static CultNetErrorMessage ForUnreadableMessage() =>
+            ForMessageInvalid("message", "the message could not be read");
+
+        /// <summary>
         /// Builds the wire error for a cursor refusal (R-N): code <c>cursor_stale</c> with details
         /// <c>{ asOf, current }</c>, or code <c>cursor_invalid</c> with no details.
         /// </summary>

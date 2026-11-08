@@ -1,7 +1,9 @@
 #nullable enable
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
@@ -1029,6 +1031,83 @@ namespace GameCult.Networking.Tests
             var error = AssertRefused(wire.Sent.Single(), "m1", "message_invalid");
             Assert.That(error.Details!.Field, Is.EqualTo("message"));
             Assert.That(rig.TextOf(KeyA), Is.Null);
+        }
+
+        private static JsonElement Vectors()
+        {
+            var directory = new DirectoryInfo(TestContext.CurrentContext.TestDirectory);
+            while (directory != null && !File.Exists(Path.Combine(directory.FullName, "CultLib.sln")))
+                directory = directory.Parent;
+            var path = Path.Combine(directory!.FullName, "contracts", "cultnet", "interop", "write-receipt-vectors.json");
+            return JsonDocument.Parse(File.ReadAllText(path)).RootElement.Clone();
+        }
+
+        public static IEnumerable<string> BlankFieldCases() =>
+            Vectors().GetProperty("blankFields").GetProperty("cases").EnumerateArray().Select(c => c.GetProperty("name").GetString()!);
+
+        // The one fixed text of a frame that does not read or a write that names nothing, read from the vector that carries it.
+        private static string UnreadableVectorText() =>
+            Vectors().GetProperty("wire").EnumerateArray()
+                .Single(v => v.GetProperty("name").GetString() == "error_v1_empty_schema_id_is_unreadable_and_names_the_write")
+                .GetProperty("message").GetProperty("error").GetString()!;
+
+        // write-receipt-vectors.json `blankFields`: every case, on a receipt-capable and on a legacy connection. The rig's put is
+        // the valid document; the case's `set` replaces the named fields (the vectors' payload bytes stand for any non-empty payload).
+        [Test]
+        public async Task APutThatNamesNothingIsRefusedAsUnreadableAndANamedOneIsAdmitted(
+            [ValueSource(nameof(BlankFieldCases))] string name, [Values] bool capable)
+        {
+            var vectors = Vectors().GetProperty("blankFields").GetProperty("cases").EnumerateArray()
+                .Single(c => c.GetProperty("name").GetString() == name);
+            var rig = Build();
+            var wire = new Wire();
+            if (capable) await rig.Hello(wire, BothFrames);
+            wire.Sent.Clear();
+            var message = rig.PutOf("m1", KeyA, "one");
+            var document = message.Document!;
+            foreach (var field in vectors.GetProperty("set").EnumerateObject())
+            {
+                var value = field.Value;
+                var text = value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+                switch (field.Name)
+                {
+                    case "schemaId": document.SchemaId = text!; break;
+                    case "recordKey": document.RecordKey = text!; break;
+                    case "storedAt": document.StoredAt = text!; break;
+                    case "payloadHex": document.Payload = Convert.FromHexString(text!); break;
+                    case "sourceRuntimeId": document.SourceRuntimeId = text; break;
+                    case "sourceAgentId": document.SourceAgentId = text; break;
+                    case "sourceRole": document.SourceRole = text; break;
+                    case "tags": document.Tags = value.ValueKind == JsonValueKind.Null ? null : value.EnumerateArray().Select(t => t.GetString()!).ToArray(); break;
+                    default: Assert.Fail($"unknown field {field.Name}"); break;
+                }
+            }
+
+            await rig.PutHandler(message, wire.Peer);
+
+            if (vectors.GetProperty("outcome").GetString() == "admitted")
+            {
+                if (capable) AssertAdmitted(wire.Sent.Single(), "m1", "put", document.RecordKey);
+                else Assert.That(wire.Sent, Is.Empty, "a legacy connection is sent no receipt");
+                Assert.That(rig.TextOf(KeyA), Is.EqualTo("one"));
+                return;
+            }
+
+            var refused = wire.Sent.Single();
+            var error = capable ? AssertRefused(refused, "m1", "message_invalid").ToV0() : (CultNetErrorMessage)refused;
+            Assert.That(error.Code, Is.EqualTo("message_invalid"));
+            Assert.That(error.Details!.Field, Is.EqualTo("message"));
+            Assert.That(error.Error, Is.EqualTo(UnreadableVectorText()));
+            Assert.That(rig.TextOf(KeyA), Is.Null, "a write that names nothing is never applied");
+        }
+
+        // The fixed text is also what an undecodable frame is answered with, from the transport, not a decoder's wording.
+        [Test]
+        public async Task AnUnreadableSchemaFrameIsAnsweredWithTheFixedText()
+        {
+            var (_, wire) = await Capable();
+            wire.Transport.AnswerUnreadableSchemaFrame(new byte[] { 0xC1 });
+            Assert.That(AssertRefused(wire.Sent.Single(), null, "message_invalid").Error, Is.EqualTo(UnreadableVectorText()));
         }
 
         [TestCase("", "k")]
