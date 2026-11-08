@@ -359,6 +359,26 @@ pub enum CultNetMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         details: Option<CultNetErrorDetails>,
     },
+    /// `cultnet.error.v1` (contracts/cultnet/interop/write-receipt.md): `cultnet.error.v0` plus the id of the
+    /// request it answers. Sent only to a connection that declared the write-receipt capability.
+    #[serde(skip_deserializing)]
+    #[serde(rename = "cultnet.error.v1", rename_all = "camelCase")]
+    ErrorV1 {
+        error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<CultNetErrorCode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<CultNetErrorDetails>,
+        message_id: Option<String>,
+    },
+    /// `cultnet.write_admitted.v0`: the receipt for one admitted put or delete, sent after its commit point.
+    #[serde(rename = "cultnet.write_admitted.v0", rename_all = "camelCase")]
+    WriteAdmitted {
+        message_id: String,
+        operation: String,
+        schema_id: String,
+        record_key: String,
+    },
     #[serde(rename = "cultnet.sample.change_name.v0", rename_all = "camelCase")]
     SampleChangeName { name: String },
     #[serde(rename = "cultnet.sample.chat.v0", rename_all = "camelCase")]
@@ -543,7 +563,8 @@ pub fn encode_cultnet_message_for_wire(
             | CultNetMessage::SnapshotResponseRawV1 { .. }
             | CultNetMessage::ContentChunkRequest { .. }
             | CultNetMessage::ContentChunkResponse { .. }
-            | CultNetMessage::Error { .. } => encode_raw_cultnet_schema_message(message),
+            | CultNetMessage::Error { .. }
+            | CultNetMessage::ErrorV1 { .. } => encode_raw_cultnet_schema_message(message),
             _ => Ok(cultcache_rs::decode_payload(&rmp_serde::to_vec(
                 &serde_json::to_value(message)?,
             )?)?),
@@ -573,7 +594,8 @@ pub fn decode_cultnet_message_from_slice(
                     | "cultnet.snapshot_response_raw.v0"
                     | "cultmesh.content_chunk_request.v1"
                     | "cultmesh.content_chunk_response.v1"
-                    | "cultnet.error.v0",
+                    | "cultnet.error.v0"
+                    | "cultnet.error.v1",
                 ) => parse_raw_cultnet_schema_message(&wire_value)
                     .with_context(|| received_version_label(&wire_value))?,
                 _ => cultcache_rs::decode_payload::<CultNetMessage>(bytes)
@@ -645,6 +667,20 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
             require_non_empty(session, "session")?;
         }
         CultNetMessage::Error { error, code: _, details: _ } => require_non_empty(error, "error")?,
+        CultNetMessage::ErrorV1 { error, message_id, .. } => {
+            require_non_empty(error, "error")?;
+            if let Some(message_id) = message_id {
+                require_non_empty(message_id, "messageId")?;
+            }
+        }
+        CultNetMessage::WriteAdmitted { message_id, operation, schema_id, record_key } => {
+            require_non_empty(message_id, "messageId")?;
+            if operation != "put" && operation != "delete" {
+                return Err(anyhow!("operation must be put or delete"));
+            }
+            require_non_empty(schema_id, "schemaId")?;
+            require_non_empty(record_key, "recordKey")?;
+        }
         CultNetMessage::SampleChangeName { name } => require_non_empty(name, "name")?,
         CultNetMessage::SampleChat { text } => require_non_empty(text, "text")?,
         CultNetMessage::DocumentDelete {
@@ -1021,7 +1057,7 @@ fn parse_raw_cultnet_schema_message(input: &rmpv::Value) -> Result<CultNetMessag
                 .to_vec(),
             error: require_legacy_string(get("error"), "error")?,
         }),
-        "cultnet.error.v0" => {
+        "cultnet.error.v0" | "cultnet.error.v1" => {
             let code = get("code")
                 .filter(|value| !value.is_nil())
                 .map(|value| {
@@ -1032,11 +1068,19 @@ fn parse_raw_cultnet_schema_message(input: &rmpv::Value) -> Result<CultNetMessag
                 })
                 .transpose()?;
             let details = require_error_details(get("details"), "ErrorMessage.Details")?;
-            Ok(CultNetMessage::Error {
-                error: require_legacy_string(get("error"), "ErrorMessage.Error")?,
-                code,
-                details,
-            })
+            let error = require_legacy_string(get("error"), "ErrorMessage.Error")?;
+            if schema_version == "cultnet.error.v1" {
+                return Ok(CultNetMessage::ErrorV1 {
+                    error,
+                    code,
+                    details,
+                    message_id: match get("messageId") {
+                        None | Some(rmpv::Value::Nil) => None,
+                        other => Some(require_legacy_string(other, "messageId")?),
+                    },
+                });
+            }
+            Ok(CultNetMessage::Error { error, code, details })
         }
         _ => Err(anyhow!(
             "Unsupported raw cultnet.schema.v0 message"
@@ -1252,6 +1296,36 @@ fn encode_raw_cultnet_schema_message(message: &CultNetMessage) -> Result<rmpv::V
                 details
                     .as_ref()
                     .map(encode_error_details)
+                    .unwrap_or(rmpv::Value::Nil),
+            ),
+        ],
+        CultNetMessage::ErrorV1 {
+            error,
+            code,
+            details,
+            message_id,
+        } => vec![
+            (rmpv::Value::from("schemaVersion"), rmpv::Value::from("cultnet.error.v1")),
+            (rmpv::Value::from("error"), rmpv::Value::from(error.as_str())),
+            (rmpv::Value::from("routingHint"), rmpv::Value::Nil),
+            (
+                rmpv::Value::from("code"),
+                code.as_ref()
+                    .map(|code| rmpv::Value::from(code.as_wire_str()))
+                    .unwrap_or(rmpv::Value::Nil),
+            ),
+            (
+                rmpv::Value::from("details"),
+                details
+                    .as_ref()
+                    .map(encode_error_details)
+                    .unwrap_or(rmpv::Value::Nil),
+            ),
+            (
+                rmpv::Value::from("messageId"),
+                message_id
+                    .as_deref()
+                    .map(rmpv::Value::from)
                     .unwrap_or(rmpv::Value::Nil),
             ),
         ],
@@ -1883,4 +1957,25 @@ fn legacy_schema_descriptor(schema: &CultNetSchemaDescriptor) -> Result<rmpv::Va
                 .unwrap_or(rmpv::Value::Nil),
         ),
     ]))
+}
+
+/// The content hash a write-receipt server binds to a `(actor, messageId)` dedupe key
+/// (contracts/cultnet/interop/write-receipt.md, rule 5): SHA-256 of the MessagePack array
+/// `[operation, schemaId, recordKey, payload]`, `payload` a `bin` for a put and nil for a delete.
+pub fn write_content_hash(
+    operation: &str,
+    schema_id: &str,
+    record_key: &str,
+    payload: Option<&[u8]>,
+) -> Result<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    let value = rmpv::Value::Array(vec![
+        rmpv::Value::from(operation),
+        rmpv::Value::from(schema_id),
+        rmpv::Value::from(record_key),
+        payload.map_or(rmpv::Value::Nil, |payload| rmpv::Value::Binary(payload.to_vec())),
+    ]);
+    let mut bytes = Vec::new();
+    rmpv::encode::write_value(&mut bytes, &value)?;
+    Ok(Sha256::digest(&bytes).into())
 }

@@ -2056,3 +2056,165 @@ fn the_grace_deadline_does_not_wrap_at_the_end_of_the_clock() -> Result<()> {
     assert_eq!(server.session_count(), 1);
     Ok(())
 }
+
+// Write receipts (contracts/cultnet/interop/write-receipt.md). A connection whose hello lists both new frames is
+// answered with `write_admitted.v0` or `error.v1`, each carrying the write's id; any other connection is answered
+// exactly as before.
+
+fn receipt_hello() -> CultNetMessage {
+    CultNetMessage::Hello {
+        runtime_id: "receipt-client".into(),
+        runtime_kind: "test".into(),
+        agent_id: None,
+        role: None,
+        display_name: None,
+        supported_document_types: None,
+        supported_mutation_contracts: None,
+        supported_message_versions: Some(vec![
+            "cultnet.write_admitted.v0".into(),
+            "cultnet.error.v1".into(),
+        ]),
+        transport_profiles: None,
+        supports_schema_catalog: None,
+    }
+}
+
+fn put(id: &str, key: &str, payload: Vec<u8>) -> CultNetMessage {
+    CultNetMessage::DocumentPutRaw {
+        message_id: id.into(),
+        document: document(key, payload),
+    }
+}
+
+/// Polls the server until `client` has `count` schema frames or the polling runs out; rejections are expected here.
+fn frames_after<Q: CultMeshRudpSnapshotSource>(
+    server: &mut CultMeshRudpDocumentServer<Sink, Q, Clock>,
+    client: &mut CultNetRudpSocketTransportConnection,
+    count: usize,
+) -> Result<Vec<CultNetMessage>> {
+    let mut frames = Vec::new();
+    for _ in 0..600 {
+        server.poll_once()?;
+        client.poll_resends()?;
+        while let Some(frame) = client.receive_once()? {
+            if frame.channel_id == "schema" {
+                frames.push(decode_cultnet_message_from_slice(
+                    &frame.payload,
+                    CultNetWireContract::CultNetSchemaV0,
+                )?);
+            }
+        }
+        if frames.len() >= count {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    Ok(frames)
+}
+
+fn admitted(id: &str, key: &str) -> CultNetMessage {
+    CultNetMessage::WriteAdmitted {
+        message_id: id.into(),
+        operation: "put".into(),
+        schema_id: "test.raw.v1".into(),
+        record_key: key.into(),
+    }
+}
+
+#[test]
+fn an_admitted_put_on_a_receipt_connection_is_answered_with_a_receipt_carrying_its_id() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 201)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    send_reliable(&mut peer, &put("m1", "note:1", vec![1, 2, 3]))?;
+    assert_eq!(frames_after(&mut server, &mut peer, 1)?, vec![admitted("m1", "note:1")]);
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_connection_without_the_capability_gets_no_receipt() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 202)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &put("m1", "note:1", vec![1, 2, 3]))?;
+    assert_eq!(frames_after(&mut server, &mut peer, 1)?, vec![]);
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 1, "the put was admitted all the same");
+    Ok(())
+}
+
+#[test]
+fn a_resend_of_an_admitted_write_is_re_receipted_without_applying_it_twice() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 203)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    send_reliable(&mut peer, &put("m1", "note:1", vec![1, 2, 3]))?;
+    send_reliable(&mut peer, &put("m1", "note:1", vec![1, 2, 3]))?;
+    assert_eq!(
+        frames_after(&mut server, &mut peer, 2)?,
+        vec![admitted("m1", "note:1"), admitted("m1", "note:1")]
+    );
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn the_same_id_with_other_content_is_refused_message_invalid_never_re_receipted() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 204)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    send_reliable(&mut peer, &put("m1", "note:1", vec![1, 2, 3]))?;
+    send_reliable(&mut peer, &put("m1", "note:1", vec![9, 9, 9]))?;
+    let frames = frames_after(&mut server, &mut peer, 2)?;
+    assert_eq!(frames[0], admitted("m1", "note:1"));
+    let CultNetMessage::ErrorV1 { code, details, message_id, .. } = &frames[1] else {
+        panic!("the second answer must be a refusal, got {:?}", frames[1]);
+    };
+    assert_eq!(*code, Some(CultNetErrorCode::MessageInvalid));
+    assert_eq!(message_id.as_deref(), Some("m1"));
+    assert_eq!(details.as_ref().and_then(|d| d.field.as_deref()), Some("messageId"));
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 1, "the changed write was not applied");
+    Ok(())
+}
+
+#[test]
+fn a_refused_put_on_a_receipt_connection_is_a_typed_error_naming_its_id() -> Result<()> {
+    let sink = Sink::fail_once();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 205)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    send_reliable(&mut peer, &put("m7", "note:7", vec![1]))?;
+    let frames = frames_after(&mut server, &mut peer, 1)?;
+    let Some(CultNetMessage::ErrorV1 { code, message_id, .. }) = frames.first() else {
+        panic!("expected error.v1, got {frames:?}");
+    };
+    assert_eq!(*code, Some(CultNetErrorCode::WriteNotAuthorized));
+    assert_eq!(message_id.as_deref(), Some("m7"));
+    Ok(())
+}
+
+#[test]
+fn a_hello_listing_only_one_of_the_two_frames_does_not_opt_in() -> Result<()> {
+    for listed in ["cultnet.write_admitted.v0", "cultnet.error.v1"] {
+        let sink = Sink::default();
+        let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+        let mut peer = client(server.local_addr()?, 206)?;
+        connect(&mut server, &mut [&mut peer])?;
+        let mut hello = receipt_hello();
+        if let CultNetMessage::Hello { supported_message_versions, .. } = &mut hello {
+            *supported_message_versions = Some(vec![listed.into()]);
+        }
+        send_reliable(&mut peer, &hello)?;
+        send_reliable(&mut peer, &put("m1", "note:1", vec![1]))?;
+        assert_eq!(frames_after(&mut server, &mut peer, 1)?, vec![], "listed only {listed}");
+    }
+    Ok(())
+}

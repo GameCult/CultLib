@@ -3,9 +3,9 @@ use cultnet_rs::{
     CultNetErrorCode, CultNetErrorDetails, CultNetMessage, CultNetRawDocumentRecord, CultNetRudpPacket, CultNetRudpPacketType,
     CultNetRudpSendOptions, CultNetRudpSession, CultNetRudpSessionOptions, CultNetWireContract,
     decode_cultnet_message_from_slice, decode_rudp_packet, encode_cultnet_message_to_vec,
-    encode_rudp_packet, is_permanent_send_error, send_error_code,
+    encode_rudp_packet, is_permanent_send_error, send_error_code, write_content_hash,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 #[cfg(test)]
 use std::collections::BTreeSet;
 use std::io::ErrorKind;
@@ -258,6 +258,9 @@ pub enum CultMeshRudpRejectionReason {
     DeleteNotSupported,
     /// A schema frame did not decode as a CultNet message. Carries the decoder's error text.
     MessageUnreadable(String),
+    /// A receipt-capable session sent a message id it already used for a write with other content
+    /// (write-receipt.md, rule 5). Nothing reached the sink; the first write's state is unchanged.
+    MessageIdReused,
 }
 
 impl std::fmt::Display for CultMeshRudpRejectionReason {
@@ -266,6 +269,7 @@ impl std::fmt::Display for CultMeshRudpRejectionReason {
             Self::SinkRefused(error) | Self::SnapshotSourceFailed(error) => f.write_str(error),
             Self::DeleteNotSupported => f.write_str("the server does not take deletes"),
             Self::MessageUnreadable(error) => write!(f, "message could not be read: {error}"),
+            Self::MessageIdReused => f.write_str("the message id was already used for different content"),
             Self::DocumentUnservable {
                 response_bytes,
                 max_snapshot_response_bytes,
@@ -306,7 +310,7 @@ impl std::fmt::Display for CultMeshRudpRejectionReason {
 /// The texts a refused peer is sent, one per rejection variant. They are fixed:
 /// a sink's or source's error text can quote what a peer sent, so it stays with
 /// the caller that receives the rejection and never reaches the wire.
-pub(crate) const REFUSAL_TEXTS: [&str; 11] = [
+pub(crate) const REFUSAL_TEXTS: [&str; 12] = [
     "the catalog refused the document",
     "the document can never be served",
     "the snapshot source failed",
@@ -318,6 +322,7 @@ pub(crate) const REFUSAL_TEXTS: [&str; 11] = [
     "the snapshot response could not be sent",
     "the server does not take deletes",
     "the message could not be read",
+    "the message id was already used for different content",
 ];
 
 impl CultMeshRudpRejectionReason {
@@ -335,6 +340,7 @@ impl CultMeshRudpRejectionReason {
             Self::ResponseSendFailed(_) => 8,
             Self::DeleteNotSupported => 9,
             Self::MessageUnreadable(_) => 10,
+            Self::MessageIdReused => 11,
         }]
     }
 }
@@ -384,7 +390,23 @@ impl CultMeshRudpApplicationRejection {
     /// What the refused peer is sent: a refused put or delete is a typed `write_not_authorized` naming
     /// the record, an unreadable frame a typed `message_invalid` naming `message`; every other rejection
     /// is the variant's fixed text, untyped. None carries the sink's, source's or decoder's own text.
-    fn refusal_message(&self) -> CultNetMessage {
+    ///
+    /// A receipt-capable session is sent `cultnet.error.v1` naming the refused message's id; any other
+    /// session the v0 error it has always been sent.
+    fn refusal_message(&self, receipts: bool) -> CultNetMessage {
+        let refusal = self.v0_refusal_message();
+        match refusal {
+            CultNetMessage::Error { error, code, details } if receipts => CultNetMessage::ErrorV1 {
+                error,
+                code,
+                details,
+                message_id: Some(self.message_id.clone()).filter(|id| !id.is_empty()),
+            },
+            other => other,
+        }
+    }
+
+    fn v0_refusal_message(&self) -> CultNetMessage {
         let text = self.reason.refusal_text();
         match (&self.reason, &self.record_key) {
             (
@@ -394,6 +416,9 @@ impl CultMeshRudpApplicationRejection {
             ) => write_refused_message(record_key, text),
             (CultMeshRudpRejectionReason::MessageUnreadable(_), _) => {
                 message_invalid_message("message", text)
+            }
+            (CultMeshRudpRejectionReason::MessageIdReused, _) => {
+                message_invalid_message("messageId", text)
             }
             _ => CultNetMessage::Error {
                 error: text.into(),
@@ -431,7 +456,17 @@ struct SessionEntry {
     /// Set once the peer's capped frame has been answered: the session ends when the answer is acknowledged,
     /// or at this time.
     ending_deadline_monotonic_millis: Option<u64>,
+    /// The peer's hello listed `cultnet.write_admitted.v0` and `cultnet.error.v1`: its writes are answered
+    /// with a receipt or an `error.v1` naming the write's id (write-receipt.md). Framing only; it grants nothing.
+    receipts: bool,
+    /// Admitted writes of a receipt-capable session: message id -> content hash, so a resend of the same
+    /// content is re-receipted without being applied again and the same id with other content is refused.
+    admitted_writes: HashMap<String, [u8; 32]>,
 }
+
+/// The most admitted writes a receipt-capable session remembers; a session at the limit refuses new writes
+/// (`PayloadBudgetFull`) rather than forget an id it promised to answer idempotently.
+const MAX_REMEMBERED_WRITES_PER_SESSION: usize = 1024;
 
 /// A synchronous, multi-session CultNet RUDP raw-document server.
 ///
@@ -687,7 +722,7 @@ where
                 if (is_unreadable || is_delete)
                     && run.is_some_and(|run| run < MAX_CONSECUTIVE_REFUSED_FRAMES)
                 {
-                    let refusal = rejection.refusal_message();
+                    let refusal = rejection.refusal_message(self.receipts(key));
                     let packets = match self.sessions.remove(&key) {
                         Some(mut entry) => {
                             let packets = self.refusal_packets(&mut entry.session, &refusal, false);
@@ -715,7 +750,7 @@ where
                         CultMeshRudpRejectionReason::ResponseSendFailed(_)
                     )
                 {
-                    let refusal = rejection.refusal_message();
+                    let refusal = rejection.refusal_message(self.receipts(key));
                     let packets = match self.sessions.remove(&key) {
                         Some(mut entry) => {
                             let packets = self.refusal_packets(&mut entry.session, &refusal, true);
@@ -752,7 +787,7 @@ where
                     rejection.reason,
                     CultMeshRudpRejectionReason::ResponseSendFailed(_)
                 ) {
-                    self.end_session(key, SessionEnd::Rejected(rejection.refusal_message()))?;
+                    self.end_session(key, SessionEnd::Rejected(rejection.refusal_message(self.receipts(key))))?;
                 }
                 return Ok(CultMeshRudpPollOutcome::ApplicationRejected(rejection));
             }
@@ -892,6 +927,8 @@ where
                         undecodable_frames_in_a_row: 0,
                         refused_deletes_in_a_row: 0,
                         ending_deadline_monotonic_millis: None,
+                        receipts: false,
+                        admitted_writes: HashMap::new(),
                     },
                 );
                 accept
@@ -927,6 +964,39 @@ where
                         reason,
                     }))
                 };
+                let content_hash = match write_content_hash(
+                    "put",
+                    &document.schema_id,
+                    &document.record_key,
+                    Some(&document.payload),
+                ) {
+                    Ok(hash) => hash,
+                    Err(error) => {
+                        return reject(CultMeshRudpRejectionReason::ResponseEncodingFailed(
+                            format!("{error:#}"),
+                        ));
+                    }
+                };
+                let remembered = self
+                    .sessions
+                    .get(&key)
+                    .filter(|entry| entry.receipts)
+                    .map(|entry| (entry.admitted_writes.get(&message_id).copied(), entry.admitted_writes.len()));
+                if let Some((prior, remembered_count)) = remembered {
+                    match prior {
+                        Some(prior) if prior == content_hash => {
+                            self.send_write_admitted(key, now, &message_id, &document.schema_id, &document.record_key);
+                            return Ok(None);
+                        }
+                        Some(_) => return reject(CultMeshRudpRejectionReason::MessageIdReused),
+                        None if remembered_count >= MAX_REMEMBERED_WRITES_PER_SESSION => {
+                            return reject(CultMeshRudpRejectionReason::PayloadBudgetFull);
+                        }
+                        None => {}
+                    }
+                }
+                let (receipt_schema_id, receipt_record_key) =
+                    (document.schema_id.clone(), document.record_key.clone());
                 // Admit only what some snapshot request can return: the smallest
                 // response that could carry this document is the record the snapshot
                 // source would serve for it, alone, under the shortest message id
@@ -973,6 +1043,25 @@ where
                     return reject(CultMeshRudpRejectionReason::SinkRefused(format!(
                         "{error:#}"
                     )));
+                }
+                // Admitted: the sink holds it. Only now is a receipt owed, never before the commit point.
+                if let Some(entry) = self.sessions.get_mut(&key).filter(|entry| entry.receipts) {
+                    entry.admitted_writes.insert(message_id.clone(), content_hash);
+                    self.send_write_admitted(key, now, &message_id, &receipt_schema_id, &receipt_record_key);
+                }
+            }
+            CultNetMessage::Hello {
+                supported_message_versions,
+                ..
+            } => {
+                let listed = |version: &str| {
+                    supported_message_versions
+                        .iter()
+                        .flatten()
+                        .any(|candidate| candidate == version)
+                };
+                if let Some(entry) = self.sessions.get_mut(&key) {
+                    entry.receipts = listed("cultnet.write_admitted.v0") && listed("cultnet.error.v1");
                 }
             }
             CultNetMessage::SnapshotRequest {
@@ -1114,6 +1203,51 @@ where
         Ok(None)
     }
 
+    /// Sends the receipt for an admitted put. Best effort: the write is already committed, so a receipt that
+    /// cannot be queued or sent is dropped and the peer's own window settles the write as unconfirmed. It is
+    /// never answered with a refusal, which would make an admitted write look refused.
+    fn send_write_admitted(
+        &mut self,
+        key: CultMeshRudpSessionKey,
+        now: u64,
+        message_id: &str,
+        schema_id: &str,
+        record_key: &str,
+    ) {
+        let receipt = CultNetMessage::WriteAdmitted {
+            message_id: message_id.into(),
+            operation: "put".into(),
+            schema_id: schema_id.into(),
+            record_key: record_key.into(),
+        };
+        let Ok(payload) = encode_cultnet_message_to_vec(&receipt, CultNetWireContract::CultNetSchemaV0) else {
+            return;
+        };
+        let max_fragment_bytes = self.options.max_fragment_bytes;
+        let Some(entry) = self.sessions.get_mut(&key) else {
+            return;
+        };
+        let Ok(packets) = entry.session.send_many(
+            "schema",
+            payload,
+            CultNetRudpSendOptions {
+                reliable: true,
+                ordered: true,
+                sequenced: false,
+                now_ms: now,
+                reliable_expire_after_ms: None,
+            },
+            Some(max_fragment_bytes),
+        ) else {
+            return;
+        };
+        for packet in &packets {
+            if !matches!(self.send_packet(key.remote_addr, packet), Ok(None)) {
+                break;
+            }
+        }
+    }
+
     /// Ends a session before its peer is done with it, and says goodbye. It is
     /// the one way a session ends early: every end removes the session, sends
     /// what the peer is owed, then the goodbye.
@@ -1155,6 +1289,10 @@ where
     }
 
     /// The refusal a rejected peer is sent: unreliable and unordered, or (`reliable`) queued like any response.
+    fn receipts(&self, key: CultMeshRudpSessionKey) -> bool {
+        self.sessions.get(&key).is_some_and(|entry| entry.receipts)
+    }
+
     fn refusal_packets(
         &self,
         session: &mut CultNetRudpSession,
