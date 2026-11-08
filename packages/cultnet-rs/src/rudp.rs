@@ -2198,6 +2198,7 @@ impl CultNetRudpSocketTransportConnection {
         self.send_packet(&packet)
     }
 
+    /// Fire-and-forget: an ack or a return is not admission; read the result frame.
     pub fn send(&mut self, channel_id: &str, payload: Vec<u8>) -> Result<()> {
         let options =
             channel_send_options(
@@ -2216,6 +2217,8 @@ impl CultNetRudpSocketTransportConnection {
 
     /// Sends one frame on a reliable channel whose packets cannot expire and
     /// returns the transport receipt used to observe its exact acknowledgement.
+    ///
+    /// Fire-and-forget: an ack or a return is not admission; read the result frame.
     pub fn send_reliable(
         &mut self,
         channel_id: &str,
@@ -2309,6 +2312,9 @@ impl CultNetRudpSocketTransportConnection {
         self.session.outstanding_reliable_packet_count()
     }
 
+    /// Waits until every reliable write is acknowledged by the transport.
+    ///
+    /// Fire-and-forget: an ack or a return is not admission; read the result frame.
     pub fn flush_reliable(&mut self, timeout: Duration) -> Result<()> {
         let original_timeout = self.socket.read_timeout()?;
         let poll_timeout = original_timeout
