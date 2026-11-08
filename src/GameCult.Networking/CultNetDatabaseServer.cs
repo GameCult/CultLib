@@ -416,9 +416,17 @@ namespace GameCult.Networking
         private async Task HandlePutAsync(CultNetDocumentPutRawMessage message, CultNetServerPeer peer)
         {
             var write = BeginReceipted(peer, "put", message.MessageId, message.Document?.SchemaId, message.Document?.RecordKey, message.Document?.Payload);
-            if (write != null && !write.HasId)
+            var idRefusal = write?.IdRefusal;
+            if (idRefusal != null)
             {
-                write.Refused(CultNetErrorMessage.ForMessageInvalid("messageId", "a write needs a messageId"));
+                write!.Refused(idRefusal);
+                return;
+            }
+
+            var missing = message.Document == null ? "document" : message.Document.SchemaId == null ? "schemaId" : null;
+            if (missing != null)
+            {
+                Refuse(peer, write, CultNetErrorMessage.ForMessageInvalid(missing, $"{missing} is required"));
                 return;
             }
 
@@ -484,9 +492,16 @@ namespace GameCult.Networking
         private async Task HandleDeleteAsync(CultNetDocumentDeleteMessage message, CultNetServerPeer peer)
         {
             var write = BeginReceipted(peer, "delete", message.MessageId, message.SchemaId, message.RecordKey, null);
-            if (write != null && !write.HasId)
+            var idRefusal = write?.IdRefusal;
+            if (idRefusal != null)
             {
-                write.Refused(CultNetErrorMessage.ForMessageInvalid("messageId", "a write needs a messageId"));
+                write!.Refused(idRefusal);
+                return;
+            }
+
+            if (message.SchemaId == null)
+            {
+                Refuse(peer, write, CultNetErrorMessage.ForMessageInvalid("schemaId", "schemaId is required"));
                 return;
             }
 

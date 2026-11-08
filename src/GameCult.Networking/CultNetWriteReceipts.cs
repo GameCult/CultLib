@@ -47,73 +47,138 @@ namespace GameCult.Networking
         }
     }
 
+    /// <summary>A SHA-256 digest held by value: the fixed-size stand-in for an id or a content hash.</summary>
+    internal readonly struct CultNetDigest : IEquatable<CultNetDigest>
+    {
+        private readonly ulong _a, _b, _c, _d;
+
+        private CultNetDigest(ulong a, ulong b, ulong c, ulong d) { _a = a; _b = b; _c = c; _d = d; }
+
+        public static CultNetDigest Of(byte[] bytes)
+        {
+            using var sha = SHA256.Create();
+            var hash = sha.ComputeHash(bytes);
+            return new CultNetDigest(
+                BitConverter.ToUInt64(hash, 0), BitConverter.ToUInt64(hash, 8),
+                BitConverter.ToUInt64(hash, 16), BitConverter.ToUInt64(hash, 24));
+        }
+
+        public bool Equals(CultNetDigest other) => _a == other._a && _b == other._b && _c == other._c && _d == other._d;
+        public override bool Equals(object? obj) => obj is CultNetDigest other && Equals(other);
+        public override int GetHashCode() => unchecked((int)_a ^ (int)(_a >> 32));
+        public static bool operator ==(CultNetDigest left, CultNetDigest right) => left.Equals(right);
+        public static bool operator !=(CultNetDigest left, CultNetDigest right) => !left.Equals(right);
+    }
+
     /// <summary>
     /// One receipt-capable peer's writes: message id to content hash and the answer given, refusals included, so a resend of the
-    /// same content is answered again without being decided again and the same id with other content is refused.
+    /// same content is answered again without being decided again and the same id with other content is refused. Ids and content
+    /// hashes are held as fixed-size digests; the answer is held as its kind (and, for a refusal, its code, text and details),
+    /// never the strings of the write.
     /// </summary>
     internal sealed class CultNetWriteReceiptSession
     {
         /// <summary>The most writes a peer is remembered for, refused ones included; a peer at the limit has new writes refused.</summary>
         internal const int MaxRememberedWrites = 1024;
 
+        /// <summary>The most ids refused at the limit that are remembered, so their resend is judged the same way.</summary>
+        internal const int MaxRememberedLimitRefusals = 1024;
+
+        /// <summary>The longest messageId a write may carry, in UTF-8 bytes (write-receipt.md, Id size).</summary>
+        internal const int MaxMessageIdBytes = 256;
+
         /// <summary>What a write is refused with when it failed for a reason no typed refusal names. Never an exception's own text.</summary>
         internal const string WriteFailedText = "the write could not be applied";
 
         private readonly object _gate = new();
-        private readonly Dictionary<string, Entry> _writes = new(StringComparer.Ordinal);
+        private readonly Dictionary<CultNetDigest, Entry> _writes = new();
+        private readonly Dictionary<CultNetDigest, CultNetDigest> _limitRefusals = new();
 
         private sealed class Entry
         {
-            public Entry(byte[] hash) { Hash = hash; }
-            public byte[] Hash { get; }
-            public ICultNetSchemaMessage? Answer { get; set; }
+            public Entry(CultNetDigest hash) { Hash = hash; }
+            public CultNetDigest Hash { get; set; }
+            public bool Abandoned { get; set; }
+            public bool Admitted { get; set; }
+            public CultNetErrorMessage? Refusal { get; set; }
         }
 
-        public enum Begin { New, Replay, Unanswered, DifferentContent, Full }
+        public enum Begin { New, ReplayAdmitted, ReplayRefusal, Unanswered, DifferentContent, Full }
+
+        private static CultNetDigest IdDigest(string messageId) => CultNetDigest.Of(System.Text.Encoding.UTF8.GetBytes(messageId));
 
         /// <summary>
         /// Looks <paramref name="messageId"/> up first. An id not seen is claimed for this content (<see cref="Begin.New"/>);
-        /// otherwise the outcome says what already holds it, and <paramref name="answer"/> is the answer to replay.
+        /// otherwise the outcome says what already holds it, and <paramref name="refusal"/> is the refusal to repeat.
         /// </summary>
-        public Begin TryBegin(string messageId, byte[] hash, out ICultNetSchemaMessage? answer)
+        public Begin TryBegin(string messageId, byte[] hash, out CultNetErrorMessage? refusal)
         {
+            var id = IdDigest(messageId);
+            var content = CultNetDigest.Of(hash);
             lock (_gate)
             {
-                answer = null;
-                if (_writes.TryGetValue(messageId, out var entry))
+                refusal = null;
+                if (_writes.TryGetValue(id, out var entry))
                 {
-                    if (!CryptographicOperations.FixedTimeEquals(entry.Hash, hash)) return Begin.DifferentContent;
-                    if (entry.Answer != null)
+                    if (entry.Abandoned)
                     {
-                        answer = entry.Answer;
-                        return Begin.Replay;
+                        // Not sent, so judged afresh in the slot it already holds; no slot is ever freed.
+                        entry.Abandoned = false;
+                        entry.Hash = content;
+                        return Begin.New;
+                    }
+
+                    if (entry.Hash != content) return Begin.DifferentContent;
+                    if (entry.Admitted) return Begin.ReplayAdmitted;
+                    if (entry.Refusal != null)
+                    {
+                        refusal = entry.Refusal;
+                        return Begin.ReplayRefusal;
                     }
 
                     // No answer yet: the first attempt is still being applied, or its primary left it unanswered for good.
                     return Begin.Unanswered;
                 }
 
-                if (_writes.Count >= MaxRememberedWrites) return Begin.Full;
-                _writes[messageId] = new Entry(hash);
+                if (_writes.Count >= MaxRememberedWrites)
+                {
+                    if (_limitRefusals.TryGetValue(id, out var refused)) return refused == content ? Begin.Full : Begin.DifferentContent;
+                    if (_limitRefusals.Count < MaxRememberedLimitRefusals) _limitRefusals[id] = content;
+                    return Begin.Full;
+                }
+
+                _writes[id] = new Entry(content);
                 return Begin.New;
             }
         }
 
-        /// <summary>The write was answered, admitted or refused: remember the answer so a resend repeats it.</summary>
-        public void Answered(string messageId, ICultNetSchemaMessage answer)
+        /// <summary>The write was admitted: remember it so a resend repeats the receipt.</summary>
+        public void Admitted(string messageId)
         {
             lock (_gate)
             {
-                if (_writes.TryGetValue(messageId, out var entry)) entry.Answer = answer;
+                if (_writes.TryGetValue(IdDigest(messageId), out var entry)) entry.Admitted = true;
             }
         }
 
-        /// <summary>The write never reached anyone who could have applied it: forget it so a repeat is judged afresh.</summary>
+        /// <summary>The write was refused: remember the refusal so a resend repeats it.</summary>
+        public void Refused(string messageId, CultNetErrorMessage refusal)
+        {
+            lock (_gate)
+            {
+                if (_writes.TryGetValue(IdDigest(messageId), out var entry)) entry.Refusal = refusal;
+            }
+        }
+
+        /// <summary>
+        /// The write never reached anyone who could have applied it: a repeat is judged afresh. The entry keeps its slot, so
+        /// forgetting a write never makes room for an id that was refused at the limit.
+        /// </summary>
         public void Abandoned(string messageId)
         {
             lock (_gate)
             {
-                _writes.Remove(messageId);
+                if (_writes.TryGetValue(IdDigest(messageId), out var entry)) entry.Abandoned = true;
             }
         }
     }
@@ -193,15 +258,19 @@ namespace GameCult.Networking
         /// </summary>
         public bool Begin()
         {
-            var outcome = _session.TryBegin(_messageId, CultNetWriteContentHash.Compute(_operation, _schemaId, _recordKey, _payload), out var answer);
+            var outcome = _session.TryBegin(_messageId, CultNetWriteContentHash.Compute(_operation, _schemaId, _recordKey, _payload), out var refusal);
             switch (outcome)
             {
                 case CultNetWriteReceiptSession.Begin.New:
                     _claimed = true;
                     return true;
-                case CultNetWriteReceiptSession.Begin.Replay:
+                case CultNetWriteReceiptSession.Begin.ReplayAdmitted:
                     _answered = true;
-                    _send(answer!);
+                    _send(AdmittedReceipt());
+                    return false;
+                case CultNetWriteReceiptSession.Begin.ReplayRefusal:
+                    _answered = true;
+                    _send(CultNetErrorV1Message.From(refusal!, _messageId));
                     return false;
                 case CultNetWriteReceiptSession.Begin.Unanswered:
                     // The first attempt is still being applied and will answer this id, or its primary left it unanswered:
@@ -218,20 +287,21 @@ namespace GameCult.Networking
             }
         }
 
+        private CultNetWriteAdmittedMessage AdmittedReceipt() => new()
+        {
+            MessageId = _messageId,
+            Operation = _operation,
+            SchemaId = _schemaId,
+            RecordKey = _recordKey
+        };
+
         /// <summary>The write committed: remember the receipt and send it.</summary>
         public void Admitted()
         {
             if (_answered) return;
             _answered = true;
-            var receipt = new CultNetWriteAdmittedMessage
-            {
-                MessageId = _messageId,
-                Operation = _operation,
-                SchemaId = _schemaId,
-                RecordKey = _recordKey
-            };
-            if (_claimed) _session.Answered(_messageId, receipt);
-            _send(receipt);
+            if (_claimed) _session.Admitted(_messageId);
+            _send(AdmittedReceipt());
         }
 
         /// <summary>The write was refused: remember the refusal (a resend repeats it) and send its one error.v1.</summary>
@@ -240,7 +310,7 @@ namespace GameCult.Networking
             if (_answered) return;
             _answered = true;
             var refusal = CultNetErrorV1Message.From(error, _messageId);
-            if (_claimed) _session.Answered(_messageId, refusal);
+            if (_claimed) _session.Refused(_messageId, error);
             _send(refusal);
         }
 
@@ -263,7 +333,15 @@ namespace GameCult.Networking
             _claimed = false;
         }
 
-        /// <summary>A missing id cannot be answered under rule 1; refuse it with no id.</summary>
-        public bool HasId => _messageId.Length > 0;
+        /// <summary>
+        /// Why the write's id cannot be used at all, before anything is remembered: it is missing (refused with no id) or longer
+        /// than <see cref="CultNetWriteReceiptSession.MaxMessageIdBytes"/> UTF-8 bytes. Null when the id is usable.
+        /// </summary>
+        public CultNetErrorMessage? IdRefusal =>
+            _messageId.Length == 0
+                ? CultNetErrorMessage.ForMessageInvalid("messageId", "a write needs a messageId")
+                : System.Text.Encoding.UTF8.GetByteCount(_messageId) > CultNetWriteReceiptSession.MaxMessageIdBytes
+                    ? CultNetErrorMessage.ForMessageInvalid("messageId", "messageId exceeds 256 bytes")
+                    : null;
     }
 }

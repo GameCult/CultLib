@@ -873,5 +873,192 @@ namespace GameCult.Networking.Tests
         {
             Assert.That(new CultNetSchemaWriteForwarderOptions().ResultWindow, Is.EqualTo(CultNetWriteCompletion.ReceiptResultWindow));
         }
+
+        // ---- Heimdall round two ----
+
+        private static string IdOfBytes(int bytes) => new string('i', bytes);
+
+        [Test]
+        public async Task AnIdOver256BytesIsRefusedBeforeAnythingIsRemembered()
+        {
+            var (rig, wire) = await Capable();
+            var tooLong = IdOfBytes(257);
+
+            await rig.Put(wire, tooLong, KeyA, "one");
+            await rig.Put(wire, tooLong, KeyA, "one");
+
+            Assert.That(wire.Sent, Has.Count.EqualTo(2));
+            foreach (var sent in wire.Sent)
+            {
+                var error = AssertRefused(sent, tooLong, "message_invalid");
+                Assert.That(error.Details!.Field, Is.EqualTo("messageId"));
+                Assert.That(error.Error, Is.EqualTo("message_invalid: messageId exceeds 256 bytes"));
+            }
+
+            Assert.That(rig.TextOf(KeyA), Is.Null);
+            // Nothing was remembered: the whole table is still free for admitted writes.
+            wire.Sent.Clear();
+            for (var index = 0; index < CultNetWriteReceiptSession.MaxRememberedWrites; index++)
+                await rig.Put(wire, $"w{index}", new CultRecordKey($"tests:receipt:{index}"), "x");
+            Assert.That(wire.Sent.OfType<CultNetWriteAdmittedMessage>().Count(), Is.EqualTo(CultNetWriteReceiptSession.MaxRememberedWrites));
+        }
+
+        [Test]
+        public async Task TheIdLimitCountsUtf8BytesNotCharacters()
+        {
+            var (rig, wire) = await Capable();
+            var atLimit = IdOfBytes(256);
+            var multibyte = new string('\u00e9', 129); // 129 chars, 258 bytes
+
+            await rig.Put(wire, atLimit, KeyA, "one");
+            await rig.Put(wire, multibyte, KeyB, "two");
+
+            AssertAdmitted(wire.Sent[0], atLimit, "put", KeyA.Value);
+            AssertRefused(wire.Sent[1], multibyte, "message_invalid");
+        }
+
+        [Test]
+        public void ARememberedEntryHoldsOnlyFixedSizeDigestsNotTheStrings()
+        {
+            var flags = BindingFlags.NonPublic | BindingFlags.Instance;
+            var table = typeof(CultNetWriteReceiptSession).GetFields(flags)
+                .Where(f => f.FieldType.IsGenericType && f.FieldType.GetGenericTypeDefinition() == typeof(Dictionary<,>));
+            Assert.That(table, Is.Not.Empty);
+            foreach (var field in table)
+            {
+                var args = field.FieldType.GetGenericArguments();
+                Assert.That(args[0].IsValueType, Is.True, $"{field.Name} is keyed by {args[0]}");
+                foreach (var held in args[1].IsValueType || args[1] == typeof(string) ? new[] { args[1] } : args[1].GetFields(flags).Select(f => f.FieldType).Concat(args[1].GetProperties(flags | BindingFlags.Public).Select(p => p.PropertyType)))
+                {
+                    Assert.That(held == typeof(string) || held == typeof(byte[]), Is.False, $"{field.Name} holds {held}");
+                }
+            }
+        }
+
+        [Test]
+        public async Task AnAdmittedResendIsAnsweredFromDigestsWithTheResendsOwnBody()
+        {
+            var (rig, wire) = await Capable();
+            await rig.Put(wire, "m1", KeyA, "one");
+            await rig.Put(wire, "m1", KeyA, "one");
+
+            AssertAdmitted(wire.Sent[1], "m1", "put", KeyA.Value);
+            Assert.That(rig.LogLength, Is.EqualTo(1));
+        }
+
+        [Test]
+        public async Task ARefusalIsReplayedForAResendAfterTheDigestChange()
+        {
+            var (rig, wire) = await Capable();
+            rig.Authority.Denied.Add(KeyA.Value);
+            await rig.Put(wire, "m1", KeyA, "one");
+            await rig.Put(wire, "m1", KeyA, "one");
+
+            AssertRefused(wire.Sent[0], "m1", "write_not_authorized");
+            AssertRefused(wire.Sent[1], "m1", "write_not_authorized");
+            Assert.That(rig.Authority.Asked, Is.EqualTo(1));
+        }
+
+        [Test]
+        public async Task APutWithNoDocumentIsRefusedNamingTheDocumentWithFixedText([Values] bool capable)
+        {
+            var rig = Build();
+            var wire = new Wire();
+            if (capable) await rig.Hello(wire, BothFrames);
+            wire.Sent.Clear();
+            var message = rig.PutOf("m1", KeyA, "one");
+            message.Document = null!;
+
+            await rig.PutHandler(message, wire.Peer);
+
+            var sent = wire.Sent.Single();
+            var error = capable ? AssertRefused(sent, "m1", "message_invalid").ToV0() : (CultNetErrorMessage)sent;
+            Assert.That(error.Code, Is.EqualTo("message_invalid"));
+            Assert.That(error.Details!.Field, Is.EqualTo("document"));
+            Assert.That(error.Error, Is.EqualTo("message_invalid: document is required"));
+        }
+
+        [Test]
+        public async Task APutWithNoSchemaIdIsRefusedNamingTheSchemaIdWithFixedText()
+        {
+            var (rig, wire) = await Capable();
+            var message = rig.PutOf("m1", KeyA, "one");
+            message.Document.SchemaId = null!;
+
+            await rig.PutHandler(message, wire.Peer);
+
+            var error = AssertRefused(wire.Sent.Single(), "m1", "message_invalid");
+            Assert.That(error.Details!.Field, Is.EqualTo("schemaId"));
+            Assert.That(error.Error, Is.EqualTo("message_invalid: schemaId is required"));
+        }
+
+        [Test]
+        public async Task ADeleteWithNoSchemaIdIsRefusedNamingTheSchemaIdWithFixedText([Values] bool capable)
+        {
+            var rig = Build();
+            var wire = new Wire();
+            if (capable) await rig.Hello(wire, BothFrames);
+            wire.Sent.Clear();
+            var message = rig.DeleteOf("d1", KeyA);
+            message.SchemaId = null!;
+
+            await rig.DeleteHandler(message, wire.Peer);
+
+            var sent = wire.Sent.Single();
+            var error = capable ? AssertRefused(sent, "d1", "message_invalid").ToV0() : (CultNetErrorMessage)sent;
+            Assert.That(error.Details!.Field, Is.EqualTo("schemaId"));
+            Assert.That(error.Error, Is.EqualTo("message_invalid: schemaId is required"));
+        }
+
+        [Test]
+        public async Task ARefusalAtTheCapIsRememberedSoAResendReplaysItAndADifferentContentResendIsRefused()
+        {
+            var (rig, wire) = await Capable();
+            for (var index = 0; index < CultNetWriteReceiptSession.MaxRememberedWrites; index++)
+                await rig.Put(wire, $"w{index}", new CultRecordKey($"tests:receipt:{index}"), "x");
+            wire.Sent.Clear();
+
+            await rig.Put(wire, "over", KeyA, "x");
+            await rig.Put(wire, "over", KeyA, "x");
+            await rig.Put(wire, "over", KeyB, "other");
+
+            AssertRefused(wire.Sent[0], "over", "limit_reached");
+            AssertRefused(wire.Sent[1], "over", "limit_reached");
+            var changed = AssertRefused(wire.Sent[2], "over", "message_invalid");
+            Assert.That(changed.Details!.Field, Is.EqualTo("messageId"));
+            Assert.That(rig.TextOf(KeyA), Is.Null);
+        }
+
+        private static byte[] HashOf(string text) => CultNetWriteContentHash.Compute("put", "s", text, new byte[] { 1 });
+
+        [Test]
+        public void AnAbandonedClaimFreesNoSlotSoARefusedIdNeverBecomesAdmissible()
+        {
+            var session = new CultNetWriteReceiptSession();
+            for (var index = 0; index < CultNetWriteReceiptSession.MaxRememberedWrites; index++)
+                Assert.That(session.TryBegin($"w{index}", HashOf($"k{index}"), out _), Is.EqualTo(CultNetWriteReceiptSession.Begin.New));
+            Assert.That(session.TryBegin("over", HashOf("o"), out _), Is.EqualTo(CultNetWriteReceiptSession.Begin.Full));
+
+            session.Abandoned("w0");
+
+            Assert.That(session.TryBegin("over", HashOf("o"), out _), Is.EqualTo(CultNetWriteReceiptSession.Begin.Full));
+            Assert.That(session.TryBegin("another", HashOf("a"), out _), Is.EqualTo(CultNetWriteReceiptSession.Begin.Full));
+            // The abandoned id itself is judged afresh, in its own slot.
+            Assert.That(session.TryBegin("w0", HashOf("k0"), out _), Is.EqualTo(CultNetWriteReceiptSession.Begin.New));
+        }
+
+        [Test]
+        public void TheRefusalSetIsBoundedAndNeverAdmitsAnId()
+        {
+            var session = new CultNetWriteReceiptSession();
+            for (var index = 0; index < CultNetWriteReceiptSession.MaxRememberedWrites; index++)
+                session.TryBegin($"w{index}", HashOf($"k{index}"), out _);
+            for (var index = 0; index < CultNetWriteReceiptSession.MaxRememberedWrites + 5; index++)
+                Assert.That(session.TryBegin($"o{index}", HashOf("o"), out _), Is.EqualTo(CultNetWriteReceiptSession.Begin.Full));
+
+            session.Abandoned("w1");
+
+            Assert.That(session.TryBegin("o1030", HashOf("o"), out _), Is.EqualTo(CultNetWriteReceiptSession.Begin.Full));
+        }
     }
 }
