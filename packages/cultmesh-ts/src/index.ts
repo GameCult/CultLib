@@ -5543,7 +5543,11 @@ export class CultMesh {
     let sendFailures = 0;
     const resendPollMs = Math.max(10, options.resendPollMs ?? 25);
     const sessionTimeoutMs = Math.max(1_000, options.sessionTimeoutMs ?? 30_000);
-    const decideTimeoutMs = Math.max(1, options.writeAuthorityTimeoutMs ?? CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_DECIDE_TIMEOUT_MS);
+    const decideTimeoutMs = options.writeAuthorityTimeoutMs ?? CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_DECIDE_TIMEOUT_MS;
+    // A timer past 2^31-1 ms (or NaN) fires after 1 ms in Node, which would refuse every write that is not instant.
+    if (!(decideTimeoutMs > 0 && decideTimeoutMs <= 0x7fffffff)) {
+      throw new RangeError("CultMesh RUDP document server writeAuthorityTimeoutMs must be greater than zero and at most 2147483647.");
+    }
     const wireContract = options.wireContract ?? "cultnet.schema.v0";
     const maxFragmentBytes = options.maxFragmentBytes ?? CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_MAX_FRAGMENT_BYTES;
     if (!(maxFragmentBytes > 0)) {

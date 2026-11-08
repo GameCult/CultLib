@@ -251,6 +251,17 @@ test("an authority that never settles refuses after the timeout and does not blo
   });
 });
 
+test("a write authority timeout that is not a usable timer delay is refused at construction", () => {
+  for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 31]) {
+    assert.throws(() => CultMesh.createRudpDocumentServer("authority-server", 1, {
+      documents: new CultNetDocumentRegistry([defineCultNetDocumentBinding({ definition: note })]),
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      writeAuthorityTimeoutMs: bad,
+    }), RangeError, String(bad));
+  }
+});
+
 test("a refusal with no reason still says why, and a missing decision refuses", async () => {
   await using(await rig(new Recording(() => ({ granted: false }))), async (r) => {
     r.peer.send(put(KEY_A));
