@@ -23,7 +23,7 @@ namespace GameCult.Networking
         private const string EmailPattern =
             @"^([0-9a-zA-Z]([\+\-_\.][0-9a-zA-Z]+)*)+@(([0-9a-zA-Z][-\w]*[0-9a-zA-Z]*\.)+[a-zA-Z0-9]{2,17})$";
         private const string UsernamePattern = @"^[A-Za-z0-9]+(?:[ _-][A-Za-z0-9]+)*$";
-        private const int ServerPort = 3075;
+        private const int DefaultPort = 3075;
         private const float SessionTimeoutSeconds = 1800; // 30 minutes
         private const float SessionRefreshThresholdSeconds = 300; // 5 minutes
         private const int MaxConnectionAttemptsPerMinute = 30;
@@ -63,6 +63,12 @@ namespace GameCult.Networking
         /// </summary>
         public bool LogSensitivePayloads { get; set; }
 
+        /// <summary>
+        /// Gets or sets the UDP port <see cref="Start"/> binds (default 3075; 0 asks the OS for a free one). After
+        /// <see cref="Start"/> it holds the port actually bound.
+        /// </summary>
+        public int Port { get; set; } = DefaultPort;
+
         private float Time => (float)(_timer?.Elapsed.TotalSeconds ?? 0d);
 
         /// <summary>
@@ -74,7 +80,7 @@ namespace GameCult.Networking
             {
                 TransportId = "litenetlib-server",
                 Host = "0.0.0.0",
-                Port = ServerPort
+                Port = Port
             });
 
         /// <summary>
@@ -357,7 +363,8 @@ namespace GameCult.Networking
                 UnsyncedEvents = true,
                 NatPunchEnabled = true
             };
-            _netManager.Start(ServerPort);
+            _netManager.Start(Port);
+            Port = _netManager.LocalPort;
 
             listener.NetworkErrorEvent += (point, code) => Logger.LogInfo($"{point.Address}: Error {code}");
 
@@ -406,25 +413,26 @@ namespace GameCult.Networking
                     var frame = transport.Receive(bytes);
                     if (string.Equals(frame.ChannelId, "schema", StringComparison.Ordinal))
                     {
-                        ICultNetSchemaMessage cultNetMessage;
-                        try
-                        {
-                            cultNetMessage = LiteNetLibTransportConnection.DecodeSchema(frame);
-                        }
-                        catch (Exception ex) when (transport.WriteReceipts != null)
-                        {
-                            // A receipt-capable peer is told which frame was unreadable (by its id, if the frame still holds one).
-                            Logger.LogWarning($"CultNet schema frame unreadable: {ex.Message}");
-                            transport.AnswerUnreadableSchemaFrame(frame.Payload);
-                            return;
-                        }
-
+                        var cultNetMessage = LiteNetLibTransportConnection.DecodeSchema(frame);
                         Logger.LogDebug($"Received CultNet schema message {cultNetMessage.SchemaVersion}");
                         await HandleCultNetSchemaMessageAsync(peer, user, cultNetMessage).ConfigureAwait(false);
                         return;
                     }
 
-                    var message = LiteNetLibTransportConnection.DecodeLegacy(frame);
+                    Message message;
+                    try
+                    {
+                        message = LiteNetLibTransportConnection.DecodeLegacy(frame);
+                    }
+                    catch (Exception ex) when (transport.WriteReceipts != null)
+                    {
+                        // A frame that decodes on neither channel is classed legacy, so this is where an unreadable frame lands.
+                        // A receipt-capable peer is told which frame was unreadable (by its id, if the frame still holds one).
+                        Logger.LogWarning($"CultNet frame unreadable: {ex.Message}");
+                        transport.AnswerUnreadableSchemaFrame(frame.Payload);
+                        return;
+                    }
+
                     if (LogSensitivePayloads)
                     {
                         Logger.LogDebug($"Received message: {MessagePackSerializer.ConvertToJson(new ReadOnlyMemory<byte>(frame.Payload))}");
@@ -519,7 +527,7 @@ namespace GameCult.Networking
                 }
             });
 
-            Logger.LogInfo($"Server started on port {ServerPort}.");
+            Logger.LogInfo($"Server started on port {Port}.");
         }
 
         private async Task HandleCultNetSchemaMessageAsync(NetPeer peer, User user, ICultNetSchemaMessage message)
