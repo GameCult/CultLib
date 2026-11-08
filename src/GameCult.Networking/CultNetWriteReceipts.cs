@@ -66,11 +66,10 @@ namespace GameCult.Networking
         {
             public Entry(byte[] hash) { Hash = hash; }
             public byte[] Hash { get; }
-            public bool Silent { get; set; }
             public ICultNetSchemaMessage? Answer { get; set; }
         }
 
-        public enum Begin { New, Replay, InFlight, Silent, DifferentContent, Full }
+        public enum Begin { New, Replay, Unanswered, DifferentContent, Full }
 
         /// <summary>
         /// Looks <paramref name="messageId"/> up first. An id not seen is claimed for this content (<see cref="Begin.New"/>);
@@ -90,7 +89,8 @@ namespace GameCult.Networking
                         return Begin.Replay;
                     }
 
-                    return entry.Silent ? Begin.Silent : Begin.InFlight;
+                    // No answer yet: the first attempt is still being applied, or its primary left it unanswered for good.
+                    return Begin.Unanswered;
                 }
 
                 if (_writes.Count >= MaxRememberedWrites) return Begin.Full;
@@ -105,18 +105,6 @@ namespace GameCult.Networking
             lock (_gate)
             {
                 if (_writes.TryGetValue(messageId, out var entry)) entry.Answer = answer;
-            }
-        }
-
-        /// <summary>
-        /// The primary left a forward unanswered: it may have applied it, so the id is never forwarded again on this session and
-        /// a resend is answered with nothing (the client settles it unconfirmed).
-        /// </summary>
-        public void LeftSilent(string messageId)
-        {
-            lock (_gate)
-            {
-                if (_writes.TryGetValue(messageId, out var entry)) entry.Silent = true;
             }
         }
 
@@ -215,12 +203,9 @@ namespace GameCult.Networking
                     _answered = true;
                     _send(answer!);
                     return false;
-                case CultNetWriteReceiptSession.Begin.InFlight:
-                    // The first attempt is still being applied and will answer this id.
-                    _answered = true;
-                    return false;
-                case CultNetWriteReceiptSession.Begin.Silent:
-                    // The first attempt went to a primary that never answered; this id is never sent again, and stays unanswered.
+                case CultNetWriteReceiptSession.Begin.Unanswered:
+                    // The first attempt is still being applied and will answer this id, or its primary left it unanswered:
+                    // then the claim stays, so the id is never sent again on this session, and the write stays unconfirmed.
                     _answered = true;
                     return false;
                 case CultNetWriteReceiptSession.Begin.DifferentContent:
@@ -260,14 +245,13 @@ namespace GameCult.Networking
         }
 
         /// <summary>
-        /// A forward its primary left unanswered: no answer is owed or possible, and the id is never forwarded again on this
-        /// session. Sends nothing.
+        /// A forward its primary left unanswered: no answer is owed or possible, and the claim stays so the id is never
+        /// forwarded again on this session. Sends nothing.
         /// </summary>
         public void LeftSilent()
         {
             if (_answered) return;
             _answered = true;
-            if (_claimed) _session.LeftSilent(_messageId);
         }
 
         /// <summary>A forward that never reached a primary that could have applied it: forget the claim, send nothing.</summary>
