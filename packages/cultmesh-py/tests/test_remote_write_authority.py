@@ -311,15 +311,12 @@ class RemoteWriteAuthorityTests(unittest.TestCase):
         self.seed(server, KEY_B, "server")
         shards_before = server.node.database.shard_ids()
         for field, value in (("shardId", {"not": "a string"}), ("shardId", 5), ("shardEpoch", "7"), ("shardEpoch", True), ("shardEpoch", 1.5)):
-            for operation, code in (
-                ("put", "malformed_document_put"),
-                ("delete", "malformed_document_delete"),
-            ):
+            for operation in ("put", "delete"):
                 with self.subTest(field=field, value=value, operation=operation):
                     message = put_of(KEY_A, "x") if operation == "put" else delete_of(KEY_B)
                     message[field] = value
                     replies = self.send(server, message)
-                    self.assertEqual([reply["code"] for reply in replies], [code])
+                    self.assertEqual([(reply["code"], reply["details"]["field"]) for reply in replies], [("message_invalid", field)])
         self.assertEqual(authority.requests, [], "the authority was never asked")
         self.assertIsNone(self.text_of(server, KEY_A), "nothing was written")
         self.assertEqual(self.text_of(server, KEY_B), "server", "nothing was deleted")

@@ -316,7 +316,10 @@ test("wrong-typed shard fields on a put are judged with null shard fields, then 
     for (const fields of bad) r.peer.send(put(KEY_A, fields));
     await r.settle();
     assert.equal(r.replies.length, bad.length);
-    assert.ok(r.replies.every((reply) => reply.schemaVersion === "cultnet.error.v0" && reply.code === null && reply.error.startsWith("malformed_document_put:")));
+    assert.deepEqual(
+      r.replies.map((reply) => reply.schemaVersion === "cultnet.error.v0" ? [reply.code, reply.details?.field] : reply),
+      ["shardId", "shardId", "shardEpoch", "shardEpoch", "shardEpoch"].map((field) => ["message_invalid", field]),
+    );
     assert.equal(authority.requests.length, bad.length, "the authority is asked first");
     assert.ok(authority.requests.every((q) => q.shardId === null && q.shardEpoch === null), "with null shard fields");
     assert.equal(r.puts.length, 0);
@@ -493,9 +496,9 @@ test("a granted peer's unreadable write reaches onError and gets a malformed ref
       r.send(h.frame);
       await sleep(250);
       assert.equal(r.replies.length, 1, h.name);
-      const reply = r.replies[0] as { code: unknown; error: string };
-      assert.equal(reply.code, null, h.name);
-      assert.ok(reply.error.startsWith(`malformed_document_${h.operation}:`), h.name);
+      const reply = r.replies[0] as { code: unknown; error: string; details: { field: string } };
+      assert.equal(reply.code, "message_invalid", h.name);
+      assert.equal(reply.details.field, "message", h.name);
       assert.equal(r.errors.length, 1, h.name);
       assert.deepEqual([r.puts.length, r.deletes.length], [0, 0], h.name);
       assert.deepEqual([authority.requests.length, authority.requests[0]!.operation, authority.requests[0]!.recordKey], [1, h.operation, h.recordKey], h.name);

@@ -196,6 +196,7 @@ export const CULTNET_ERROR_CODES = [
   "unowned_schema",
   "write_not_authorized",
   "unsupported_schema_version",
+  "message_invalid",
 ] as const;
 
 export type CultNetErrorCode = (typeof CULTNET_ERROR_CODES)[number];
@@ -216,6 +217,20 @@ export function cultNetWriteNotAuthorizedError(recordKey: string, reason?: strin
     routingHint: null,
     code: "write_not_authorized",
     details: { field: "recordKey", value: recordKey, asOf: null, current: null },
+  };
+}
+
+/**
+ * The refusal for a request that lacks a required field or carries an ill-typed one (C# `CultNetErrorMessage.ForMessageInvalid`):
+ * code `message_invalid`, `details.field` naming that request field.
+ */
+export function cultNetMessageInvalidError(field: string, reason: string): CultNetErrorMessage {
+  return {
+    schemaVersion: "cultnet.error.v0",
+    error: `message_invalid: ${reason}`,
+    routingHint: null,
+    code: "message_invalid",
+    details: { field, value: null, asOf: null, current: null },
   };
 }
 

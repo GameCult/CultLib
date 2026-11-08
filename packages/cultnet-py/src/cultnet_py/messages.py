@@ -44,6 +44,7 @@ CULTNET_ERROR_CODES: tuple[str, ...] = (
     "unowned_schema",
     "write_not_authorized",
     "unsupported_schema_version",
+    "message_invalid",
 )
 
 _ERROR_DETAILS_KEYS = ("field", "value", "asOf", "current")
@@ -183,6 +184,11 @@ def unsupported_schema_version_error(schema_version: Any) -> CultNetMessage:
         code="unsupported_schema_version",
         details={"field": "schemaVersion", "value": value},
     )
+
+
+def message_invalid_error(field: str, reason: str) -> CultNetMessage:
+    """The refusal for a request that lacks a required field or carries an ill-typed one (C# ForMessageInvalid)."""
+    return error_message(f"message_invalid: {reason}", code="message_invalid", details={"field": field})
 
 
 def login_success(

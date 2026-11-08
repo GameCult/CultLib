@@ -4883,7 +4883,8 @@ class CultMeshTests(unittest.TestCase):
         for message_id, refusal in refusals:
             self.assertEqual(refusal["schemaVersion"], "cultnet.error.v0", message_id)
             self.assertEqual(refusal["messageId"], message_id)
-            self.assertEqual(refusal["code"], "malformed_document_put", message_id)
+            self.assertEqual(refusal["code"], "message_invalid", message_id)
+            self.assertEqual(refusal["details"]["field"], "document", message_id)
         self.assertEqual(after["messageId"], "after")
         self.assertEqual(after["documents"], [])
         self.assertTrue(alive)
@@ -4942,7 +4943,8 @@ class CultMeshTests(unittest.TestCase):
         for message_id, refusal in rudp_refusals + tcp_refusals:
             self.assertEqual(refusal["schemaVersion"], "cultnet.error.v0", message_id)
             self.assertEqual(refusal["messageId"], message_id)
-            self.assertEqual(refusal["code"], "malformed_document_put", message_id)
+            self.assertEqual(refusal["code"], "message_invalid", message_id)
+            self.assertEqual(refusal["details"]["field"], "document", message_id)
             self.assertNotIn("note:ok", refusal["error"], message_id)
         self.assertEqual(len(tcp_refusals), 5)
         self.assertEqual(rudp_after["schemaVersion"], "cultnet.hello.v0")
@@ -5056,9 +5058,11 @@ class CultMeshTests(unittest.TestCase):
         self.assertEqual(unsupported["details"]["value"], "cultnet.nope.v0")
         self.assertIn("unsupported_schema_version", unsupported["error"])
         self.assertEqual(malformed_put["messageId"], "bad-put")
-        self.assertEqual(malformed_put["code"], "malformed_document_put")
+        self.assertEqual(malformed_put["code"], "message_invalid")
+        self.assertEqual(malformed_put["details"]["field"], "document")
         self.assertEqual(malformed_delete["messageId"], "bad-delete")
-        self.assertEqual(malformed_delete["code"], "malformed_document_delete")
+        self.assertEqual(malformed_delete["code"], "message_invalid")
+        self.assertEqual(malformed_delete["details"]["field"], "recordKey")
         self.assertEqual(unsupported_v1["code"], "unsupported_schema_version")
         self.assertEqual(unsupported_v1["details"]["value"], "cultnet.snapshot_request.v1")
 

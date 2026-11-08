@@ -8,6 +8,7 @@ import { decode, encode } from "@msgpack/msgpack";
 import {
   CULTNET_ERROR_CODES,
   cultNetSchemas,
+  cultNetMessageInvalidError,
   cultNetWriteNotAuthorizedError,
   encodeCultNetMessageForWire,
   parseCultNetMessage,
@@ -87,6 +88,13 @@ test("the write_not_authorized factory writes the C# vector's bytes and names th
   const vector = vectors.find((v) => v.name === "write_not_authorized")!;
   assert.equal(hexOf(wireOf(cultNetWriteNotAuthorizedError("some:key", "not granted"))), vector.messagePackHex);
   assert.deepEqual(cultNetWriteNotAuthorizedError("some:key", "not granted"), vector.message);
+});
+
+test("the message_invalid factory writes the C# vector's bytes and names the field", () => {
+  const vector = vectors.find((v) => v.name === "message_invalid")!;
+  const built = cultNetMessageInvalidError("document", "Raw put messages must contain a document map.");
+  assert.equal(hexOf(wireOf(built)), vector.messagePackHex);
+  assert.deepEqual(built, vector.message);
 });
 
 test("a write_not_authorized refusal with no reason, or a blank one, says only the code", () => {

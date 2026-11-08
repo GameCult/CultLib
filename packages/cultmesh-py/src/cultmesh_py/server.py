@@ -12,6 +12,7 @@ import msgpack
 
 from cultnet_py import (
     error_message,
+    message_invalid_error,
     unsupported_schema_version_error,
     CultNetRawSnapshotResponse,
     CultNetSimulationObservationHub,
@@ -602,12 +603,8 @@ class CultMeshLocalServer:
     ) -> list[dict[str, Any]]:
         document_record = message.get("document")
         if not isinstance(document_record, dict):
-            return [self._error_response(
-                "Raw put messages must contain a document map.",
-                message_id=str(message.get("messageId") or ""),
-                code="malformed_document_put",
-            )]
-        malformed_shard = self._malformed_shard_fields(message, "malformed_document_put")
+            return [self._message_invalid(message, "document", "Raw put messages must contain a document map.")]
+        malformed_shard = self._malformed_shard_fields(message)
         if malformed_shard is not None:
             return [malformed_shard]
         # Refusal precedes every other judgment of the put. The node resolves the schema first, because the
@@ -634,11 +631,7 @@ class CultMeshLocalServer:
             # raises. It is refused to the peer that sent it; no thread and no other peer is
             # affected. Neither the refusal nor the log quotes the error, which can quote the put.
             _LOGGER.warning("CultMesh server refused a raw put the store could not take (%s).", type(error).__name__)
-            return [self._error_response(
-                "Raw put document could not be stored.",
-                message_id=str(message.get("messageId") or ""),
-                code="malformed_document_put",
-            )]
+            return [self._message_invalid(message, "document", "Raw put document could not be stored.")]
         if change is None:
             return [self._error_response(
                 "Raw put message did not apply to a registered document.",
@@ -663,12 +656,10 @@ class CultMeshLocalServer:
         schema_id = str(message.get("schemaId") or "")
         record_key = str(message.get("recordKey") or "")
         if not schema_id or not record_key:
-            return [self._error_response(
-                "Raw delete messages must contain schemaId and recordKey.",
-                message_id=str(message.get("messageId") or ""),
-                code="malformed_document_delete",
+            return [self._message_invalid(
+                message, "schemaId" if not schema_id else "recordKey", "Raw delete messages must contain schemaId and recordKey.",
             )]
-        malformed_shard = self._malformed_shard_fields(message, "malformed_document_delete")
+        malformed_shard = self._malformed_shard_fields(message)
         if malformed_shard is not None:
             return [malformed_shard]
         target = self.node.database.raw_delete_target(message) or (schema_id, record_key)
@@ -684,7 +675,13 @@ class CultMeshLocalServer:
             )]
         return self._database_delete_notifications(message, subscriptions, resolved_schema_id=change.schema_id)
 
-    def _malformed_shard_fields(self, message: dict[str, Any], code: str) -> dict[str, Any] | None:
+    def _message_invalid(self, message: dict[str, Any], field: str, reason: str) -> dict[str, Any]:
+        """The typed `message_invalid` refusal naming the request field at fault, under the request's messageId."""
+        response = message_invalid_error(field, reason).to_wire()
+        response["messageId"] = str(message.get("messageId") or "")
+        return response
+
+    def _malformed_shard_fields(self, message: dict[str, Any]) -> dict[str, Any] | None:
         """The protocol error for a shardId that is not a string or a shardEpoch that is not an int (a bool is
         not), else None. It precedes the gate, so the authority only ever judges a write whose shard it can
         read, and the store never files a write under a shard the authority did not see."""
@@ -694,10 +691,10 @@ class CultMeshLocalServer:
             shard_epoch is None or (isinstance(shard_epoch, int) and not isinstance(shard_epoch, bool))
         ):
             return None
-        return self._error_response(
+        return self._message_invalid(
+            message,
+            "shardId" if not (shard_id is None or isinstance(shard_id, str)) else "shardEpoch",
             "shardId must be a string and shardEpoch an integer.",
-            message_id=str(message.get("messageId") or ""),
-            code=code,
         )
 
     def _refuse_unauthorized_write(
@@ -929,11 +926,7 @@ class CultMeshLocalServer:
             and isinstance(document_record.get("recordKey"), str)
             and isinstance(document_record.get("payload"), (bytes, bytearray))
         ):
-            return self._error_response(
-                "Raw put documents must carry a string recordKey and a binary payload.",
-                message_id=str(message.get("messageId") or ""),
-                code="malformed_document_put",
-            )
+            return self._message_invalid(message, "document", "Raw put documents must carry a string recordKey and a binary payload.")
         if self.max_snapshot_bytes is None and not over_rudp:
             return None
         alone = self.node.database.raw_put_served_alone(message, message_id=_SHORTEST_SERVED_MESSAGE_ID)
