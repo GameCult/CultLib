@@ -61,7 +61,7 @@ A write settles as exactly one of:
 
 ## Changes to what #55 to #58 shipped
 
-Those clients complete *successfully* when the window ends with no refusal. Under this spec that case is `unconfirmed`. The TypeScript one-shot writer (#62) already reports it so; the C# and Rust clients of #55 to #58 keep the window-success until their conformance work lands, and callers of those must not read it as admission.
+Those clients complete *successfully* when the window ends with no refusal. Under this spec that case is `unconfirmed`. The TypeScript one-shot writer (#62) already reports it so: it resolves `admitted` only on a `write_admitted` carrying the put's id, and no other frame, a put echoed under the same id included, ever counts as admission. A caller whose server cannot answer a write yet (Odin, until it is receipt-capable) opts into the explicit send-only mode per call (`sendOnly: true`), which resolves the distinct outcome `sent` once the transport has acknowledged the put and never `admitted`; the Idunn presence publisher uses it. Receipts and send-only are both opt-in, neither is the default. The C# and Rust clients of #55 to #58 keep the window-success until their conformance work lands, and callers of those must not read it as admission.
 
 ## Vectors
 

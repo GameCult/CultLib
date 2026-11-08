@@ -176,14 +176,17 @@ test("a server that does not advertise receipts and echoes the put's id back has
 });
 
 test("a silent server never yields admitted, in either mode: the default is unconfirmed, sendOnly is the distinct outcome sent", async () => {
-  const server = await fakeServer(nextConnection, { advertise: false, answer: "silence" });
+  const dflt = await fakeServer(nextConnection, { advertise: false, answer: "silence" });
   try {
-    await assert.rejects(publish(server, { resultWindowMs: 200 }), CultMeshRudpWriteUnconfirmedError);
-    const outcome = await publish(server, { sendOnly: true });
+    await assert.rejects(publish(dflt, { resultWindowMs: 200 }), CultMeshRudpWriteUnconfirmedError);
+  } finally { dflt.close(); }
+  const sendOnly = await fakeServer(nextConnection, { advertise: false, answer: "silence" });
+  try {
+    const outcome = await publish(sendOnly, { sendOnly: true });
     assert.equal(outcome, "sent");
     assert.notEqual(outcome, "admitted");
-    assert.deepEqual(server.seen, ["cultnet.document_put_raw.v0", "cultnet.document_put_raw.v0"], "sendOnly sends no hello");
-  } finally { server.close(); }
+    assert.deepEqual(sendOnly.seen, ["cultnet.document_put_raw.v0"], "sendOnly sends no hello");
+  } finally { sendOnly.close(); }
 });
 
 test("only a write_admitted resolves admitted, and sendOnly does not wait for or act on an answer", async () => {
@@ -197,13 +200,16 @@ test("only a write_admitted resolves admitted, and sendOnly does not wait for or
   } finally { refusing.close(); }
 });
 
-test("sendOnly fails local_send_failed when the send is never acknowledged, and cannot be combined with writeReceipts", async () => {
-  const server = await fakeServer(nextConnection, { advertise: true, answer: "admit", ack: false });
+test("sendOnly fails local_send_failed when the send is never acknowledged", async () => {
+  const server = await fakeServer(nextConnection, { advertise: true, answer: "silence", ack: false });
   try {
     await assert.rejects(publish(server, { sendOnly: true, flushTimeoutMs: 300 }), (error: unknown) =>
       error instanceof CultMeshRudpWriteUnconfirmedError && error.reason === "local_send_failed");
-    await assert.rejects(publish(server, { sendOnly: true, writeReceipts: true }), TypeError);
   } finally { server.close(); }
+});
+
+test("sendOnly cannot be combined with writeReceipts", async () => {
+  await assert.rejects(publish({ endpoint: "rudp://127.0.0.1:9" }, { sendOnly: true, writeReceipts: true }), TypeError);
 });
 
 test("without writeReceipts no hello is sent and the receipt frames are never asked for", async () => {
