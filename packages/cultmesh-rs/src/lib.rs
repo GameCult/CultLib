@@ -2035,4 +2035,28 @@ mod tests {
         Ok(())
     }
 
+
+    #[test]
+    fn a_publish_whose_ack_arrives_before_the_refusal_is_refused() -> Result<()> {
+        let (target, stop, catalog) = acknowledging_refusing_catalog(false)?;
+        let result = publish_cultnet_message_to_rudp_catalog(&refused_note(), publish_options(target));
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        catalog.join().expect("catalog thread should not panic")?;
+        let error = result.expect_err("a refused put is never reported as admitted");
+        assert!(error.to_string().contains("refused the put"), "{error:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_batch_publish_is_not_complete_on_the_ack_of_refused_puts() -> Result<()> {
+        for refusal_first in [false, true] {
+            let (target, stop, catalog) = acknowledging_refusing_catalog(refusal_first)?;
+            let result = publish_cultnet_messages_to_rudp_catalog(&[refused_note()], publish_options(target));
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            catalog.join().expect("catalog thread should not panic")?;
+            assert!(result.is_err(), "refusal_first={refusal_first}: a refused put was reported as published");
+        }
+        Ok(())
+    }
+
 }
