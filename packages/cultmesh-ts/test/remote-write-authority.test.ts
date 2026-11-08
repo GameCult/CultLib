@@ -16,6 +16,7 @@ import {
 } from "@gamecult/cultnet-ts";
 import {
   CultMesh,
+  CULTMESH_RUDP_DOCUMENT_SERVER_MAX_CONSECUTIVE_REFUSED_FRAMES,
   CultMeshGrantAllWrites,
   type CultMeshRemoteWriteAuthority,
   type CultMeshRemoteWriteDecision,
@@ -504,4 +505,88 @@ test("a granted peer's unreadable write reaches onError and gets a malformed ref
       assert.deepEqual([authority.requests.length, authority.requests[0]!.operation, authority.requests[0]!.recordKey], [1, h.operation, h.recordKey], h.name);
     } finally { r.close(); }
   }
+});
+
+const CAP = 8; // the cap every runtime shares; the exported constant must stay this number
+
+test("the consecutive-refused-frames cap is the number every runtime shares", () => {
+  assert.equal(CULTMESH_RUDP_DOCUMENT_SERVER_MAX_CONSECUTIVE_REFUSED_FRAMES, CAP);
+});
+
+test("unreadable frames are answered and the session kept until eight in a row; any decoded frame resets the run", async () => {
+  const r = await rawRig(new Recording(grant));
+  try {
+    const batch = async (frames: number) => {
+      for (let i = 0; i < frames; i++) r.send(Uint8Array.from([0xc1]));
+      await sleep(400);
+    };
+    await batch(CAP - 1);
+    assert.equal(r.replies.length, CAP - 1, "each is answered");
+    r.send(encodeWireValue(put(KEY_A)));
+    await sleep(250);
+    assert.deepEqual(r.puts.map((p) => p.recordKey), [KEY_A], "the session was kept through seven");
+    await batch(CAP - 1);
+    assert.equal(r.replies.length, 2 * (CAP - 1), "the valid frame reset the run");
+    r.send(Uint8Array.from([0xc1]));
+    await sleep(300);
+    assert.equal(r.replies.length, 2 * (CAP - 1) + 1, "the eighth consecutive one is answered too");
+    assert.ok(r.replies.every((reply) => (reply as { code?: string }).code === "message_invalid"));
+    // The goodbye reached the peer: its client no longer takes a send.
+    assert.throws(() => r.send(encodeWireValue(put(KEY_B))), /before the session is connected/, "then the session ended");
+    assert.deepEqual(r.puts.map((p) => p.recordKey), [KEY_A]);
+  } finally { r.close(); }
+});
+
+test("deletes the authority refuses are answered and the session kept until eight in a row; any other decoded frame resets the run", async () => {
+  const authority = new Recording((request) => request.recordKey === KEY_B ? { granted: true } : { granted: false });
+  await using(await rig(authority), async (r) => {
+    const refuse = async (deletes: number) => {
+      for (let i = 0; i < deletes; i++) r.peer.send(del(KEY_A));
+      await sleep(400);
+    };
+    await refuse(CAP - 1);
+    assert.equal(r.replies.length, CAP - 1);
+    r.peer.send(del(KEY_B)); // granted: resets the run
+    await sleep(250);
+    assert.deepEqual(r.deletes.map((d) => d.recordKey), [KEY_B]);
+    await refuse(CAP - 1);
+    assert.equal(r.replies.length, 2 * (CAP - 1));
+    r.peer.send(put(KEY_B)); // a decoded non-delete resets too
+    await sleep(250);
+    await refuse(CAP - 1);
+    assert.equal(r.replies.length, 3 * (CAP - 1), "a put reset the run");
+    r.peer.send(del(KEY_A));
+    await sleep(300);
+    assert.equal(r.replies.length, 3 * (CAP - 1) + 1, "the eighth consecutive refused delete is answered too");
+    for (const reply of r.replies) assertRefused(reply, KEY_A);
+    assert.throws(() => r.peer.send(del(KEY_B)), /before the session is connected/, "then the session ended");
+    assert.equal(r.deletes.length, 1);
+  });
+});
+
+test("a frame that decodes but is no message the parser takes is answered, counted, and ended at eight in a row like any unreadable frame", async () => {
+  const r = await rawRig(new Recording(grant));
+  const unknown = () => encodeWireValue({ schemaVersion: "cultnet.not-a-message.v0", messageId: "x" });
+  try {
+    const batch = async (frames: number) => {
+      for (let i = 0; i < frames; i++) r.send(unknown());
+      await sleep(400);
+    };
+    await batch(CAP - 1);
+    assert.equal(r.replies.length, CAP - 1, "each is answered");
+    assert.equal(r.errors.length, CAP - 1, "and reported");
+    r.send(encodeWireValue(put(KEY_A)));
+    await sleep(250);
+    assert.deepEqual(r.puts.map((p) => p.recordKey), [KEY_A], "the session was kept through seven");
+    await batch(CAP - 1);
+    assert.equal(r.replies.length, 2 * (CAP - 1), "the decoded put reset the run");
+    r.send(unknown());
+    await sleep(300);
+    assert.equal(r.replies.length, 2 * (CAP - 1) + 1, "the eighth is answered too");
+    for (const reply of r.replies) {
+      assert.equal((reply as { code?: string }).code, "message_invalid");
+      assert.equal((reply as { details: { field: string } }).details.field, "message");
+    }
+    assert.throws(() => r.send(unknown()), /before the session is connected/, "then the session ended");
+  } finally { r.close(); }
 });

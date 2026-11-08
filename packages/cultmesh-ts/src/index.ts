@@ -4121,6 +4121,14 @@ export interface CultMeshRudpDocumentServerOptions extends CultMeshRudpSocketOpt
 /** A write authority that has not answered in this long has refused the write. */
 export const CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_DECIDE_TIMEOUT_MS = 5_000;
 
+/**
+ * How many consecutive refused frames of one kind a `createRudpDocumentServer` session may send before it is
+ * ended: undecodable frames (reset by any frame that decodes) and deletes the write authority refuses (reset by any
+ * decoded frame that is not a refused delete). Fewer are answered with a typed refusal and the session is kept; the
+ * frame that reaches this number is answered too, then the session ends. The same number is the cap in every runtime.
+ */
+export const CULTMESH_RUDP_DOCUMENT_SERVER_MAX_CONSECUTIVE_REFUSED_FRAMES = 8;
+
 /** Replies larger than one fragment are split into fragments of at most this many bytes. */
 export const CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_MAX_FRAGMENT_BYTES = 1200;
 
@@ -5537,6 +5545,9 @@ export class CultMesh {
       closed: boolean;
       /** A packet it owed could never be sent, so the session ended. */
       unsendable: boolean;
+      /** Consecutive undecodable frames, and consecutive deletes the authority refused. */
+      unreadableInARow: number;
+      refusedDeletesInARow: number;
       work: Promise<void>;
     };
     const sessions = new Map<string, SessionRecord>();
@@ -5591,6 +5602,8 @@ export class CultMesh {
             connectPayload,
             closed: false,
             unsendable: false,
+            unreadableInARow: 0,
+            refusedDeletesInARow: 0,
             session: new CultNetRudpSession({
               connectionId,
               initialSequence: options.initialSequence,
@@ -5665,12 +5678,21 @@ export class CultMesh {
         // A frame the server cannot read is judged as the write it looks like (a put when it does not even decode), so
         // an ungranted peer hears the same refusal for it as for any other write, not a parse error.
         const write = readableWrite(decoded);
-        if (decoded !== undefined && !write) throw error;
-        if (await writeRefused(record, write?.operation ?? "put", write?.schemaId ?? "", write?.recordKey ?? "", null, null)) return;
-        reportError(error);
-        sendSchemaMessage(record, cultNetMessageInvalidError("message", "CultMesh RUDP document server could not read the write."));
+        record.unreadableInARow += 1;
+        if (decoded !== undefined && !write) {
+          // It decodes but is no message the parser takes (an unknown schemaVersion, a non-map) and is no write the
+          // authority could judge: answered and counted like any other unreadable frame.
+          reportError(error);
+          sendSchemaMessage(record, cultNetMessageInvalidError("message", "CultMesh RUDP document server could not read the message."));
+        } else if (!await writeRefused(record, write?.operation ?? "put", write?.schemaId ?? "", write?.recordKey ?? "", null, null)) {
+          reportError(error);
+          sendSchemaMessage(record, cultNetMessageInvalidError("message", "CultMesh RUDP document server could not read the write."));
+        }
+        if (record.unreadableInARow >= CULTMESH_RUDP_DOCUMENT_SERVER_MAX_CONSECUTIVE_REFUSED_FRAMES) endCappedSession(record);
         return;
       }
+      record.unreadableInARow = 0;
+      if (message.schemaVersion !== "cultnet.document_delete.v0") record.refusedDeletesInARow = 0;
       switch (message.schemaVersion) {
         case "cultnet.snapshot_request.v0": {
           if (!options.getCache) {
@@ -5744,7 +5766,12 @@ export class CultMesh {
           }
           return;
         case "cultnet.document_delete.v0": {
-          if (await writeRefused(record, "delete", message.schemaId, message.recordKey, null, null)) return;
+          if (await writeRefused(record, "delete", message.schemaId, message.recordKey, null, null)) {
+            record.refusedDeletesInARow += 1;
+            if (record.refusedDeletesInARow >= CULTMESH_RUDP_DOCUMENT_SERVER_MAX_CONSECUTIVE_REFUSED_FRAMES) endCappedSession(record);
+            return;
+          }
+          record.refusedDeletesInARow = 0;
           if (!options.onDocumentDeleteRaw) {
             sendSchemaMessage(record, cultNetTextError("CultMesh RUDP document server has no delete handler."));
             return;
@@ -5893,6 +5920,13 @@ export class CultMesh {
       record.session.resetPeerState();
       const goodbye = encodeRudpPacket(record.session.createDisconnect(Buffer.from("session refused a packet", "utf8")));
       sendRudpDatagram(socket, goodbye, record.remote.port, record.remote.address, () => {});
+    }
+
+    /** A session that reached the cap of consecutive refused frames: its last refusal is sent, then it ends. */
+    function endCappedSession(record: SessionRecord): void {
+      const key = `${record.remote.address}:${record.remote.port}`;
+      if (sessions.get(key) !== record) return;
+      endRefusedSession(key, record);
     }
 
     /** The session owes its peer a packet that can never be sent as built. */
