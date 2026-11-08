@@ -1060,5 +1060,32 @@ namespace GameCult.Networking.Tests
 
             Assert.That(session.TryBegin("o1030", HashOf("o"), out _), Is.EqualTo(CultNetWriteReceiptSession.Begin.Full));
         }
+
+        [Test]
+        public void TheRefusalSetStopsRememberingAtItsBound()
+        {
+            var session = new CultNetWriteReceiptSession();
+            for (var index = 0; index < CultNetWriteReceiptSession.MaxRememberedWrites; index++)
+                session.TryBegin($"w{index}", HashOf($"k{index}"), out _);
+            for (var index = 0; index < CultNetWriteReceiptSession.MaxRememberedLimitRefusals; index++)
+                session.TryBegin($"o{index}", HashOf("o"), out _);
+
+            // Past the bound a refusal is not remembered: its changed-content resend is simply refused at the limit again.
+            Assert.That(session.TryBegin("late", HashOf("a"), out _), Is.EqualTo(CultNetWriteReceiptSession.Begin.Full));
+            Assert.That(session.TryBegin("late", HashOf("b"), out _), Is.EqualTo(CultNetWriteReceiptSession.Begin.Full));
+            // Inside the bound it is remembered.
+            Assert.That(session.TryBegin("o0", HashOf("changed"), out _), Is.EqualTo(CultNetWriteReceiptSession.Begin.DifferentContent));
+        }
+
+        [Test]
+        public void AnAbandonedIdMayBeResentWithOtherContentBecauseItWasNeverSent()
+        {
+            var session = new CultNetWriteReceiptSession();
+            session.TryBegin("m1", HashOf("a"), out _);
+            session.Abandoned("m1");
+
+            Assert.That(session.TryBegin("m1", HashOf("b"), out _), Is.EqualTo(CultNetWriteReceiptSession.Begin.New));
+            Assert.That(session.TryBegin("m1", HashOf("b"), out _), Is.EqualTo(CultNetWriteReceiptSession.Begin.Unanswered));
+        }
     }
 }
