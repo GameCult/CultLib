@@ -1010,6 +1010,43 @@ namespace GameCult.Networking.Tests
             Assert.That(error.Error, Is.EqualTo("message_invalid: schemaId is required"));
         }
 
+        // An empty or blank schemaId or recordKey is refused like a frame that does not read (the Rust server's rule): message_invalid,
+        // details.field "message", the write's id, nothing applied. A null schemaId stays "schemaId is required".
+        [TestCase("", null)]
+        [TestCase("   ", null)]
+        [TestCase(null, "")]
+        [TestCase(null, "   ")]
+        public async Task APutWithAnEmptyOrBlankSchemaIdOrRecordKeyIsRefusedAsUnreadableAndNotApplied(string? schemaId, string? recordKey)
+        {
+            var (rig, wire) = await Capable();
+            var message = rig.PutOf("m1", KeyA, "one");
+            if (schemaId != null) message.Document.SchemaId = schemaId;
+            if (recordKey != null) message.Document.RecordKey = recordKey;
+            wire.Sent.Clear();
+
+            await rig.PutHandler(message, wire.Peer);
+
+            var error = AssertRefused(wire.Sent.Single(), "m1", "message_invalid");
+            Assert.That(error.Details!.Field, Is.EqualTo("message"));
+            Assert.That(rig.TextOf(KeyA), Is.Null);
+        }
+
+        [TestCase("", "k")]
+        [TestCase("   ", "k")]
+        [TestCase("note.v0", "")]
+        public async Task ADeleteWithAnEmptyOrBlankSchemaIdOrRecordKeyIsRefusedAsUnreadable(string schemaId, string recordKey)
+        {
+            var (rig, wire) = await Capable();
+            var message = rig.DeleteOf("d1", new CultRecordKey(recordKey));
+            message.SchemaId = schemaId;
+            wire.Sent.Clear();
+
+            await rig.DeleteHandler(message, wire.Peer);
+
+            var error = AssertRefused(wire.Sent.Single(), "d1", "message_invalid");
+            Assert.That(error.Details!.Field, Is.EqualTo("message"));
+        }
+
         [Test]
         public async Task ARefusalAtTheCapIsRememberedSoAResendReplaysItAndADifferentContentResendIsRefused()
         {
