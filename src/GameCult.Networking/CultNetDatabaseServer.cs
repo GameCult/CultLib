@@ -266,7 +266,7 @@ namespace GameCult.Networking
             catch (Exception ex)
             {
                 _server.Logger.LogError($"CultNet snapshot v1 request failed: {ex.Message}");
-                peer.SendCultNet(new CultNetErrorMessage { Error = ex.Message });
+                peer.SendCultNet(new CultNetErrorMessage { Error = "the snapshot request could not be answered" });
             }
 
             return Task.CompletedTask;
@@ -286,7 +286,8 @@ namespace GameCult.Networking
             }
             catch (Exception ex)
             {
-                peer.SendCultNet(new CultNetErrorMessage { Error = ex.Message });
+                _server.Logger.LogError($"CultNet shard log request failed: {ex.Message}");
+                peer.SendCultNet(new CultNetErrorMessage { Error = "the shard log request could not be answered" });
             }
 
             return Task.CompletedTask;
@@ -754,7 +755,7 @@ namespace GameCult.Networking
                 var refusedKey = change.GetType().GetProperty("Key")?.GetValue(change) is CultRecordKey changed ? changed.Value : string.Empty;
                 lock (refused)
                     refused.Add(refusedKey);
-                sendError(new CultNetErrorMessage { Error = refusal.Message });
+                sendError(new CultNetErrorMessage { Error = "the record is a variant CultNet cannot carry" });
                 return null;
             }
 

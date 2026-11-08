@@ -1087,5 +1087,37 @@ namespace GameCult.Networking.Tests
             Assert.That(session.TryBegin("m1", HashOf("b"), out _), Is.EqualTo(CultNetWriteReceiptSession.Begin.New));
             Assert.That(session.TryBegin("m1", HashOf("b"), out _), Is.EqualTo(CultNetWriteReceiptSession.Begin.Unanswered));
         }
+
+        // ---- Fixed text in v0 errors: an exception's own words never reach the wire ----
+
+        private static Func<TMessage, CultNetServerPeer, Task> HandlerOf<TMessage>(Rig rig, string field) =>
+            (Func<TMessage, CultNetServerPeer, Task>)typeof(CultNetDatabaseServer)
+                .GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(rig.DatabaseServer)!;
+
+        [Test]
+        public async Task ASnapshotFaultIsAnsweredWithFixedTextNotTheExceptionMessage()
+        {
+            var rig = Build();
+            var wire = new Wire();
+
+            await HandlerOf<CultNetSnapshotRequestV1Message>(rig, "_snapshotHandlerV1")(
+                new CultNetSnapshotRequestV1Message { MessageId = "s1", Selection = null! }, wire.Peer);
+
+            var error = (CultNetErrorMessage)wire.Sent.Single();
+            Assert.That(error.Error, Is.EqualTo("the snapshot request could not be answered"));
+        }
+
+        [Test]
+        public async Task AShardLogFaultIsAnsweredWithFixedTextNotTheExceptionMessage()
+        {
+            var rig = Build();
+            var wire = new Wire();
+
+            await HandlerOf<CultNetShardLogRequestMessage>(rig, "_shardLogHandler")(
+                new CultNetShardLogRequestMessage { MessageId = "l1", ShardId = string.Empty }, wire.Peer);
+
+            var error = (CultNetErrorMessage)wire.Sent.Single();
+            Assert.That(error.Error, Is.EqualTo("the shard log request could not be answered"));
+        }
     }
 }
