@@ -2020,3 +2020,29 @@ pub fn readable_message_id(bytes: &[u8]) -> Option<String> {
         _ => None,
     })
 }
+
+/// The first required field (`document`, then `schemaId`) that a put or delete frame lacks or holds as nil
+/// (write-receipt.md, "Required fields"), with the write's operation (`"put"` or `"delete"`). `None` when the
+/// bytes are not such a frame, or both fields are present. A put's `schemaId` is its document's.
+pub fn missing_required_write_field(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    let rmpv::Value::Map(entries) = rmpv::decode::read_value(&mut &*bytes).ok()? else {
+        return None;
+    };
+    let field = |entries: &[(rmpv::Value, rmpv::Value)], name: &str| {
+        entries
+            .iter()
+            .find(|(key, _)| key.as_str() == Some(name))
+            .map(|(_, value)| value.clone())
+            .filter(|value| !value.is_nil())
+    };
+    match field(&entries, "schemaVersion")?.as_str()? {
+        "cultnet.document_put_raw.v0" => match field(&entries, "document") {
+            Some(rmpv::Value::Map(document)) => {
+                field(&document, "schemaId").is_none().then_some(("put", "schemaId"))
+            }
+            _ => Some(("put", "document")),
+        },
+        "cultnet.document_delete.v0" => field(&entries, "schemaId").is_none().then_some(("delete", "schemaId")),
+        _ => None,
+    }
+}

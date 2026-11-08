@@ -3,7 +3,7 @@ use cultnet_rs::{
     CultNetErrorCode, CultNetErrorDetails, CultNetMessage, CultNetRawDocumentRecord, CultNetRudpPacket, CultNetRudpPacketType,
     CultNetRudpSendOptions, CultNetRudpSession, CultNetRudpSessionOptions, CultNetWireContract,
     decode_cultnet_message_from_slice, decode_rudp_packet, encode_cultnet_message_to_vec,
-    encode_rudp_packet, is_permanent_send_error, readable_message_id, message_id_digest, send_error_code, write_content_hash,
+    encode_rudp_packet, is_permanent_send_error, readable_message_id, message_id_digest, missing_required_write_field, send_error_code, write_content_hash,
 };
 use std::collections::{BTreeMap, HashMap};
 #[cfg(test)]
@@ -289,6 +289,10 @@ pub enum CultMeshRudpRejectionReason {
     MessageIdTooLong,
     /// A receipt-capable session sent a write on an unreliable channel, where no answer could be owed once.
     ChannelNotReliable,
+    /// A receipt-capable session's put or delete has a null or missing `document`.
+    DocumentMissing,
+    /// A receipt-capable session's put or delete has a null or missing `schemaId`.
+    SchemaIdMissing,
 }
 
 impl std::fmt::Display for CultMeshRudpRejectionReason {
@@ -301,6 +305,8 @@ impl std::fmt::Display for CultMeshRudpRejectionReason {
             Self::WriteLimitReached => f.write_str("the session remembers as many writes as it will"),
             Self::MessageIdTooLong => f.write_str("the message id is longer than 256 bytes"),
             Self::ChannelNotReliable => f.write_str("a receipt session's write arrived on an unreliable channel"),
+            Self::DocumentMissing => f.write_str("the write has no document"),
+            Self::SchemaIdMissing => f.write_str("the write has no schemaId"),
             Self::DocumentUnservable {
                 response_bytes,
                 max_snapshot_response_bytes,
@@ -341,7 +347,7 @@ impl std::fmt::Display for CultMeshRudpRejectionReason {
 /// The texts a refused peer is sent, one per rejection variant. They are fixed:
 /// a sink's or source's error text can quote what a peer sent, so it stays with
 /// the caller that receives the rejection and never reaches the wire.
-pub(crate) const REFUSAL_TEXTS: [&str; 15] = [
+pub(crate) const REFUSAL_TEXTS: [&str; 17] = [
     "the catalog refused the document",
     "the document can never be served",
     "the snapshot source failed",
@@ -357,6 +363,8 @@ pub(crate) const REFUSAL_TEXTS: [&str; 15] = [
     "the session's remembered-write limit is full",
     "messageId exceeds 256 bytes",
     "receipt sessions require the reliable channel",
+    "document is required",
+    "schemaId is required",
 ];
 
 impl CultMeshRudpRejectionReason {
@@ -383,7 +391,9 @@ impl CultMeshRudpRejectionReason {
             11 => Self::MessageIdReused,
             12 => Self::WriteLimitReached,
             13 => Self::MessageIdTooLong,
-            _ => Self::ChannelNotReliable,
+            14 => Self::ChannelNotReliable,
+            15 => Self::DocumentMissing,
+            _ => Self::SchemaIdMissing,
         }
     }
 
@@ -404,6 +414,8 @@ impl CultMeshRudpRejectionReason {
             Self::WriteLimitReached => 12,
             Self::MessageIdTooLong => 13,
             Self::ChannelNotReliable => 14,
+            Self::DocumentMissing => 15,
+            Self::SchemaIdMissing => 16,
         }
     }
 }
@@ -484,6 +496,8 @@ impl CultMeshRudpApplicationRejection {
                 message_invalid_message("messageId", text)
             }
             (CultMeshRudpRejectionReason::MessageIdTooLong, _) => message_invalid_message("messageId", text),
+            (CultMeshRudpRejectionReason::DocumentMissing, _) => message_invalid_message("document", text),
+            (CultMeshRudpRejectionReason::SchemaIdMissing, _) => message_invalid_message("schemaId", text),
             (CultMeshRudpRejectionReason::ChannelNotReliable, _) => message_invalid_message("channel", text),
             (CultMeshRudpRejectionReason::WriteLimitReached, _) => CultNetMessage::Error {
                 error: format!("limit_reached: {text}"),
@@ -844,13 +858,26 @@ where
                     now_unix,
                     now_monotonic,
                 )?,
-                Err(error) => Some(CultMeshRudpApplicationRejection {
-                    session: key,
-                    operation: CultMeshRudpApplicationOperation::Unreadable,
-                    message_id: readable_message_id(&frame.payload).unwrap_or_default(),
-                    record_key: None,
-                    reason: CultMeshRudpRejectionReason::MessageUnreadable(format!("{error:#}")),
-                }),
+                Err(error) => {
+                    // A receipt session's put or delete missing a required field is a refused write that
+                    // names the field, not an unreadable frame.
+                    let missing = if receipt_session { missing_required_write_field(&frame.payload) } else { None };
+                    Some(CultMeshRudpApplicationRejection {
+                        session: key,
+                        operation: match missing {
+                            Some(("put", _)) => CultMeshRudpApplicationOperation::DocumentPutRaw,
+                            Some(_) => CultMeshRudpApplicationOperation::DocumentDelete,
+                            None => CultMeshRudpApplicationOperation::Unreadable,
+                        },
+                        message_id: readable_message_id(&frame.payload).unwrap_or_default(),
+                        record_key: None,
+                        reason: match missing {
+                            Some((_, "document")) => CultMeshRudpRejectionReason::DocumentMissing,
+                            Some(_) => CultMeshRudpRejectionReason::SchemaIdMissing,
+                            None => CultMeshRudpRejectionReason::MessageUnreadable(format!("{error:#}")),
+                        },
+                    })
+                }
             };
             if let Some(rejection) = rejection {
                 // A refused delete or unreadable frame below the cap is answered on the live session,
