@@ -66,6 +66,9 @@ _LOGGER = logging.getLogger(__name__)
 # frame that reaches this number is answered too, then the session ends. The same number is the cap in every
 # runtime.
 MAX_CONSECUTIVE_REFUSED_FRAMES = 8
+
+# How long a session whose capped frame was answered waits for the peer to acknowledge the answer before it ends anyway.
+_RUDP_CAPPED_ANSWER_GRACE_MS = 2000
 _EPHEMERAL_PAIR_ATTEMPTS = 64
 
 
@@ -99,6 +102,8 @@ class _RudpPeerConnection:
     subscriptions: dict[str, _DatabaseSubscription] = field(default_factory=dict)
     undecodable_frames_in_a_row: int = 0
     refused_deletes_in_a_row: int = 0
+    # Set once the peer's capped frame has been answered: the session ends when the answers are acknowledged.
+    ending_deadline_ms: int | None = None
 
 
 @dataclass
@@ -355,6 +360,7 @@ class CultMeshLocalServer:
             if packet.connection_id != self.rudp_connection_id:
                 continue
 
+            self._end_answered_peers(rudp_socket, peers)
             now_ms = _now_ms()
             peer = peers.get(remote_addr)
             if packet.packet_type == CultNetRudpPacketType.CONNECT:
@@ -399,11 +405,13 @@ class CultMeshLocalServer:
             if result.disconnected:
                 peers.pop(remote_addr, None)
                 continue
-            capped = False
             try:
                 for delivered in result.delivered:
                     if delivered.channel_id != "schema":
                         continue
+                    if peer.ending_deadline_ms is not None:
+                        # The capped frame was answered; nothing after it is served while the answer is delivered.
+                        break
                     try:
                         message = msgpack.unpackb(delivered.payload, raw=False)
                     except (msgpack.ExtraData, msgpack.FormatError, msgpack.StackError, ValueError):
@@ -426,11 +434,6 @@ class CultMeshLocalServer:
                         peer.undecodable_frames_in_a_row += 1
                         refused, run = True, peer.undecodable_frames_in_a_row
                         responses = [self._message_invalid({}, "message", "CultMesh RUDP server could not read the message.")]
-                    if refused and run >= MAX_CONSECUTIVE_REFUSED_FRAMES:
-                        # The capped frame's refusal goes out with the goodbye; the session ends.
-                        self._end_refused_peer(rudp_socket, peers, remote_addr, refusal=responses[0])
-                        capped = True
-                        break
                     for response in responses:
                         if unsendable is None:
                             unsendable = self._send_rudp_schema_frame(
@@ -440,6 +443,11 @@ class CultMeshLocalServer:
                                 msgpack.packb(response, use_bin_type=True),
                                 message_id=str(response.get("messageId") or ""),
                             )
+                    if refused and run >= MAX_CONSECUTIVE_REFUSED_FRAMES:
+                        # The capped frame is answered like any other, reliably. The session ends once the peer
+                        # has acknowledged every answer (or the grace runs out): see _end_answered_peers.
+                        peer.ending_deadline_ms = now_ms + _RUDP_CAPPED_ANSWER_GRACE_MS
+                        break
             except Exception as error:  # noqa: BLE001 - one peer's message never ends the thread
                 # Whatever a peer's message makes the handling raise is that peer's failure.
                 # The session recorded the frame's sequence, so it cannot be kept: a retransmit
@@ -459,8 +467,6 @@ class CultMeshLocalServer:
                     )
                 self._end_refused_peer(rudp_socket, peers, remote_addr, refusal=refusal)
                 continue
-            if capped:
-                continue
             if unsendable is None and (
                 packet.reliable or packet.packet_type == CultNetRudpPacketType.DATA or result.delivered
             ):
@@ -472,11 +478,26 @@ class CultMeshLocalServer:
             if unsendable is not None:
                 self._end_unsendable_peer(rudp_socket, peers, remote_addr, unsendable)
 
+    def _end_answered_peers(
+        self,
+        rudp_socket: socket.socket,
+        peers: dict[tuple[str, int], _RudpPeerConnection],
+    ) -> None:
+        """Ends each session whose capped frame was answered once the peer has acknowledged every answer (a lost
+        answer is resent first), or when the grace has run out."""
+        now_ms = _now_ms()
+        for remote_addr, peer in list(peers.items()):
+            if peer.ending_deadline_ms is None:
+                continue
+            if peer.session.outstanding_reliable_packet_count == 0 or now_ms >= peer.ending_deadline_ms:
+                self._end_refused_peer(rudp_socket, peers, remote_addr)
+
     def _poll_rudp_resends(
         self,
         rudp_socket: socket.socket,
         peers: dict[tuple[str, int], _RudpPeerConnection],
     ) -> None:
+        self._end_answered_peers(rudp_socket, peers)
         now_ms = _now_ms()
         for remote_addr, peer in list(peers.items()):
             for packet in peer.session.due_resends(now_ms):

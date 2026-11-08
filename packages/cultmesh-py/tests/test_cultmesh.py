@@ -4936,6 +4936,53 @@ class CultMeshTests(unittest.TestCase):
             transport.close()
             server.stop()
 
+    def test_cultmesh_local_server_resends_a_lost_capped_answer_before_it_ends_the_session(self) -> None:
+        # The eighth refusal is answered reliably: the datagram carrying it is lost on the wire, and the
+        # peer still gets the answer (by resend) before the goodbye. An unreliable final answer, or a
+        # goodbye sent at once, would leave the peer without it.
+        node = CultMesh.create_node(runtime_id="mesh-rudp-lost-answer")
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
+        send = server._send_rudp_packet
+        dropped: list[Any] = []
+        armed = threading.Event()
+
+        def lossy(rudp_socket: Any, remote_addr: Any, packet: Any) -> Any:
+            if armed.is_set() and not dropped and packet.packet_type == CultNetRudpPacketType.DATA and b"message_invalid" in (packet.payload or b""):
+                dropped.append(packet)
+                return None
+            return send(rudp_socket, remote_addr, packet)
+
+        server._send_rudp_packet = lossy
+        transport = self._rudp_open(server)
+        try:
+            for _ in range(MAX_CONSECUTIVE_REFUSED_FRAMES - 1):
+                self._rudp_answer(transport, b"\xc1")
+            armed.set()
+            reply = self._rudp_answer(transport, b"\xc1")
+            self.assertEqual(len(dropped), 1, "fixture: the first transmission of the last answer was lost")
+            self.assertEqual(reply["code"], "message_invalid")
+            self._assert_rudp_session_ended(transport, server)
+        finally:
+            transport.close()
+            server.stop()
+
+    def test_cultmesh_local_server_serves_nothing_after_the_capped_frame(self) -> None:
+        node = CultMesh.create_node(runtime_id="mesh-rudp-after-cap")
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
+        transport = self._rudp_open(server)
+        try:
+            for _ in range(MAX_CONSECUTIVE_REFUSED_FRAMES - 1):
+                self._rudp_answer(transport, b"\xc1")
+            transport.send("schema", b"\xc1")
+            transport.send("schema", msgpack.packb(snapshot_request(message_id="behind-the-cap").to_wire(), use_bin_type=True))
+            first = msgpack.unpackb(transport.receive(timeout_seconds=4.0).payload, raw=False)
+            self.assertEqual(first["code"], "message_invalid")
+            with self.assertRaises(Exception):
+                transport.receive(timeout_seconds=1.0)
+        finally:
+            transport.close()
+            server.stop()
+
     def test_cultmesh_local_server_ends_the_session_at_eight_refused_deletes_in_a_row(self) -> None:
         class GrantOnlyKeyB:
             def decide(self, request: Any) -> Any:
