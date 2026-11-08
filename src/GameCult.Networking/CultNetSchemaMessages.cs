@@ -48,6 +48,14 @@ namespace GameCult.Networking
         /// </summary>
         public const string Error = "cultnet.error.v0";
         /// <summary>
+        /// error v1 contract identifier: error v0 plus the id of the request it answers (write-receipt.md).
+        /// </summary>
+        public const string ErrorV1 = "cultnet.error.v1";
+        /// <summary>
+        /// write admitted receipt contract identifier (write-receipt.md).
+        /// </summary>
+        public const string WriteAdmitted = "cultnet.write_admitted.v0";
+        /// <summary>
         /// sample change name contract identifier.
         /// </summary>
         public const string SampleChangeName = "cultnet.sample.change_name.v0";
@@ -619,6 +627,68 @@ namespace GameCult.Networking
                 Error = ex.Message,
                 Code = "reference_outside_target"
             };
+    }
+
+    /// <summary>
+    /// <c>cultnet.error.v1</c> (contracts/cultnet/interop/write-receipt.md): the v0 error plus <see cref="MessageId"/>,
+    /// the id of the request it answers. Sent only to a connection that declared the write-receipt capability.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetErrorV1Message : ICultNetSchemaMessage
+    {
+        /// <summary>Gets or sets the schema version.</summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.ErrorV1;
+        /// <summary>Gets or sets the error.</summary>
+        [Key("error")] public string Error { get; set; } = string.Empty;
+        /// <summary>Gets or sets optional shard routing details for authority failures.</summary>
+        [Key("routingHint")] public CultNetShardRoutingHint? RoutingHint { get; set; }
+        /// <summary>Gets or sets the machine-readable refusal code (the v0 enum).</summary>
+        [Key("code")] public string? Code { get; set; }
+        /// <summary>Gets or sets the code-specific structured detail.</summary>
+        [Key("details")] public CultNetErrorDetails? Details { get; set; }
+        /// <summary>Gets or sets the id of the request this answers; null only when no id could be read.</summary>
+        [Key("messageId")] public string? MessageId { get; set; }
+
+        /// <summary>Builds the v1 form of <paramref name="error"/> answering <paramref name="messageId"/>.</summary>
+        public static CultNetErrorV1Message From(CultNetErrorMessage error, string? messageId)
+        {
+            if (error == null) throw new ArgumentNullException(nameof(error));
+            return new CultNetErrorV1Message
+            {
+                Error = error.Error,
+                RoutingHint = error.RoutingHint,
+                Code = error.Code,
+                Details = error.Details,
+                MessageId = string.IsNullOrEmpty(messageId) ? null : messageId
+            };
+        }
+
+        /// <summary>Gets the v0 form, dropping the id.</summary>
+        public CultNetErrorMessage ToV0() => new CultNetErrorMessage
+        {
+            Error = Error,
+            RoutingHint = RoutingHint,
+            Code = Code,
+            Details = Details
+        };
+    }
+
+    /// <summary>
+    /// <c>cultnet.write_admitted.v0</c>: the receipt for one admitted put or delete, sent after its commit point.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetWriteAdmittedMessage : ICultNetSchemaMessage
+    {
+        /// <summary>Gets or sets the schema version.</summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.WriteAdmitted;
+        /// <summary>Gets or sets the messageId of the admitted write, echoed.</summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>Gets or sets <c>put</c> or <c>delete</c>.</summary>
+        [Key("operation")] public string Operation { get; set; } = string.Empty;
+        /// <summary>Gets or sets the schemaId of the admitted write, echoed.</summary>
+        [Key("schemaId")] public string SchemaId { get; set; } = string.Empty;
+        /// <summary>Gets or sets the recordKey of the admitted write, echoed.</summary>
+        [Key("recordKey")] public string RecordKey { get; set; } = string.Empty;
     }
 
     /// <summary>

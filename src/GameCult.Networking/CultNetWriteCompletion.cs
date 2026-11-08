@@ -25,6 +25,22 @@ namespace GameCult.Networking
     }
 
     /// <summary>
+    /// A write nothing answered within its window: neither admitted nor refused (write-receipt.md, "unconfirmed").
+    /// </summary>
+    public sealed class CultNetWriteUnconfirmedException : Exception
+    {
+        /// <summary>Creates the exception for the write <paramref name="messageId"/>.</summary>
+        public CultNetWriteUnconfirmedException(string messageId)
+            : base($"No admission or refusal arrived for write '{messageId}'.")
+        {
+            MessageId = messageId;
+        }
+
+        /// <summary>Gets the id of the unconfirmed write.</summary>
+        public string MessageId { get; }
+    }
+
+    /// <summary>
     /// Completes a write on the peer's result frame, never on a send's return or a transport acknowledgement:
     /// an ack proves delivery, not admission.
     /// </summary>
@@ -32,6 +48,49 @@ namespace GameCult.Networking
     {
         /// <summary>How long after a send a refusal may still arrive when the caller names no window.</summary>
         public static readonly TimeSpan DefaultResultWindow = TimeSpan.FromMilliseconds(500);
+
+        /// <summary>How long a receipt-capable peer has to answer a write (write-receipt.md, <c>RECEIPT_RESULT_WINDOW_MS</c>).</summary>
+        public static readonly TimeSpan ReceiptResultWindow = TimeSpan.FromMilliseconds(5000);
+
+        /// <summary>
+        /// Sends one write to a receipt-capable peer and waits <paramref name="resultWindow"/> for its answer: a
+        /// <c>write_admitted</c> naming <paramref name="messageId"/> returns, an <c>error.v1</c> naming it throws
+        /// <see cref="CultNetWriteRefusedException"/>, and an id-less error (v0, or v1 with no id) is attributed to this write
+        /// because it is the only one in flight on the connection. Silence throws <see cref="CultNetWriteUnconfirmedException"/>.
+        /// </summary>
+        public static async Task SendAndAwaitReceiptAsync(
+            Func<Action<CultNetWriteAdmittedMessage>, Action<CultNetErrorMessage>, Action<CultNetErrorV1Message>, IDisposable?> subscribe,
+            Action send,
+            string messageId,
+            TimeSpan resultWindow,
+            CancellationToken cancellationToken = default)
+        {
+            if (subscribe == null) throw new ArgumentNullException(nameof(subscribe));
+            if (send == null) throw new ArgumentNullException(nameof(send));
+            var answer = new TaskCompletionSource<CultNetErrorMessage?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var registration = subscribe(
+                admitted =>
+                {
+                    if (string.Equals(admitted.MessageId, messageId, StringComparison.Ordinal)) answer.TrySetResult(null);
+                },
+                error => answer.TrySetResult(error),
+                error =>
+                {
+                    if (error.MessageId == null || string.Equals(error.MessageId, messageId, StringComparison.Ordinal))
+                        answer.TrySetResult(error.ToV0());
+                });
+            send();
+            var window = Task.Delay(resultWindow, cancellationToken);
+            await Task.WhenAny(answer.Task, window).ConfigureAwait(false);
+            if (!answer.Task.IsCompleted)
+            {
+                await window.ConfigureAwait(false);
+                throw new CultNetWriteUnconfirmedException(messageId);
+            }
+
+            var refusal = await answer.Task.ConfigureAwait(false);
+            if (refusal != null) throw new CultNetWriteRefusedException(refusal);
+        }
 
         /// <summary>
         /// Sends one write and waits <paramref name="resultWindow"/> for the peer's answer. A refusal frame rejects with
