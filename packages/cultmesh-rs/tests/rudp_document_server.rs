@@ -2022,3 +2022,37 @@ fn nothing_behind_the_capped_frame_is_served() -> Result<()> {
     assert!(sink.0.lock().unwrap().receipts.is_empty(), "the put behind the cap was not stored");
     Ok(())
 }
+
+/// A Ping inside the grace is answered with a Pong that acknowledges nothing: its ack fields are built from
+/// what the session received, which includes the capped frame.
+#[test]
+fn a_pong_in_the_grace_after_the_cap_acknowledges_nothing() -> Result<()> {
+    let mut server = server(Default::default(), Clock::new(84_000), Sink::default(), Source::default())?;
+    let (mut peer, capped) = peer_at_the_cap(&mut server, 84)?;
+    peer.drain();
+
+    let ping = peer.session.create_ping(b"alive".to_vec());
+    peer.send_packet(&ping)?;
+    assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Handled);
+    let pong = peer
+        .drain()
+        .into_iter()
+        .find(|packet| packet.packet_type == cultnet_rs::CultNetRudpPacketType::Pong)
+        .expect("the ping is answered");
+    assert_eq!(pong.payload, b"alive");
+    assert!(!acknowledges(&pong, capped), "the Pong acknowledges the capped frame");
+    assert_eq!((pong.ack, pong.ack_mask), (0, 0));
+    Ok(())
+}
+
+/// The grace deadline saturates: at the end of the clock the answer is not given up on at once.
+#[test]
+fn the_grace_deadline_does_not_wrap_at_the_end_of_the_clock() -> Result<()> {
+    let mut server = server(Default::default(), Clock::new(u64::MAX - 10), Sink::default(), Source::default())?;
+    let (peer, _) = peer_at_the_cap(&mut server, 85)?;
+    peer.drain();
+    server.maintain()?;
+    assert!(!peer.drain().iter().any(is_goodbye), "the deadline wrapped and the session ended before its grace");
+    assert_eq!(server.session_count(), 1);
+    Ok(())
+}

@@ -605,7 +605,18 @@ where
         };
 
         let mut unsendable = match result.reply {
-            Some(reply) => self.send_packet(key.remote_addr, &reply)?,
+            Some(mut reply) => {
+                // A reply (a Pong) in the grace after the capped frame acknowledges nothing either.
+                if self
+                    .sessions
+                    .get(&key)
+                    .is_some_and(|entry| entry.ending_deadline_monotonic_millis.is_some())
+                {
+                    reply.ack = 0;
+                    reply.ack_mask = 0;
+                }
+                self.send_packet(key.remote_addr, &reply)?
+            }
             None => None,
         };
 
@@ -710,7 +721,7 @@ where
                             let packets = self.refusal_packets(&mut entry.session, &refusal, true);
                             if !packets.is_empty() {
                                 entry.ending_deadline_monotonic_millis =
-                                    Some(now_monotonic + CAPPED_ANSWER_GRACE_MILLIS);
+                                    Some(now_monotonic.saturating_add(CAPPED_ANSWER_GRACE_MILLIS));
                             }
                             self.sessions.insert(key, entry);
                             packets
