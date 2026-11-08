@@ -196,7 +196,10 @@ pub struct CultMeshRudpMaintenance {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CultMeshRudpApplicationOperation {
     DocumentPutRaw,
+    DocumentDelete,
     SnapshotRequest,
+    /// A schema frame that did not decode as any CultNet message; there is no message id to name.
+    Unreadable,
 }
 
 /// Why the server refused an application message.
@@ -241,12 +244,18 @@ pub enum CultMeshRudpRejectionReason {
     /// (`send_error_code`). The session has ended with a goodbye carrying the
     /// same name, and no refusal: the server knows the peer cannot be reached.
     ResponseSendFailed(&'static str),
+    /// The server has no delete path, so every delete is refused. Nothing reached the sink.
+    DeleteNotSupported,
+    /// A schema frame did not decode as a CultNet message. Carries the decoder's error text.
+    MessageUnreadable(String),
 }
 
 impl std::fmt::Display for CultMeshRudpRejectionReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SinkRefused(error) | Self::SnapshotSourceFailed(error) => f.write_str(error),
+            Self::DeleteNotSupported => f.write_str("the server does not take deletes"),
+            Self::MessageUnreadable(error) => write!(f, "message could not be read: {error}"),
             Self::DocumentUnservable {
                 response_bytes,
                 max_snapshot_response_bytes,
@@ -287,7 +296,7 @@ impl std::fmt::Display for CultMeshRudpRejectionReason {
 /// The texts a refused peer is sent, one per rejection variant. They are fixed:
 /// a sink's or source's error text can quote what a peer sent, so it stays with
 /// the caller that receives the rejection and never reaches the wire.
-pub(crate) const REFUSAL_TEXTS: [&str; 9] = [
+pub(crate) const REFUSAL_TEXTS: [&str; 11] = [
     "the catalog refused the document",
     "the document can never be served",
     "the snapshot source failed",
@@ -297,6 +306,8 @@ pub(crate) const REFUSAL_TEXTS: [&str; 9] = [
     "the retained payload budget is full",
     "the snapshot response could not be queued",
     "the snapshot response could not be sent",
+    "the server does not take deletes",
+    "the message could not be read",
 ];
 
 impl CultMeshRudpRejectionReason {
@@ -312,6 +323,8 @@ impl CultMeshRudpRejectionReason {
             Self::PayloadBudgetFull => 6,
             Self::ResponseQueueFailed(_) => 7,
             Self::ResponseSendFailed(_) => 8,
+            Self::DeleteNotSupported => 9,
+            Self::MessageUnreadable(_) => 10,
         }]
     }
 }
@@ -331,25 +344,46 @@ pub(crate) fn write_refused_message(record_key: &str, reason: &str) -> CultNetMe
     }
 }
 
+/// The typed `message_invalid` refusal naming the request `field` at fault, as C#
+/// `CultNetErrorMessage.ForMessageInvalid` builds it.
+pub(crate) fn message_invalid_message(field: &str, reason: &str) -> CultNetMessage {
+    CultNetMessage::Error {
+        error: format!("message_invalid: {reason}"),
+        code: Some(CultNetErrorCode::MessageInvalid),
+        details: Some(CultNetErrorDetails {
+            field: Some(field.into()),
+            value: None,
+            as_of: None,
+            current: None,
+        }),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CultMeshRudpApplicationRejection {
     pub session: CultMeshRudpSessionKey,
     pub operation: CultMeshRudpApplicationOperation,
     pub message_id: String,
-    /// The record a rejected put concerned; `None` for a snapshot request. A sink refusal names it to the peer.
+    /// The record a rejected put or delete concerned; `None` for a snapshot request or an unreadable frame.
+    /// A sink or delete refusal names it to the peer.
     pub record_key: Option<String>,
     pub reason: CultMeshRudpRejectionReason,
 }
 
 impl CultMeshRudpApplicationRejection {
-    /// What the refused peer is sent: a sink's refusal of a put is a typed `write_not_authorized` naming
-    /// the record; every other rejection is the variant's fixed text, untyped. Neither carries the
-    /// sink's or source's own text.
+    /// What the refused peer is sent: a refused put or delete is a typed `write_not_authorized` naming
+    /// the record, an unreadable frame a typed `message_invalid` naming `message`; every other rejection
+    /// is the variant's fixed text, untyped. None carries the sink's, source's or decoder's own text.
     fn refusal_message(&self) -> CultNetMessage {
         let text = self.reason.refusal_text();
         match (&self.reason, &self.record_key) {
-            (CultMeshRudpRejectionReason::SinkRefused(_), Some(record_key)) => {
-                write_refused_message(record_key, text)
+            (
+                CultMeshRudpRejectionReason::SinkRefused(_)
+                | CultMeshRudpRejectionReason::DeleteNotSupported,
+                Some(record_key),
+            ) => write_refused_message(record_key, text),
+            (CultMeshRudpRejectionReason::MessageUnreadable(_), _) => {
+                message_invalid_message("message", text)
             }
             _ => CultNetMessage::Error {
                 error: text.into(),
@@ -569,20 +603,26 @@ where
             if frame.channel_id != "schema" {
                 continue;
             }
-            let message = match decode_cultnet_message_from_slice(
+            let rejection = match decode_cultnet_message_from_slice(
                 &frame.payload,
                 CultNetWireContract::CultNetSchemaV0,
             ) {
-                Ok(message) => message,
-                Err(_) => continue,
+                Ok(message) => self.deliver_application_message(
+                    key,
+                    frame.sequence,
+                    message,
+                    now_unix,
+                    now_monotonic,
+                )?,
+                Err(error) => Some(CultMeshRudpApplicationRejection {
+                    session: key,
+                    operation: CultMeshRudpApplicationOperation::Unreadable,
+                    message_id: String::new(),
+                    record_key: None,
+                    reason: CultMeshRudpRejectionReason::MessageUnreadable(format!("{error:#}")),
+                }),
             };
-            if let Some(rejection) = self.deliver_application_message(
-                key,
-                frame.sequence,
-                message,
-                now_unix,
-                now_monotonic,
-            )? {
+            if let Some(rejection) = rejection {
                 // The only reply `receive` returns is a Pong, which delivers no
                 // frame, so no earlier send of this poll can precede a rejection.
                 // A response that could not be sent ended its session where the
@@ -898,6 +938,19 @@ where
                     }
                 }
             }
+            CultNetMessage::DocumentDelete {
+                message_id,
+                record_key,
+                ..
+            } => {
+                return Ok(Some(CultMeshRudpApplicationRejection {
+                    session: key,
+                    operation: CultMeshRudpApplicationOperation::DocumentDelete,
+                    message_id,
+                    record_key: Some(record_key),
+                    reason: CultMeshRudpRejectionReason::DeleteNotSupported,
+                }));
+            }
             _ => {}
         }
         Ok(None)
@@ -1129,6 +1182,9 @@ mod tests {
     // (`ForRemoteWriteRefused(request for "some:key", "not granted")`) and pinned by C#, TS and Python too.
     const WRITE_NOT_AUTHORIZED_HEX: &str = "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D92177726974655F6E6F745F617574686F72697A65643A206E6F74206772616E746564AB726F7574696E6748696E74C0A4636F6465B477726974655F6E6F745F617574686F72697A6564A764657461696C7384A56669656C64A97265636F72644B6579A576616C7565A8736F6D653A6B6579A461734F66C0A763757272656E74C0";
 
+    // The same file's `message_invalid` vector: field `document`, reason "Raw put messages must contain a document map."
+    const MESSAGE_INVALID_HEX: &str = "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D93E6D6573736167655F696E76616C69643A2052617720707574206D65737361676573206D75737420636F6E7461696E206120646F63756D656E74206D61702EAB726F7574696E6748696E74C0A4636F6465AF6D6573736167655F696E76616C6964A764657461696C7384A56669656C64A8646F63756D656E74A576616C7565C0A461734F66C0A763757272656E74C0";
+
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02X}")).collect()
     }
@@ -1141,5 +1197,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hex(&bytes), WRITE_NOT_AUTHORIZED_HEX);
+    }
+
+    #[test]
+    fn the_unreadable_refusal_is_the_pinned_message_invalid_bytes() {
+        let bytes = encode_cultnet_message_to_vec(
+            &message_invalid_message("document", "Raw put messages must contain a document map."),
+            CultNetWireContract::CultNetSchemaV0,
+        )
+        .unwrap();
+        assert_eq!(hex(&bytes), MESSAGE_INVALID_HEX);
     }
 }

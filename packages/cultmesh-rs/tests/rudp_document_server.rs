@@ -752,6 +752,94 @@ fn application_rejection_is_nonfatal_peer_scoped_refused_to_the_peer_and_unackno
 }
 
 #[test]
+fn an_unreadable_frame_and_a_delete_are_refused_typed_not_dropped() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(
+        Default::default(),
+        Clock::new(49_000),
+        sink.clone(),
+        Source::default(),
+    )?;
+    let target = server.local_addr()?;
+    let mut garbler = client(target, 111)?;
+    let mut deleter = client(target, 112)?;
+    let mut survivor = client(target, 113)?;
+    connect(
+        &mut server,
+        &mut [&mut garbler, &mut deleter, &mut survivor],
+    )?;
+
+    // A frame that is no CultNet message: a msgpack string quoting a canary. The peer is told
+    // message_invalid naming `message`; the decoder's text never reaches it.
+    let mut payload = vec![0xAE];
+    payload.extend_from_slice(b"CANARY-garbage");
+    let receipt = garbler.send_reliable("schema", payload)?;
+    let CultMeshRudpPollOutcome::ApplicationRejected(rejection) = server.poll_once()? else {
+        panic!("an unreadable frame must be returned as a nonfatal poll outcome");
+    };
+    assert_eq!(rejection.session.connection_id, 111);
+    assert_eq!(
+        rejection.operation,
+        CultMeshRudpApplicationOperation::Unreadable
+    );
+    assert!(matches!(
+        rejection.reason,
+        CultMeshRudpRejectionReason::MessageUnreadable(_)
+    ));
+    assert_eq!(
+        typed_refusal_seen_by(&mut garbler, &receipt)?,
+        (
+            "message_invalid: the message could not be read".to_string(),
+            Some(CultNetErrorCode::MessageInvalid),
+            Some(CultNetErrorDetails {
+                field: Some("message".into()),
+                value: None,
+                as_of: None,
+                current: None,
+            })
+        )
+    );
+    drain_until_idle(&mut server)?;
+
+    // The server has no delete path: a delete is refused write_not_authorized naming the record.
+    let receipt = send_reliable(
+        &mut deleter,
+        &CultNetMessage::DocumentDelete {
+            message_id: "del-1".into(),
+            schema_id: "sha256:note".into(),
+            record_key: "note:victim".into(),
+        },
+    )?;
+    let CultMeshRudpPollOutcome::ApplicationRejected(rejection) = server.poll_once()? else {
+        panic!("a delete must be returned as a nonfatal poll outcome");
+    };
+    assert_eq!(rejection.session.connection_id, 112);
+    assert_eq!(
+        rejection.operation,
+        CultMeshRudpApplicationOperation::DocumentDelete
+    );
+    assert_eq!(rejection.message_id, "del-1");
+    assert_eq!(rejection.reason, CultMeshRudpRejectionReason::DeleteNotSupported);
+    assert_eq!(
+        typed_refusal_seen_by(&mut deleter, &receipt)?,
+        (
+            "write_not_authorized: the server does not take deletes".to_string(),
+            Some(CultNetErrorCode::WriteNotAuthorized),
+            Some(CultNetErrorDetails {
+                field: Some("recordKey".into()),
+                value: Some("note:victim".into()),
+                as_of: None,
+                current: None,
+            })
+        )
+    );
+    drain_until_idle(&mut server)?;
+    assert_eq!(server.session_count(), 1, "only the refused peers' sessions ended");
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 0);
+    Ok(())
+}
+
+#[test]
 fn snapshot_response_resends_until_acknowledged() -> Result<()> {
     let clock = Clock::new(51_000);
     let expected = document("catalog", vec![0x81, 0xa1, 0x78, 0x2a]);
