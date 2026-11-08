@@ -68,6 +68,12 @@ namespace GameCult.Networking
         /// rudp:// endpoints use the C# RUDP schema client and cultnet:// endpoints use LiteNetLib.
         /// </summary>
         public Func<ICultNetSchemaClient>? CreateClient { get; set; }
+
+        /// <summary>
+        /// Gets or sets how long after a forwarded write the primary's refusal may still arrive; a refusal fails the
+        /// forward with <see cref="CultNetWriteRefusedException"/>. Defaults to <see cref="CultNetWriteCompletion.DefaultResultWindow"/>.
+        /// </summary>
+        public TimeSpan ResultWindow { get; set; } = CultNetWriteCompletion.DefaultResultWindow;
     }
 
     /// <summary>
@@ -85,7 +91,10 @@ namespace GameCult.Networking
             _options = options ?? new CultNetSchemaWriteForwarderOptions();
         }
 
-        /// <inheritdoc />
+        /// <summary>
+        /// Forwards a put and completes on the primary's result frame: a refusal throws
+        /// <see cref="CultNetWriteRefusedException"/>, the same failure path as an unreachable primary.
+        /// </summary>
         public async Task ForwardPutAsync(CultNetShardDescriptor shard, CultNetDocumentPutRawMessage message)
         {
             if (message == null) throw new ArgumentNullException(nameof(message));
@@ -95,7 +104,10 @@ namespace GameCult.Networking
             await SendAsync(endpoint, message).ConfigureAwait(false);
         }
 
-        /// <inheritdoc />
+        /// <summary>
+        /// Forwards a delete and completes on the primary's result frame: a refusal throws
+        /// <see cref="CultNetWriteRefusedException"/>.
+        /// </summary>
         public async Task ForwardDeleteAsync(CultNetShardDescriptor shard, CultNetDocumentDeleteMessage message)
         {
             if (message == null) throw new ArgumentNullException(nameof(message));
@@ -132,7 +144,14 @@ namespace GameCult.Networking
             using var client = CreateClient(endpoint);
             client.Connect(host, port);
             await WaitForConnectionAsync(client, endpoint).ConfigureAwait(false);
-            client.SendCultNet(message);
+            await CultNetWriteCompletion.SendAndAwaitResultAsync(
+                refuse =>
+                {
+                    client.OnCultNet(refuse);
+                    return null;
+                },
+                () => client.SendCultNet(message),
+                _options.ResultWindow).ConfigureAwait(false);
         }
 
         private ICultNetSchemaClient CreateClient(string endpoint)
