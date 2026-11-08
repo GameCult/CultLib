@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/GameCult/CultLib/contracts/cultnet/interop/cultnet.error.v1.schema.json",
   "title": "CultNet Error Message v1",
-  "description": "cultnet.error.v0 plus messageId (write-receipt.md). Sent in place of cultnet.error.v0 only to a connection that declared the write-receipt capability. v0 is unchanged: its schema is closed (additionalProperties false), so an extra key would make a v0 peer reject the frame instead of ignoring it. Map-mode: every key is written, messageId nil when the error answers no readable message. The code enum is the v0 enum.",
+  "description": "cultnet.error.v0 plus messageId (write-receipt.md). Sent in place of cultnet.error.v0 only to a connection that declared the write-receipt capability. v0 is unchanged: its schema is closed (additionalProperties false), so an extra key would make a v0 peer reject the frame instead of ignoring it. Map-mode: every key is written, messageId nil when the error answers no readable message. The code enum is the v0 enum plus limit_reached (write-receipt.md, Remembered-write limits).",
   "type": "object",
   "required": [
     "schemaVersion",
