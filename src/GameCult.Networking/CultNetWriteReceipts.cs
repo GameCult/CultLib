@@ -48,13 +48,16 @@ namespace GameCult.Networking
     }
 
     /// <summary>
-    /// One receipt-capable peer's writes: message id to content hash, so a resend of the same content is re-receipted
-    /// without being committed again and the same id with other content is refused.
+    /// One receipt-capable peer's writes: message id to content hash and the answer given, refusals included, so a resend of the
+    /// same content is answered again without being decided again and the same id with other content is refused.
     /// </summary>
     internal sealed class CultNetWriteReceiptSession
     {
-        /// <summary>The most writes a peer is remembered for; a peer at the limit has new writes refused.</summary>
+        /// <summary>The most writes a peer is remembered for, refused ones included; a peer at the limit has new writes refused.</summary>
         internal const int MaxRememberedWrites = 1024;
+
+        /// <summary>What a write is refused with when it failed for a reason no typed refusal names. Never an exception's own text.</summary>
+        internal const string WriteFailedText = "the write could not be applied";
 
         private readonly object _gate = new();
         private readonly Dictionary<string, Entry> _writes = new(StringComparer.Ordinal);
@@ -63,20 +66,31 @@ namespace GameCult.Networking
         {
             public Entry(byte[] hash) { Hash = hash; }
             public byte[] Hash { get; }
-            public bool Admitted { get; set; }
+            public bool Silent { get; set; }
+            public ICultNetSchemaMessage? Answer { get; set; }
         }
 
-        public enum Begin { New, AdmittedBefore, InFlight, DifferentContent, Full }
+        public enum Begin { New, Replay, InFlight, Silent, DifferentContent, Full }
 
-        /// <summary>Claims <paramref name="messageId"/> for a write with this content, or says what already holds it.</summary>
-        public Begin TryBegin(string messageId, byte[] hash)
+        /// <summary>
+        /// Looks <paramref name="messageId"/> up first. An id not seen is claimed for this content (<see cref="Begin.New"/>);
+        /// otherwise the outcome says what already holds it, and <paramref name="answer"/> is the answer to replay.
+        /// </summary>
+        public Begin TryBegin(string messageId, byte[] hash, out ICultNetSchemaMessage? answer)
         {
             lock (_gate)
             {
+                answer = null;
                 if (_writes.TryGetValue(messageId, out var entry))
                 {
                     if (!CryptographicOperations.FixedTimeEquals(entry.Hash, hash)) return Begin.DifferentContent;
-                    return entry.Admitted ? Begin.AdmittedBefore : Begin.InFlight;
+                    if (entry.Answer != null)
+                    {
+                        answer = entry.Answer;
+                        return Begin.Replay;
+                    }
+
+                    return entry.Silent ? Begin.Silent : Begin.InFlight;
                 }
 
                 if (_writes.Count >= MaxRememberedWrites) return Begin.Full;
@@ -85,16 +99,28 @@ namespace GameCult.Networking
             }
         }
 
-        /// <summary>The write committed: remember it so a resend is re-receipted.</summary>
-        public void Admitted(string messageId)
+        /// <summary>The write was answered, admitted or refused: remember the answer so a resend repeats it.</summary>
+        public void Answered(string messageId, ICultNetSchemaMessage answer)
         {
             lock (_gate)
             {
-                if (_writes.TryGetValue(messageId, out var entry)) entry.Admitted = true;
+                if (_writes.TryGetValue(messageId, out var entry)) entry.Answer = answer;
             }
         }
 
-        /// <summary>The write was refused or unanswered: forget it so a corrected or repeated attempt is judged afresh.</summary>
+        /// <summary>
+        /// The primary left a forward unanswered: it may have applied it, so the id is never forwarded again on this session and
+        /// a resend is answered with nothing (the client settles it unconfirmed).
+        /// </summary>
+        public void LeftSilent(string messageId)
+        {
+            lock (_gate)
+            {
+                if (_writes.TryGetValue(messageId, out var entry)) entry.Silent = true;
+            }
+        }
+
+        /// <summary>The write never reached anyone who could have applied it: forget it so a repeat is judged afresh.</summary>
         public void Abandoned(string messageId)
         {
             lock (_gate)
@@ -139,18 +165,6 @@ namespace GameCult.Networking
         }
     }
 
-    /// <summary>A resend the receipt session answered without applying it again, or refused as a reused id.</summary>
-    internal sealed class CultNetWriteResendException : Exception
-    {
-        public CultNetWriteResendException(CultNetWriteReceiptSession.Begin outcome)
-            : base("write answered from the connection's remembered writes")
-        {
-            Outcome = outcome;
-        }
-
-        public CultNetWriteReceiptSession.Begin Outcome { get; }
-    }
-
     /// <summary>
     /// One write on a receipt-capable connection: its dedupe claim and its single answer (write-receipt.md, rules 1 to 5).
     /// </summary>
@@ -185,94 +199,87 @@ namespace GameCult.Networking
         }
 
         /// <summary>
-        /// Wraps the server's authorization so the connection's remembered writes are consulted only after the actor is
-        /// authorized: authorize first, then claim the id. A resend of an admitted write throws
-        /// <see cref="CultNetWriteResendException"/> instead of applying it again.
+        /// Looks the write's id up before anything else is decided (rule 5). True when the id is new and the write should go on
+        /// to authorization and the commit; false when it was answered here (a replay, a reused id, a full table) or is owed no
+        /// further answer (still in flight, or left silent by its primary).
         /// </summary>
-        public Action<string, CultRecordKey> Guard(Action<string, CultRecordKey> authorize) => (schemaId, key) =>
+        public bool Begin()
         {
-            authorize(schemaId, key);
-            if (_messageId.Length == 0) return;
-            var outcome = _session.TryBegin(_messageId, CultNetWriteContentHash.Compute(_operation, _schemaId, _recordKey, _payload));
-            if (outcome == CultNetWriteReceiptSession.Begin.New)
+            var outcome = _session.TryBegin(_messageId, CultNetWriteContentHash.Compute(_operation, _schemaId, _recordKey, _payload), out var answer);
+            switch (outcome)
             {
-                _claimed = true;
-                return;
+                case CultNetWriteReceiptSession.Begin.New:
+                    _claimed = true;
+                    return true;
+                case CultNetWriteReceiptSession.Begin.Replay:
+                    _answered = true;
+                    _send(answer!);
+                    return false;
+                case CultNetWriteReceiptSession.Begin.InFlight:
+                    // The first attempt is still being applied and will answer this id.
+                    _answered = true;
+                    return false;
+                case CultNetWriteReceiptSession.Begin.Silent:
+                    // The first attempt went to a primary that never answered; this id is never sent again, and stays unanswered.
+                    _answered = true;
+                    return false;
+                case CultNetWriteReceiptSession.Begin.DifferentContent:
+                    Refused(CultNetErrorMessage.ForMessageInvalid("messageId", "the message id was already used for different content"));
+                    return false;
+                default:
+                    _answered = true;
+                    _send(CultNetErrorV1Message.LimitReached(_messageId));
+                    return false;
             }
+        }
 
-            throw new CultNetWriteResendException(outcome);
-        };
-
-        /// <summary>The write committed: remember it and send its one receipt.</summary>
+        /// <summary>The write committed: remember the receipt and send it.</summary>
         public void Admitted()
         {
             if (_answered) return;
             _answered = true;
-            if (_messageId.Length > 0) _session.Admitted(_messageId);
-            _send(new CultNetWriteAdmittedMessage
+            var receipt = new CultNetWriteAdmittedMessage
             {
                 MessageId = _messageId,
                 Operation = _operation,
                 SchemaId = _schemaId,
                 RecordKey = _recordKey
-            });
+            };
+            if (_claimed) _session.Answered(_messageId, receipt);
+            _send(receipt);
         }
 
-        /// <summary>The write was refused: forget its claim so a repeat is judged afresh, and send its one error.v1.</summary>
+        /// <summary>The write was refused: remember the refusal (a resend repeats it) and send its one error.v1.</summary>
         public void Refused(CultNetErrorMessage error)
         {
             if (_answered) return;
             _answered = true;
-            Release();
-            _send(CultNetErrorV1Message.From(error, _messageId));
+            var refusal = CultNetErrorV1Message.From(error, _messageId);
+            if (_claimed) _session.Answered(_messageId, refusal);
+            _send(refusal);
         }
 
-        /// <summary>No answer is owed or possible (a forward the primary never answered): forget the claim, send nothing.</summary>
+        /// <summary>
+        /// A forward its primary left unanswered: no answer is owed or possible, and the id is never forwarded again on this
+        /// session. Sends nothing.
+        /// </summary>
+        public void LeftSilent()
+        {
+            if (_answered) return;
+            _answered = true;
+            if (_claimed) _session.LeftSilent(_messageId);
+        }
+
+        /// <summary>A forward that never reached a primary that could have applied it: forget the claim, send nothing.</summary>
         public void Unanswered()
         {
             if (_answered) return;
             _answered = true;
-            Release();
-        }
-
-        /// <summary>Answers a resend per rule 5.</summary>
-        public void Resent(CultNetWriteResendException resend)
-        {
-            switch (resend.Outcome)
-            {
-                case CultNetWriteReceiptSession.Begin.AdmittedBefore:
-                    _answered = true;
-                    _send(new CultNetWriteAdmittedMessage
-                    {
-                        MessageId = _messageId,
-                        Operation = _operation,
-                        SchemaId = _schemaId,
-                        RecordKey = _recordKey
-                    });
-                    break;
-                case CultNetWriteReceiptSession.Begin.InFlight:
-                    // The first attempt is still being applied and will answer this id.
-                    _answered = true;
-                    break;
-                case CultNetWriteReceiptSession.Begin.DifferentContent:
-                    Refused(CultNetErrorMessage.ForMessageInvalid("messageId", "the message id was already used for different content"));
-                    break;
-                default:
-                    Refused(new CultNetErrorMessage { Error = "too many writes are remembered for this connection" });
-                    break;
-            }
-        }
-
-        /// <summary>Whether the write has had its answer (or has none owed).</summary>
-        public bool Settled => _answered;
-
-        /// <summary>A missing id cannot be answered under rule 1; refuse it with no id.</summary>
-        public bool HasId => _messageId.Length > 0;
-
-        private void Release()
-        {
             if (_claimed) _session.Abandoned(_messageId);
             _claimed = false;
         }
+
+        /// <summary>A missing id cannot be answered under rule 1; refuse it with no id.</summary>
+        public bool HasId => _messageId.Length > 0;
     }
 }

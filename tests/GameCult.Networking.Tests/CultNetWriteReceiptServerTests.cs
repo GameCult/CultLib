@@ -23,20 +23,32 @@ namespace GameCult.Networking.Tests
         private sealed class Authority : ICultNetRemoteWriteAuthority
         {
             public HashSet<string> Denied { get; } = new();
-            public CultNetRemoteWriteDecision Decide(CultNetRemoteWriteRequest request) =>
-                Denied.Contains(request.RecordKey.Value) ? CultNetRemoteWriteDecision.Refuse("denied") : CultNetRemoteWriteDecision.Grant();
+            public int Asked { get; private set; }
+            public CultNetRemoteWriteDecision Decide(CultNetRemoteWriteRequest request)
+            {
+                Asked++;
+                return Denied.Contains(request.RecordKey.Value) ? CultNetRemoteWriteDecision.Refuse("denied") : CultNetRemoteWriteDecision.Grant();
+            }
         }
 
         private sealed class Wire
         {
             public List<ICultNetSchemaMessage> Sent { get; } = new();
+            /// <summary>When set, the connection cannot queue what it is sent.</summary>
+            public bool Unsendable { get; set; }
+            public int Ended { get; private set; }
             public LiteNetLibTransportConnection Transport { get; }
             public CultNetServerPeer Peer { get; }
 
             public Wire()
             {
-                Transport = new LiteNetLibTransportConnection(bytes =>
-                    Sent.Add(LiteNetLibTransportConnection.DecodeSchema(LiteNetLibTransportConnection.Decode(bytes))));
+                Transport = new LiteNetLibTransportConnection(
+                    bytes =>
+                    {
+                        if (Unsendable) throw new InvalidOperationException("the send queue is full");
+                        Sent.Add(LiteNetLibTransportConnection.DecodeSchema(LiteNetLibTransportConnection.Decode(bytes)));
+                    },
+                    () => Ended++);
                 Peer = (CultNetServerPeer)RuntimeHelpers.GetUninitializedObject(typeof(CultNetServerPeer));
                 typeof(CultNetServerPeer).GetField("<Transport>k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance)!
                     .SetValue(Peer, Transport);
@@ -273,7 +285,7 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
-        public async Task AuthorizationIsDecidedBeforeAReusedIdIsLookedAt()
+        public async Task AReusedIdIsJudgedBeforeAuthorityIsAskedAgain()
         {
             var (rig, wire) = await Capable();
             await rig.Put(wire, "m1", KeyA, "one");
@@ -281,11 +293,25 @@ namespace GameCult.Networking.Tests
 
             await rig.Put(wire, "m1", KeyB, "other");
 
-            AssertRefused(wire.Sent[1], "m1", "write_not_authorized");
+            AssertRefused(wire.Sent[1], "m1", "message_invalid");
+            Assert.That(rig.Authority.Asked, Is.EqualTo(1), "authority is asked on an id's first sighting only");
         }
 
         [Test]
-        public async Task ARefusedWriteIsForgottenSoARepeatIsJudgedAfresh()
+        public async Task AResendIsAnsweredFromMemoryWithoutAskingAuthorityAgain()
+        {
+            var (rig, wire) = await Capable();
+            await rig.Put(wire, "m1", KeyA, "one");
+            rig.Authority.Denied.Add(KeyA.Value);
+
+            await rig.Put(wire, "m1", KeyA, "one");
+
+            AssertAdmitted(wire.Sent[1], "m1", "put", KeyA.Value);
+            Assert.That(rig.Authority.Asked, Is.EqualTo(1));
+        }
+
+        [Test]
+        public async Task ARefusedWriteIsRememberedSoItsResendReplaysTheRefusal()
         {
             var (rig, wire) = await Capable();
             rig.Authority.Denied.Add(KeyA.Value);
@@ -294,9 +320,131 @@ namespace GameCult.Networking.Tests
 
             await rig.Put(wire, "m1", KeyA, "one");
 
-            AssertRefused(wire.Sent[0], "m1", "write_not_authorized");
-            AssertAdmitted(wire.Sent[1], "m1", "put", KeyA.Value);
-            Assert.That(rig.TextOf(KeyA), Is.EqualTo("one"));
+            var first = AssertRefused(wire.Sent[0], "m1", "write_not_authorized");
+            var again = AssertRefused(wire.Sent[1], "m1", "write_not_authorized");
+            Assert.That(again.Error, Is.EqualTo(first.Error));
+            Assert.That(rig.TextOf(KeyA), Is.Null, "the resend was not decided afresh");
+            Assert.That(rig.Authority.Asked, Is.EqualTo(1));
+        }
+
+        [Test]
+        public async Task ARefusedIdReusedForOtherContentIsMessageInvalid()
+        {
+            var (rig, wire) = await Capable();
+            rig.Authority.Denied.Add(KeyA.Value);
+            await rig.Put(wire, "m1", KeyA, "one");
+
+            await rig.Put(wire, "m1", KeyB, "other");
+
+            AssertRefused(wire.Sent[1], "m1", "message_invalid");
+            Assert.That(rig.TextOf(KeyB), Is.Null);
+        }
+
+        [Test]
+        public async Task RefusedWritesCountAgainstTheRememberedWriteLimit()
+        {
+            var (rig, wire) = await Capable();
+            rig.Authority.Denied.Add(KeyA.Value);
+            for (var index = 0; index < CultNetWriteReceiptSession.MaxRememberedWrites; index++)
+            {
+                await rig.Put(wire, $"r{index}", KeyA, $"v{index}");
+            }
+
+            wire.Sent.Clear();
+            await rig.Put(wire, "over", KeyB, "x");
+            await rig.Put(wire, "r0", KeyA, "v0");
+
+            AssertRefused(wire.Sent[0], "over", "limit_reached");
+            AssertRefused(wire.Sent[1], "r0", "write_not_authorized");
+            Assert.That(rig.TextOf(KeyB), Is.Null);
+        }
+
+        [Test]
+        public async Task APutAndADeleteNeverShareAnId()
+        {
+            var (rig, wire) = await Capable();
+            await rig.Put(wire, "p1", KeyA, "one");
+            await rig.Delete(wire, "d1", KeyA);
+            wire.Sent.Clear();
+
+            await rig.Delete(wire, "p1", KeyA);
+            await rig.Put(wire, "d1", KeyA, "one");
+
+            AssertRefused(wire.Sent[0], "p1", "message_invalid");
+            AssertRefused(wire.Sent[1], "d1", "message_invalid");
+            Assert.That(rig.TextOf(KeyA), Is.Null, "neither reuse was applied");
+        }
+
+        [Test]
+        public async Task ADeleteAsTheFirstFrameSettlesTheConnectionAsLegacy()
+        {
+            var rig = Build();
+            var wire = new Wire();
+            await rig.Delete(wire, "d1", KeyA);
+            await rig.Hello(wire, BothFrames);
+            await rig.Put(wire, "m1", KeyA, "one");
+
+            Assert.That(wire.Sent, Is.Empty, "a hello after the first delete does not opt the connection in");
+        }
+
+        [Test]
+        public async Task AnAnswerThatCannotBeSentEndsTheConnectionInsteadOfLeavingTheWriteSilent()
+        {
+            var (rig, wire) = await Capable();
+            wire.Unsendable = true;
+            await rig.Put(wire, "m1", KeyA, "one");
+            Assert.That(wire.Ended, Is.EqualTo(1), "a receipt that cannot be queued");
+
+            rig.Authority.Denied.Add(KeyB.Value);
+            await rig.Put(wire, "m2", KeyB, "two");
+            Assert.That(wire.Ended, Is.EqualTo(2), "a refusal that cannot be queued");
+
+            wire.Transport.AnswerUnreadableSchemaFrame(new byte[] { 0xC1 });
+            Assert.That(wire.Ended, Is.EqualTo(3), "an unreadable-frame answer that cannot be queued");
+        }
+
+        [Test]
+        public async Task AnUnexpectedFailureIsRefusedWithFixedTextNotTheExceptionsOwn()
+        {
+            var (rig, wire) = await Capable();
+            var message = rig.PutOf("m1", KeyA, "one");
+            message.Document!.Payload = [0xC1];
+            var legacy = new Wire();
+
+            await rig.PutHandler(message, wire.Peer);
+            await rig.PutHandler(message, legacy.Peer);
+            await rig.DeleteHandler(new CultNetDocumentDeleteMessage { MessageId = "d1", SchemaId = "no.such.schema", RecordKey = "k" }, legacy.Peer);
+
+            Assert.That(((CultNetErrorV1Message)wire.Sent.Single()).Error, Is.EqualTo(CultNetWriteReceiptSession.WriteFailedText));
+            Assert.That(((CultNetErrorMessage)legacy.Sent[0]).Error, Is.EqualTo(CultNetWriteReceiptSession.WriteFailedText));
+        }
+
+        [Test]
+        public void TheLimitReachedRefusalIsTheSpecVectorByteForByte()
+        {
+            const string vector = "86AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7631A56572726F72D93B6C696D69745F726561636865643A207468652073657373696F6E27732072656D656D62657265642D7772697465206C696D69742069732066756C6CAB726F7574696E6748696E74C0A4636F6465AD6C696D69745F72656163686564A764657461696C7384A56669656C64C0A576616C7565C0A461734F66C0A763757272656E74C0A96D6573736167654964A87075742D31303235";
+
+            var bytes = CultNetSchemaMessageSerialization.Serialize(CultNetErrorV1Message.LimitReached("put-1025"));
+
+            Assert.That(Convert.ToHexString(bytes), Is.EqualTo(vector));
+        }
+
+        [Test]
+        public void TheSpecWireVectorsDecodeToTheirExpectedFields()
+        {
+            var admitted = (CultNetWriteAdmittedMessage)CultNetSchemaMessageSerialization.Deserialize(Convert.FromHexString(
+                "85AD736368656D6156657273696F6EB963756C746E65742E77726974655F61646D69747465642E7630A96D6573736167654964A57075742D31A96F7065726174696F6EA3707574A8736368656D614964A76E6F74652E7630A97265636F72644B6579A66E6F74653A31"));
+            Assert.That((admitted.MessageId, admitted.Operation, admitted.SchemaId, admitted.RecordKey),
+                Is.EqualTo(("put-1", "put", "note.v0", "note:1")));
+
+            var refused = (CultNetErrorV1Message)CultNetSchemaMessageSerialization.Deserialize(Convert.FromHexString(
+                "86AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7631A56572726F72D93677726974655F6E6F745F617574686F72697A65643A2074686520636174616C6F6720726566757365642074686520646F63756D656E74AB726F7574696E6748696E74C0A4636F6465B477726974655F6E6F745F617574686F72697A6564A764657461696C7384A56669656C64A97265636F72644B6579A576616C7565A66E6F74653A32A461734F66C0A763757272656E74C0A96D6573736167654964A57075742D32"));
+            Assert.That(refused.Error, Is.EqualTo("write_not_authorized: the catalog refused the document"));
+            Assert.That(refused.Code, Is.EqualTo("write_not_authorized"));
+            Assert.That(refused.MessageId, Is.EqualTo("put-2"));
+            Assert.That((refused.Details!.Field, refused.Details.Value), Is.EqualTo(("recordKey", "note:2")));
+            Assert.That(refused.Details.AsOf, Is.Null);
+            Assert.That(refused.Details.Current, Is.Null);
         }
 
         [Test]
@@ -312,7 +460,8 @@ namespace GameCult.Networking.Tests
             await rig.Put(wire, "over", KeyA, "x");
             await rig.Put(wire, "w0", new CultRecordKey("tests:receipt:0"), "x");
 
-            AssertRefused(wire.Sent[0], "over", null);
+            var limit = AssertRefused(wire.Sent[0], "over", "limit_reached");
+            Assert.That(limit.Error, Is.EqualTo("limit_reached: the session's remembered-write limit is full"));
             AssertAdmitted(wire.Sent[1], "w0", "put", "tests:receipt:0");
             Assert.That(rig.TextOf(KeyA), Is.Null);
         }
@@ -446,11 +595,50 @@ namespace GameCult.Networking.Tests
             AssertRefused(wire.Sent[1], "fwd-2", "message_invalid");
         }
 
-        [TestCase(true)]
-        [TestCase(false)]
-        public async Task AForwardThePrimaryNeverAnsweredRelaysNothingAndMayBeRetried(bool unconfirmed)
+        [Test]
+        public async Task AForwardThePrimaryLeftSilentIsNeverForwardedAgainOnTheSession()
         {
-            Exception failure = unconfirmed ? new CultNetWriteUnconfirmedException("fwd-1") : new TimeoutException("primary unreachable");
+            var forwarder = new ScriptedForwarder { OnPut = _ => Task.FromException(new CultNetWriteUnconfirmedException("fwd-1")) };
+            var rig = Build(primary: false, forwarder: forwarder);
+            var wire = new Wire();
+            await rig.Hello(wire, BothFrames);
+            wire.Sent.Clear();
+
+            await rig.Put(wire, "fwd-1", KeyA, "one");
+            forwarder.OnPut = _ => Task.CompletedTask;
+            await rig.Put(wire, "fwd-1", KeyA, "one");
+
+            Assert.That(wire.Sent, Is.Empty, "no receipt, no error: the write stays unconfirmed");
+            Assert.That(forwarder.Forwarded, Is.EqualTo(1), "the primary may have applied it, so it is not sent again");
+
+            await rig.Put(wire, "fwd-1", KeyB, "other");
+            AssertRefused(wire.Sent.Single(), "fwd-1", "message_invalid");
+        }
+
+        [Test]
+        public async Task AForwardRefusedByThePrimaryReplaysItsRefusalOnResend()
+        {
+            var forwarder = new ScriptedForwarder
+            {
+                OnPut = _ => Task.FromException(new CultNetWriteRefusedException(new CultNetErrorMessage { Error = "primary says no", Code = "write_not_authorized" }))
+            };
+            var rig = Build(primary: false, forwarder: forwarder);
+            var wire = new Wire();
+            await rig.Hello(wire, BothFrames);
+            wire.Sent.Clear();
+
+            await rig.Put(wire, "fwd-1", KeyA, "one");
+            await rig.Put(wire, "fwd-1", KeyA, "one");
+
+            Assert.That(wire.Sent, Has.Count.EqualTo(2));
+            Assert.That(((CultNetErrorV1Message)wire.Sent[1]).Error, Is.EqualTo("primary says no"));
+            Assert.That(forwarder.Forwarded, Is.EqualTo(1));
+        }
+
+        [Test]
+        public async Task AForwardThatNeverReachedThePrimaryMayBeRetried()
+        {
+            Exception failure = new TimeoutException("primary unreachable");
             var forwarder = new ScriptedForwarder { OnPut = _ => Task.FromException(failure) };
             var rig = Build(primary: false, forwarder: forwarder);
             var wire = new Wire();

@@ -345,7 +345,7 @@ namespace GameCult.Networking
         }
 
         // The write's receipt state, or null when its connection did not opt in (it is then answered exactly as before).
-        private static CultNetReceiptedWrite? BeginReceipted(
+        private CultNetReceiptedWrite? BeginReceipted(
             CultNetServerPeer peer,
             string operation,
             string? messageId,
@@ -362,8 +362,22 @@ namespace GameCult.Networking
                 : new CultNetReceiptedWrite(session, message => Answer(peer, message), operation, messageId, schemaId, recordKey, payload);
         }
 
-        // Every frame a write can be answered with. Mock point for tests: the answer leaves through the peer's transport.
-        internal static void Answer(CultNetServerPeer peer, ICultNetSchemaMessage message)
+        // Every frame a write can be answered with. Mock point for tests: the answer leaves through the peer's transport. An
+        // answer that cannot be queued ends the connection: the peer settles its write as session_ended, never as silence.
+        private void Answer(CultNetServerPeer peer, ICultNetSchemaMessage message)
+        {
+            try
+            {
+                Send(peer, message);
+            }
+            catch (Exception ex)
+            {
+                _server.Logger.LogWarning($"CultNet write answer could not be sent; ending the connection: {ex.Message}");
+                peer.Transport?.End();
+            }
+        }
+
+        private static void Send(CultNetServerPeer peer, ICultNetSchemaMessage message)
         {
             switch (message)
             {
@@ -393,7 +407,10 @@ namespace GameCult.Networking
             }
 
             _server.Logger.LogWarning($"CultNet forwarded write was not answered by its primary: {failure.Message}");
-            write.Unanswered();
+            // Silence past the window means the primary may have applied it: never forward the id again on this session.
+            // Any other failure never reached a primary that could have.
+            if (failure is CultNetWriteUnconfirmedException) write.LeftSilent();
+            else write.Unanswered();
         }
 
         private async Task HandlePutAsync(CultNetDocumentPutRawMessage message, CultNetServerPeer peer)
@@ -405,15 +422,13 @@ namespace GameCult.Networking
                 return;
             }
 
+            if (write != null && !write.Begin()) return;
+
             var authorize = Authorize(peer, CultNetRemoteWriteOperation.Put, message.ShardId, message.ShardEpoch);
             try
             {
-                await _database.ApplyPutAsync(message, write == null ? authorize : write.Guard(authorize)).ConfigureAwait(false);
+                await _database.ApplyPutAsync(message, authorize).ConfigureAwait(false);
                 write?.Admitted();
-            }
-            catch (CultNetWriteResendException resend) when (write != null)
-            {
-                write.Resent(resend);
             }
             catch (CultNetRemoteWriteRefusedException ex)
             {
@@ -462,7 +477,7 @@ namespace GameCult.Networking
             catch (Exception ex)
             {
                 _server.Logger.LogError($"CultNet raw put failed: {ex.Message}");
-                Refuse(peer, write, new CultNetErrorMessage { Error = ex.Message });
+                Refuse(peer, write, new CultNetErrorMessage { Error = CultNetWriteReceiptSession.WriteFailedText });
             }
         }
 
@@ -475,15 +490,13 @@ namespace GameCult.Networking
                 return;
             }
 
+            if (write != null && !write.Begin()) return;
+
             var authorize = Authorize(peer, CultNetRemoteWriteOperation.Delete, message.ShardId, message.ShardEpoch);
             try
             {
-                await _database.ApplyDeleteAsync(message, write == null ? authorize : write.Guard(authorize)).ConfigureAwait(false);
+                await _database.ApplyDeleteAsync(message, authorize).ConfigureAwait(false);
                 write?.Admitted();
-            }
-            catch (CultNetWriteResendException resend) when (write != null)
-            {
-                write.Resent(resend);
             }
             catch (CultNetRemoteWriteRefusedException ex)
             {
@@ -528,7 +541,7 @@ namespace GameCult.Networking
             }
             catch (Exception ex)
             {
-                Refuse(peer, write, new CultNetErrorMessage { Error = ex.Message });
+                Refuse(peer, write, new CultNetErrorMessage { Error = CultNetWriteReceiptSession.WriteFailedText });
             }
         }
 

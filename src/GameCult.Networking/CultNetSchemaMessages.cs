@@ -663,6 +663,18 @@ namespace GameCult.Networking
             };
         }
 
+        /// <summary>
+        /// The refusal of a write a session has no room to remember (write-receipt.md, rule 5): code <c>limit_reached</c>,
+        /// details present and all nil. Exists only as error.v1; v0 has no such code.
+        /// </summary>
+        public static CultNetErrorV1Message LimitReached(string? messageId) => new CultNetErrorV1Message
+        {
+            Error = "limit_reached: the session's remembered-write limit is full",
+            Code = "limit_reached",
+            Details = new CultNetErrorDetails(),
+            MessageId = string.IsNullOrEmpty(messageId) ? null : messageId
+        };
+
         /// <summary>Gets the v0 form, dropping the id.</summary>
         public CultNetErrorMessage ToV0() => new CultNetErrorMessage
         {

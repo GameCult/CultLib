@@ -3534,6 +3534,7 @@ namespace GameCult.Networking
     public sealed class LiteNetLibTransportConnection
     {
         private readonly Action<byte[]>? _deliver;
+        private readonly Action? _end;
         private readonly CultNetTransportStats _stats = new CultNetTransportStats();
 
         /// <summary>
@@ -3543,21 +3544,41 @@ namespace GameCult.Networking
         {
             if (peer == null) throw new ArgumentNullException(nameof(peer));
             _deliver = payload => peer.Send(payload, DeliveryMethod.ReliableOrdered);
+            _end = peer.Disconnect;
             Profile = profile ?? CultNetTransportProfiles.CreateLiteNetLib("csharp-litenetlib-peer");
         }
 
         // The mock point for what leaves the connection: the peer's reliable ordered send.
-        internal LiteNetLibTransportConnection(Action<byte[]> deliver)
+        internal LiteNetLibTransportConnection(Action<byte[]> deliver, Action? end = null)
         {
             _deliver = deliver ?? throw new ArgumentNullException(nameof(deliver));
+            _end = end;
             Profile = CultNetTransportProfiles.CreateLiteNetLib("csharp-litenetlib-peer");
         }
 
-        /// <summary>Answers a schema frame that did not decode with a <c>message_invalid</c> error.v1 naming its id when it holds one.</summary>
-        internal void AnswerUnreadableSchemaFrame(byte[] payload) =>
-            SendSchema(CultNetErrorV1Message.From(
-                CultNetErrorMessage.ForMessageInvalid("message", "the message could not be read"),
-                CultNetReadableMessageId.From(payload)));
+        /// <summary>
+        /// Ends the connection. A write that can be neither answered nor refused is answered by this goodbye: the peer sees
+        /// its session end and settles the write as unconfirmed (<c>session_ended</c>), never as silence.
+        /// </summary>
+        internal void End() => _end?.Invoke();
+
+        /// <summary>
+        /// Answers a schema frame that did not decode with a <c>message_invalid</c> error.v1 naming its id when it holds one;
+        /// when that answer cannot be sent the connection ends instead.
+        /// </summary>
+        internal void AnswerUnreadableSchemaFrame(byte[] payload)
+        {
+            try
+            {
+                SendSchema(CultNetErrorV1Message.From(
+                    CultNetErrorMessage.ForMessageInvalid("message", "the message could not be read"),
+                    CultNetReadableMessageId.From(payload)));
+            }
+            catch (Exception)
+            {
+                End();
+            }
+        }
 
         private readonly object _writeFramingGate = new();
         private bool _writeFramingSettled;
