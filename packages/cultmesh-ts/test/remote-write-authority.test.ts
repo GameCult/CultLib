@@ -563,3 +563,30 @@ test("deletes the authority refuses are answered and the session kept until eigh
     assert.equal(r.deletes.length, 1);
   });
 });
+
+test("a frame that decodes but is no message the parser takes is answered, counted, and ended at eight in a row like any unreadable frame", async () => {
+  const r = await rawRig(new Recording(grant));
+  const unknown = () => encodeWireValue({ schemaVersion: "cultnet.not-a-message.v0", messageId: "x" });
+  try {
+    const batch = async (frames: number) => {
+      for (let i = 0; i < frames; i++) r.send(unknown());
+      await sleep(400);
+    };
+    await batch(CAP - 1);
+    assert.equal(r.replies.length, CAP - 1, "each is answered");
+    assert.equal(r.errors.length, CAP - 1, "and reported");
+    r.send(encodeWireValue(put(KEY_A)));
+    await sleep(250);
+    assert.deepEqual(r.puts.map((p) => p.recordKey), [KEY_A], "the session was kept through seven");
+    await batch(CAP - 1);
+    assert.equal(r.replies.length, 2 * (CAP - 1), "the decoded put reset the run");
+    r.send(unknown());
+    await sleep(300);
+    assert.equal(r.replies.length, 2 * (CAP - 1) + 1, "the eighth is answered too");
+    for (const reply of r.replies) {
+      assert.equal((reply as { code?: string }).code, "message_invalid");
+      assert.equal((reply as { details: { field: string } }).details.field, "message");
+    }
+    assert.throws(() => r.send(unknown()), /before the session is connected/, "then the session ended");
+  } finally { r.close(); }
+});

@@ -5678,9 +5678,13 @@ export class CultMesh {
         // A frame the server cannot read is judged as the write it looks like (a put when it does not even decode), so
         // an ungranted peer hears the same refusal for it as for any other write, not a parse error.
         const write = readableWrite(decoded);
-        if (decoded !== undefined && !write) throw error;
         record.unreadableInARow += 1;
-        if (!await writeRefused(record, write?.operation ?? "put", write?.schemaId ?? "", write?.recordKey ?? "", null, null)) {
+        if (decoded !== undefined && !write) {
+          // It decodes but is no message the parser takes (an unknown schemaVersion, a non-map) and is no write the
+          // authority could judge: answered and counted like any other unreadable frame.
+          reportError(error);
+          sendSchemaMessage(record, cultNetMessageInvalidError("message", "CultMesh RUDP document server could not read the message."));
+        } else if (!await writeRefused(record, write?.operation ?? "put", write?.schemaId ?? "", write?.recordKey ?? "", null, null)) {
           reportError(error);
           sendSchemaMessage(record, cultNetMessageInvalidError("message", "CultMesh RUDP document server could not read the write."));
         }
