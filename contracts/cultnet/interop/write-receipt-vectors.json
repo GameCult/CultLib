@@ -111,10 +111,10 @@
     }
   ],
   "blankFields": {
-    "semantics": "A put whose document 'names nothing' is refused like a frame that does not read (error.v1 message_invalid, details.field \"message\", the write's id, the fixed text of error_v1_empty_schema_id_is_unreadable_and_names_the_write) and never applied, on every connection, receipt-capable or not. Each case starts from this valid document: schemaId note.v0, recordKey note:1, storedAt 2026-11-08T00:00:00Z, payload 81A16101 (hex), no source ids, no tags; 'set' replaces or adds the named fields. A blank string is empty or made only of Unicode White_Space code points (the list in whiteSpaceCodePoints, the PropList property, the same in every runtime; U+200B, U+FEFF and U+180E are not White_Space). Fields not listed are valid. 'unset' means the key is absent or nil, which is not blank: those cases are admitted.",
+    "semantics": "A put whose document 'names nothing' is refused like a frame that does not read (error.v1 message_invalid, details.field \"message\", the write's id, the fixed text of error_v1_empty_schema_id_is_unreadable_and_names_the_write) and never applied, on every connection, receipt-capable or not. Each case starts from this valid document: schemaId note.v0, recordKey note:1, storedAt 2026-11-08T00:00:00Z, payload 81A16101 (hex), no source ids, no tags; 'set' replaces or adds the named fields. A blank string is empty or made only of Unicode White_Space code points (the list in whiteSpaceCodePoints, the PropList property, the same in every runtime; U+200B, U+FEFF, U+180E and U+001C to U+001F are not White_Space, though some platforms' whitespace tests accept some of them). Fields not listed are valid. 'unset' means the key is absent or nil, which is not blank: those cases are admitted.",
     "validPutPayloadHex": "81A16101",
     "whiteSpaceCodePoints": ["0009","000A","000B","000C","000D","0020","0085","00A0","1680","2000","2001","2002","2003","2004","2005","2006","2007","2008","2009","200A","2028","2029","202F","205F","3000"],
-    "notWhiteSpaceCodePoints": ["200B","200C","200D","2060","FEFF","180E"],
+    "notWhiteSpaceCodePoints": ["200B","200C","200D","2060","FEFF","180E","001C","001D","001E","001F"],
     "codePointCases": "For every code point in whiteSpaceCodePoints, each of schemaId, recordKey, storedAt, sourceRuntimeId, sourceAgentId, sourceRole and one tags entry, set alone to a string of just that code point (and to that code point repeated three times), is refused; for every code point in notWhiteSpaceCodePoints the same string is not blank and the put is admitted.",
     "cases": [
       { "name": "valid_document_is_admitted", "set": {}, "outcome": "admitted" },
@@ -142,6 +142,8 @@
       { "name": "zero_width_space_tag_is_a_name", "set": { "tags": ["\u200b"] }, "outcome": "admitted" },
       { "name": "bom_stored_at_is_a_name", "set": { "storedAt": "\ufeff" }, "outcome": "admitted" },
       { "name": "mongolian_vowel_separator_source_role_is_a_name", "set": { "sourceRole": "\u180e" }, "outcome": "admitted" },
+      { "name": "padded_name_is_a_name", "set": { "schemaId": "\u00a0a\u2003", "tags": [" a"] }, "outcome": "admitted" },
+      { "name": "file_separator_schema_id_is_a_name", "set": { "schemaId": "\u001c" }, "outcome": "admitted" },
       { "name": "source_ids_and_tags_present_and_named", "set": { "sourceRuntimeId": "r", "sourceAgentId": "a", "sourceRole": "w", "tags": ["a"] }, "outcome": "admitted" },
       { "name": "source_ids_and_tags_nil", "set": { "sourceRuntimeId": null, "sourceAgentId": null, "sourceRole": null, "tags": null }, "outcome": "admitted" },
       { "name": "empty_tag_list", "set": { "tags": [] }, "outcome": "admitted" }
