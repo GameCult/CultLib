@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/CultLib/contracts/cultnet/interop/cultnet.error.v1.schema.json",
+  "title": "CultNet Error Message v1",
+  "description": "cultnet.error.v0 plus messageId (write-receipt.md). Sent in place of cultnet.error.v0 only to a connection that declared the write-receipt capability. v0 is unchanged: its schema is closed (additionalProperties false), so an extra key would make a v0 peer reject the frame instead of ignoring it. Map-mode: every key is written, messageId nil when the error answers no readable message. The code enum is the v0 enum.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "error",
+    "routingHint",
+    "code",
+    "details",
+    "messageId"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": "cultnet.error.v1"
+    },
+    "error": {
+      "type": "string",
+      "minLength": 1
+    },
+    "routingHint": {
+      "description": "Optional shard routing detail for an authority failure. Null for every selection/cursor refusal code (R-N).",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "shard",
+        "reason"
+      ],
+      "properties": {
+        "shard": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "code": {
+      "description": "Machine-readable refusal code (R-N). Additive: a v0 peer that does not know this field ignores it. The set is a closed enum: Rust and TypeScript refuse a message whose code is not listed, so adding a code is one coordinated change across every runtime (this schema, the C# factory, the Rust CultNetErrorCode, and a captured-bytes case for each).",
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        null,
+        "selection_invalid",
+        "cursor_stale",
+        "cursor_invalid",
+        "reference_outside_target",
+        "variant_unsupported",
+        "unowned_schema",
+        "write_not_authorized",
+        "unsupported_schema_version",
+        "message_invalid"
+      ]
+    },
+    "details": {
+      "description": "Code-specific structured detail (R-N). Every field is populated only for the code that defines it; the others are null, not omitted.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "value",
+        "asOf",
+        "current"
+      ],
+      "properties": {
+        "field": {
+          "description": "selection_invalid: the selection field that failed. variant_unsupported: \"subscriptionId\", when a subscription was ended. unowned_schema: \"schemaId\". write_not_authorized: \"recordKey\". unsupported_schema_version: \"schemaVersion\". message_invalid: the request field that is missing or ill-typed (\"message\" when the whole frame cannot be read).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "description": "selection_invalid: the offending value, when there is one string worth naming. variant_unsupported: the id of the subscription that ended. unowned_schema: the schema id no shard owns. write_not_authorized: the key of the refused write. unsupported_schema_version: the schemaVersion the peer does not speak.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "asOf": {
+          "description": "cursor_stale: the cursor's own minted asOf.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "current": {
+          "description": "cursor_stale: the answering server's current asOf.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "messageId": {
+      "description": "The messageId of the write (or other request) this error answers, echoed byte for byte. Null only when the frame was unreadable or carried no messageId.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    }
+  }
+}

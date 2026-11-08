@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/CultLib/contracts/cultnet/interop/cultnet.write-admitted.schema.json",
+  "title": "CultNet Write Admitted",
+  "description": "The receipt for one admitted document put or delete (write-receipt.md). Sent only after the write's commit point, only to a connection that declared the write-receipt capability, once per messageId. Map-mode: every key is written, none is nil. A receipt never carries an error, and an error.v1 never carries admission.",
+  "type": "object",
+  "required": ["schemaVersion", "messageId", "operation", "schemaId", "recordKey"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.write_admitted.v0" },
+    "messageId": { "description": "The messageId of the put or delete this admits, echoed byte for byte.", "type": "string", "minLength": 1 },
+    "operation": { "enum": ["put", "delete"] },
+    "schemaId": { "description": "The schemaId of the admitted write, echoed.", "type": "string", "minLength": 1 },
+    "recordKey": { "description": "The recordKey of the admitted write, echoed.", "type": "string", "minLength": 1 }
+  }
+}
