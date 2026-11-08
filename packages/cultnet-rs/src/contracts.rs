@@ -1979,3 +1979,17 @@ pub fn write_content_hash(
     rmpv::encode::write_value(&mut bytes, &value)?;
     Ok(Sha256::digest(&bytes).into())
 }
+
+/// The `messageId` of a schema frame that does not decode as a message (write-receipt.md, rule 3: a refusal
+/// carries the write's id whenever the frame is readable enough to find it). `None` when the bytes are not
+/// a MessagePack map or hold no non-empty string `messageId`.
+pub fn readable_message_id(bytes: &[u8]) -> Option<String> {
+    let value = rmpv::decode::read_value(&mut &*bytes).ok()?;
+    let rmpv::Value::Map(entries) = value else {
+        return None;
+    };
+    entries.into_iter().find_map(|(key, value)| match (key.as_str(), value) {
+        (Some("messageId"), rmpv::Value::String(id)) => id.into_str().filter(|id| !id.is_empty()),
+        _ => None,
+    })
+}

@@ -22,6 +22,8 @@ use std::time::Duration;
 struct SinkState {
     receipts: Vec<CultMeshRudpRawDocumentReceipt>,
     failures_remaining: usize,
+    /// Record keys the sink refuses to authorize, before and at the write.
+    denied_keys: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -34,11 +36,28 @@ impl Sink {
             ..Default::default()
         })))
     }
+
+    fn denying(keys: &[&str]) -> Self {
+        Self(Arc::new(Mutex::new(SinkState {
+            denied_keys: keys.iter().map(|key| key.to_string()).collect(),
+            ..Default::default()
+        })))
+    }
 }
 
 impl CultMeshRudpRawDocumentSink for Sink {
+    fn authorize_raw_document(&mut self, receipt: &CultMeshRudpRawDocumentReceipt) -> Result<()> {
+        if self.0.lock().unwrap().denied_keys.contains(&receipt.document.record_key) {
+            anyhow::bail!("not authorized");
+        }
+        Ok(())
+    }
+
     fn accept_raw_document(&mut self, receipt: CultMeshRudpRawDocumentReceipt) -> Result<()> {
         let mut state = self.0.lock().unwrap();
+        if state.denied_keys.contains(&receipt.document.record_key) {
+            anyhow::bail!("not authorized");
+        }
         if state.failures_remaining > 0 {
             state.failures_remaining -= 1;
             anyhow::bail!("injected sink failure CANARY-7f3a");
@@ -2112,6 +2131,36 @@ fn frames_after<Q: CultMeshRudpSnapshotSource>(
     Ok(frames)
 }
 
+/// The hello a receipt server sends a receipt-capable client, ahead of any answer.
+fn server_hello() -> CultNetMessage {
+    CultNetMessage::Hello {
+        runtime_id: "cultmesh-rs-rudp-document-server".into(),
+        runtime_kind: "cultmesh-rs".into(),
+        agent_id: None,
+        role: None,
+        display_name: None,
+        supported_document_types: None,
+        supported_mutation_contracts: None,
+        supported_message_versions: Some(vec![
+            "cultnet.write_admitted.v0".into(),
+            "cultnet.error.v1".into(),
+        ]),
+        transport_profiles: None,
+        supports_schema_catalog: None,
+    }
+}
+
+/// The `count` answers after the server's hello, which must come first.
+fn answers_after<Q: CultMeshRudpSnapshotSource>(
+    server: &mut CultMeshRudpDocumentServer<Sink, Q, Clock>,
+    client: &mut CultNetRudpSocketTransportConnection,
+    count: usize,
+) -> Result<Vec<CultNetMessage>> {
+    let mut frames = frames_after(server, client, count + 1)?;
+    assert_eq!(frames.first(), Some(&server_hello()), "the server answers the hello first");
+    Ok(frames.split_off(1))
+}
+
 fn admitted(id: &str, key: &str) -> CultNetMessage {
     CultNetMessage::WriteAdmitted {
         message_id: id.into(),
@@ -2129,7 +2178,7 @@ fn an_admitted_put_on_a_receipt_connection_is_answered_with_a_receipt_carrying_i
     connect(&mut server, &mut [&mut peer])?;
     send_reliable(&mut peer, &receipt_hello())?;
     send_reliable(&mut peer, &put("m1", "note:1", vec![1, 2, 3]))?;
-    assert_eq!(frames_after(&mut server, &mut peer, 1)?, vec![admitted("m1", "note:1")]);
+    assert_eq!(answers_after(&mut server, &mut peer, 1)?, vec![admitted("m1", "note:1")]);
     assert_eq!(sink.0.lock().unwrap().receipts.len(), 1);
     Ok(())
 }
@@ -2156,7 +2205,7 @@ fn a_resend_of_an_admitted_write_is_re_receipted_without_applying_it_twice() -> 
     send_reliable(&mut peer, &put("m1", "note:1", vec![1, 2, 3]))?;
     send_reliable(&mut peer, &put("m1", "note:1", vec![1, 2, 3]))?;
     assert_eq!(
-        frames_after(&mut server, &mut peer, 2)?,
+        answers_after(&mut server, &mut peer, 2)?,
         vec![admitted("m1", "note:1"), admitted("m1", "note:1")]
     );
     assert_eq!(sink.0.lock().unwrap().receipts.len(), 1);
@@ -2172,7 +2221,7 @@ fn the_same_id_with_other_content_is_refused_message_invalid_never_re_receipted(
     send_reliable(&mut peer, &receipt_hello())?;
     send_reliable(&mut peer, &put("m1", "note:1", vec![1, 2, 3]))?;
     send_reliable(&mut peer, &put("m1", "note:1", vec![9, 9, 9]))?;
-    let frames = frames_after(&mut server, &mut peer, 2)?;
+    let frames = answers_after(&mut server, &mut peer, 2)?;
     assert_eq!(frames[0], admitted("m1", "note:1"));
     let CultNetMessage::ErrorV1 { code, details, message_id, .. } = &frames[1] else {
         panic!("the second answer must be a refusal, got {:?}", frames[1]);
@@ -2192,7 +2241,7 @@ fn a_refused_put_on_a_receipt_connection_is_a_typed_error_naming_its_id() -> Res
     connect(&mut server, &mut [&mut peer])?;
     send_reliable(&mut peer, &receipt_hello())?;
     send_reliable(&mut peer, &put("m7", "note:7", vec![1]))?;
-    let frames = frames_after(&mut server, &mut peer, 1)?;
+    let frames = answers_after(&mut server, &mut peer, 1)?;
     let Some(CultNetMessage::ErrorV1 { code, message_id, .. }) = frames.first() else {
         panic!("expected error.v1, got {frames:?}");
     };
@@ -2216,5 +2265,176 @@ fn a_hello_listing_only_one_of_the_two_frames_does_not_opt_in() -> Result<()> {
         send_reliable(&mut peer, &put("m1", "note:1", vec![1]))?;
         assert_eq!(frames_after(&mut server, &mut peer, 1)?, vec![], "listed only {listed}");
     }
+    Ok(())
+}
+
+fn refusal_of(message: &CultNetMessage) -> (Option<CultNetErrorCode>, Option<String>) {
+    let CultNetMessage::ErrorV1 { code, message_id, .. } = message else {
+        panic!("expected error.v1, got {message:?}");
+    };
+    (code.clone(), message_id.clone())
+}
+
+#[test]
+fn a_refused_put_leaves_the_receipt_session_open_for_the_next_write() -> Result<()> {
+    let sink = Sink::fail_once();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 207)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    send_reliable(&mut peer, &put("m1", "note:1", vec![1]))?;
+    send_reliable(&mut peer, &put("m2", "note:2", vec![2]))?;
+    let answers = answers_after(&mut server, &mut peer, 2)?;
+    assert_eq!(refusal_of(&answers[0]), (Some(CultNetErrorCode::WriteNotAuthorized), Some("m1".into())));
+    assert_eq!(answers[1], admitted("m2", "note:2"));
+    assert_eq!(server.session_count(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_reused_id_refuses_the_write_not_the_session() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 208)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    send_reliable(&mut peer, &put("m1", "note:1", vec![1]))?;
+    send_reliable(&mut peer, &put("m1", "note:1", vec![2]))?;
+    send_reliable(&mut peer, &put("m3", "note:3", vec![3]))?;
+    let answers = answers_after(&mut server, &mut peer, 3)?;
+    assert_eq!(refusal_of(&answers[1]), (Some(CultNetErrorCode::MessageInvalid), Some("m1".into())));
+    assert_eq!(answers[2], admitted("m3", "note:3"));
+    assert_eq!(server.session_count(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_full_dedupe_table_refuses_new_writes_and_keeps_the_session_and_its_receipts() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 209)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    for index in 0..1024 {
+        send_reliable(&mut peer, &put(&format!("w{index}"), &format!("note:{index}"), vec![1]))?;
+        if index % 16 == 15 {
+            for _ in 0..40 {
+                server.poll_once()?;
+                peer.poll_resends()?;
+                while peer.receive_once()?.is_some() {}
+            }
+        }
+    }
+    send_reliable(&mut peer, &put("over", "note:over", vec![1]))?;
+    send_reliable(&mut peer, &put("w0", "note:0", vec![1]))?;
+    let answers = frames_after(&mut server, &mut peer, 2)?;
+    assert_eq!(refusal_of(&answers[0]), (None, Some("over".into())));
+    assert_eq!(answers[1], admitted("w0", "note:0"), "a remembered id is still answered idempotently");
+    assert_eq!(server.session_count(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_readable_id_with_a_bad_field_is_refused_with_that_id() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 210)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    // A put with no document: it does not decode, but its id is there to read.
+    let frame = rmp_serde::to_vec_named(&serde_json::json!({
+        "schemaVersion": "cultnet.document_put_raw.v0",
+        "messageId": "bad-1",
+    }))?;
+    peer.send_reliable("schema", frame)?;
+    peer.send_reliable("schema", garbage())?;
+    let answers = answers_after(&mut server, &mut peer, 2)?;
+    assert_eq!(refusal_of(&answers[0]), (Some(CultNetErrorCode::MessageInvalid), Some("bad-1".into())));
+    assert_eq!(refusal_of(&answers[1]), (Some(CultNetErrorCode::MessageInvalid), None), "no id can be read");
+    Ok(())
+}
+
+#[test]
+fn authorization_is_decided_before_a_reused_id_is_looked_at() -> Result<()> {
+    let sink = Sink::denying(&["secret"]);
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 211)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    send_reliable(&mut peer, &put("m1", "note:1", vec![1]))?;
+    send_reliable(&mut peer, &put("m1", "secret", vec![1]))?;
+    let answers = answers_after(&mut server, &mut peer, 2)?;
+    assert_eq!(
+        refusal_of(&answers[1]),
+        (Some(CultNetErrorCode::WriteNotAuthorized), Some("m1".into())),
+        "a peer that may not write the key is not told the id was used"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_second_hello_does_not_change_the_capability() -> Result<()> {
+    let mut downgrade = receipt_hello();
+    if let CultNetMessage::Hello { supported_message_versions, .. } = &mut downgrade {
+        *supported_message_versions = None;
+    }
+    // Capable, then a hello listing nothing: still capable.
+    let sink = Sink::default();
+    let mut server_a = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server_a.local_addr()?, 212)?;
+    connect(&mut server_a, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    send_reliable(&mut peer, &downgrade)?;
+    send_reliable(&mut peer, &put("m1", "note:1", vec![1]))?;
+    assert_eq!(answers_after(&mut server_a, &mut peer, 1)?, vec![admitted("m1", "note:1")]);
+    // Legacy by its first write, then a capable hello: still legacy.
+    let mut server_b = server(Default::default(), Clock::new(70_000), Sink::default(), Source::default())?;
+    let mut late = client(server_b.local_addr()?, 213)?;
+    connect(&mut server_b, &mut [&mut late])?;
+    send_reliable(&mut late, &put("m1", "note:1", vec![1]))?;
+    send_reliable(&mut late, &receipt_hello())?;
+    send_reliable(&mut late, &put("m2", "note:2", vec![1]))?;
+    assert_eq!(frames_after(&mut server_b, &mut late, 1)?, vec![]);
+    Ok(())
+}
+
+#[test]
+fn a_receipt_session_that_runs_out_of_payload_budget_is_ended_not_left_silent() -> Result<()> {
+    let options = CultMeshRudpDocumentServerOptions {
+        max_admitted_payload_bytes_per_session: 400,
+        max_snapshot_response_bytes: 200,
+        ..Default::default()
+    };
+    let mut server = server(options, Clock::new(70_000), Sink::default(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 214)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    for index in 0..20 {
+        send_reliable(&mut peer, &put(&format!("w{index}"), &format!("note:{index}"), vec![1; 64]))?;
+    }
+    frames_after(&mut server, &mut peer, usize::MAX)?;
+    assert_eq!(server.session_count(), 0, "the writes the budget dropped were answered by ending the session");
+    Ok(())
+}
+
+#[test]
+fn a_receipt_that_cannot_be_queued_ends_the_session_instead_of_leaving_the_write_unanswered() -> Result<()> {
+    let options = CultMeshRudpDocumentServerOptions {
+        max_pending_reliable_packets_per_session: 3,
+        ..Default::default()
+    };
+    let sink = Sink::default();
+    let mut server = server(options, Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 215)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    // The peer never reads, so it acknowledges nothing and the server's reliable queue fills.
+    for index in 0..8 {
+        send_reliable(&mut peer, &put(&format!("w{index}"), &format!("note:{index}"), vec![1]))?;
+        for _ in 0..20 {
+            server.poll_once()?;
+        }
+    }
+    assert_eq!(server.session_count(), 0, "a receipt the queue could not take ended the session");
     Ok(())
 }

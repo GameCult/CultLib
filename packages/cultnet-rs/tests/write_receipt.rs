@@ -25,7 +25,7 @@ fn the_content_hash_matches_the_spec_vectors() {
 }
 
 #[test]
-fn the_new_frames_encode_to_the_spec_bytes() {
+fn the_new_frames_decode_back_equal() {
     let admitted = CultNetMessage::WriteAdmitted {
         message_id: "put-1".into(),
         operation: "put".into(),
