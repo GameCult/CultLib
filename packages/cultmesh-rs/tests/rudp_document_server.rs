@@ -3138,6 +3138,50 @@ fn a_superseded_sequenced_write_is_still_refused() -> Result<()> {
     Ok(())
 }
 
+/// A superseded sequenced packet is answered even when its arrival fills a gap and releases another write: the
+/// frames that arrive with it do not stand in for its own.
+#[test]
+fn a_superseded_sequenced_write_is_refused_while_it_releases_a_held_ordered_write() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = RawPeer::connect(&mut server, 255)?;
+    peer.send(&receipt_hello())?;
+    server.poll_once()?;
+    let packet_for = |peer: &mut RawPeer, id: &str, ordered: bool, sequenced: bool| -> Result<Vec<cultnet_rs::CultNetRudpPacket>> {
+        let payload = encode_cultnet_message_to_vec(&put(id, &format!("note:{id}"), vec![1]), CultNetWireContract::CultNetSchemaV0)?;
+        peer.session.send_many(
+            "schema",
+            payload,
+            cultnet_rs::CultNetRudpSendOptions { reliable: true, ordered, sequenced, now_ms: 3, reliable_expire_after_ms: None },
+            Some(1200),
+        )
+    };
+    let older = packet_for(&mut peer, "old", false, true)?;
+    let ordered = packet_for(&mut peer, "o1", true, false)?;
+    let newer = packet_for(&mut peer, "new", false, true)?;
+    let mut answers = Vec::new();
+    for packets in [&newer, &ordered, &older] {
+        for packet in packets {
+            peer.send_packet(packet)?;
+        }
+        server.poll_once()?;
+        for packet in peer.drain() {
+            for frame in peer.session.receive(&packet, 4)?.delivered {
+                answers.push(decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)?);
+            }
+        }
+    }
+    let mut refused: Vec<String> = answers
+        .iter()
+        .filter(|a| matches!(a, CultNetMessage::ErrorV1 { .. }))
+        .map(|a| refusal_of(a).1.expect("a refusal names its write"))
+        .collect();
+    refused.sort();
+    assert_eq!(refused, vec!["new".to_string(), "old".to_string()], "{answers:?}");
+    assert!(answers.contains(&admitted("o1", "note:o1")), "the released ordered write is admitted: {answers:?}");
+    Ok(())
+}
+
 /// The refusal reaches a sequenced write however far apart its fragments' sequences sit: other traffic can take the
 /// sequences between the first fragment and the last, further back than the duplicate test's receive window.
 #[test]

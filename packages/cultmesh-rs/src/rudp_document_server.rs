@@ -1961,5 +1961,7 @@ mod tests {
         assert!(!sequence_at_or_before(1, u32::MAX - 1), "after the wrap is later than before it");
         assert!(sequence_at_or_before(u32::MAX, 0), "the wrap itself");
         assert!(!sequence_at_or_before(0, u32::MAX));
+        assert!(sequence_at_or_before(0, (1 << 31) - 1), "just inside half the space");
+        assert!(!sequence_at_or_before(0, 1 << 31), "half the space away is not before");
     }
 }
