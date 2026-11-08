@@ -27,7 +27,8 @@ namespace GameCult.Networking
 
         /// <summary>
         /// Sends one schema-v0 message through the transport. Fire-and-forget: an ack or a return is not admission;
-        /// read the result frame (<see cref="CultNetWriteCompletion"/>).
+        /// read the result frame (<see cref="CultNetWriteCompletion"/>). Throws <see cref="CultNetWriteNotSentException"/> only
+        /// when it can prove no byte was written; any other exception leaves the send ambiguous and a forwarded write unconfirmed.
         /// </summary>
         void SendCultNet<T>(T message)
             where T : ICultNetSchemaMessage;

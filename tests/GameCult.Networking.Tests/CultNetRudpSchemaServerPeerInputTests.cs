@@ -178,6 +178,46 @@ namespace GameCult.Networking.Tests
             Assert.That(scene.Logger.Errors, Has.Count.EqualTo(1));
         }
 
+        // The RUDP schema server implements no receipt rules, so it must not advertise them (write-receipt.md, Capability and the
+        // conformance table): whatever hello it sends lists neither frame.
+        [Test]
+        public async Task TheRudpSchemaServerNeverAdvertisesTheReceiptFrames()
+        {
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "csharp-rudp-no-receipts",
+                ConnectionId = ConnectionId
+            });
+            var client = await Connect(server);
+            try
+            {
+                SendSchema(server, client, CultNetSchemaMessageSerialization.Serialize(new CultNetHelloMessage
+                {
+                    RuntimeId = "receipt-client",
+                    RuntimeKind = "test",
+                    SupportedMessageVersions = [CultNetSchemaVersions.WriteAdmitted, CultNetSchemaVersions.ErrorV1]
+                }));
+                await server.PollAvailableAsync(16);
+
+                var hellos = new List<CultNetHelloMessage>();
+                foreach (var packet in Drain(client.Socket))
+                    foreach (var frame in client.Session.Receive(packet, 1).Delivered)
+                        if (CultNetSchemaMessageSerialization.Deserialize(frame.Payload) is CultNetHelloMessage hello)
+                            hellos.Add(hello);
+
+                foreach (var hello in hellos)
+                {
+                    var listed = hello.SupportedMessageVersions ?? Array.Empty<string>();
+                    Assert.That(listed, Has.None.EqualTo(CultNetSchemaVersions.WriteAdmitted));
+                    Assert.That(listed, Has.None.EqualTo(CultNetSchemaVersions.ErrorV1));
+                }
+            }
+            finally
+            {
+                client.Socket.Dispose();
+            }
+        }
+
         private static List<CultNetErrorMessage> ErrorsReceivedBy(Client client)
         {
             var errors = new List<CultNetErrorMessage>();

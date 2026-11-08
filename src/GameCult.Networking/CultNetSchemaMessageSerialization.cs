@@ -53,6 +53,8 @@ namespace GameCult.Networking
                 CultNetSchemaVersions.Verify => Deserialize<CultNetVerifyMessage>(payload),
                 CultNetSchemaVersions.LoginSuccess => Deserialize<CultNetLoginSuccessMessage>(payload),
                 CultNetSchemaVersions.Error => Deserialize<CultNetErrorMessage>(payload),
+                CultNetSchemaVersions.ErrorV1 => Deserialize<CultNetErrorV1Message>(payload),
+                CultNetSchemaVersions.WriteAdmitted => Deserialize<CultNetWriteAdmittedMessage>(payload),
                 CultNetSchemaVersions.SampleChangeName => Deserialize<CultNetSampleChangeNameMessage>(payload),
                 CultNetSchemaVersions.SampleChat => Deserialize<CultNetSampleChatMessage>(payload),
                 CultNetSchemaVersions.OperationRequest => Deserialize<CultNetOperationRequestMessage>(payload),

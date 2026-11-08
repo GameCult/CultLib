@@ -5189,7 +5189,9 @@ namespace GameCult.Networking.Tests
         [Test]
         public async Task CultNetSchemaWriteForwarder_Uses_SchemaClientPort()
         {
-            var fake = new CapturingSchemaClient(_ => null);
+            var fake = new CapturingSchemaClient(message => message is CultNetDocumentDeleteMessage delete
+                ? new CultNetWriteAdmittedMessage { MessageId = delete.MessageId, Operation = "delete", SchemaId = delete.SchemaId, RecordKey = delete.RecordKey }
+                : null);
             var forwarder = new CultNetSchemaWriteForwarder(new CultNetSchemaWriteForwarderOptions
             {
                 CreateClient = () => fake
@@ -5203,11 +5205,16 @@ namespace GameCult.Networking.Tests
 
             await forwarder.ForwardDeleteAsync(shard, new CultNetDocumentDeleteMessage
             {
+                MessageId = "fwd-del",
                 SchemaId = "note.v0",
                 RecordKey = "note:1"
             });
 
-            var sent = (CultNetDocumentDeleteMessage)fake.SentMessages.Single();
+            var hello = (CultNetHelloMessage)fake.SentMessages[0];
+            Assert.That(hello.SupportedMessageVersions, Is.EquivalentTo(new[] { CultNetSchemaVersions.WriteAdmitted, CultNetSchemaVersions.ErrorV1 }),
+                "the hello opts the forwarding connection in before the write");
+            var sent = (CultNetDocumentDeleteMessage)fake.SentMessages[1];
+            Assert.That(sent.MessageId, Is.EqualTo("fwd-del"), "the write goes under its original id");
             Assert.That(fake.ConnectedHost, Is.EqualTo("primary.example.test"));
             Assert.That(sent.ShardId, Is.EqualTo("notes"));
             Assert.That(sent.ShardEpoch, Is.EqualTo(3));
@@ -5241,7 +5248,7 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
-        public async Task CultNetSchemaWriteForwarder_DoesNotCompleteOnTheSendReturning()
+        public void CultNetSchemaWriteForwarder_SilenceIsUnconfirmedNotSuccess()
         {
             var fake = new CapturingSchemaClient(_ => null);
             var forwarder = new CultNetSchemaWriteForwarder(new CultNetSchemaWriteForwarderOptions
@@ -5254,9 +5261,49 @@ namespace GameCult.Networking.Tests
                 primaryEndpoints: ["cultnet://primary.example.test:4075"]);
             var started = DateTime.UtcNow;
 
-            await forwarder.ForwardDeleteAsync(shard, new CultNetDocumentDeleteMessage { SchemaId = "note.v0", RecordKey = "note:1" });
+            var unconfirmed = Assert.ThrowsAsync<CultNetWriteUnconfirmedException>(() =>
+                forwarder.ForwardDeleteAsync(shard, new CultNetDocumentDeleteMessage { MessageId = "fwd-del", SchemaId = "note.v0", RecordKey = "note:1" }));
 
+            Assert.That(unconfirmed!.MessageId, Is.EqualTo("fwd-del"));
             Assert.That(DateTime.UtcNow - started, Is.GreaterThanOrEqualTo(TimeSpan.FromMilliseconds(380)));
+        }
+
+        [Test]
+        public void CultNetSchemaWriteForwarder_AnswersNamingAnotherWriteSettleNothing()
+        {
+            var fake = new CapturingSchemaClient(_ => null);
+            var forwarder = new CultNetSchemaWriteForwarder(new CultNetSchemaWriteForwarderOptions
+            {
+                CreateClient = () => fake,
+                ResultWindow = TimeSpan.FromMilliseconds(300)
+            });
+            var shard = new CultNetShardDescriptor(
+                "notes", "primary", 3, isPrimary: false,
+                primaryEndpoints: ["cultnet://primary.example.test:4075"]);
+            fake.OnSend = () =>
+            {
+                fake.Deliver(new CultNetWriteAdmittedMessage { MessageId = "someone-else", Operation = "delete", SchemaId = "note.v0", RecordKey = "note:1" });
+                fake.Deliver(new CultNetErrorV1Message { Error = "refused", Code = "write_not_authorized", MessageId = "someone-else" });
+            };
+
+            Assert.ThrowsAsync<CultNetWriteUnconfirmedException>(() =>
+                forwarder.ForwardDeleteAsync(shard, new CultNetDocumentDeleteMessage { MessageId = "fwd-del", SchemaId = "note.v0", RecordKey = "note:1" }));
+        }
+
+        [Test]
+        public void CultNetSchemaWriteForwarder_RejectsWithTheErrorV1NamingItsWrite()
+        {
+            var fake = new CapturingSchemaClient(_ => null);
+            var forwarder = new CultNetSchemaWriteForwarder(new CultNetSchemaWriteForwarderOptions { CreateClient = () => fake });
+            var shard = new CultNetShardDescriptor(
+                "notes", "primary", 3, isPrimary: false,
+                primaryEndpoints: ["cultnet://primary.example.test:4075"]);
+            fake.OnSend = () => fake.Deliver(new CultNetErrorV1Message { Error = "refused", Code = "write_not_authorized", MessageId = "fwd-del" });
+
+            var refused = Assert.ThrowsAsync<CultNetWriteRefusedException>(() =>
+                forwarder.ForwardDeleteAsync(shard, new CultNetDocumentDeleteMessage { MessageId = "fwd-del", SchemaId = "note.v0", RecordKey = "note:1" }));
+
+            Assert.That(refused!.Code, Is.EqualTo("write_not_authorized"));
         }
 
         [Test]

@@ -1017,6 +1017,8 @@ namespace GameCult.Networking
         /// <summary>
         /// Applies a raw document mutation after checking shard authority. This is the host's own door (and replication's):
         /// it asks no remote write authority. A peer's put goes through <see cref="CultNetDatabaseServer"/>, which does.
+        /// Returning normally means the put is committed and visible to readers: a receipt-capable peer is told
+        /// <c>write_admitted</c> on the strength of it, so a write that has only been queued must not return.
         /// </summary>
         /// <exception cref="CultNetUnownedSchemaException">No shard owns the schema and key; nothing was written.</exception>
         /// <exception cref="CultNetShardLogException">The change committed and was published, but the shard log could not record it.</exception>
@@ -1047,6 +1049,7 @@ namespace GameCult.Networking
         /// <summary>
         /// Applies a raw document delete after checking shard authority. This is the host's own door: it asks no remote
         /// write authority. A peer's delete goes through <see cref="CultNetDatabaseServer"/>, which does.
+        /// Returning normally means the delete is committed and visible to readers (see <see cref="ApplyPutAsync(CultNetDocumentPutRawMessage)"/>).
         /// </summary>
         /// <exception cref="CultNetUnownedSchemaException">No shard owns the schema and key; nothing was written.</exception>
         /// <exception cref="CultNetShardLogException">The change committed and was published, but the shard log could not record it.</exception>
