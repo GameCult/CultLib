@@ -181,8 +181,7 @@
     }
   ],
   "scenarios": {
-    "windowMs": 500,
-    "semantics": "Each scenario replays events in atMs order against a client that sent each write at its send event; a tick advances the clock without a frame. expect gives the settled outcome per write id. admitted/refused/unconfirmed are three distinct results; no scenario may settle admitted without a write_admitted frame carrying the write's id.",
+    "semantics": "Each scenario replays events in atMs order against a client that sent each write at its send event; a tick advances the clock without a frame. 'window' names the constant in vectors.constants that applies (server receipt -> RECEIPT_RESULT_WINDOW_MS, legacy -> LEGACY_RESULT_WINDOW_MS); a tick at or after the window settles unanswered writes as unconfirmed. expect gives the outcome the caller was told per write id; recorded, when present, is the write handle's later state. admitted/refused/unconfirmed are three distinct results; no scenario may settle admitted without a write_admitted frame carrying the write's id.",
     "cases": [
       {
         "name": "receipt_admits",
@@ -215,7 +214,8 @@
           "w1": {
             "outcome": "admitted"
           }
-        }
+        },
+        "window": "RECEIPT_RESULT_WINDOW_MS"
       },
       {
         "name": "receipt_before_transport_ack",
@@ -248,7 +248,8 @@
           "w1": {
             "outcome": "admitted"
           }
-        }
+        },
+        "window": "RECEIPT_RESULT_WINDOW_MS"
       },
       {
         "name": "refusal_after_ack",
@@ -283,7 +284,8 @@
             "outcome": "refused",
             "code": "write_not_authorized"
           }
-        }
+        },
+        "window": "RECEIPT_RESULT_WINDOW_MS"
       },
       {
         "name": "refusal_before_ack",
@@ -318,7 +320,8 @@
             "outcome": "refused",
             "code": "message_invalid"
           }
-        }
+        },
+        "window": "RECEIPT_RESULT_WINDOW_MS"
       },
       {
         "name": "ack_only_window_ends_unconfirmed",
@@ -346,7 +349,8 @@
             "outcome": "unconfirmed",
             "reason": "window_elapsed"
           }
-        }
+        },
+        "window": "LEGACY_RESULT_WINDOW_MS"
       },
       {
         "name": "window_runs_from_send_not_from_ack",
@@ -374,7 +378,8 @@
             "outcome": "unconfirmed",
             "reason": "window_elapsed"
           }
-        }
+        },
+        "window": "LEGACY_RESULT_WINDOW_MS"
       },
       {
         "name": "silent_receipt_capable_server_is_unconfirmed_too",
@@ -402,7 +407,8 @@
             "outcome": "unconfirmed",
             "reason": "window_elapsed"
           }
-        }
+        },
+        "window": "RECEIPT_RESULT_WINDOW_MS"
       },
       {
         "name": "legacy_error_with_one_write_in_flight_refuses",
@@ -432,7 +438,8 @@
             "outcome": "refused",
             "code": "write_not_authorized"
           }
-        }
+        },
+        "window": "LEGACY_RESULT_WINDOW_MS"
       },
       {
         "name": "legacy_error_with_two_writes_in_flight_is_unattributed",
@@ -475,7 +482,8 @@
             "outcome": "unconfirmed",
             "reason": "window_elapsed"
           }
-        }
+        },
+        "window": "LEGACY_RESULT_WINDOW_MS"
       },
       {
         "name": "batch_names_the_refused_member",
@@ -542,7 +550,8 @@
           "b3": {
             "outcome": "admitted"
           }
-        }
+        },
+        "window": "RECEIPT_RESULT_WINDOW_MS"
       },
       {
         "name": "batch_with_one_member_unanswered",
@@ -584,7 +593,8 @@
             "outcome": "unconfirmed",
             "reason": "window_elapsed"
           }
-        }
+        },
+        "window": "RECEIPT_RESULT_WINDOW_MS"
       },
       {
         "name": "session_ends_before_an_answer",
@@ -612,11 +622,12 @@
             "outcome": "unconfirmed",
             "reason": "session_ended"
           }
-        }
+        },
+        "window": "RECEIPT_RESULT_WINDOW_MS"
       },
       {
-        "name": "late_refusal_does_not_rewrite_the_outcome",
-        "description": "An answer after the window changes nothing the caller already got; it is logged.",
+        "name": "late_refusal_is_recorded_not_told",
+        "description": "An answer after the window does not change what the caller was told; the handle records refused_late.",
         "server": "legacy",
         "writes": [
           "w1"
@@ -645,9 +656,11 @@
         "expect": {
           "w1": {
             "outcome": "unconfirmed",
-            "reason": "window_elapsed"
+            "reason": "window_elapsed",
+            "recorded": "refused_late"
           }
-        }
+        },
+        "window": "LEGACY_RESULT_WINDOW_MS"
       },
       {
         "name": "duplicate_resend_of_an_admitted_write_is_admitted_again",
@@ -686,7 +699,8 @@
           "w1": {
             "outcome": "admitted"
           }
-        }
+        },
+        "window": "RECEIPT_RESULT_WINDOW_MS"
       },
       {
         "name": "an_answer_for_an_unknown_id_is_ignored",
@@ -711,7 +725,7 @@
             }
           },
           {
-            "atMs": 500,
+            "atMs": 5000,
             "tick": true
           }
         ],
@@ -720,7 +734,292 @@
             "outcome": "unconfirmed",
             "reason": "window_elapsed"
           }
+        },
+        "window": "RECEIPT_RESULT_WINDOW_MS"
+      },
+      {
+        "name": "late_receipt_is_recorded_admitted_late",
+        "description": "A receipt after the window: the caller was told unconfirmed, the handle records admitted_late; a caller must consult it before resending.",
+        "server": "receipt",
+        "window": "RECEIPT_RESULT_WINDOW_MS",
+        "writes": [
+          "w1"
+        ],
+        "events": [
+          {
+            "atMs": 0,
+            "send": "w1"
+          },
+          {
+            "atMs": 5000,
+            "tick": true
+          },
+          {
+            "atMs": 6200,
+            "frame": {
+              "schemaVersion": "cultnet.write_admitted.v0",
+              "messageId": "w1",
+              "operation": "put",
+              "schemaId": "note.v0",
+              "recordKey": "note:1"
+            }
+          }
+        ],
+        "expect": {
+          "w1": {
+            "outcome": "unconfirmed",
+            "reason": "window_elapsed",
+            "recorded": "admitted_late"
+          }
         }
+      },
+      {
+        "name": "receipt_inside_the_receipt_window_is_not_late",
+        "description": "The receipt-capable window is 5 s: a receipt at 1.2 s admits.",
+        "server": "receipt",
+        "window": "RECEIPT_RESULT_WINDOW_MS",
+        "writes": [
+          "w1"
+        ],
+        "events": [
+          {
+            "atMs": 0,
+            "send": "w1"
+          },
+          {
+            "atMs": 1200,
+            "frame": {
+              "schemaVersion": "cultnet.write_admitted.v0",
+              "messageId": "w1",
+              "operation": "put",
+              "schemaId": "note.v0",
+              "recordKey": "note:1"
+            }
+          }
+        ],
+        "expect": {
+          "w1": {
+            "outcome": "admitted"
+          }
+        }
+      },
+      {
+        "name": "legacy_window_is_not_used_against_a_receipt_server",
+        "description": "At 500 ms a receipt-capable server's write is still pending, not unconfirmed.",
+        "server": "receipt",
+        "window": "RECEIPT_RESULT_WINDOW_MS",
+        "writes": [
+          "w1"
+        ],
+        "events": [
+          {
+            "atMs": 0,
+            "send": "w1"
+          },
+          {
+            "atMs": 500,
+            "tick": true
+          },
+          {
+            "atMs": 800,
+            "frame": {
+              "schemaVersion": "cultnet.write_admitted.v0",
+              "messageId": "w1",
+              "operation": "put",
+              "schemaId": "note.v0",
+              "recordKey": "note:1"
+            }
+          }
+        ],
+        "expect": {
+          "w1": {
+            "outcome": "admitted"
+          }
+        }
+      }
+    ]
+  },
+  "constants": {
+    "RECEIPT_RESULT_WINDOW_MS": 5000,
+    "LEGACY_RESULT_WINDOW_MS": 500,
+    "DEDUPE_RETENTION_MS": 600000
+  },
+  "contentHash": {
+    "definition": "sha256(msgpack([operation, schemaId, recordKey, payload])), payload a msgpack bin for a put and nil for a delete; hex lowercase",
+    "cases": [
+      {
+        "name": "put_note_1_payload_a",
+        "operation": "put",
+        "schemaId": "note.v0",
+        "recordKey": "note:1",
+        "payloadHex": "81A26964A131",
+        "sha256": "7051c10071123b6ade50fbd5075e3859cae4ea70ce358a24a0b0c6980090e95d"
+      },
+      {
+        "name": "put_note_1_payload_b",
+        "operation": "put",
+        "schemaId": "note.v0",
+        "recordKey": "note:1",
+        "payloadHex": "81A26964A132",
+        "sha256": "58d3fc6b858d2605a68550c9d4811ccdca6b9db7a0c3bfebf304d279257f6f9f"
+      },
+      {
+        "name": "put_note_2_payload_a",
+        "operation": "put",
+        "schemaId": "note.v0",
+        "recordKey": "note:2",
+        "payloadHex": "81A26964A131",
+        "sha256": "a248cd920e58d41bc6ccca9e108030b1d491239000047fef088122364a32b6f8"
+      },
+      {
+        "name": "delete_note_1",
+        "operation": "delete",
+        "schemaId": "note.v0",
+        "recordKey": "note:1",
+        "payloadHex": null,
+        "sha256": "232b0f96651b28aa8ab7673a6106944a9f6a8d66852b6e21291a23ed084b8b37"
+      }
+    ]
+  },
+  "dedupe": {
+    "semantics": "Replay writes in order against a receipt-capable server whose actors are transport-authenticated. expect lists the answer per write in order and how many times a write was applied to the store in total. 'invalid' means error.v1 message_invalid with details.field messageId and the write's id.",
+    "cases": [
+      {
+        "name": "resend_same_content_re_admits_without_reapplying",
+        "writes": [
+          {
+            "actor": "alice",
+            "messageId": "m1",
+            "content": "put_note_1_payload_a"
+          },
+          {
+            "actor": "alice",
+            "messageId": "m1",
+            "content": "put_note_1_payload_a"
+          }
+        ],
+        "answers": [
+          "admitted",
+          "admitted"
+        ],
+        "applied": 1
+      },
+      {
+        "name": "same_id_different_payload_is_refused_not_re_receipted",
+        "writes": [
+          {
+            "actor": "alice",
+            "messageId": "m1",
+            "content": "put_note_1_payload_a"
+          },
+          {
+            "actor": "alice",
+            "messageId": "m1",
+            "content": "put_note_1_payload_b"
+          }
+        ],
+        "answers": [
+          "admitted",
+          "refused:message_invalid"
+        ],
+        "applied": 1
+      },
+      {
+        "name": "same_id_different_record_key_is_refused",
+        "writes": [
+          {
+            "actor": "alice",
+            "messageId": "m1",
+            "content": "put_note_1_payload_a"
+          },
+          {
+            "actor": "alice",
+            "messageId": "m1",
+            "content": "put_note_2_payload_a"
+          }
+        ],
+        "answers": [
+          "admitted",
+          "refused:message_invalid"
+        ],
+        "applied": 1
+      },
+      {
+        "name": "same_id_different_operation_is_refused",
+        "writes": [
+          {
+            "actor": "alice",
+            "messageId": "m1",
+            "content": "put_note_1_payload_a"
+          },
+          {
+            "actor": "alice",
+            "messageId": "m1",
+            "content": "delete_note_1"
+          }
+        ],
+        "answers": [
+          "admitted",
+          "refused:message_invalid"
+        ],
+        "applied": 1
+      },
+      {
+        "name": "the_same_id_from_another_actor_is_an_independent_write",
+        "writes": [
+          {
+            "actor": "alice",
+            "messageId": "m1",
+            "content": "put_note_1_payload_a"
+          },
+          {
+            "actor": "bob",
+            "messageId": "m1",
+            "content": "put_note_1_payload_b"
+          }
+        ],
+        "answers": [
+          "admitted",
+          "admitted"
+        ],
+        "applied": 2
+      },
+      {
+        "name": "resend_of_a_refused_write_is_refused_the_same_way",
+        "writes": [
+          {
+            "actor": "mallory",
+            "messageId": "m1",
+            "content": "put_note_1_payload_a"
+          },
+          {
+            "actor": "mallory",
+            "messageId": "m1",
+            "content": "put_note_1_payload_a"
+          }
+        ],
+        "answers": [
+          "refused:write_not_authorized",
+          "refused:write_not_authorized"
+        ],
+        "applied": 0,
+        "note": "mallory is not authorized to write note.v0"
+      },
+      {
+        "name": "the_capability_does_not_authorize",
+        "writes": [
+          {
+            "actor": "mallory",
+            "messageId": "m2",
+            "content": "put_note_2_payload_a"
+          }
+        ],
+        "helloDeclaresReceipts": true,
+        "answers": [
+          "refused:write_not_authorized"
+        ],
+        "applied": 0,
+        "note": "declaring the receipt capability changes the frame the refusal arrives in, never whether it is a refusal"
       }
     ]
   }
