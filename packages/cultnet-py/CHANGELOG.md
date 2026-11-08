@@ -2,6 +2,7 @@
 
 ## Unreleased (breaking; version 0.x, so the next minor)
 
+- Added `message_invalid` to `CULTNET_ERROR_CODES` and `message_invalid_error(field, reason)`, byte-identical to the C# `ForMessageInvalid`. `cultmesh-py` refuses a malformed put or delete with it instead of the out-of-schema `malformed_document_put` and `malformed_document_delete`, which are removed.
 - Added `CultNetRudpSocketTransportServer` (`cultnet_py.rudp_server`): one UDP socket serving many RUDP peers, one session per
   remote endpoint, ported from the C# `CultNetRudpSocketTransportServer` and held to its bytes by
   `tests/vectors/rudp-multipeer-server/transcript.txt`. The caller drives it (`try_receive_once`, `poll_resends`). Like the C#

@@ -20,6 +20,7 @@ import {
   CultNetRudpSocketTransportConnection,
   rudpClientBindHost,
   CultNetSchemaCatalog,
+  cultNetMessageInvalidError,
   cultNetTextError,
   cultNetWriteNotAuthorizedError,
   CultNetShardCatalog,
@@ -5667,7 +5668,7 @@ export class CultMesh {
         if (decoded !== undefined && !write) throw error;
         if (await writeRefused(record, write?.operation ?? "put", write?.schemaId ?? "", write?.recordKey ?? "", null, null)) return;
         reportError(error);
-        sendSchemaMessage(record, malformedWriteError(write?.operation ?? "put", "CultMesh RUDP document server could not read the write."));
+        sendSchemaMessage(record, cultNetMessageInvalidError("message", "CultMesh RUDP document server could not read the write."));
         return;
       }
       switch (message.schemaVersion) {
@@ -5716,7 +5717,10 @@ export class CultMesh {
               malformedShard ? null : (shardEpoch as number | undefined) ?? null,
             )) return;
             if (malformedShard) {
-              sendSchemaMessage(record, malformedWriteError("put", "Raw put messages must carry a string shardId and an integer shardEpoch."));
+              sendSchemaMessage(record, cultNetMessageInvalidError(
+                typeof shardId !== "undefined" && typeof shardId !== "string" ? "shardId" : "shardEpoch",
+                "Raw put messages must carry a string shardId and an integer shardEpoch.",
+              ));
               return;
             }
           }
@@ -5783,12 +5787,6 @@ export class CultMesh {
         return { operation: "put", schemaId: str(document.schemaId), recordKey: str(document.recordKey) };
       }
       return undefined;
-    }
-
-    // Not a `code`: malformed_document_put/delete are outside the schema's closed code enum, which TS and Rust peers
-    // refuse to decode (docs/cultnet-error-contract-cut.md), so the name leads the text of a codeless error instead.
-    function malformedWriteError(operation: CultMeshRemoteWriteOperation, text: string): CultNetMessage {
-      return cultNetTextError(`malformed_document_${operation}: ${text}`);
     }
 
     /**

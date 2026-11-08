@@ -145,6 +145,22 @@
           "current": null
         }
       }
+    },
+    {
+      "name": "message_invalid",
+      "messagePackHex": "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D93E6D6573736167655F696E76616C69643A2052617720707574206D65737361676573206D75737420636F6E7461696E206120646F63756D656E74206D61702EAB726F7574696E6748696E74C0A4636F6465AF6D6573736167655F696E76616C6964A764657461696C7384A56669656C64A8646F63756D656E74A576616C7565C0A461734F66C0A763757272656E74C0",
+      "message": {
+        "schemaVersion": "cultnet.error.v0",
+        "error": "message_invalid: Raw put messages must contain a document map.",
+        "routingHint": null,
+        "code": "message_invalid",
+        "details": {
+          "field": "document",
+          "value": null,
+          "asOf": null,
+          "current": null
+        }
+      }
     }
   ]
 }

@@ -511,7 +511,7 @@ namespace GameCult.Networking
         [Key("routingHint")] public CultNetShardRoutingHint? RoutingHint { get; set; }
         /// <summary>
         /// Gets or sets the machine-readable refusal code (R-N), e.g. <c>selection_invalid</c>,
-        /// <c>cursor_stale</c>, <c>cursor_invalid</c>, <c>reference_outside_target</c>, <c>unowned_schema</c>, <c>write_not_authorized</c>, <c>unsupported_schema_version</c>. Additive to
+        /// <c>cursor_stale</c>, <c>cursor_invalid</c>, <c>reference_outside_target</c>, <c>unowned_schema</c>, <c>write_not_authorized</c>, <c>unsupported_schema_version</c>, <c>message_invalid</c>. Additive to
         /// <c>cultnet.error.v0</c>; a v0 peer that does not know this field ignores it.
         /// </summary>
         [Key("code")] public string? Code { get; set; }
@@ -565,6 +565,18 @@ namespace GameCult.Networking
                 Error = $"unsupported_schema_version: {schemaVersion}",
                 Code = "unsupported_schema_version",
                 Details = new CultNetErrorDetails { Field = "schemaVersion", Value = schemaVersion }
+            };
+
+        /// <summary>
+        /// Builds the wire error for a request that lacks a required field or carries an ill-typed one: code
+        /// <c>message_invalid</c>, details <c>{ field }</c> naming that request field.
+        /// </summary>
+        public static CultNetErrorMessage ForMessageInvalid(string field, string reason) =>
+            new CultNetErrorMessage
+            {
+                Error = $"message_invalid: {reason}",
+                Code = "message_invalid",
+                Details = new CultNetErrorDetails { Field = field }
             };
 
         /// <summary>

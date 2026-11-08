@@ -401,7 +401,7 @@ namespace GameCult.Networking
                 : message.SubscriptionId;
             if (string.IsNullOrWhiteSpace(subscriptionId))
             {
-                peer.SendCultNet(new CultNetErrorMessage { Error = "Database subscription requires a subscriptionId or messageId." });
+                peer.SendCultNet(CultNetErrorMessage.ForMessageInvalid("subscriptionId", "Database subscription requires a subscriptionId or messageId."));
                 return Task.CompletedTask;
             }
 
@@ -443,7 +443,7 @@ namespace GameCult.Networking
                 : message.SubscriptionId;
             if (string.IsNullOrWhiteSpace(subscriptionId))
             {
-                peer.SendCultNet(new CultNetErrorMessage { Error = "Database subscription requires a subscriptionId or messageId." });
+                peer.SendCultNet(CultNetErrorMessage.ForMessageInvalid("subscriptionId", "Database subscription requires a subscriptionId or messageId."));
                 return Task.CompletedTask;
             }
 

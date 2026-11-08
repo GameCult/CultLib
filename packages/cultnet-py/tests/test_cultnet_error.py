@@ -6,7 +6,7 @@ from pathlib import Path
 
 import msgpack
 
-from cultnet_py import CULTNET_ERROR_CODES, error_message, parse_message, unsupported_schema_version_error
+from cultnet_py import CULTNET_ERROR_CODES, error_message, message_invalid_error, parse_message, unsupported_schema_version_error
 
 # contracts/cultnet/interop/error-vectors.json: bytes captured from MessagePack C# 3.1.7 and pinned
 # by cultnet-rs/tests/error_message.rs (Rust encodes to exactly these bytes).
@@ -51,6 +51,10 @@ class CultNetErrorMessageTests(unittest.TestCase):
         )
         self.assertEqual(selection.to_bytes(), by_name["selection_invalid_field_value"])
         self.assertEqual(unsupported_schema_version_error("cultnet.hello.v1").to_bytes(), by_name["unsupported_schema_version"])
+        self.assertEqual(
+            message_invalid_error("document", "Raw put messages must contain a document map.").to_bytes(),
+            by_name["message_invalid"],
+        )
 
     def test_builder_writes_nil_keys_and_accepts_a_null_code(self) -> None:
         wire = error_message("boom").to_wire()
