@@ -345,18 +345,27 @@ test("the Odin publisher publishes the signer's document to the endpoint Expecte
   assert.equal(peer.failure, undefined, peer.failure?.message);
 });
 
-for (const order of ["ack-then-refusal", "refusal-then-ack"] as const) {
-  test(`the Odin publisher does not complete on the ack of a refused presence (${order})`, async (context) => {
-    const endpoint = expectedFacts("service").odinEndpoint!;
-    const peer = await startOdinPeer(context, endpoint);
-    peer.reject = true;
-    peer.order = order;
-    const signer = signerFor(context, "service");
-    signer.reportHealth("active");
-    const publisher = createIdunnRuntimePresencePublisher({ signer, endpoint });
-    await assert.rejects(publisher.publish("denied presence"), /Odin rejected runtime presence: test admission denied/);
-  });
-}
+test("the Odin publisher rejects a presence whose refusal arrives before the transport ack", async (context) => {
+  const endpoint = expectedFacts("service").odinEndpoint!;
+  const peer = await startOdinPeer(context, endpoint);
+  peer.reject = true;
+  peer.order = "refusal-then-ack";
+  const signer = signerFor(context, "service");
+  signer.reportHealth("active");
+  const publisher = createIdunnRuntimePresencePublisher({ signer, endpoint });
+  await assert.rejects(publisher.publish("denied presence"), /Odin rejected runtime presence: test admission denied/);
+});
+
+test("the Odin publisher is send-only: a refusal that follows the transport ack is not awaited", async (context) => {
+  const endpoint = expectedFacts("service").odinEndpoint!;
+  const peer = await startOdinPeer(context, endpoint);
+  peer.reject = true;
+  peer.order = "ack-then-refusal";
+  const signer = signerFor(context, "service");
+  signer.reportHealth("active");
+  const publisher = createIdunnRuntimePresencePublisher({ signer, endpoint });
+  await publisher.publish("denied presence");
+});
 
 test("the Odin publisher leaves a capability shortfall to the Rust correlation instead of refusing to publish", async (context) => {
   const endpoint = expectedFacts("service").odinEndpoint!;
