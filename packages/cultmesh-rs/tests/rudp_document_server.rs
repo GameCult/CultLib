@@ -24,6 +24,8 @@ struct SinkState {
     failures_remaining: usize,
     /// Record keys the sink refuses to authorize, before and at the write.
     denied_keys: Vec<String>,
+    /// Every `authorize_raw_document` call, by message id.
+    authorized: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -47,6 +49,7 @@ impl Sink {
 
 impl CultMeshRudpRawDocumentSink for Sink {
     fn authorize_raw_document(&mut self, receipt: &CultMeshRudpRawDocumentReceipt) -> Result<()> {
+        self.0.lock().unwrap().authorized.push(receipt.message_id.clone());
         if self.0.lock().unwrap().denied_keys.contains(&receipt.document.record_key) {
             anyhow::bail!("not authorized");
         }
@@ -2328,9 +2331,9 @@ fn a_full_dedupe_table_refuses_new_writes_and_keeps_the_session_and_its_receipts
     send_reliable(&mut peer, &put("over", "note:over", vec![1]))?;
     send_reliable(&mut peer, &put("w0", "note:0", vec![1]))?;
     let answers = frames_after(&mut server, &mut peer, 2)?;
-    assert_eq!(refusal_of(&answers[0]), (None, Some("over".into())));
+    assert_eq!(refusal_of(&answers[0]), (Some(CultNetErrorCode::LimitReached), Some("over".into())));
     let CultNetMessage::ErrorV1 { error, .. } = &answers[0] else { unreachable!() };
-    assert_eq!(error, "the session's remembered-write limit is full", "the cap has its own fixed text");
+    assert_eq!(error, "limit_reached: the session's remembered-write limit is full", "the cap has its own fixed text");
     assert_eq!(answers[1], admitted("w0", "note:0"), "a remembered id is still answered idempotently");
     assert_eq!(server.session_count(), 1);
     Ok(())
@@ -2474,6 +2477,35 @@ fn a_refused_write_is_remembered_and_its_resend_replays_the_refusal() -> Result<
     assert_eq!(refusal_of(&answers[0]), (Some(CultNetErrorCode::WriteNotAuthorized), Some("m1".into())));
     assert_eq!(answers[1], answers[0], "the same refusal again, not a fresh attempt that would now succeed");
     assert_eq!(sink.0.lock().unwrap().receipts.len(), 0);
+    Ok(())
+}
+
+/// The sink is asked once, on an id's first sighting: not again for a resend (admitted or refused), and
+/// not at all on a session that never declared the receipt capability. The sink here only counts, so a
+/// flag that stopped or inverted the ask cannot hide behind the sink refusing at the write.
+#[test]
+fn authorize_is_called_once_per_first_sighting_and_only_for_receipt_sessions() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 219)?;
+    let mut legacy = client(server.local_addr()?, 220)?;
+    connect(&mut server, &mut [&mut peer, &mut legacy])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    send_reliable(&mut peer, &put("m1", "note:1", vec![1]))?;
+    assert_eq!(answers_after(&mut server, &mut peer, 1)?, vec![admitted("m1", "note:1")]);
+    assert_eq!(sink.0.lock().unwrap().authorized, vec!["m1".to_string()], "first sighting asks once");
+    send_reliable(&mut peer, &put("m1", "note:1", vec![1]))?;
+    assert_eq!(frames_after(&mut server, &mut peer, 1)?, vec![admitted("m1", "note:1")]);
+    assert_eq!(sink.0.lock().unwrap().authorized, vec!["m1".to_string()], "the resend does not ask again");
+    send_reliable(&mut legacy, &put("l1", "note:9", vec![1]))?;
+    for _ in 0..40 {
+        server.poll_once()?;
+        legacy.poll_resends()?;
+        while legacy.receive_once()?.is_some() {}
+    }
+    let state = sink.0.lock().unwrap();
+    assert_eq!(state.receipts.len(), 2, "the legacy put was committed");
+    assert_eq!(state.authorized, vec!["m1".to_string()], "a legacy session is never asked");
     Ok(())
 }
 

@@ -1,7 +1,7 @@
 //! Wire parity with contracts/cultnet/interop/write-receipt-vectors.json: the content hash, and the two new frames.
 
 use cultnet_rs::{
-    CultNetErrorCode, CultNetMessage, CultNetWireContract, decode_cultnet_message_from_slice,
+    CultNetErrorCode, CultNetErrorDetails, CultNetMessage, CultNetWireContract, decode_cultnet_message_from_slice,
     encode_cultnet_message_to_vec, write_content_hash,
 };
 
@@ -88,4 +88,49 @@ fn the_spec_wire_vectors_decode_to_their_expected_fields() {
     assert_eq!(details.field.as_deref(), Some("recordKey"));
     assert_eq!(details.value.as_deref(), Some("note:2"));
     assert_eq!((details.as_of, details.current), (None, None));
+}
+
+/// Spec vector `error_v1_limit_reached`: the bytes the server must send, and what they decode to.
+#[test]
+fn error_v1_limit_reached_is_the_spec_vector() {
+    let vector = "86AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7631A56572726F72D93B6C696D69745F726561636865643A207468652073657373696F6E27732072656D656D62657265642D7772697465206C696D69742069732066756C6CAB726F7574696E6748696E74C0A4636F6465AD6C696D69745F72656163686564A764657461696C7384A56669656C64C0A576616C7565C0A461734F66C0A763757272656E74C0A96D6573736167654964A87075742D31303235";
+    let message = CultNetMessage::ErrorV1 {
+        error: "limit_reached: the session's remembered-write limit is full".into(),
+        code: Some(CultNetErrorCode::LimitReached),
+        details: Some(CultNetErrorDetails::default()),
+        message_id: Some("put-1025".into()),
+    };
+    let bytes = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0).unwrap();
+    assert_eq!(hex(&bytes), vector);
+    let CultNetMessage::ErrorV1 { error, code, details, message_id } =
+        decode_cultnet_message_from_slice(&unhex(vector), CultNetWireContract::CultNetSchemaV0).unwrap()
+    else {
+        panic!("expected error.v1");
+    };
+    assert_eq!(error, "limit_reached: the session's remembered-write limit is full");
+    assert_eq!(code, Some(CultNetErrorCode::LimitReached));
+    assert_eq!(message_id.as_deref(), Some("put-1025"));
+    assert_eq!(details, Some(CultNetErrorDetails::default()));
+}
+
+/// `limit_reached` is in the error.v1 enum only: a v0 error neither encodes nor decodes it.
+#[test]
+fn error_v0_refuses_the_v1_only_limit_reached_code() {
+    let v0 = CultNetMessage::Error {
+        error: "x".into(),
+        code: Some(CultNetErrorCode::LimitReached),
+        details: None,
+    };
+    assert!(encode_cultnet_message_to_vec(&v0, CultNetWireContract::CultNetSchemaV0).is_err());
+    let v1 = CultNetMessage::ErrorV1 {
+        error: "x".into(),
+        code: Some(CultNetErrorCode::LimitReached),
+        details: None,
+        message_id: None,
+    };
+    let v1_bytes = encode_cultnet_message_to_vec(&v1, CultNetWireContract::CultNetSchemaV0).unwrap();
+    let at = v1_bytes.windows(16).position(|w| w == b"cultnet.error.v1").unwrap();
+    let mut as_v0 = v1_bytes.clone();
+    as_v0[at + 15] = b'0';
+    assert!(decode_cultnet_message_from_slice(&as_v0, CultNetWireContract::CultNetSchemaV0).is_err());
 }

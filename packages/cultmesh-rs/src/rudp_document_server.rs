@@ -437,6 +437,11 @@ impl CultMeshRudpApplicationRejection {
             (CultMeshRudpRejectionReason::MessageIdReused, _) => {
                 message_invalid_message("messageId", text)
             }
+            (CultMeshRudpRejectionReason::WriteLimitReached, _) => CultNetMessage::Error {
+                error: format!("limit_reached: {text}"),
+                code: Some(CultNetErrorCode::LimitReached),
+                details: Some(CultNetErrorDetails::default()),
+            },
             _ => CultNetMessage::Error {
                 error: text.into(),
                 code: None,

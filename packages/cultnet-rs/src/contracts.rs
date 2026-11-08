@@ -249,6 +249,9 @@ pub enum CultNetErrorCode {
     WriteNotAuthorized,
     UnsupportedSchemaVersion,
     MessageInvalid,
+    /// `cultnet.error.v1` only: the session's remembered-write limit is full. `cultnet.error.v0` neither
+    /// encodes nor decodes it, so its enum stays the schema's.
+    LimitReached,
 }
 
 impl CultNetErrorCode {
@@ -263,6 +266,7 @@ impl CultNetErrorCode {
             Self::WriteNotAuthorized => "write_not_authorized",
             Self::UnsupportedSchemaVersion => "unsupported_schema_version",
             Self::MessageInvalid => "message_invalid",
+            Self::LimitReached => "limit_reached",
         }
     }
 
@@ -277,6 +281,7 @@ impl CultNetErrorCode {
             "write_not_authorized" => Ok(Self::WriteNotAuthorized),
             "unsupported_schema_version" => Ok(Self::UnsupportedSchemaVersion),
             "message_invalid" => Ok(Self::MessageInvalid),
+            "limit_reached" => Ok(Self::LimitReached),
             _ => Err(anyhow!("ErrorMessage.Code is not a recognized cultnet.error.v0 code")),
         }
     }
@@ -1067,6 +1072,9 @@ fn parse_raw_cultnet_schema_message(input: &rmpv::Value) -> Result<CultNetMessag
                         .and_then(CultNetErrorCode::from_wire_str)
                 })
                 .transpose()?;
+            if schema_version == "cultnet.error.v0" && code == Some(CultNetErrorCode::LimitReached) {
+                return Err(anyhow!("ErrorMessage.Code is not a recognized cultnet.error.v0 code"));
+            }
             let details = require_error_details(get("details"), "ErrorMessage.Details")?;
             let error = require_legacy_string(get("error"), "ErrorMessage.Error")?;
             if schema_version == "cultnet.error.v1" {
@@ -1134,6 +1142,9 @@ fn require_legacy_optional_u64(
 }
 
 fn encode_raw_cultnet_schema_message(message: &CultNetMessage) -> Result<rmpv::Value> {
+    if let CultNetMessage::Error { code: Some(CultNetErrorCode::LimitReached), .. } = message {
+        return Err(anyhow!("limit_reached is a cultnet.error.v1 code; cultnet.error.v0 cannot carry it"));
+    }
     Ok(rmpv::Value::Map(match message {
         CultNetMessage::DocumentPutRaw {
             message_id,
