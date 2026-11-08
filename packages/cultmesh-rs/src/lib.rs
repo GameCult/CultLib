@@ -82,7 +82,10 @@ pub struct CultMeshRudpDocumentPublishOptions {
     pub target: SocketAddr,
     pub runtime_id: String,
     pub connect_timeout: Duration,
+    /// How long the acknowledgement of every put may take.
     pub flush_timeout: Duration,
+    /// How long after the acknowledgement a refusal may still arrive; a success frame ends the wait early.
+    pub result_window: Duration,
     pub poll_interval: Duration,
     pub resend_delay_ms: u64,
     pub source_agent_id: Option<String>,
@@ -149,6 +152,7 @@ impl Default for CultMeshRudpDocumentPublishOptions {
             runtime_id: "cultmesh-rudp-document-publisher".to_string(),
             connect_timeout: Duration::from_secs(3),
             flush_timeout: Duration::from_millis(300),
+            result_window: Duration::from_millis(500),
             poll_interval: Duration::from_millis(10),
             resend_delay_ms: 50,
             source_agent_id: None,
@@ -882,77 +886,30 @@ fn unix_millis() -> u128 {
 
 /// Publish one raw CultNet schema message to a RUDP catalog.
 ///
-/// Each call owns a fresh connection epoch and returns only after the catalog
-/// acknowledges reliable application admission. Against a Rust CultMesh
-/// catalog, which never acknowledges a message it refuses, a refusal is
-/// returned as an error, naming the refusal when it is one of the fixed texts
-/// such a catalog sends. A catalog that acknowledges a message on receipt and
-/// refuses it afterwards (the TypeScript document server does) is reported as
-/// having admitted it: the acknowledgement arrives first.
+/// A put completes on the catalog's result frame, never on the transport
+/// acknowledgement: an ack proves delivery, not admission. A refusal (a
+/// `cultnet.error.v0` frame) returns an error in either order against the ack,
+/// naming the refusal when it is one of the fixed texts a catalog sends. A
+/// catalog that admits a put sends no success frame, so after the ack the call
+/// waits `result_window` for a refusal and reports the put as admitted when
+/// none comes (interim until the catalog sends a success frame; a success
+/// frame ends the wait early). Each call owns a fresh connection epoch.
 pub fn publish_cultnet_message_to_rudp_catalog(
     message: &cultnet_rs::CultNetMessage,
     options: CultMeshRudpDocumentPublishOptions,
 ) -> Result<()> {
-    if options.runtime_id.trim().is_empty() {
-        anyhow::bail!("runtime_id must be non-empty");
-    }
-    let mut client = connect_rudp_client(
-        options.target,
-        &options.runtime_id,
-        options.connect_timeout,
-        options.poll_interval,
-        options.resend_delay_ms,
-        "cultmesh-rudp-document-publisher",
-    )?;
-
-    let payload = encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0)?;
-    let receipt = client.send_reliable("schema", payload)?;
-    let flush_deadline = Instant::now() + options.flush_timeout;
-    while Instant::now() < flush_deadline {
-        if let Some(frame) = client.receive_once()? {
-            if frame.channel_id == "schema" {
-                if let Ok(cultnet_rs::CultNetMessage::Error { error, .. }) =
-                    decode_cultnet_message_from_slice(
-                        &frame.payload,
-                        CultNetWireContract::CultNetSchemaV0,
-                    )
-                {
-                    let _ = client.disconnect(b"document-refused".to_vec());
-                    anyhow::bail!(
-                        "CultMesh RUDP catalog {} refused the put{}",
-                        options.target,
-                        recognised_refusal(&error)
-                    );
-                }
-            }
-        }
-        match client.reliable_send_status(&receipt) {
-            cultnet_rs::CultNetRudpReliableSendStatus::Acknowledged => {
-                let _ = client.disconnect(b"document-acknowledged".to_vec());
-                return Ok(());
-            }
-            cultnet_rs::CultNetRudpReliableSendStatus::Invalidated => {
-                anyhow::bail!("CultMesh RUDP document receipt was invalidated")
-            }
-            cultnet_rs::CultNetRudpReliableSendStatus::Pending => {}
-        }
-        client.poll_resends()?;
-        thread::sleep(options.poll_interval);
-    }
-    let _ = client.disconnect(b"document-unacknowledged".to_vec());
-    anyhow::bail!(
-        "timed out waiting for reliable acknowledgement from CultMesh RUDP catalog {}",
-        options.target
-    )
+    publish_cultnet_messages_to_rudp_catalog(std::slice::from_ref(message), options)
 }
 
-/// Publish a batch of raw CultNet schema messages to a RUDP catalog.
+/// Publish a batch of raw CultNet schema messages to a RUDP catalog on one
+/// connection.
 ///
-/// Unlike [`publish_cultnet_message_to_rudp_catalog`], which polls for
-/// per-message application-level acknowledgement, this sends every message on
-/// one connection and waits only for a transport-level `flush_reliable`. It
-/// trades per-receipt confirmation for batch throughput; callers that need a
-/// stronger delivery guarantee should use the singular publish path instead.
+/// Completes under the same rule as [`publish_cultnet_message_to_rudp_catalog`]:
+/// every message acknowledged, then no refusal frame within `result_window`
+/// (or one success frame per message). A refusal of any message in the batch
+/// fails the whole call; the batch cannot hide it. The catalog's answers do not
+/// name the message they answer, so a failed batch does not say which message
+/// was refused or whether the others were admitted.
 pub fn publish_cultnet_messages_to_rudp_catalog(
     messages: &[cultnet_rs::CultNetMessage],
     options: CultMeshRudpDocumentPublishOptions,
@@ -969,11 +926,62 @@ pub fn publish_cultnet_messages_to_rudp_catalog(
         "cultmesh-rudp-document-publisher",
     )?;
 
+    let mut receipts = Vec::with_capacity(messages.len());
     for message in messages {
         let payload = encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0)?;
-        client.send("schema", payload)?;
+        receipts.push(client.send_reliable("schema", payload)?);
     }
-    client.flush_reliable(options.flush_timeout)
+    let ack_deadline = Instant::now() + options.flush_timeout;
+    let mut acknowledged_at: Option<Instant> = None;
+    let mut successes = 0;
+    loop {
+        while let Some(frame) = client.receive_once()? {
+            if frame.channel_id != "schema" {
+                continue;
+            }
+            match decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0) {
+                Ok(cultnet_rs::CultNetMessage::Error { error, .. }) => {
+                    let _ = client.disconnect(b"document-refused".to_vec());
+                    anyhow::bail!(
+                        "CultMesh RUDP catalog {} refused the put{}",
+                        options.target,
+                        recognised_refusal(&error)
+                    );
+                }
+                Ok(_) => successes += 1,
+                Err(_) => {}
+            }
+        }
+        if acknowledged_at.is_none() {
+            let mut all_acknowledged = true;
+            for receipt in &receipts {
+                match client.reliable_send_status(receipt) {
+                    cultnet_rs::CultNetRudpReliableSendStatus::Acknowledged => {}
+                    cultnet_rs::CultNetRudpReliableSendStatus::Invalidated => {
+                        anyhow::bail!("CultMesh RUDP document receipt was invalidated")
+                    }
+                    cultnet_rs::CultNetRudpReliableSendStatus::Pending => all_acknowledged = false,
+                }
+            }
+            if all_acknowledged {
+                acknowledged_at = Some(Instant::now());
+            } else if Instant::now() >= ack_deadline {
+                let _ = client.disconnect(b"document-unacknowledged".to_vec());
+                anyhow::bail!(
+                    "timed out waiting for reliable acknowledgement from CultMesh RUDP catalog {}",
+                    options.target
+                )
+            }
+        }
+        if let Some(acknowledged_at) = acknowledged_at {
+            if successes >= messages.len() || acknowledged_at.elapsed() >= options.result_window {
+                let _ = client.disconnect(b"document-completed".to_vec());
+                return Ok(());
+            }
+        }
+        client.poll_resends()?;
+        thread::sleep(options.poll_interval);
+    }
 }
 
 fn connect_rudp_client(
@@ -1454,8 +1462,16 @@ mod tests {
     /// A catalog that acknowledges every reliable message it receives and refuses it with a typed
     /// write_not_authorized, the acknowledgement either before the refusal or after it (the second packet
     /// follows the first by 100 ms). The refusal carries no acknowledgement of its own.
+    /// What the stub catalog sends for a put, and in which order against the transport ack.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum CatalogReply {
+        RefusalThenAck,
+        AckThenRefusal,
+        AckThenSuccess,
+    }
+
     fn acknowledging_refusing_catalog(
-        refusal_first: bool,
+        reply: CatalogReply,
     ) -> Result<(
         SocketAddr,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1503,10 +1519,17 @@ mod tests {
                 }
                 let ack = session.create_ack_for_received(packet.sequence);
                 let refusal = encode_cultnet_message_to_vec(
-                    &cultnet_rs::CultNetMessage::Error {
-                        error: "write_not_authorized: the catalog refused the document".into(),
-                        code: Some(cultnet_rs::CultNetErrorCode::WriteNotAuthorized),
-                        details: None,
+                    &if reply == CatalogReply::AckThenSuccess {
+                        cultnet_rs::CultNetMessage::SnapshotResponseRaw {
+                            message_id: "completion".into(),
+                            documents: Vec::new(),
+                        }
+                    } else {
+                        cultnet_rs::CultNetMessage::Error {
+                            error: "write_not_authorized: the catalog refused the document".into(),
+                            code: Some(cultnet_rs::CultNetErrorCode::WriteNotAuthorized),
+                            details: None,
+                        }
                     },
                     CultNetWireContract::CultNetSchemaV0,
                 )?;
@@ -1528,7 +1551,7 @@ mod tests {
                     }
                     Ok(())
                 };
-                if refusal_first {
+                if reply == CatalogReply::RefusalThenAck {
                     send_refusals(&socket)?;
                     thread::sleep(Duration::from_millis(100));
                     socket.send_to(&encode_rudp_packet(&ack)?, peer)?;
@@ -2026,7 +2049,7 @@ mod tests {
     // acknowledges the put and refuses it, the refusal arriving before or after the ack.
     #[test]
     fn a_publish_whose_refusal_arrives_before_the_ack_is_refused() -> Result<()> {
-        let (target, stop, catalog) = acknowledging_refusing_catalog(true)?;
+        let (target, stop, catalog) = acknowledging_refusing_catalog(CatalogReply::RefusalThenAck)?;
         let result = publish_cultnet_message_to_rudp_catalog(&refused_note(), publish_options(target));
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
         catalog.join().expect("catalog thread should not panic")?;
@@ -2038,7 +2061,7 @@ mod tests {
 
     #[test]
     fn a_publish_whose_ack_arrives_before_the_refusal_is_refused() -> Result<()> {
-        let (target, stop, catalog) = acknowledging_refusing_catalog(false)?;
+        let (target, stop, catalog) = acknowledging_refusing_catalog(CatalogReply::AckThenRefusal)?;
         let result = publish_cultnet_message_to_rudp_catalog(&refused_note(), publish_options(target));
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
         catalog.join().expect("catalog thread should not panic")?;
@@ -2049,14 +2072,35 @@ mod tests {
 
     #[test]
     fn a_batch_publish_is_not_complete_on_the_ack_of_refused_puts() -> Result<()> {
-        for refusal_first in [false, true] {
-            let (target, stop, catalog) = acknowledging_refusing_catalog(refusal_first)?;
+        for reply in [CatalogReply::AckThenRefusal, CatalogReply::RefusalThenAck] {
+            let (target, stop, catalog) = acknowledging_refusing_catalog(reply)?;
             let result = publish_cultnet_messages_to_rudp_catalog(&[refused_note()], publish_options(target));
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
             catalog.join().expect("catalog thread should not panic")?;
-            assert!(result.is_err(), "refusal_first={refusal_first}: a refused put was reported as published");
+            assert!(result.is_err(), "a refused put was reported as published");
         }
         Ok(())
     }
 
+    #[test]
+    fn a_success_frame_completes_the_publish_without_waiting_out_the_result_window() -> Result<()> {
+        for batch in [false, true] {
+            let (target, stop, catalog) = acknowledging_refusing_catalog(CatalogReply::AckThenSuccess)?;
+            let options = CultMeshRudpDocumentPublishOptions {
+                result_window: Duration::from_secs(30),
+                ..publish_options(target)
+            };
+            let started = Instant::now();
+            let result = if batch {
+                publish_cultnet_messages_to_rudp_catalog(&[refused_note()], options)
+            } else {
+                publish_cultnet_message_to_rudp_catalog(&refused_note(), options)
+            };
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            catalog.join().expect("catalog thread should not panic")?;
+            result?;
+            assert!(started.elapsed() < Duration::from_secs(10), "batch={batch}: waited out the window");
+        }
+        Ok(())
+    }
 }
