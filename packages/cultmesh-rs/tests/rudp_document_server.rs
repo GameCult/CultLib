@@ -343,14 +343,17 @@ fn refusal_seen_by(
     client: &mut CultNetRudpSocketTransportConnection,
     receipt: &CultNetRudpReliableSendReceipt,
 ) -> Result<String> {
-    let (error, code, details) = typed_refusal_seen_by(client, receipt)?;
+    let (error, code, details) = typed_refusal_seen_by(client, receipt, None)?;
     assert_eq!((code, details), (None, None));
     Ok(error)
 }
 
+/// `server` is polled while the goodbye is awaited when the refusal ends its session only once the peer has
+/// acknowledged it (the capped frame's answer).
 fn typed_refusal_seen_by(
     client: &mut CultNetRudpSocketTransportConnection,
     receipt: &CultNetRudpReliableSendReceipt,
+    mut server: Option<&mut Server>,
 ) -> Result<(String, Option<CultNetErrorCode>, Option<CultNetErrorDetails>)> {
     let mut refusal = None;
     for _ in 0..2_000 {
@@ -381,6 +384,9 @@ fn typed_refusal_seen_by(
         "a refusal must not acknowledge the refused message"
     );
     for _ in 0..2_000 {
+        if let Some(server) = server.as_deref_mut() {
+            server.poll_once()?;
+        }
         client.receive_once()?;
         if !client.connected() {
             break;
@@ -681,7 +687,7 @@ fn application_rejection_is_nonfatal_peer_scoped_refused_to_the_peer_and_unackno
     // The caller keeps the sink's text; the peer is sent fixed text, never it.
     // A refused put is typed write_not_authorized and names the record; nothing of it reached the sink.
     assert_eq!(
-        typed_refusal_seen_by(&mut publisher, &publish_receipt)?,
+        typed_refusal_seen_by(&mut publisher, &publish_receipt, None)?,
         (
             "write_not_authorized: the catalog refused the document".to_string(),
             Some(CultNetErrorCode::WriteNotAuthorized),
@@ -863,7 +869,7 @@ fn an_unreadable_frame_is_refused_typed_and_the_session_kept_until_eight_in_a_ro
         panic!("the eighth consecutive unreadable frame must be refused");
     };
     assert_eq!(rejection.operation, CultMeshRudpApplicationOperation::Unreadable);
-    let (error, code, _) = typed_refusal_seen_by(&mut garbler, &receipt)?;
+    let (error, code, _) = typed_refusal_seen_by(&mut garbler, &receipt, Some(&mut server))?;
     assert_eq!((error.as_str(), code), (message_invalid.2.as_str(), message_invalid.0));
     drain_until_idle(&mut server)?;
     assert_eq!(server.session_count(), 1, "only the capped peer's session ended");
@@ -905,7 +911,7 @@ fn a_refused_delete_keeps_the_session_until_eight_in_a_row() -> Result<()> {
     };
     assert_eq!(rejection.operation, CultMeshRudpApplicationOperation::DocumentDelete);
     assert_eq!(rejection.reason, CultMeshRudpRejectionReason::DeleteNotSupported);
-    let (error, code, details) = typed_refusal_seen_by(&mut deleter, &receipt)?;
+    let (error, code, details) = typed_refusal_seen_by(&mut deleter, &receipt, Some(&mut server))?;
     assert_eq!(
         (error, code, details),
         {
@@ -1623,6 +1629,11 @@ impl RawPeer {
     /// Sends `message` reliably and in order; returns its sequences.
     fn send(&mut self, message: &CultNetMessage) -> Result<Vec<u32>> {
         let payload = encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0)?;
+        self.send_payload(payload)
+    }
+
+    /// Sends `payload` as one reliable, ordered schema frame; returns its sequences.
+    fn send_payload(&mut self, payload: Vec<u8>) -> Result<Vec<u32>> {
         let options = cultnet_rs::CultNetRudpSendOptions {
             reliable: true,
             ordered: true,
@@ -1908,5 +1919,140 @@ fn a_response_that_is_too_large_to_send_is_named_emsgsize() -> Result<()> {
         client.disconnect_reason(),
         Some(&b"packet could not be sent: EMSGSIZE"[..])
     );
+    Ok(())
+}
+
+/// A peer on `server` that has sent seven unreadable frames, each answered and processed, and then the
+/// eighth, whose answer is waiting at its socket. Returns the peer and the eighth frame's sequence.
+fn peer_at_the_cap(server: &mut Server, connection_id: u32) -> Result<(RawPeer, u32)> {
+    let mut peer = RawPeer::connect(server, connection_id)?;
+    for _ in 0..7 {
+        peer.send_payload(garbage())?;
+        assert!(matches!(
+            server.poll_once()?,
+            CultMeshRudpPollOutcome::ApplicationRejected(_)
+        ));
+        for packet in peer.drain() {
+            peer.session.receive(&packet, 3)?;
+        }
+    }
+    let capped = peer.send_payload(garbage())?[0];
+    assert!(matches!(
+        server.poll_once()?,
+        CultMeshRudpPollOutcome::ApplicationRejected(_)
+    ));
+    Ok((peer, capped))
+}
+
+fn is_goodbye(packet: &cultnet_rs::CultNetRudpPacket) -> bool {
+    packet.packet_type == cultnet_rs::CultNetRudpPacketType::Disconnect
+}
+
+fn is_answer(packet: &cultnet_rs::CultNetRudpPacket) -> bool {
+    packet.packet_type == cultnet_rs::CultNetRudpPacketType::Data && packet.reliable
+}
+
+/// The capped frame's answer is reliable: its datagram is lost, the server resends it, and only once the
+/// peer has acknowledged it does the goodbye follow. Neither transmission acknowledges the capped frame.
+#[test]
+fn a_lost_capped_answer_is_resent_and_the_goodbye_waits_for_its_acknowledgement() -> Result<()> {
+    let clock = Clock::new(81_000);
+    let mut server = server(Default::default(), clock.clone(), Sink::default(), Source::default())?;
+    let (mut peer, capped) = peer_at_the_cap(&mut server, 81)?;
+
+    let first = peer.drain();
+    assert!(first.iter().any(is_answer), "fixture: the answer was sent, and is lost here");
+    assert!(!first.iter().any(is_goodbye), "no goodbye before the answer is acknowledged");
+    assert!(
+        !first.iter().any(|packet| acknowledges(packet, capped)),
+        "nothing sent for the capped frame acknowledges it"
+    );
+    assert_eq!(server.session_count(), 1);
+
+    clock.set_monotonic(81_000 + 60);
+    server.maintain()?;
+    let resent = peer.drain();
+    let answer = resent.iter().find(|packet| is_answer(packet)).expect("the lost answer is resent");
+    assert!(!acknowledges(answer, capped), "the resent answer acknowledges nothing the peer sent");
+    assert!(!resent.iter().any(is_goodbye), "still no goodbye");
+    let delivered = peer.session.receive(answer, 4)?.delivered;
+    let Ok(CultNetMessage::Error { code, .. }) =
+        decode_cultnet_message_from_slice(&delivered[0].payload, CultNetWireContract::CultNetSchemaV0)
+    else {
+        panic!("the resent answer is a typed refusal");
+    };
+    assert_eq!(code, Some(CultNetErrorCode::MessageInvalid));
+
+    peer.send_packet(&peer.session.create_ack_for(answer.sequence))?;
+    assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Handled);
+    assert!(peer.drain().iter().any(is_goodbye), "acknowledged: the goodbye follows");
+    assert_eq!(server.session_count(), 0);
+    Ok(())
+}
+
+/// A peer that never acknowledges the answer is not kept for ever: the session ends after the grace.
+#[test]
+fn a_capped_session_whose_answer_is_never_acknowledged_ends_after_the_grace() -> Result<()> {
+    let clock = Clock::new(82_000);
+    let mut server = server(Default::default(), clock.clone(), Sink::default(), Source::default())?;
+    let (peer, _) = peer_at_the_cap(&mut server, 82)?;
+    peer.drain();
+
+    clock.set_monotonic(82_000 + 1_999);
+    server.maintain()?;
+    assert!(!peer.drain().iter().any(is_goodbye), "inside the grace");
+    assert_eq!(server.session_count(), 1);
+    clock.set_monotonic(82_000 + 2_000);
+    server.maintain()?;
+    assert!(peer.drain().iter().any(is_goodbye), "the grace ran out");
+    assert_eq!(server.session_count(), 0);
+    Ok(())
+}
+
+/// Nothing behind the capped frame is served while its answer is delivered.
+#[test]
+fn nothing_behind_the_capped_frame_is_served() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(83_000), sink.clone(), Source::default())?;
+    let (mut peer, _) = peer_at_the_cap(&mut server, 83)?;
+    peer.send_payload(valid_put("behind-the-cap"))?;
+    for _ in 0..3 {
+        server.poll_once()?;
+    }
+    assert!(sink.0.lock().unwrap().receipts.is_empty(), "the put behind the cap was not stored");
+    Ok(())
+}
+
+/// A Ping inside the grace is answered with a Pong that acknowledges nothing: its ack fields are built from
+/// what the session received, which includes the capped frame.
+#[test]
+fn a_pong_in_the_grace_after_the_cap_acknowledges_nothing() -> Result<()> {
+    let mut server = server(Default::default(), Clock::new(84_000), Sink::default(), Source::default())?;
+    let (mut peer, capped) = peer_at_the_cap(&mut server, 84)?;
+    peer.drain();
+
+    let ping = peer.session.create_ping(b"alive".to_vec());
+    peer.send_packet(&ping)?;
+    assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Handled);
+    let pong = peer
+        .drain()
+        .into_iter()
+        .find(|packet| packet.packet_type == cultnet_rs::CultNetRudpPacketType::Pong)
+        .expect("the ping is answered");
+    assert_eq!(pong.payload, b"alive");
+    assert!(!acknowledges(&pong, capped), "the Pong acknowledges the capped frame");
+    assert_eq!((pong.ack, pong.ack_mask), (0, 0));
+    Ok(())
+}
+
+/// The grace deadline saturates: at the end of the clock the answer is not given up on at once.
+#[test]
+fn the_grace_deadline_does_not_wrap_at_the_end_of_the_clock() -> Result<()> {
+    let mut server = server(Default::default(), Clock::new(u64::MAX - 10), Sink::default(), Source::default())?;
+    let (peer, _) = peer_at_the_cap(&mut server, 85)?;
+    peer.drain();
+    server.maintain()?;
+    assert!(!peer.drain().iter().any(is_goodbye), "the deadline wrapped and the session ended before its grace");
+    assert_eq!(server.session_count(), 1);
     Ok(())
 }

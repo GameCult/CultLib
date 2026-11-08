@@ -25,6 +25,10 @@ const SHORTEST_MESSAGE_ID: &str = "0";
 /// is answered too, then the session ends. The same number is the cap in every runtime.
 pub const MAX_CONSECUTIVE_REFUSED_FRAMES: u32 = 8;
 
+/// How long a session whose capped frame was answered waits for the peer to acknowledge the answer
+/// before it ends anyway.
+const CAPPED_ANSWER_GRACE_MILLIS: u64 = 2_000;
+
 /// The transport identity of one remote CultNet RUDP session.
 ///
 /// Connection identifiers are scoped to a remote socket address. Two clients
@@ -424,6 +428,9 @@ struct SessionEntry {
     admitted_payload_bytes: usize,
     undecodable_frames_in_a_row: u32,
     refused_deletes_in_a_row: u32,
+    /// Set once the peer's capped frame has been answered: the session ends when the answer is acknowledged,
+    /// or at this time.
+    ending_deadline_monotonic_millis: Option<u64>,
 }
 
 /// A synchronous, multi-session CultNet RUDP raw-document server.
@@ -598,7 +605,18 @@ where
         };
 
         let mut unsendable = match result.reply {
-            Some(reply) => self.send_packet(key.remote_addr, &reply)?,
+            Some(mut reply) => {
+                // A reply (a Pong) in the grace after the capped frame acknowledges nothing either.
+                if self
+                    .sessions
+                    .get(&key)
+                    .is_some_and(|entry| entry.ending_deadline_monotonic_millis.is_some())
+                {
+                    reply.ack = 0;
+                    reply.ack_mask = 0;
+                }
+                self.send_packet(key.remote_addr, &reply)?
+            }
             None => None,
         };
 
@@ -611,6 +629,14 @@ where
         for frame in result.delivered {
             if frame.channel_id != "schema" {
                 continue;
+            }
+            // The capped frame was answered: nothing after it is served while the answer is delivered.
+            if self
+                .sessions
+                .get(&key)
+                .is_some_and(|entry| entry.ending_deadline_monotonic_millis.is_some())
+            {
+                break;
             }
             let decoded = decode_cultnet_message_from_slice(
                 &frame.payload,
@@ -664,7 +690,7 @@ where
                     let refusal = rejection.refusal_message();
                     let packets = match self.sessions.remove(&key) {
                         Some(mut entry) => {
-                            let packets = self.refusal_packets(&mut entry.session, &refusal);
+                            let packets = self.refusal_packets(&mut entry.session, &refusal, false);
                             self.sessions.insert(key, entry);
                             packets
                         }
@@ -678,6 +704,45 @@ where
                     }
                     kept_rejection = Some(rejection);
                     continue;
+                }
+                // The capped frame is answered reliably, so a lost datagram is resent; the session ends once
+                // the peer has acknowledged the answer or the grace runs out (`end_answered_sessions`). When
+                // the answer cannot be queued, the session ends at once with the refusal as before.
+                if (is_unreadable || is_delete)
+                    && run.is_some()
+                    && !matches!(
+                        rejection.reason,
+                        CultMeshRudpRejectionReason::ResponseSendFailed(_)
+                    )
+                {
+                    let refusal = rejection.refusal_message();
+                    let packets = match self.sessions.remove(&key) {
+                        Some(mut entry) => {
+                            let packets = self.refusal_packets(&mut entry.session, &refusal, true);
+                            if !packets.is_empty() {
+                                entry.ending_deadline_monotonic_millis =
+                                    Some(now_monotonic.saturating_add(CAPPED_ANSWER_GRACE_MILLIS));
+                            }
+                            self.sessions.insert(key, entry);
+                            packets
+                        }
+                        None => Vec::new(),
+                    };
+                    if packets.is_empty() {
+                        self.end_session(key, SessionEnd::Rejected(refusal))?;
+                        return Ok(CultMeshRudpPollOutcome::ApplicationRejected(rejection));
+                    }
+                    for mut packet in packets {
+                        // Acknowledges nothing, as every refusal: the refused frame was not admitted.
+                        packet.ack = 0;
+                        packet.ack_mask = 0;
+                        if let Some(error) = self.send_packet(key.remote_addr, &packet)? {
+                            unsendable = Some(error);
+                            break;
+                        }
+                    }
+                    kept_rejection = Some(rejection);
+                    break;
                 }
                 // The only reply `receive` returns is a Pong, which delivers no
                 // frame, so no earlier send of this poll can precede a rejection.
@@ -693,7 +758,11 @@ where
             }
         }
 
-        if packet.reliable && unsendable.is_none() {
+        let answering_capped_frame = self
+            .sessions
+            .get(&key)
+            .is_some_and(|entry| entry.ending_deadline_monotonic_millis.is_some());
+        if packet.reliable && unsendable.is_none() && !answering_capped_frame {
             let ack = self
                 .sessions
                 .get_mut(&key)
@@ -705,6 +774,7 @@ where
         if let Some(error) = unsendable {
             self.end_session(key, SessionEnd::Unsendable(error))?;
         }
+        self.end_answered_sessions()?;
         Ok(match kept_rejection {
             Some(rejection) => CultMeshRudpPollOutcome::ApplicationRejected(rejection),
             None => CultMeshRudpPollOutcome::Handled,
@@ -722,10 +792,16 @@ where
                 && now.saturating_sub(entry.created_at_monotonic_millis) <= lifetime_ms
         });
         let expired = before - self.sessions.len();
+        self.end_answered_sessions()?;
 
         let mut resends = Vec::new();
         for (key, entry) in &mut self.sessions {
-            for packet in entry.session.due_resends(now) {
+            for mut packet in entry.session.due_resends(now) {
+                if entry.ending_deadline_monotonic_millis.is_some() {
+                    // The resent answer to a capped frame acknowledges nothing either.
+                    packet.ack = 0;
+                    packet.ack_mask = 0;
+                }
                 resends.push((*key, packet));
             }
         }
@@ -742,6 +818,26 @@ where
             sessions_expired: expired,
             packets_resent: resends.len(),
         })
+    }
+
+    /// Ends each session whose capped frame was answered once the peer has acknowledged every answer (a lost
+    /// answer is resent first), or when the grace has run out.
+    fn end_answered_sessions(&mut self) -> Result<()> {
+        let now = self.clock.now_monotonic_millis();
+        let due: Vec<CultMeshRudpSessionKey> = self
+            .sessions
+            .iter()
+            .filter(|(_, entry)| {
+                entry.ending_deadline_monotonic_millis.is_some_and(|deadline| {
+                    entry.session.outstanding_reliable_packet_count() == 0 || now >= deadline
+                })
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        for key in due {
+            self.end_session(key, SessionEnd::Refused)?;
+        }
+        Ok(())
     }
 
     /// `Ok(false)` when the Connect was refused because the session cap is full;
@@ -795,6 +891,7 @@ where
                         admitted_payload_bytes: 0,
                         undecodable_frames_in_a_row: 0,
                         refused_deletes_in_a_row: 0,
+                        ending_deadline_monotonic_millis: None,
                     },
                 );
                 accept
@@ -1034,7 +1131,7 @@ where
         };
         let (refusal, mut unsendable) = match end {
             SessionEnd::Refused => (Vec::new(), None),
-            SessionEnd::Rejected(refusal) => (self.refusal_packets(&mut entry.session, &refusal), None),
+            SessionEnd::Rejected(refusal) => (self.refusal_packets(&mut entry.session, &refusal, false), None),
             SessionEnd::Unsendable(error) => (Vec::new(), Some(error)),
         };
         entry.session.reset_peer_state();
@@ -1057,11 +1154,12 @@ where
         Ok(())
     }
 
-    /// The refusal a rejected peer is sent, as unreliable, unordered packets.
+    /// The refusal a rejected peer is sent: unreliable and unordered, or (`reliable`) queued like any response.
     fn refusal_packets(
         &self,
         session: &mut CultNetRudpSession,
         refusal: &CultNetMessage,
+        reliable: bool,
     ) -> Vec<CultNetRudpPacket> {
         encode_cultnet_message_to_vec(refusal, CultNetWireContract::CultNetSchemaV0)
             .and_then(|payload| {
@@ -1069,8 +1167,8 @@ where
                     "schema",
                     payload,
                     CultNetRudpSendOptions {
-                        reliable: false,
-                        ordered: false,
+                        reliable,
+                        ordered: reliable,
                         sequenced: false,
                         now_ms: self.clock.now_monotonic_millis(),
                         reliable_expire_after_ms: None,
