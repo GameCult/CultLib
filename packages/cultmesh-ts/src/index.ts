@@ -4183,7 +4183,29 @@ export interface CultMeshRudpDocumentServer {
   close(): void;
 }
 
+/**
+ * A write the peer refused: the typed `cultnet.error.v0` it answered with (`write_not_authorized`,
+ * `message_invalid`, ...), whichever of the transport ack and the result frame came first.
+ */
+export class CultMeshRudpWriteRefusedError extends Error {
+  readonly code: string | undefined;
+  readonly response: Extract<CultNetMessage, { schemaVersion: "cultnet.error.v0" }>;
+  constructor(response: Extract<CultNetMessage, { schemaVersion: "cultnet.error.v0" }>) {
+    super(response.error);
+    this.name = "CultMeshRudpWriteRefusedError";
+    this.code = response.code ?? undefined;
+    this.response = response;
+  }
+}
+
 export interface CultMeshRudpDocumentPublishOptions extends CultMeshRudpPeerOptions {
+  /**
+   * How long after the put's transport ack a refusal may still arrive. A reliable-transport ack is not
+   * admission; the outcome is the peer's result frame. A server that answers a put only on refusal sends no
+   * success frame, so the put is reported published once this window passes with no refusal; a success reply
+   * ends the wait early. Default 500 ms.
+   */
+  resultWindowMs?: number;
   messageId?: string;
   sourceRuntimeId?: string;
   sourceAgentId?: string;
@@ -6157,11 +6179,23 @@ export class CultMesh {
     requireNonEmpty(runtimeId, "runtimeId");
     requireNonEmpty(recordKey, "recordKey");
     const registry = new CultNetDocumentRegistry([binding]);
+    const messageId = options.messageId ?? `${runtimeId}:${binding.definition.type}:${recordKey}`;
     const peer = await CultMesh.createRudpPeer(runtimeId, connectionId, endpoint, options);
     try {
+      // A transport ack is not admission: the put completes on its result frame. A refusal rejects with the
+      // typed error whether it arrives before the ack, after it, or inside the result window.
+      let refusal: CultMeshRudpWriteRefusedError | undefined;
+      let succeeded = false;
+      let wake: (() => void) | undefined;
+      peer.on("message", (message: CultNetMessage) => {
+        if (message.schemaVersion === "cultnet.error.v0") refusal ??= new CultMeshRudpWriteRefusedError(message);
+        else if ("messageId" in message && message.messageId === messageId) succeeded = true;
+        else return;
+        wake?.();
+      });
       peer.send(registry.createRawDocumentPutMessage(
         binding,
-        options.messageId ?? `${runtimeId}:${binding.definition.type}:${recordKey}`,
+        messageId,
         recordKey,
         value,
         {
@@ -6172,6 +6206,13 @@ export class CultMesh {
         },
       ));
       await peer.flush(options.flushTimeoutMs ?? 30_000);
+      if (!refusal && !succeeded) {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, options.resultWindowMs ?? 500);
+          wake = () => { clearTimeout(timer); resolve(); };
+        });
+      }
+      if (refusal) throw refusal;
     } finally {
       peer.close();
     }
@@ -6190,6 +6231,7 @@ export class CultMesh {
       const receipt = new Promise<CultCacheDocumentValue<TReceiptDefinition>>((resolve, reject) => {
         const timeout = setTimeout(() => { cleanup(); reject(new Error(`Timed out waiting for RUDP application receipt for ${recordKey}.`)); }, options.receiptTimeoutMs ?? 5_000);
         const onMessage = (message: CultNetMessage): void => {
+          if (message.schemaVersion === "cultnet.error.v0") { cleanup(); reject(new CultMeshRudpWriteRefusedError(message)); return; }
           if (message.schemaVersion !== "cultnet.document_put_raw.v0" || message.messageId !== messageId || message.document.schemaId !== receiptBinding.definition.schemaId) return;
           try {
             const decoded = decodeDocumentPayload(receiptBinding.definition, message.document.payload);

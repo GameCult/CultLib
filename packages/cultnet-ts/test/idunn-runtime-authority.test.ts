@@ -276,9 +276,14 @@ async function startOdinPeer(context: TestContext, endpoint: string) {
     peer.once("error", reject);
     peer.bind(port, "127.0.0.1", resolve);
   });
-  context.after(() => peer.close());
+  // The second packet of a split delivery is a timer; the test's end cancels it rather than racing the closed socket.
+  const timers = new Set<NodeJS.Timeout>();
+  const later = (send: () => void) => { timers.add(setTimeout(send, 120)); };
+  context.after(() => { for (const timer of timers) clearTimeout(timer); peer.close(); });
   const state = {
     reject: false,
+    // How a refusal and the ack of the put reach the publisher: in one packet, or the ack first, or the refusal first.
+    order: "piggyback" as "piggyback" | "ack-then-refusal" | "refusal-then-ack",
     received: [] as Array<{ schemaVersion?: string; document: { payload: DocumentPayload } }>,
     responseAck: undefined as number | undefined,
     failure: undefined as Error | undefined,
@@ -305,7 +310,15 @@ async function startOdinPeer(context: TestContext, endpoint: string) {
       });
       assert.ok(response);
       state.responseAck = response.ack;
-      peer.send(encodeRudpPacket(response), remote.port, remote.address);
+      if (state.reject && state.order === "ack-then-refusal") {
+        peer.send(encodeRudpPacket(serverSession.createAckForReceived(packet.sequence)), remote.port, remote.address);
+        later(() => peer.send(encodeRudpPacket(response), remote.port, remote.address));
+      } else if (state.reject && state.order === "refusal-then-ack") {
+        peer.send(encodeRudpPacket({ ...response, ack: 0, ackMask: 0 }), remote.port, remote.address);
+        later(() => peer.send(encodeRudpPacket(serverSession!.createAckForReceived(packet.sequence)), remote.port, remote.address));
+      } else {
+        peer.send(encodeRudpPacket(response), remote.port, remote.address);
+      }
     } catch (error) {
       state.failure = error as Error;
     }
@@ -331,6 +344,19 @@ test("the Odin publisher publishes the signer's document to the endpoint Expecte
   await assert.rejects(publisher.publish("denied presence"), /Odin rejected runtime presence: test admission denied/);
   assert.equal(peer.failure, undefined, peer.failure?.message);
 });
+
+for (const order of ["ack-then-refusal", "refusal-then-ack"] as const) {
+  test(`the Odin publisher does not complete on the ack of a refused presence (${order})`, async (context) => {
+    const endpoint = expectedFacts("service").odinEndpoint!;
+    const peer = await startOdinPeer(context, endpoint);
+    peer.reject = true;
+    peer.order = order;
+    const signer = signerFor(context, "service");
+    signer.reportHealth("active");
+    const publisher = createIdunnRuntimePresencePublisher({ signer, endpoint });
+    await assert.rejects(publisher.publish("denied presence"), /Odin rejected runtime presence: test admission denied/);
+  });
+}
 
 test("the Odin publisher leaves a capability shortfall to the Rust correlation instead of refusing to publish", async (context) => {
   const endpoint = expectedFacts("service").odinEndpoint!;
