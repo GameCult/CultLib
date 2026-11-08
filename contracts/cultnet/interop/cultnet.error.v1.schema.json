@@ -45,7 +45,7 @@
       }
     },
     "code": {
-      "description": "Machine-readable refusal code (R-N). Additive: a v0 peer that does not know this field ignores it. The set is a closed enum: Rust and TypeScript refuse a message whose code is not listed, so adding a code is one coordinated change across every runtime (this schema, the C# factory, the Rust CultNetErrorCode, and a captured-bytes case for each).",
+      "description": "Machine-readable refusal code (R-N). Additive: a v0 peer that does not know this field ignores it. The set is a closed enum: Rust and TypeScript refuse a message whose code is not listed, so adding a code is one coordinated change across every runtime (this schema, the C# factory, the Rust CultNetErrorCode, and a captured-bytes case for each). limit_reached: a receipt-capable server refuses a NEW write because its per-session remembered-write table (1024 entries) is full; messageId is the write's id.",
       "type": [
         "string",
         "null"
@@ -60,7 +60,8 @@
         "unowned_schema",
         "write_not_authorized",
         "unsupported_schema_version",
-        "message_invalid"
+        "message_invalid",
+        "limit_reached"
       ]
     },
     "details": {
@@ -78,7 +79,7 @@
       ],
       "properties": {
         "field": {
-          "description": "selection_invalid: the selection field that failed. variant_unsupported: \"subscriptionId\", when a subscription was ended. unowned_schema: \"schemaId\". write_not_authorized: \"recordKey\". unsupported_schema_version: \"schemaVersion\". message_invalid: the request field that is missing or ill-typed (\"message\" when the whole frame cannot be read).",
+          "description": "selection_invalid: the selection field that failed. variant_unsupported: \"subscriptionId\", when a subscription was ended. unowned_schema: \"schemaId\". write_not_authorized: \"recordKey\". unsupported_schema_version: \"schemaVersion\". message_invalid: the request field that is missing or ill-typed (\"message\" when the whole frame cannot be read). limit_reached: no field; details stay all null.",
           "type": [
             "string",
             "null"

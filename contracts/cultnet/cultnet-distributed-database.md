@@ -115,6 +115,7 @@ copies), the C# `CultNetErrorMessage` factory, the Rust `CultNetErrorCode`, and 
 `unowned_schema` (a write, or a remote put or delete, for a schema and key no shard owns),
 `write_not_authorized` (a peer's put or delete its server's remote write authority did not grant) and
 `unsupported_schema_version` (a message whose `schemaVersion` the peer does not speak; `details` names `schemaVersion` and the offered value) and
+`limit_reached` (a receipt-capable server's per-session remembered-write table is full, so a new write is refused; `details` all null) and
 `message_invalid` (a request that lacks a required field or carries an ill-typed one: a document-put or delete, or a subscription without an id; `details.field` names the request field, or `message` when the whole frame cannot be read).
 A malformed put or delete is `message_invalid`, not a per-operation code: the peer knows which operation it sent.
 
