@@ -59,6 +59,16 @@ from cultnet_py.cultmesh_contracts import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# How many consecutive refused frames of one kind a RUDP session may send before it is ended: undecodable
+# frames (reset by any frame that decodes) and deletes the write authority refuses (reset by any decoded
+# frame that is not a refused delete). Fewer are answered with a typed refusal and the session is kept; the
+# frame that reaches this number is answered too, then the session ends. The same number is the cap in every
+# runtime.
+MAX_CONSECUTIVE_REFUSED_FRAMES = 8
+
+# How long a session whose capped frame was answered waits for the peer to acknowledge the answer before it ends anyway.
+_RUDP_CAPPED_ANSWER_GRACE_MS = 2000
 _EPHEMERAL_PAIR_ATTEMPTS = 64
 
 
@@ -90,6 +100,10 @@ class _DatabaseSubscription:
 class _RudpPeerConnection:
     session: CultNetRudpSession
     subscriptions: dict[str, _DatabaseSubscription] = field(default_factory=dict)
+    undecodable_frames_in_a_row: int = 0
+    refused_deletes_in_a_row: int = 0
+    # Set once the peer's capped frame has been answered: the session ends when the answers are acknowledged.
+    ending_deadline_ms: int | None = None
 
 
 @dataclass
@@ -346,6 +360,7 @@ class CultMeshLocalServer:
             if packet.connection_id != self.rudp_connection_id:
                 continue
 
+            self._end_answered_peers(rudp_socket, peers)
             now_ms = _now_ms()
             peer = peers.get(remote_addr)
             if packet.packet_type == CultNetRudpPacketType.CONNECT:
@@ -394,18 +409,31 @@ class CultMeshLocalServer:
                 for delivered in result.delivered:
                     if delivered.channel_id != "schema":
                         continue
+                    if peer.ending_deadline_ms is not None:
+                        # The capped frame was answered; nothing after it is served while the answer is delivered.
+                        break
                     try:
                         message = msgpack.unpackb(delivered.payload, raw=False)
                     except (msgpack.ExtraData, msgpack.FormatError, msgpack.StackError, ValueError):
-                        continue
-                    if not isinstance(message, dict):
-                        continue
-                    responses = self._handle_connection_message(
-                        message,
-                        peer.subscriptions,
-                        over_rudp=True,
-                        peer=CultMeshServerPeer(f"{remote_addr[0]}:{remote_addr[1]}", "rudp"),
-                    )
+                        message = None
+                    if isinstance(message, dict):
+                        peer.undecodable_frames_in_a_row = 0
+                        responses = self._handle_connection_message(
+                            message,
+                            peer.subscriptions,
+                            over_rudp=True,
+                            peer=CultMeshServerPeer(f"{remote_addr[0]}:{remote_addr[1]}", "rudp"),
+                        )
+                        refused_delete = message.get("schemaVersion") == "cultnet.document_delete.v0" and any(
+                            response.get("code") == "write_not_authorized" for response in responses
+                        )
+                        peer.refused_deletes_in_a_row = peer.refused_deletes_in_a_row + 1 if refused_delete else 0
+                        refused, run = refused_delete, peer.refused_deletes_in_a_row
+                    else:
+                        # A frame that is no CultNet message is answered, not dropped, and the session kept.
+                        peer.undecodable_frames_in_a_row += 1
+                        refused, run = True, peer.undecodable_frames_in_a_row
+                        responses = [self._message_invalid({}, "message", "CultMesh RUDP server could not read the message.")]
                     for response in responses:
                         if unsendable is None:
                             unsendable = self._send_rudp_schema_frame(
@@ -415,6 +443,11 @@ class CultMeshLocalServer:
                                 msgpack.packb(response, use_bin_type=True),
                                 message_id=str(response.get("messageId") or ""),
                             )
+                    if refused and run >= MAX_CONSECUTIVE_REFUSED_FRAMES:
+                        # The capped frame is answered like any other, reliably. The session ends once the peer
+                        # has acknowledged every answer (or the grace runs out): see _end_answered_peers.
+                        peer.ending_deadline_ms = now_ms + _RUDP_CAPPED_ANSWER_GRACE_MS
+                        break
             except Exception as error:  # noqa: BLE001 - one peer's message never ends the thread
                 # Whatever a peer's message makes the handling raise is that peer's failure.
                 # The session recorded the frame's sequence, so it cannot be kept: a retransmit
@@ -445,11 +478,26 @@ class CultMeshLocalServer:
             if unsendable is not None:
                 self._end_unsendable_peer(rudp_socket, peers, remote_addr, unsendable)
 
+    def _end_answered_peers(
+        self,
+        rudp_socket: socket.socket,
+        peers: dict[tuple[str, int], _RudpPeerConnection],
+    ) -> None:
+        """Ends each session whose capped frame was answered once the peer has acknowledged every answer (a lost
+        answer is resent first), or when the grace has run out."""
+        now_ms = _now_ms()
+        for remote_addr, peer in list(peers.items()):
+            if peer.ending_deadline_ms is None:
+                continue
+            if peer.session.outstanding_reliable_packet_count == 0 or now_ms >= peer.ending_deadline_ms:
+                self._end_refused_peer(rudp_socket, peers, remote_addr)
+
     def _poll_rudp_resends(
         self,
         rudp_socket: socket.socket,
         peers: dict[tuple[str, int], _RudpPeerConnection],
     ) -> None:
+        self._end_answered_peers(rudp_socket, peers)
         now_ms = _now_ms()
         for remote_addr, peer in list(peers.items()):
             for packet in peer.session.due_resends(now_ms):

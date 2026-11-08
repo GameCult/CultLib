@@ -24,7 +24,9 @@ from cultcache_py import (
     define_document_type,
 )
 from cultcache_py.interop import INTEROP_SCHEMA_VERSION, interop_note_document
+from cultmesh_py.server import MAX_CONSECUTIVE_REFUSED_FRAMES
 from cultmesh_py.verify import verify
+from cultmesh_py.write_authority import CultMeshRemoteWriteDecision
 from cultnet_py import (
     compute_simulation_claim_hash,
     CultNetClientAuthorityScope,
@@ -4888,6 +4890,140 @@ class CultMeshTests(unittest.TestCase):
         self.assertEqual(after["messageId"], "after")
         self.assertEqual(after["documents"], [])
         self.assertTrue(alive)
+
+    def _rudp_open(self, server: Any) -> Any:
+        return create_rudp_schema_transport(
+            host="127.0.0.1",
+            port=server.port,
+            connection_id=server.rudp_connection_id,
+            timeout_seconds=4.0,
+            max_fragment_bytes=1200,
+        )
+
+    def _rudp_answer(self, transport: Any, payload: bytes) -> dict[str, Any]:
+        transport.send("schema", payload)
+        return msgpack.unpackb(transport.receive(timeout_seconds=4.0).payload, raw=False)
+
+    def _assert_rudp_session_ended(self, transport: Any, server: Any) -> None:
+        transport.send("schema", msgpack.packb(snapshot_request(message_id="after-cap").to_wire(), use_bin_type=True))
+        with self.assertRaises(Exception):
+            transport.receive(timeout_seconds=1.0)
+        self.assertTrue(server._rudp_thread.is_alive())
+
+    def test_cultmesh_local_server_answers_unreadable_frames_and_ends_the_session_at_eight_in_a_row(self) -> None:
+        # An undecodable frame (not a msgpack map) is answered message_invalid and the session kept;
+        # eight in a row end it (the eighth is answered too); any decoded frame resets the run.
+        self.assertEqual(MAX_CONSECUTIVE_REFUSED_FRAMES, 8)
+        node = CultMesh.create_node(runtime_id="mesh-rudp-unreadable")
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
+        garbage = b"\xc1"
+        snapshot = msgpack.packb(snapshot_request(message_id="ok").to_wire(), use_bin_type=True)
+        transport = self._rudp_open(server)
+        try:
+            for _ in range(2):
+                for _ in range(MAX_CONSECUTIVE_REFUSED_FRAMES - 1):
+                    reply = self._rudp_answer(transport, garbage)
+                    self.assertEqual(reply["code"], "message_invalid")
+                    self.assertEqual(reply["details"]["field"], "message")
+                self.assertEqual(self._rudp_answer(transport, snapshot)["messageId"], "ok")
+            for _ in range(MAX_CONSECUTIVE_REFUSED_FRAMES - 1):
+                self._rudp_answer(transport, garbage)
+            transport.send("schema", garbage)
+            eighth = msgpack.unpackb(transport.receive(timeout_seconds=4.0).payload, raw=False)
+            self.assertEqual(eighth["code"], "message_invalid")
+            self._assert_rudp_session_ended(transport, server)
+        finally:
+            transport.close()
+            server.stop()
+
+    def test_cultmesh_local_server_resends_a_lost_capped_answer_before_it_ends_the_session(self) -> None:
+        # The eighth refusal is answered reliably: the datagram carrying it is lost on the wire, and the
+        # peer still gets the answer (by resend) before the goodbye. An unreliable final answer, or a
+        # goodbye sent at once, would leave the peer without it.
+        node = CultMesh.create_node(runtime_id="mesh-rudp-lost-answer")
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
+        send = server._send_rudp_packet
+        dropped: list[Any] = []
+        armed = threading.Event()
+
+        def lossy(rudp_socket: Any, remote_addr: Any, packet: Any) -> Any:
+            if armed.is_set() and not dropped and packet.packet_type == CultNetRudpPacketType.DATA and b"message_invalid" in (packet.payload or b""):
+                dropped.append(packet)
+                return None
+            return send(rudp_socket, remote_addr, packet)
+
+        server._send_rudp_packet = lossy
+        transport = self._rudp_open(server)
+        try:
+            for _ in range(MAX_CONSECUTIVE_REFUSED_FRAMES - 1):
+                self._rudp_answer(transport, b"\xc1")
+            armed.set()
+            reply = self._rudp_answer(transport, b"\xc1")
+            self.assertEqual(len(dropped), 1, "fixture: the first transmission of the last answer was lost")
+            self.assertEqual(reply["code"], "message_invalid")
+            self._assert_rudp_session_ended(transport, server)
+        finally:
+            transport.close()
+            server.stop()
+
+    def test_cultmesh_local_server_serves_nothing_after_the_capped_frame(self) -> None:
+        node = CultMesh.create_node(runtime_id="mesh-rudp-after-cap")
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
+        transport = self._rudp_open(server)
+        try:
+            for _ in range(MAX_CONSECUTIVE_REFUSED_FRAMES - 1):
+                self._rudp_answer(transport, b"\xc1")
+            transport.send("schema", b"\xc1")
+            transport.send("schema", msgpack.packb(snapshot_request(message_id="behind-the-cap").to_wire(), use_bin_type=True))
+            first = msgpack.unpackb(transport.receive(timeout_seconds=4.0).payload, raw=False)
+            self.assertEqual(first["code"], "message_invalid")
+            with self.assertRaises(Exception):
+                transport.receive(timeout_seconds=1.0)
+        finally:
+            transport.close()
+            server.stop()
+
+    def test_cultmesh_local_server_ends_the_session_at_eight_refused_deletes_in_a_row(self) -> None:
+        class GrantOnlyKeyB:
+            def decide(self, request: Any) -> Any:
+                return CultMeshRemoteWriteDecision.grant() if request.record_key == "note:b" else CultMeshRemoteWriteDecision.refuse("no")
+
+        document = self._rudp_bound_note()
+        node = CultMesh.create_node(runtime_id="mesh-rudp-deletes")
+        node.database.register_document(document)
+        server = CultMesh.serve_node(node, write_authority=GrantOnlyKeyB())
+
+        def delete(key: str) -> bytes:
+            return msgpack.packb({
+                "schemaVersion": "cultnet.document_delete.v0",
+                "messageId": f"del-{key}",
+                "schemaId": document.schema_id,
+                "recordKey": key,
+            }, use_bin_type=True)
+
+        snapshot = msgpack.packb(snapshot_request(message_id="ok").to_wire(), use_bin_type=True)
+        transport = self._rudp_open(server)
+        try:
+            def refused_run(count: int) -> None:
+                for _ in range(count):
+                    reply = self._rudp_answer(transport, delete("note:a"))
+                    self.assertEqual(reply["code"], "write_not_authorized")
+                    self.assertEqual(reply["details"]["value"], "note:a")
+
+            refused_run(MAX_CONSECUTIVE_REFUSED_FRAMES - 1)
+            # A granted delete resets the run (nothing is stored under it, so the store answers that).
+            self.assertEqual(self._rudp_answer(transport, delete("note:b"))["code"], "unregistered_document_delete")
+            refused_run(MAX_CONSECUTIVE_REFUSED_FRAMES - 1)
+            # So does any decoded non-delete frame.
+            self.assertEqual(self._rudp_answer(transport, snapshot)["messageId"], "ok")
+            refused_run(MAX_CONSECUTIVE_REFUSED_FRAMES - 1)
+            transport.send("schema", delete("note:a"))
+            eighth = msgpack.unpackb(transport.receive(timeout_seconds=4.0).payload, raw=False)
+            self.assertEqual(eighth["code"], "write_not_authorized")
+            self._assert_rudp_session_ended(transport, server)
+        finally:
+            transport.close()
+            server.stop()
 
     def test_cultmesh_local_server_refuses_a_put_its_store_cannot_take_and_serves_on(self) -> None:
         # Well-formed puts the store refuses: a blank key, a payload that is not MessagePack, a
