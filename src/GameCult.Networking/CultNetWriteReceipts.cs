@@ -71,9 +71,50 @@ namespace GameCult.Networking
     }
 
     /// <summary>
+    /// What a session keeps of a refusal (write-receipt.md, What is remembered): its code, the field its details name, and its
+    /// routing hint (a shard descriptor the server owns). Never the write's strings or an authority's reason: the replay is built
+    /// from fixed text and the fields of the resend, which carries the same content.
+    /// </summary>
+    internal readonly struct CultNetRememberedRefusal
+    {
+        public string? Code { get; }
+        public bool HasDetails { get; }
+        public string? Field { get; }
+        public CultNetShardRoutingHint? Hint { get; }
+
+        public CultNetRememberedRefusal(string? code, bool hasDetails, string? field, CultNetShardRoutingHint? hint)
+        {
+            Code = code; HasDetails = hasDetails; Field = field; Hint = hint;
+        }
+
+        public static CultNetRememberedRefusal Of(CultNetErrorMessage error) =>
+            new(error.Code, error.Details != null, error.Details?.Field, error.RoutingHint);
+
+        /// <summary>The refusal, in fixed text, naming the write's own record key or schema id where its details do.</summary>
+        public CultNetErrorMessage ToError(string schemaId, string recordKey) => new()
+        {
+            Error = Code switch
+            {
+                "unowned_schema" => "unowned_schema: no shard owns the schema and key",
+                null => Hint != null ? CultNetDatabaseServer.RoutingRefusalText : CultNetWriteReceiptSession.WriteFailedText,
+                _ => Code
+            },
+            Code = Code,
+            RoutingHint = Hint,
+            Details = HasDetails
+                ? new CultNetErrorDetails
+                {
+                    Field = Field,
+                    Value = Field switch { "recordKey" => recordKey, "schemaId" => schemaId, _ => null }
+                }
+                : null
+        };
+    }
+
+    /// <summary>
     /// One receipt-capable peer's writes: message id to content hash and the answer given, refusals included, so a resend of the
     /// same content is answered again without being decided again and the same id with other content is refused. Ids and content
-    /// hashes are held as fixed-size digests; the answer is held as its kind (and, for a refusal, its code, text and details),
+    /// hashes are held as fixed-size digests; the answer is held as its kind (and, for a refusal, its code and the field its details name),
     /// never the strings of the write.
     /// </summary>
     internal sealed class CultNetWriteReceiptSession
@@ -100,7 +141,7 @@ namespace GameCult.Networking
             public CultNetDigest Hash { get; set; }
             public bool Abandoned { get; set; }
             public bool Admitted { get; set; }
-            public CultNetErrorMessage? Refusal { get; set; }
+            public CultNetRememberedRefusal? Refusal { get; set; }
         }
 
         public enum Begin { New, ReplayAdmitted, ReplayRefusal, Unanswered, DifferentContent, Full }
@@ -111,7 +152,7 @@ namespace GameCult.Networking
         /// Looks <paramref name="messageId"/> up first. An id not seen is claimed for this content (<see cref="Begin.New"/>);
         /// otherwise the outcome says what already holds it, and <paramref name="refusal"/> is the refusal to repeat.
         /// </summary>
-        public Begin TryBegin(string messageId, byte[] hash, out CultNetErrorMessage? refusal)
+        public Begin TryBegin(string messageId, byte[] hash, out CultNetRememberedRefusal? refusal)
         {
             var id = IdDigest(messageId);
             var content = CultNetDigest.Of(hash);
@@ -162,7 +203,7 @@ namespace GameCult.Networking
         }
 
         /// <summary>The write was refused: remember the refusal so a resend repeats it.</summary>
-        public void Refused(string messageId, CultNetErrorMessage refusal)
+        public void Refused(string messageId, CultNetRememberedRefusal refusal)
         {
             lock (_gate)
             {
@@ -270,7 +311,7 @@ namespace GameCult.Networking
                     return false;
                 case CultNetWriteReceiptSession.Begin.ReplayRefusal:
                     _answered = true;
-                    _send(CultNetErrorV1Message.From(refusal!, _messageId));
+                    _send(CultNetErrorV1Message.From(refusal!.Value.ToError(_schemaId, _recordKey), _messageId));
                     return false;
                 case CultNetWriteReceiptSession.Begin.Unanswered:
                     // The first attempt is still being applied and will answer this id, or its primary left it unanswered:
@@ -309,9 +350,15 @@ namespace GameCult.Networking
         {
             if (_answered) return;
             _answered = true;
-            var refusal = CultNetErrorV1Message.From(error, _messageId);
-            if (_claimed) _session.Refused(_messageId, error);
-            _send(refusal);
+            if (_claimed)
+            {
+                // A remembered refusal is answered from what is remembered, so the replay is the refusal again.
+                var kept = CultNetRememberedRefusal.Of(error);
+                _session.Refused(_messageId, kept);
+                error = kept.ToError(_schemaId, _recordKey);
+            }
+
+            _send(CultNetErrorV1Message.From(error, _messageId));
         }
 
         /// <summary>

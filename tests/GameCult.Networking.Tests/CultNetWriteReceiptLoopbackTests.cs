@@ -47,6 +47,9 @@ namespace GameCult.Networking.Tests
             public void Send<T>(T message) where T : ICultNetSchemaMessage =>
                 _peer.Send(CultNetSchemaMessageSerialization.Serialize(message), DeliveryMethod.ReliableOrdered);
 
+            public void SendUnreliable<T>(T message) where T : ICultNetSchemaMessage =>
+                _peer.Send(CultNetSchemaMessageSerialization.Serialize(message), DeliveryMethod.Unreliable);
+
             public void SendRaw(byte[] bytes) => _peer.Send(bytes, DeliveryMethod.ReliableOrdered);
 
             public T Next<T>() where T : ICultNetSchemaMessage
@@ -173,6 +176,69 @@ namespace GameCult.Networking.Tests
             await WaitFor(() => running.Cache.Get<NetworkSchemaNote>(KeyA)?.Text == "three");
             legacy.ExpectNothingMore("a legacy peer is never sent a receipt or error.v1");
             Assert.That(running.Cache.Get<NetworkSchemaNote>(KeyB), Is.Null);
+        }
+
+        // write-receipt.md, Reliable channel only: a write on an unreliable channel of a receipt session is refused
+        // message_invalid, details.field "channel", fixed text, carrying the write's id; it is not applied.
+        [Test]
+        public async Task AWriteOnAnUnreliableChannelOfAReceiptPeerIsRefusedAndNotApplied()
+        {
+            using var running = Running.Start();
+            using var client = running.Connect();
+            client.Send(HelloOf(BothFrames));
+            client.Next<CultNetHelloMessage>();
+
+            client.SendUnreliable(running.PutOf("u1", KeyA, "lost"));
+
+            var error = client.Next<CultNetErrorV1Message>();
+            Assert.That(error.Code, Is.EqualTo("message_invalid"));
+            Assert.That(error.Details!.Field, Is.EqualTo("channel"));
+            Assert.That(error.Error, Is.EqualTo("message_invalid: receipt sessions require the reliable channel"));
+            Assert.That(error.MessageId, Is.EqualTo("u1"));
+
+            // The session goes on, and the same id on the reliable channel is a new write, not a replayed refusal.
+            client.Send(running.PutOf("u1", KeyA, "kept"));
+            Assert.That(client.Next<CultNetWriteAdmittedMessage>().MessageId, Is.EqualTo("u1"));
+            await WaitFor(() => running.Cache.Get<NetworkSchemaNote>(KeyA)?.Text == "kept");
+        }
+
+        [Test]
+        public void ADeleteOnAnUnreliableChannelOfAReceiptPeerIsRefusedWithItsId()
+        {
+            using var running = Running.Start();
+            using var client = running.Connect();
+            client.Send(HelloOf(BothFrames));
+            client.Next<CultNetHelloMessage>();
+
+            client.SendUnreliable(new CultNetDocumentDeleteMessage
+            {
+                MessageId = "ud1", SchemaId = running.SchemaId, RecordKey = KeyA.Value, ShardId = ShardId, ShardEpoch = 1
+            });
+
+            var error = client.Next<CultNetErrorV1Message>();
+            Assert.That(error.Code, Is.EqualTo("message_invalid"));
+            Assert.That(error.Details!.Field, Is.EqualTo("channel"));
+            Assert.That(error.MessageId, Is.EqualTo("ud1"));
+        }
+
+        [Test]
+        public async Task OnlyWritesAreRefusedOnTheUnreliableChannelAndALegacyPeerIsLeftAsBefore()
+        {
+            using var running = Running.Start();
+            using var receipt = running.Connect();
+            receipt.Send(HelloOf(BothFrames));
+            receipt.Next<CultNetHelloMessage>();
+            receipt.SendUnreliable(HelloOf(BothFrames)); // not a write: answered with nothing on the unreliable channel
+            receipt.Send(running.PutOf("r1", KeyA, "one"));
+            Assert.That(receipt.Next<CultNetWriteAdmittedMessage>().MessageId, Is.EqualTo("r1"), "nothing else was sent ahead of the receipt");
+
+            using var legacy = running.Connect();
+            legacy.Send(HelloOf());
+            legacy.SendUnreliable(running.PutOf("l1", KeyB, "two")); // refused by the authority, answered as v0 as before
+            Assert.That(legacy.Next<CultNetErrorMessage>().Code, Is.EqualTo("write_not_authorized"));
+            legacy.SendUnreliable(running.PutOf("l2", KeyA, "three"));
+            await WaitFor(() => running.Cache.Get<NetworkSchemaNote>(KeyA)?.Text == "three");
+            legacy.ExpectNothingMore("a legacy peer is never sent a receipt, error.v1 or a channel refusal");
         }
 
         private static async Task WaitFor(Func<bool> condition)

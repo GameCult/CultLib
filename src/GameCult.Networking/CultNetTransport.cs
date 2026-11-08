@@ -3580,6 +3580,35 @@ namespace GameCult.Networking
             }
         }
 
+        /// <summary>
+        /// A put or delete that arrived on an unreliable channel of a receipt session (write-receipt.md, Reliable channel only):
+        /// answered <c>message_invalid</c>, details <c>channel</c>, fixed text, carrying the write's id, and not applied. True when
+        /// the frame was such a write and has been answered here.
+        /// </summary>
+        internal bool RefuseUnreliableWrite(ICultNetSchemaMessage message, DeliveryMethod method)
+        {
+            if (WriteReceipts == null) return false;
+            if (method is DeliveryMethod.ReliableOrdered or DeliveryMethod.ReliableUnordered or DeliveryMethod.ReliableSequenced) return false;
+            var messageId = message switch
+            {
+                CultNetDocumentPutRawMessage put => put.MessageId,
+                CultNetDocumentDeleteMessage delete => delete.MessageId,
+                _ => null
+            };
+            if (messageId == null && message is not (CultNetDocumentPutRawMessage or CultNetDocumentDeleteMessage)) return false;
+            try
+            {
+                SendSchema(CultNetErrorV1Message.From(
+                    CultNetErrorMessage.ForMessageInvalid("channel", "receipt sessions require the reliable channel"), messageId));
+            }
+            catch (Exception)
+            {
+                End();
+            }
+
+            return true;
+        }
+
         private readonly object _writeFramingGate = new();
         private bool _writeFramingSettled;
 

@@ -591,7 +591,7 @@ namespace GameCult.Networking.Tests
             await rig.Delete(wire, "fwd-2", KeyA);
 
             AssertRefused(wire.Sent[0], "fwd-1", "write_not_authorized");
-            Assert.That(((CultNetErrorV1Message)wire.Sent[0]).Error, Is.EqualTo("primary says no"));
+            Assert.That(((CultNetErrorV1Message)wire.Sent[0]).Error, Is.EqualTo("write_not_authorized"), "a relayed refusal is in fixed text, the same one a resend replays");
             AssertRefused(wire.Sent[1], "fwd-2", "message_invalid");
         }
 
@@ -631,7 +631,7 @@ namespace GameCult.Networking.Tests
             await rig.Put(wire, "fwd-1", KeyA, "one");
 
             Assert.That(wire.Sent, Has.Count.EqualTo(2));
-            Assert.That(((CultNetErrorV1Message)wire.Sent[1]).Error, Is.EqualTo("primary says no"));
+            Assert.That(((CultNetErrorV1Message)wire.Sent[1]).Error, Is.EqualTo("write_not_authorized"), "a remembered refusal is replayed in fixed text, not the primary's own");
             Assert.That(forwarder.Forwarded, Is.EqualTo(1));
         }
 
@@ -1118,6 +1118,58 @@ namespace GameCult.Networking.Tests
 
             var error = (CultNetErrorMessage)wire.Sent.Single();
             Assert.That(error.Error, Is.EqualTo("the shard log request could not be answered"));
+        }
+
+        private static CultNetErrorMessage DeniedWith(string recordKey, string reason) => new()
+        {
+            Error = $"write_not_authorized: {reason}",
+            Code = "write_not_authorized",
+            Details = new CultNetErrorDetails { Field = "recordKey", Value = recordKey }
+        };
+
+        // write-receipt.md, What is remembered: a refusal is remembered as its code (and the field it names), never the strings of
+        // the write or of the authority's reason; the replay is built from fixed text and the resend's own fields.
+        [Test]
+        public void ARefusalIsReplayedFromFixedTextAndTheResendsOwnFieldsNotFromRememberedStrings()
+        {
+            var session = new CultNetWriteReceiptSession();
+            var sent = new List<ICultNetSchemaMessage>();
+            var longKey = new string('k', 50_000);
+            CultNetReceiptedWrite Write() => new(session, sent.Add, "put", "m1", "schema.v1", longKey, [1]);
+
+            var first = Write();
+            Assert.That(first.Begin(), Is.True);
+            first.Refused(DeniedWith(longKey, new string('r', 50_000)));
+            Assert.That(Write().Begin(), Is.False);
+
+            var again = (CultNetErrorV1Message)sent[1];
+            Assert.That(again.MessageId, Is.EqualTo("m1"));
+            Assert.That(again.Code, Is.EqualTo("write_not_authorized"));
+            Assert.That(again.Error, Is.EqualTo("write_not_authorized"));
+            Assert.That(again.Details!.Field, Is.EqualTo("recordKey"));
+            Assert.That(again.Details.Value, Is.EqualTo(longKey));
+            var firstAnswer = (CultNetErrorV1Message)sent[0];
+            Assert.That(firstAnswer.Error, Is.EqualTo(again.Error), "the replay is the refusal again");
+            Assert.That(firstAnswer.Details!.Value, Is.EqualTo(again.Details.Value));
+        }
+
+        [Test]
+        public void ThousandsOfRefusalsOf50kCharacterKeysAreRememberedInBoundedMemory()
+        {
+            var session = new CultNetWriteReceiptSession();
+            var before = GC.GetTotalMemory(true);
+            for (var i = 0; i < CultNetWriteReceiptSession.MaxRememberedWrites; i++)
+            {
+                var key = new string('k', 50_000) + i;
+                var write = new CultNetReceiptedWrite(session, _ => { }, "put", $"m{i}", "schema.v1", key, [1]);
+                Assert.That(write.Begin(), Is.True);
+                write.Refused(DeniedWith(key, key));
+            }
+
+            // Held as strings, the 1024 keys and reasons alone would be over 200 MB.
+            var growth = GC.GetTotalMemory(true) - before;
+            GC.KeepAlive(session);
+            Assert.That(growth, Is.LessThan(8L * 1024 * 1024));
         }
     }
 }

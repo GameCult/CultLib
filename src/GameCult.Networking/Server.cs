@@ -415,6 +415,7 @@ namespace GameCult.Networking
                     {
                         var cultNetMessage = LiteNetLibTransportConnection.DecodeSchema(frame);
                         Logger.LogDebug($"Received CultNet schema message {cultNetMessage.SchemaVersion}");
+                        if (transport.RefuseUnreliableWrite(cultNetMessage, method)) return;
                         await HandleCultNetSchemaMessageAsync(peer, user, cultNetMessage).ConfigureAwait(false);
                         return;
                     }
