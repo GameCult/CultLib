@@ -2576,3 +2576,18 @@ fn refusal_frames_from_a_peer_are_not_protocol_violations() -> Result<()> {
     assert_eq!(server.session_count(), 1);
     Ok(())
 }
+
+#[test]
+fn a_put_that_reuses_a_deletes_id_is_message_invalid() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 223)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    send_reliable(&mut peer, &delete("d1", "note:1"))?;
+    send_reliable(&mut peer, &put("d1", "note:1", vec![1]))?;
+    let answers = answers_after(&mut server, &mut peer, 2)?;
+    assert_eq!(refusal_of(&answers[1]), (Some(CultNetErrorCode::MessageInvalid), Some("d1".into())));
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 0, "the reusing put was not applied");
+    Ok(())
+}
