@@ -751,91 +751,170 @@ fn application_rejection_is_nonfatal_peer_scoped_refused_to_the_peer_and_unackno
     Ok(())
 }
 
-#[test]
-fn an_unreadable_frame_and_a_delete_are_refused_typed_not_dropped() -> Result<()> {
-    let sink = Sink::default();
-    let mut server = server(
-        Default::default(),
-        Clock::new(49_000),
-        sink.clone(),
-        Source::default(),
-    )?;
-    let target = server.local_addr()?;
-    let mut garbler = client(target, 111)?;
-    let mut deleter = client(target, 112)?;
-    let mut survivor = client(target, 113)?;
-    connect(
-        &mut server,
-        &mut [&mut garbler, &mut deleter, &mut survivor],
-    )?;
+/// Sends `payload` reliably, polls until the server refuses it, and returns the typed refusal the
+/// peer is sent. The session is not asserted here: the caller says whether it lives.
+fn refusal_on_live_session(
+    server: &mut CultMeshRudpDocumentServer<Sink, Source, Clock>,
+    client: &mut CultNetRudpSocketTransportConnection,
+    payload: Vec<u8>,
+) -> Result<(Option<CultNetErrorCode>, Option<CultNetErrorDetails>, String)> {
+    client.send_reliable("schema", payload)?;
+    let mut rejected = false;
+    for _ in 0..2_000 {
+        if !rejected {
+            rejected = matches!(server.poll_once()?, CultMeshRudpPollOutcome::ApplicationRejected(_));
+        }
+        if let Some(frame) = client.receive_once()? {
+            if let CultNetMessage::Error { error, code, details } = decode_cultnet_message_from_slice(
+                &frame.payload,
+                CultNetWireContract::CultNetSchemaV0,
+            )? {
+                assert!(rejected, "the refusal preceded the server's own outcome");
+                return Ok((code, details, error));
+            }
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    anyhow::bail!("no typed refusal reached the peer")
+}
 
-    // A frame that is no CultNet message: a msgpack string quoting a canary. The peer is told
-    // message_invalid naming `message`; the decoder's text never reaches it.
+fn garbage() -> Vec<u8> {
     let mut payload = vec![0xAE];
     payload.extend_from_slice(b"CANARY-garbage");
-    let receipt = garbler.send_reliable("schema", payload)?;
-    let CultMeshRudpPollOutcome::ApplicationRejected(rejection) = server.poll_once()? else {
-        panic!("an unreadable frame must be returned as a nonfatal poll outcome");
-    };
-    assert_eq!(rejection.session.connection_id, 111);
-    assert_eq!(
-        rejection.operation,
-        CultMeshRudpApplicationOperation::Unreadable
-    );
-    assert!(matches!(
-        rejection.reason,
-        CultMeshRudpRejectionReason::MessageUnreadable(_)
-    ));
-    assert_eq!(
-        typed_refusal_seen_by(&mut garbler, &receipt)?,
-        (
-            "message_invalid: the message could not be read".to_string(),
-            Some(CultNetErrorCode::MessageInvalid),
-            Some(CultNetErrorDetails {
-                field: Some("message".into()),
-                value: None,
-                as_of: None,
-                current: None,
-            })
-        )
-    );
-    drain_until_idle(&mut server)?;
+    payload
+}
 
-    // The server has no delete path: a delete is refused write_not_authorized naming the record.
-    let receipt = send_reliable(
-        &mut deleter,
+fn delete_of(key: &str) -> Vec<u8> {
+    encode_cultnet_message_to_vec(
         &CultNetMessage::DocumentDelete {
-            message_id: "del-1".into(),
+            message_id: "del".into(),
             schema_id: "sha256:note".into(),
-            record_key: "note:victim".into(),
+            record_key: key.into(),
         },
-    )?;
-    let CultMeshRudpPollOutcome::ApplicationRejected(rejection) = server.poll_once()? else {
-        panic!("a delete must be returned as a nonfatal poll outcome");
-    };
-    assert_eq!(rejection.session.connection_id, 112);
-    assert_eq!(
-        rejection.operation,
-        CultMeshRudpApplicationOperation::DocumentDelete
+        CultNetWireContract::CultNetSchemaV0,
+    )
+    .unwrap()
+}
+
+fn valid_put(key: &str) -> Vec<u8> {
+    encode_cultnet_message_to_vec(
+        &CultNetMessage::DocumentPutRaw {
+            message_id: format!("put-{key}"),
+            document: document(key, vec![1, 2, 3]),
+        },
+        CultNetWireContract::CultNetSchemaV0,
+    )
+    .unwrap()
+}
+
+fn stored_after_poll(
+    server: &mut CultMeshRudpDocumentServer<Sink, Source, Clock>,
+    client: &mut CultNetRudpSocketTransportConnection,
+    sink: &Sink,
+    receipts: usize,
+) -> Result<()> {
+    client.send_reliable("schema", valid_put(&format!("k{receipts}")))?;
+    for _ in 0..2_000 {
+        server.poll_once()?;
+        client.receive_once()?;
+        if sink.0.lock().unwrap().receipts.len() >= receipts {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    anyhow::bail!("a valid put on the kept session was not stored")
+}
+
+#[test]
+fn an_unreadable_frame_is_refused_typed_and_the_session_kept_until_eight_in_a_row() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(49_000), sink.clone(), Source::default())?;
+    let target = server.local_addr()?;
+    let mut garbler = client(target, 111)?;
+    let mut survivor = client(target, 113)?;
+    connect(&mut server, &mut [&mut garbler, &mut survivor])?;
+    let message_invalid = (
+        Some(CultNetErrorCode::MessageInvalid),
+        Some(CultNetErrorDetails {
+            field: Some("message".into()),
+            value: None,
+            as_of: None,
+            current: None,
+        }),
+        "message_invalid: the message could not be read".to_string(),
     );
-    assert_eq!(rejection.message_id, "del-1");
-    assert_eq!(rejection.reason, CultMeshRudpRejectionReason::DeleteNotSupported);
-    assert_eq!(
-        typed_refusal_seen_by(&mut deleter, &receipt)?,
+
+    // Seven in a row are answered and the session lives, a valid frame resets the run, and seven more
+    // are answered again: a counter that never resets, or a cap below eight, ends the session early.
+    for _ in 0..7 {
+        assert_eq!(refusal_on_live_session(&mut server, &mut garbler, garbage())?, message_invalid);
+        assert!(garbler.connected());
+    }
+    stored_after_poll(&mut server, &mut garbler, &sink, 1)?;
+    for _ in 0..7 {
+        assert_eq!(refusal_on_live_session(&mut server, &mut garbler, garbage())?, message_invalid);
+        assert!(garbler.connected());
+    }
+    assert_eq!(server.session_count(), 2);
+
+    // The eighth consecutive one is answered too, then the session ends with a goodbye.
+    let receipt = garbler.send_reliable("schema", garbage())?;
+    let CultMeshRudpPollOutcome::ApplicationRejected(rejection) = server.poll_once()? else {
+        panic!("the eighth consecutive unreadable frame must be refused");
+    };
+    assert_eq!(rejection.operation, CultMeshRudpApplicationOperation::Unreadable);
+    let (error, code, _) = typed_refusal_seen_by(&mut garbler, &receipt)?;
+    assert_eq!((error.as_str(), code), (message_invalid.2.as_str(), message_invalid.0));
+    drain_until_idle(&mut server)?;
+    assert_eq!(server.session_count(), 1, "only the capped peer's session ended");
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_refused_delete_keeps_the_session_until_eight_in_a_row() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(50_000), sink.clone(), Source::default())?;
+    let target = server.local_addr()?;
+    let mut deleter = client(target, 112)?;
+    connect(&mut server, &mut [&mut deleter])?;
+    let refused = |key: &str| {
         (
-            "write_not_authorized: the server does not take deletes".to_string(),
             Some(CultNetErrorCode::WriteNotAuthorized),
             Some(CultNetErrorDetails {
                 field: Some("recordKey".into()),
-                value: Some("note:victim".into()),
+                value: Some(key.into()),
                 as_of: None,
                 current: None,
-            })
+            }),
+            "write_not_authorized: the server does not take deletes".to_string(),
         )
+    };
+    for _ in 0..7 {
+        assert_eq!(refusal_on_live_session(&mut server, &mut deleter, delete_of("note:victim"))?, refused("note:victim"));
+        assert!(deleter.connected());
+    }
+    // A decoded non-delete frame resets the run.
+    stored_after_poll(&mut server, &mut deleter, &sink, 1)?;
+    for _ in 0..7 {
+        assert_eq!(refusal_on_live_session(&mut server, &mut deleter, delete_of("note:victim"))?, refused("note:victim"));
+    }
+    let receipt = deleter.send_reliable("schema", delete_of("note:victim"))?;
+    let CultMeshRudpPollOutcome::ApplicationRejected(rejection) = server.poll_once()? else {
+        panic!("the eighth consecutive delete must be refused");
+    };
+    assert_eq!(rejection.operation, CultMeshRudpApplicationOperation::DocumentDelete);
+    assert_eq!(rejection.reason, CultMeshRudpRejectionReason::DeleteNotSupported);
+    let (error, code, details) = typed_refusal_seen_by(&mut deleter, &receipt)?;
+    assert_eq!(
+        (error, code, details),
+        {
+            let (c, d, e) = refused("note:victim");
+            (e, c, d)
+        }
     );
     drain_until_idle(&mut server)?;
-    assert_eq!(server.session_count(), 1, "only the refused peers' sessions ended");
-    assert_eq!(sink.0.lock().unwrap().receipts.len(), 0);
+    assert_eq!(server.session_count(), 0);
     Ok(())
 }
 
