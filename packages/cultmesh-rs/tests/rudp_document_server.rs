@@ -2747,3 +2747,62 @@ fn an_unreliable_write_on_a_receipt_session_is_refused_message_invalid_naming_th
     assert_eq!(sink.0.lock().unwrap().receipts.len(), 1);
     Ok(())
 }
+
+/// A limit refusal is remembered like any refusal: the same id with other content is a reused id, not a fresh
+/// limit refusal; and the remembered refusals are a bounded set (1024), past which a refusal is not remembered.
+#[test]
+fn limit_refusals_are_remembered_in_a_bounded_set() -> Result<()> {
+    let options = CultMeshRudpDocumentServerOptions {
+        max_remembered_write_bytes: CultMeshRudpDocumentServerOptions::REMEMBERED_ENTRY_BYTES,
+        ..Default::default()
+    };
+    let mut server = server(options, Clock::new(70_000), Sink::default(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 234)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    send_reliable(&mut peer, &put("full", "note:full", vec![1]))?;
+    for index in 0..1024 {
+        send_reliable(&mut peer, &put(&format!("r{index}"), "note:r", vec![1]))?;
+        if index % 16 == 15 {
+            for _ in 0..40 {
+                server.poll_once()?;
+                peer.poll_resends()?;
+                while peer.receive_once()?.is_some() {}
+            }
+        }
+    }
+    // r0 was remembered as refused: other content under its id is a reused id.
+    send_reliable(&mut peer, &put("r0", "note:other", vec![2]))?;
+    let answers = frames_after(&mut server, &mut peer, 1)?;
+    assert_eq!(refusal_of(&answers[0]), (Some(CultNetErrorCode::MessageInvalid), Some("r0".into())));
+    // The 1025th refusal found the set full: it was refused but not remembered.
+    send_reliable(&mut peer, &put("over", "note:over", vec![1]))?;
+    send_reliable(&mut peer, &put("over", "note:over", vec![2]))?;
+    let answers = frames_after(&mut server, &mut peer, 2)?;
+    assert_eq!(refusal_of(&answers[0]), (Some(CultNetErrorCode::LimitReached), Some("over".into())));
+    assert_eq!(refusal_of(&answers[1]), (Some(CultNetErrorCode::LimitReached), Some("over".into())), "not remembered: refused afresh");
+    assert_eq!(server.session_count(), 1);
+    Ok(())
+}
+
+/// A session that never declared the capability gets no refusal for an unreliable write: it is dropped as before.
+#[test]
+fn an_unreliable_write_on_a_legacy_session_is_dropped_silently() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = RawPeer::connect(&mut server, 235)?;
+    let payload = encode_cultnet_message_to_vec(&put("u1", "note:1", vec![1]), CultNetWireContract::CultNetSchemaV0)?;
+    let packets = peer.session.send_many(
+        "schema",
+        payload,
+        cultnet_rs::CultNetRudpSendOptions { reliable: false, ordered: false, sequenced: false, now_ms: 3, reliable_expire_after_ms: None },
+        Some(1200),
+    )?;
+    for packet in &packets {
+        peer.send_packet(packet)?;
+    }
+    server.poll_once()?;
+    assert!(peer.drain().is_empty(), "a legacy session is sent nothing");
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 0);
+    Ok(())
+}
