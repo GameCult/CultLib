@@ -21,7 +21,7 @@ import {
   type CultNetMessage,
   type CultNetSnapshotResponseRawMessage,
 } from "@gamecult/cultnet-ts";
-import { CultMesh, CultMeshGrantAllWrites, CultMeshRudpUnservableDocumentError } from "../src/index";
+import { CultMesh, CultMeshGrantAllWrites, CultMeshRudpUnservableDocumentError, CultMeshRudpWriteUnconfirmedError } from "../src/index";
 
 // A record's payload as the bytes a peer would put on the wire.
 const payloadOf = (value: unknown) => documentPayloadFromBytes(encodeWireValue(value));
@@ -2968,25 +2968,30 @@ test("CultMesh TS publishes one registered document to a RUDP catalog", async ()
 
   try {
     await server.start();
-    await CultMesh.publishRudpDocumentOnce(
-      "cultmesh-ts-muninn",
-      connectionId,
-      `rudp://127.0.0.1:${server.bind.port}`,
-      defineCultNetDocumentBinding({ definition: noteDocument }),
-      "note:odin",
-      {
-        noteId: "note:odin",
-        body: "pay respects once",
-      },
-      {
-        resendDelayMs: 25,
-        resendPollMs: 5,
-        maxFragmentBytes: 1024,
-        maxPendingReliablePackets: 16,
-        connectTimeoutMs: 1_000,
-        flushTimeoutMs: 25,
-        sourceRole: "test-provider",
-      },
+    // This server answers a put with nothing, so the writer cannot know the put landed: unconfirmed, though it did.
+    await assert.rejects(
+      CultMesh.publishRudpDocumentOnce(
+        "cultmesh-ts-muninn",
+        connectionId,
+        `rudp://127.0.0.1:${server.bind.port}`,
+        defineCultNetDocumentBinding({ definition: noteDocument }),
+        "note:odin",
+        {
+          noteId: "note:odin",
+          body: "pay respects once",
+        },
+        {
+          resendDelayMs: 25,
+          resendPollMs: 5,
+          maxFragmentBytes: 1024,
+          maxPendingReliablePackets: 16,
+          connectTimeoutMs: 1_000,
+          flushTimeoutMs: 25,
+          resultWindowMs: 100,
+          sourceRole: "test-provider",
+        },
+      ),
+      (error: unknown) => error instanceof CultMeshRudpWriteUnconfirmedError && error.reason === "window_elapsed",
     );
 
     await waitFor(() => received !== undefined, "published RUDP document");

@@ -14,7 +14,11 @@ export function resultWindowMs(serverAdvertisesReceipts: boolean): number {
   return serverAdvertisesReceipts ? RECEIPT_RESULT_WINDOW_MS : LEGACY_RESULT_WINDOW_MS;
 }
 
-export type WriteUnconfirmedReason = "window_elapsed" | "session_ended";
+/**
+ * Why nothing settled a write: its window ran out, the session ended first, or the client's own send of it failed (it may or
+ * may not have left the machine, and is never a refusal).
+ */
+export type WriteUnconfirmedReason = "window_elapsed" | "session_ended" | "local_send_failed";
 /** What a late answer is recorded as on a write that already settled unconfirmed. */
 export type WriteRecorded = "admitted_late" | "refused_late";
 
@@ -95,6 +99,13 @@ export class WriteTracker {
     for (const [messageId, entry] of this.#writes) {
       if (entry.state.outcome === "pending") this.#settle(messageId, entry, { outcome: "unconfirmed", reason: "session_ended" });
     }
+  }
+
+  /** This client's own send of `messageId` failed: that write settles unconfirmed; the others are untouched. */
+  sendFailed(messageId: string, atMs: number): void {
+    this.tick(atMs);
+    const entry = this.#writes.get(messageId);
+    if (entry?.state.outcome === "pending") this.#settle(messageId, entry, { outcome: "unconfirmed", reason: "local_send_failed" });
   }
 
   state(messageId: string): WriteState | undefined {

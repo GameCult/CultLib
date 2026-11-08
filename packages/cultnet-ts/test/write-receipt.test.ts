@@ -194,3 +194,29 @@ test("the replay runner passes every vector against this runtime", () => {
   assert.match(run.stdout, /^PASS scenario\/receipt_admits$/m);
   assert.doesNotMatch(run.stdout, /^FAIL/m);
 });
+
+test("a failed local send settles only that write unconfirmed as local_send_failed, and an answer after it is recorded late", () => {
+  const settled: [string, WriteSettlement][] = [];
+  const tracker = new WriteTracker({ windowMs: 1000, onSettle: (id, settlement) => settled.push([id, settlement]) });
+  tracker.send("w1", 0);
+  tracker.send("w2", 0);
+  tracker.sendFailed("w1", 10);
+  assert.deepEqual(settled, [["w1", { outcome: "unconfirmed", reason: "local_send_failed" }]]);
+  assert.equal(tracker.state("w2")?.outcome, "pending");
+  tracker.frame(admitted("w1"), 20);
+  assert.deepEqual(tracker.state("w1"), { outcome: "unconfirmed", reason: "local_send_failed", recorded: "admitted_late" });
+  tracker.sendFailed("w2", 30);
+  tracker.sendFailed("w2", 31);
+  assert.equal(settled.length, 2, "a write settles once");
+  tracker.sendFailed("unknown", 40);
+  assert.equal(tracker.state("unknown"), undefined);
+});
+
+test("a failed local send advances the clock: other writes whose windows have run settle window_elapsed", () => {
+  const tracker = new WriteTracker({ windowMs: 1000 });
+  tracker.send("w1", 0);
+  tracker.send("w2", 500);
+  tracker.sendFailed("w2", 1200);
+  assert.deepEqual(tracker.state("w1"), { outcome: "unconfirmed", reason: "window_elapsed" });
+  assert.deepEqual(tracker.state("w2"), { outcome: "unconfirmed", reason: "local_send_failed" });
+});

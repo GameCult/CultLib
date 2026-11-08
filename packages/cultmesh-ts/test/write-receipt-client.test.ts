@@ -31,8 +31,10 @@ interface Script {
   /** Does the server's hello list both receipt frames? */
   advertise: boolean;
   /** What the server answers a put with, `delayMs` after it arrives. */
-  answer: "admit" | "refuse" | "wrong-id" | "silence";
+  answer: "admit" | "refuse" | "wrong-id" | "silence" | "goodbye";
   delayMs?: number;
+  /** Acknowledge the reliable packets it receives? Default true. */
+  ack?: boolean;
 }
 
 async function fakeServer(connectionId: number, script: Script) {
@@ -72,7 +74,9 @@ async function fakeServer(connectionId: number, script: Script) {
       if (message.schemaVersion !== "cultnet.document_put_raw.v0" || script.answer === "silence") continue;
       const timer = setTimeout(() => {
         timers.delete(timer);
-        if (script.answer === "refuse") {
+        if (script.answer === "goodbye") {
+          send(session.endUnsendableSession(new Error("scripted goodbye")), remote.port, remote.address);
+        } else if (script.answer === "refuse") {
           say({ schemaVersion: "cultnet.error.v1", error: "write_not_authorized", routingHint: null, code: "write_not_authorized", details: null, messageId: message.messageId! }, remote.port, remote.address);
         } else {
           const messageId = script.answer === "wrong-id" ? "someone-else" : message.messageId!;
@@ -81,7 +85,7 @@ async function fakeServer(connectionId: number, script: Script) {
       }, script.delayMs ?? 20);
       timers.add(timer);
     }
-    if (packet.reliable) send(session.createAckForReceived(packet.sequence), remote.port, remote.address);
+    if (packet.reliable && script.ack !== false) send(session.createAckForReceived(packet.sequence), remote.port, remote.address);
   });
   return { endpoint: `rudp://127.0.0.1:${socket.address().port}`, seen, close: () => { closed = true; timers.forEach(clearTimeout); socket.close(); } };
 }
@@ -121,19 +125,38 @@ test("a receipt for another id settles nothing", async () => {
   } finally { server.close(); }
 });
 
-test("a server whose hello does not advertise keeps the interim 500 ms window-success", async () => {
+test("a server whose hello does not advertise leaves a silent put unconfirmed after the 500 ms window, never published", async () => {
   const server = await fakeServer(nextConnection, { advertise: false, answer: "silence" });
   const started = Date.now();
   try {
-    await publish(server, { writeReceipts: true });
+    await assert.rejects(publish(server, { writeReceipts: true }), (error: unknown) =>
+      error instanceof CultMeshRudpWriteUnconfirmedError && error.reason === "window_elapsed");
     assert.ok(Date.now() - started >= 500, "the legacy window ran from the send");
+  } finally { server.close(); }
+});
+
+test("a session that ends before any result leaves the put unconfirmed (session_ended), against a legacy server too", async () => {
+  for (const advertise of [false, true]) {
+    const server = await fakeServer(nextConnection, { advertise, answer: "goodbye" });
+    try {
+      await assert.rejects(publish(server, { writeReceipts: true, resultWindowMs: 3_000 }), (error: unknown) =>
+        error instanceof CultMeshRudpWriteUnconfirmedError && error.reason === "session_ended");
+    } finally { server.close(); }
+  }
+});
+
+test("a put whose send is never acknowledged is unconfirmed as local_send_failed, not an untyped error", async () => {
+  const server = await fakeServer(nextConnection, { advertise: true, answer: "silence", ack: false });
+  try {
+    await assert.rejects(publish(server, { writeReceipts: true, flushTimeoutMs: 300 }), (error: unknown) =>
+      error instanceof CultMeshRudpWriteUnconfirmedError && error.reason === "local_send_failed");
   } finally { server.close(); }
 });
 
 test("without writeReceipts no hello is sent and the receipt frames are never asked for", async () => {
   const server = await fakeServer(nextConnection, { advertise: true, answer: "silence" });
   try {
-    await publish(server, { resultWindowMs: 100 });
+    await assert.rejects(publish(server, { resultWindowMs: 100 }), CultMeshRudpWriteUnconfirmedError);
     assert.deepEqual(server.seen, ["cultnet.document_put_raw.v0"]);
   } finally { server.close(); }
 });

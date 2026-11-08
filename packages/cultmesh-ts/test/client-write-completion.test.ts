@@ -16,7 +16,7 @@ import {
   encodeRudpPacket,
 } from "@gamecult/cultnet-ts";
 import { encodeWireValue } from "@gamecult/cultnet-ts/wire";
-import { CultMesh, CultMeshGrantAllWrites, CultMeshRudpWriteRefusedError } from "../src/index";
+import { CultMesh, CultMeshGrantAllWrites, CultMeshRudpWriteRefusedError, CultMeshRudpWriteUnconfirmedError } from "../src/index";
 
 const isTheRefusal = (error: unknown): boolean =>
   error instanceof CultMeshRudpWriteRefusedError && error.code === "write_not_authorized";
@@ -100,7 +100,7 @@ for (const order of orders) {
   });
 }
 
-test("publishRudpDocumentOnce still publishes a put the server admitted", async () => {
+test("a put the server applied but did not answer is unconfirmed, never published", async () => {
   const connectionId = nextConnection++;
   const puts: string[] = [];
   const server = CultMesh.createRudpDocumentServer("completion-admit", connectionId, {
@@ -111,7 +111,10 @@ test("publishRudpDocumentOnce still publishes a put the server admitted", async 
   });
   await server.start();
   try {
-    await CultMesh.publishRudpDocumentOnce("completion-admit-client", connectionId, `rudp://127.0.0.1:${server.bind.port}`, binding, "tests:completion:a", { noteId: "a", text: "x" }, { resendDelayMs: 50, resendPollMs: 5, resultWindowMs: 200 });
-    assert.deepEqual(puts, ["tests:completion:a"]);
+    await assert.rejects(
+      CultMesh.publishRudpDocumentOnce("completion-admit-client", connectionId, `rudp://127.0.0.1:${server.bind.port}`, binding, "tests:completion:a", { noteId: "a", text: "x" }, { resendDelayMs: 50, resendPollMs: 5, resultWindowMs: 200 }),
+      (error: unknown) => error instanceof CultMeshRudpWriteUnconfirmedError && error.reason === "window_elapsed",
+    );
+    assert.deepEqual(puts, ["tests:completion:a"], "the server did apply it; this server just does not answer");
   } finally { server.close(); }
 });

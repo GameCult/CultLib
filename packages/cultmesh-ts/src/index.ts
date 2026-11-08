@@ -4205,8 +4205,8 @@ export class CultMeshRudpWriteRefusedError extends Error {
 }
 
 /**
- * Nothing settled the write (write-receipt.md, "unconfirmed"): the result window ran out with no answer, or the
- * session ended first. Not success and not refusal; a caller that needs admission treats it as not admitted.
+ * Nothing settled the write (write-receipt.md, "unconfirmed"): the result window ran out with no answer, the
+ * session ended first, or the client's own send failed. Not success and not refusal; a caller that needs admission treats it as not admitted.
  */
 export class CultMeshRudpWriteUnconfirmedError extends Error {
   readonly reason: WriteUnconfirmedReason;
@@ -4223,9 +4223,9 @@ export interface CultMeshRudpDocumentPublishOptions extends CultMeshRudpPeerOpti
   /**
    * How long, counted from the send, the put may wait for its result frame. A reliable-transport ack is not
    * admission; the outcome is the peer's result frame. Default: 5000 ms against a server whose hello lists the
-   * write-receipt frames, 500 ms otherwise. Against a server that did not advertise them the put is reported
-   * published once the window passes with no refusal (interim; the caller must not read it as admission), and
-   * a success reply ends the wait early.
+   * write-receipt frames, 500 ms otherwise. A put nothing settled within the window is unconfirmed, never
+   * published, whatever the server advertised; a legacy server's success reply (the put's id echoed back) ends
+   * the wait early as admitted.
    */
   resultWindowMs?: number;
   /**
@@ -6250,19 +6250,24 @@ export class CultMesh {
       });
       tracker = writeTracker;
       writeTracker.send(messageId, Date.now());
-      peer.send(registry.createRawDocumentPutMessage(
-        binding,
-        messageId,
-        recordKey,
-        value,
-        {
-          sourceRuntimeId: options.sourceRuntimeId ?? runtimeId,
-          sourceAgentId: options.sourceAgentId,
-          sourceRole: options.sourceRole,
-          tags: options.tags,
-        },
-      ));
-      await peer.flush(options.flushTimeoutMs ?? 30_000);
+      try {
+        peer.send(registry.createRawDocumentPutMessage(
+          binding,
+          messageId,
+          recordKey,
+          value,
+          {
+            sourceRuntimeId: options.sourceRuntimeId ?? runtimeId,
+            sourceAgentId: options.sourceAgentId,
+            sourceRole: options.sourceRole,
+            tags: options.tags,
+          },
+        ));
+        await peer.flush(options.flushTimeoutMs ?? 30_000);
+      } catch {
+        // Our own send failed or was never acknowledged: the put may or may not have left. Never a refusal.
+        writeTracker.sendFailed(messageId, Date.now());
+      }
       while (!settlement) {
         const remaining = writeTracker.nextDeadlineMs(Date.now()) ?? 0;
         await new Promise<void>((resolve) => {
@@ -6272,8 +6277,7 @@ export class CultMesh {
         writeTracker.tick(Date.now());
       }
       if (settlement.outcome === "refused") throw new CultMeshRudpWriteRefusedError(settlement.response);
-      // Interim, for a server that did not advertise receipts: a window with no refusal reads as published.
-      if (settlement.outcome === "unconfirmed" && receiptCapable) throw new CultMeshRudpWriteUnconfirmedError(messageId, settlement.reason);
+      if (settlement.outcome === "unconfirmed") throw new CultMeshRudpWriteUnconfirmedError(messageId, settlement.reason);
     } finally {
       peer.close();
     }
