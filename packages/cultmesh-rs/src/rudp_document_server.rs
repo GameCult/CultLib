@@ -19,6 +19,12 @@ const MAX_FRAGMENTS_PER_MESSAGE: usize = u16::MAX as usize;
 /// can carry no shorter id, so no response to it can be smaller.
 const SHORTEST_MESSAGE_ID: &str = "0";
 
+/// How many consecutive refused frames of one kind a session may send before it is ended: undecodable
+/// frames (reset by any frame that decodes) and refused deletes (reset by any decoded non-delete).
+/// Fewer are answered with a typed refusal and the session is kept; the cap that reaches this number
+/// is answered too, then the session ends. The same number is the cap in every runtime.
+pub const MAX_CONSECUTIVE_REFUSED_FRAMES: u32 = 8;
+
 /// The transport identity of one remote CultNet RUDP session.
 ///
 /// Connection identifiers are scoped to a remote socket address. Two clients
@@ -416,6 +422,8 @@ struct SessionEntry {
     created_at_monotonic_millis: u64,
     last_activity_monotonic_millis: u64,
     admitted_payload_bytes: usize,
+    undecodable_frames_in_a_row: u32,
+    refused_deletes_in_a_row: u32,
 }
 
 /// A synchronous, multi-session CultNet RUDP raw-document server.
@@ -599,14 +607,39 @@ where
             return Ok(CultMeshRudpPollOutcome::Handled);
         }
 
+        let mut kept_rejection = None;
         for frame in result.delivered {
             if frame.channel_id != "schema" {
                 continue;
             }
-            let rejection = match decode_cultnet_message_from_slice(
+            let decoded = decode_cultnet_message_from_slice(
                 &frame.payload,
                 CultNetWireContract::CultNetSchemaV0,
-            ) {
+            );
+            // Runs of refusals this frame extends or breaks. A session is kept through a short run and
+            // ended by `MAX_CONSECUTIVE_REFUSED_FRAMES` in a row.
+            let (is_unreadable, is_delete) = (
+                decoded.is_err(),
+                matches!(decoded, Ok(CultNetMessage::DocumentDelete { .. })),
+            );
+            let run = self.sessions.get_mut(&key).map(|entry| {
+                entry.undecodable_frames_in_a_row = if is_unreadable {
+                    entry.undecodable_frames_in_a_row + 1
+                } else {
+                    0
+                };
+                if is_delete {
+                    entry.refused_deletes_in_a_row += 1;
+                } else if !is_unreadable {
+                    entry.refused_deletes_in_a_row = 0;
+                }
+                if is_unreadable {
+                    entry.undecodable_frames_in_a_row
+                } else {
+                    entry.refused_deletes_in_a_row
+                }
+            });
+            let rejection = match decoded {
                 Ok(message) => self.deliver_application_message(
                     key,
                     frame.sequence,
@@ -623,6 +656,29 @@ where
                 }),
             };
             if let Some(rejection) = rejection {
+                // A refused delete or unreadable frame below the cap is answered on the live session,
+                // which goes on: the peer keeps the connection a stray frame did not break.
+                if (is_unreadable || is_delete)
+                    && run.is_some_and(|run| run < MAX_CONSECUTIVE_REFUSED_FRAMES)
+                {
+                    let refusal = rejection.refusal_message();
+                    let packets = match self.sessions.remove(&key) {
+                        Some(mut entry) => {
+                            let packets = self.refusal_packets(&mut entry.session, &refusal);
+                            self.sessions.insert(key, entry);
+                            packets
+                        }
+                        None => Vec::new(),
+                    };
+                    for packet in &packets {
+                        if let Some(error) = self.send_packet(key.remote_addr, packet)? {
+                            unsendable = Some(error);
+                            break;
+                        }
+                    }
+                    kept_rejection = Some(rejection);
+                    continue;
+                }
                 // The only reply `receive` returns is a Pong, which delivers no
                 // frame, so no earlier send of this poll can precede a rejection.
                 // A response that could not be sent ended its session where the
@@ -649,7 +705,10 @@ where
         if let Some(error) = unsendable {
             self.end_session(key, SessionEnd::Unsendable(error))?;
         }
-        Ok(CultMeshRudpPollOutcome::Handled)
+        Ok(match kept_rejection {
+            Some(rejection) => CultMeshRudpPollOutcome::ApplicationRejected(rejection),
+            None => CultMeshRudpPollOutcome::Handled,
+        })
     }
 
     /// Expire idle sessions and resend reliable packets whose deadline passed.
@@ -734,6 +793,8 @@ where
                         created_at_monotonic_millis: now,
                         last_activity_monotonic_millis: now,
                         admitted_payload_bytes: 0,
+                        undecodable_frames_in_a_row: 0,
+                        refused_deletes_in_a_row: 0,
                     },
                 );
                 accept
