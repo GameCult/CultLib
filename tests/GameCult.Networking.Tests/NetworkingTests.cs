@@ -5213,6 +5213,52 @@ namespace GameCult.Networking.Tests
             Assert.That(sent.ShardEpoch, Is.EqualTo(3));
         }
 
+        [TestCase("write_not_authorized", 0)]
+        [TestCase("message_invalid", 0)]
+        [TestCase("write_not_authorized", 150)]
+        public void CultNetSchemaWriteForwarder_RejectsWithTheTypedRefusal_WhateverItsOrderAgainstTheSend(string code, int delayMs)
+        {
+            var fake = new CapturingSchemaClient(_ => null);
+            var forwarder = new CultNetSchemaWriteForwarder(new CultNetSchemaWriteForwarderOptions
+            {
+                CreateClient = () => fake,
+                ResultWindow = TimeSpan.FromSeconds(2)
+            });
+            var shard = new CultNetShardDescriptor(
+                "notes", "primary", 3, isPrimary: false,
+                primaryEndpoints: ["cultnet://primary.example.test:4075"]);
+            fake.OnSend = () =>
+            {
+                var refusal = new CultNetErrorMessage { Error = "refused", Code = code };
+                if (delayMs == 0) fake.Deliver(refusal);
+                else Task.Delay(delayMs).ContinueWith(_ => fake.Deliver(refusal));
+            };
+
+            var put = Assert.ThrowsAsync<CultNetWriteRefusedException>(() => forwarder.ForwardPutAsync(shard, new CultNetDocumentPutRawMessage()));
+            Assert.That(put!.Code, Is.EqualTo(code));
+            var delete = Assert.ThrowsAsync<CultNetWriteRefusedException>(() => forwarder.ForwardDeleteAsync(shard, new CultNetDocumentDeleteMessage { SchemaId = "note.v0", RecordKey = "note:1" }));
+            Assert.That(delete!.Code, Is.EqualTo(code));
+        }
+
+        [Test]
+        public async Task CultNetSchemaWriteForwarder_DoesNotCompleteOnTheSendReturning()
+        {
+            var fake = new CapturingSchemaClient(_ => null);
+            var forwarder = new CultNetSchemaWriteForwarder(new CultNetSchemaWriteForwarderOptions
+            {
+                CreateClient = () => fake,
+                ResultWindow = TimeSpan.FromMilliseconds(400)
+            });
+            var shard = new CultNetShardDescriptor(
+                "notes", "primary", 3, isPrimary: false,
+                primaryEndpoints: ["cultnet://primary.example.test:4075"]);
+            var started = DateTime.UtcNow;
+
+            await forwarder.ForwardDeleteAsync(shard, new CultNetDocumentDeleteMessage { SchemaId = "note.v0", RecordKey = "note:1" });
+
+            Assert.That(DateTime.UtcNow - started, Is.GreaterThanOrEqualTo(TimeSpan.FromMilliseconds(380)));
+        }
+
         [Test]
         public void CultMeshVerseCatalog_Finds_CompatibleTransferTargets()
         {
@@ -7458,6 +7504,14 @@ namespace GameCult.Networking.Tests
                 _respond = respond;
             }
 
+            public Action? OnSend { get; set; }
+
+            public void Deliver(ICultNetSchemaMessage message)
+            {
+                if (!_handlers.TryGetValue(message.GetType(), out var handlers)) return;
+                foreach (var handler in handlers.ToArray()) handler.DynamicInvoke(message);
+            }
+
             public bool Connected { get; private set; }
             public string? ConnectedHost { get; private set; }
             public int ConnectedPort { get; private set; }
@@ -7474,6 +7528,7 @@ namespace GameCult.Networking.Tests
                 where T : ICultNetSchemaMessage
             {
                 SentMessages.Add(message);
+                OnSend?.Invoke();
                 var response = _respond(message);
                 if (response == null)
                 {

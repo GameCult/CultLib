@@ -1256,6 +1256,7 @@ class CultNetRudpSocketTransportConnection:
         self._send_packet(self.session.create_connect(_now_ms(), payload))
 
     def send(self, channel_id: str, payload: bytes) -> None:
+        """Fire-and-forget: an ack or a return is not admission; read the result frame."""
         packets = self.session.send_many(
             channel_id,
             payload,
@@ -1567,6 +1568,7 @@ class TcpFramedTransportConnection:
         )
 
     def send(self, channel_id: str, payload: bytes) -> None:
+        """Fire-and-forget: an ack or a return is not admission; read the result frame."""
         if channel_id != "schema":
             raise ValueError(f"tcp_framed transport only supports the schema channel, got {channel_id!r}")
         before = len(payload) + 4

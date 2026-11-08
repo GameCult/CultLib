@@ -808,6 +808,7 @@ interface CultNetSchemaMessageTransport : AutoCloseable {
     val profile: CultNetTransportProfile
     val stats: CultNetTransportStats
 
+    /** Fire-and-forget: an ack or a return is not admission; read the result frame. */
     fun sendSchemaMessage(message: CultNetMessage)
 
     fun receiveSchemaMessage(timeoutMs: Long = 1_000, pollIntervalMs: Long = 5): CultNetMessage?
@@ -3167,13 +3168,16 @@ class CultNetRudpSocketTransportConnection(
         return connected
     }
 
+    /** Fire-and-forget: an ack or a return is not admission; read the result frame. */
     fun send(channelId: String, payload: ByteArray) {
         session.sendMany(channelId, payload, channelSendOptions(channelId, nowMs()), maxFragmentBytes).forEach { sendPacket(it) }
         framesSent += 1
     }
 
+    /** Fire-and-forget: an ack or a return is not admission; read the result frame. */
     fun send(channelId: String, payload: String) = send(channelId, payload.toByteArray(StandardCharsets.UTF_8))
 
+    /** Fire-and-forget: an ack or a return is not admission; read the result frame. */
     fun sendSchema(payload: ByteArray) = send("schema", payload)
 
     fun sendSchema(payload: String) = sendSchema(payload.toByteArray(StandardCharsets.UTF_8))
