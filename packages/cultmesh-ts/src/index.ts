@@ -6222,7 +6222,8 @@ export class CultMesh {
     if (options.sendOnly && options.writeReceipts) throw new TypeError("sendOnly and writeReceipts cannot be combined.");
     const registry = new CultNetDocumentRegistry([binding]);
     const messageId = options.messageId ?? `${runtimeId}:${binding.definition.type}:${recordKey}`;
-    const putMessage = () => registry.createRawDocumentPutMessage(
+    // Built before any connection and outside every try: a put that cannot be built is the caller's error, with its cause.
+    const put = registry.createRawDocumentPutMessage(
       binding,
       messageId,
       recordKey,
@@ -6237,8 +6238,6 @@ export class CultMesh {
     const peer = await CultMesh.createRudpPeer(runtimeId, connectionId, endpoint, options);
     try {
       if (options.sendOnly) {
-        // Built outside the try: a message that cannot be serialized is the caller's error, with its cause, not a send failure.
-        const put = putMessage();
         try {
           peer.send(put);
           await peer.flush(options.flushTimeoutMs ?? 30_000);
@@ -6280,7 +6279,7 @@ export class CultMesh {
       tracker = writeTracker;
       writeTracker.send(messageId, Date.now());
       try {
-        peer.send(putMessage());
+        peer.send(put);
         // The flush may not outlast the result window: a send nobody acknowledged by then is a local send failure.
         const windowRemaining = writeTracker.nextDeadlineMs(Date.now()) ?? 0;
         await peer.flush(Math.min(options.flushTimeoutMs ?? 30_000, Math.max(windowRemaining, 1)));

@@ -219,6 +219,17 @@ test("sendOnly keeps the cause of a put that cannot be built: it is not reported
   } finally { server.close(); }
 });
 
+test("the receipt path keeps the cause of a put that cannot be built: it is not reported as local_send_failed", async () => {
+  const server = await fakeServer(nextConnection, { advertise: true, answer: "admit" });
+  try {
+    await assert.rejects(
+      CultMesh.publishRudpDocumentOnce("receipt-client", nextConnection++, server.endpoint, binding, "tests:receipt:a", { noteId: 1 } as unknown as { noteId: string; text: string }, { ...transport, writeReceipts: true }),
+      (error: unknown) => !(error instanceof CultMeshRudpWriteUnconfirmedError) && error instanceof Error,
+    );
+    assert.ok(!server.seen.includes("cultnet.document_put_raw.v0"), "no put was sent");
+  } finally { server.close(); }
+});
+
 test("sendOnly cannot be combined with writeReceipts", async () => {
   await assert.rejects(publish({ endpoint: "rudp://127.0.0.1:9" }, { sendOnly: true, writeReceipts: true }), TypeError);
 });
