@@ -2983,6 +2983,75 @@ fn only_reliable_non_sequenced_writes_are_accepted_on_a_receipt_session() -> Res
     Ok(())
 }
 
+/// `bytes` with the MessagePack fixstr `from` replaced by the fixstr `to`, which may be blank.
+fn swap_fixstr(bytes: &[u8], from: &str, to: &str) -> Vec<u8> {
+    assert!(from.len() < 32 && to.len() < 32);
+    let mut needle = vec![0xa0 | from.len() as u8];
+    needle.extend_from_slice(from.as_bytes());
+    let at = bytes.windows(needle.len()).position(|window| window == needle).expect("marker is in the frame");
+    let mut out = bytes[..at].to_vec();
+    out.push(0xa0 | to.len() as u8);
+    out.extend_from_slice(to.as_bytes());
+    out.extend_from_slice(&bytes[at + needle.len()..]);
+    out
+}
+
+/// A `schemaId` or `recordKey` that is present but empty or only whitespace names nothing: the write is refused
+/// `message_invalid` like a frame that does not read (field "message", the write's id), never reaches the store,
+/// and the session goes on (write-receipt.md, rule 5; vector `error_v1_empty_schema_id_is_unreadable_and_names_the_write`).
+#[test]
+fn a_write_whose_schema_id_or_record_key_names_nothing_is_refused_and_never_handed_to_the_store() -> Result<()> {
+    let blanks = ["", " ", "\t \n"];
+    let mut connection_id = 300;
+    for blank in blanks {
+        for blank_field in ["schemaId", "recordKey"] {
+            for operation in ["put", "delete"] {
+                connection_id += 1;
+                let (schema_id, record_key) = match blank_field {
+                    "schemaId" => (blank, "note:1"),
+                    _ => ("test.raw.v1", blank),
+                };
+                // The encoder refuses a blank field, so encode a marker and swap the blank into the bytes.
+                let bad = if operation == "put" {
+                    let mut record = document("zz-key-zz", vec![1, 2, 3]);
+                    record.schema_id = "zz-schema-zz".into();
+                    encode_cultnet_message_to_vec(
+                        &CultNetMessage::DocumentPutRaw { message_id: "bad-1".into(), document: record },
+                        CultNetWireContract::CultNetSchemaV0,
+                    )?
+                } else {
+                    encode_cultnet_message_to_vec(
+                        &CultNetMessage::DocumentDelete {
+                            message_id: "bad-1".into(),
+                            schema_id: "zz-schema-zz".into(),
+                            record_key: "zz-key-zz".into(),
+                        },
+                        CultNetWireContract::CultNetSchemaV0,
+                    )?
+                };
+                let bad = swap_fixstr(&bad, "zz-schema-zz", schema_id);
+                let bad = swap_fixstr(&bad, "zz-key-zz", record_key);
+                let label = format!("{operation} with {blank_field} {blank:?}");
+                let sink = Sink::default();
+                let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+                let mut peer = client(server.local_addr()?, connection_id)?;
+                connect(&mut server, &mut [&mut peer])?;
+                send_reliable(&mut peer, &receipt_hello())?;
+                peer.send_reliable("schema", bad)?;
+                send_reliable(&mut peer, &put("good-1", "note:2", vec![1]))?;
+                let answers = answers_after(&mut server, &mut peer, 2)?;
+                assert_eq!(refusal_of(&answers[0]), (Some(CultNetErrorCode::MessageInvalid), Some("bad-1".into())), "{label}");
+                assert_eq!(error_text_and_field(&answers[0]).1, Some("message".into()), "{label}");
+                assert_eq!(answers[1], admitted("good-1", "note:2"), "{label}: the session goes on");
+                let state = sink.0.lock().unwrap();
+                assert_eq!(state.authorized, vec!["good-1".to_string()], "{label}: the store was never asked about the blank write");
+                assert_eq!(state.receipts.len(), 1, "{label}: only the good write was applied");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A refused write is traffic: the peer that sends it is not idle, so its session outlives the idle timeout measured
 /// from the refusal and not from the packet before it.
 #[test]
