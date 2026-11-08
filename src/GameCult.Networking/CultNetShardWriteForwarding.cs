@@ -11,8 +11,9 @@ namespace GameCult.Networking
     {
         /// <summary>
         /// Forwards a raw document put to the shard owner. Completes only when the owner answered that it admitted the write;
-        /// throws <see cref="CultNetWriteRefusedException"/> when it refused and <see cref="CultNetWriteUnconfirmedException"/>
-        /// when it answered nothing. The server relays to the original peer exactly what the owner answered.
+        /// throws <see cref="CultNetWriteRefusedException"/> when it refused, <see cref="CultNetWriteNotSentException"/> when
+        /// nothing could have reached it (the only failure after which the id may be forwarded again), and any other exception
+        /// when the frame may have gone out and was not answered (unconfirmed, including <see cref="CultNetWriteUnconfirmedException"/>). The server relays to the original peer exactly what the owner answered.
         /// </summary>
         Task ForwardPutAsync(CultNetShardDescriptor shard, CultNetDocumentPutRawMessage message);
 
@@ -103,10 +104,10 @@ namespace GameCult.Networking
         public async Task ForwardPutAsync(CultNetShardDescriptor shard, CultNetDocumentPutRawMessage message)
         {
             if (message == null) throw new ArgumentNullException(nameof(message));
-            var endpoint = ResolvePrimaryEndpoint(shard);
+            if (shard == null) throw new ArgumentNullException(nameof(shard));
             message.ShardId ??= shard.ShardId;
             message.ShardEpoch ??= shard.Epoch;
-            await SendAsync(endpoint, message, message.MessageId).ConfigureAwait(false);
+            await SendAsync(shard, message, message.MessageId).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -116,10 +117,10 @@ namespace GameCult.Networking
         public async Task ForwardDeleteAsync(CultNetShardDescriptor shard, CultNetDocumentDeleteMessage message)
         {
             if (message == null) throw new ArgumentNullException(nameof(message));
-            var endpoint = ResolvePrimaryEndpoint(shard);
+            if (shard == null) throw new ArgumentNullException(nameof(shard));
             message.ShardId ??= shard.ShardId;
             message.ShardEpoch ??= shard.Epoch;
-            await SendAsync(endpoint, message, message.MessageId).ConfigureAwait(false);
+            await SendAsync(shard, message, message.MessageId).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -143,19 +144,40 @@ namespace GameCult.Networking
             return (uri.Host, uri.IsDefaultPort ? 3075 : uri.Port);
         }
 
-        private async Task SendAsync<T>(string endpoint, T message, string messageId) where T : ICultNetSchemaMessage
+        // The write frame has not been handed to the transport until this returns: any failure here is CultNetWriteNotSentException,
+        // the one failure the caller may retry under the same id.
+        private async Task<ICultNetSchemaClient> ConnectBeforeSendAsync(CultNetShardDescriptor shard, string messageId)
         {
-            var (host, port) = ParseEndpoint(endpoint);
-            using var client = CreateClient(endpoint);
-            client.Connect(host, port);
-            await WaitForConnectionAsync(client, endpoint).ConfigureAwait(false);
-            // The hello comes first on the ordered schema channel: it opts this connection in to the primary's receipts.
-            client.SendCultNet(new CultNetHelloMessage
+            ICultNetSchemaClient? client = null;
+            try
             {
-                RuntimeId = "gamecult-networking-shard-forwarder",
-                RuntimeKind = "dotnet",
-                SupportedMessageVersions = [CultNetSchemaVersions.WriteAdmitted, CultNetSchemaVersions.ErrorV1]
-            });
+                var endpoint = ResolvePrimaryEndpoint(shard);
+                var (host, port) = ParseEndpoint(endpoint);
+                client = CreateClient(endpoint);
+                client.Connect(host, port);
+                await WaitForConnectionAsync(client, endpoint).ConfigureAwait(false);
+                // The hello comes first on the ordered schema channel: it opts this connection in to the primary's receipts.
+                client.SendCultNet(new CultNetHelloMessage
+                {
+                    RuntimeId = "gamecult-networking-shard-forwarder",
+                    RuntimeKind = "dotnet",
+                    SupportedMessageVersions = [CultNetSchemaVersions.WriteAdmitted, CultNetSchemaVersions.ErrorV1]
+                });
+                return client;
+            }
+            catch (Exception failure)
+            {
+                client?.Dispose();
+                if (failure is CultNetWriteNotSentException) throw;
+                throw new CultNetWriteNotSentException(messageId, failure);
+            }
+        }
+
+        private async Task SendAsync<T>(CultNetShardDescriptor shard, T message, string messageId) where T : ICultNetSchemaMessage
+        {
+            using var client = await ConnectBeforeSendAsync(shard, messageId).ConfigureAwait(false);
+            // From the write's send on, every failure (timeout, reset, silence, an exception from the send itself) propagates as it
+            // is: the frame may have gone out, so the caller treats it as unconfirmed.
             await CultNetWriteCompletion.SendAndAwaitReceiptAsync(
                 (admitted, refuse, refuseV1) =>
                 {

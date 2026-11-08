@@ -546,7 +546,7 @@ namespace GameCult.Networking
         public static CultNetErrorMessage ForUnownedSchema(CultNetUnownedSchemaException ex) =>
             new CultNetErrorMessage
             {
-                Error = $"unowned_schema: {ex.Message}",
+                Error = "unowned_schema: no shard owns the schema and key",
                 Code = "unowned_schema",
                 Details = new CultNetErrorDetails { Field = "schemaId", Value = ex.SchemaId }
             };

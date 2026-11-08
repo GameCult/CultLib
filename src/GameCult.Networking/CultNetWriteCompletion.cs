@@ -41,6 +41,24 @@ namespace GameCult.Networking
     }
 
     /// <summary>
+    /// A forwarded write that provably never left this process: the connection failed, or the send failed before any byte was
+    /// written. It is the only forwarding failure after which the same id may be forwarded again. A send port that cannot prove
+    /// nothing was written must not throw this; every other failure of a forward is unconfirmed.
+    /// </summary>
+    public sealed class CultNetWriteNotSentException : Exception
+    {
+        /// <summary>Creates the exception for the write <paramref name="messageId"/>; <paramref name="cause"/> is for logs only.</summary>
+        public CultNetWriteNotSentException(string messageId, Exception? cause = null)
+            : base($"Write '{messageId}' was not sent.", cause)
+        {
+            MessageId = messageId;
+        }
+
+        /// <summary>Gets the id of the write that was not sent.</summary>
+        public string MessageId { get; }
+    }
+
+    /// <summary>
     /// Completes a write on the peer's result frame, never on a send's return or a transport acknowledgement:
     /// an ack proves delivery, not admission.
     /// </summary>

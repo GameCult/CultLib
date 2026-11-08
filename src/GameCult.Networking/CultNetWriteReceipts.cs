@@ -245,8 +245,8 @@ namespace GameCult.Networking
         }
 
         /// <summary>
-        /// A forward its primary left unanswered: no answer is owed or possible, and the claim stays so the id is never
-        /// forwarded again on this session. Sends nothing.
+        /// A forward that may have reached its primary and is unconfirmed (silence, reset, timeout, an ambiguous send): no answer is
+        /// owed or possible, and the claim stays so the id is never forwarded again on this session. Sends nothing.
         /// </summary>
         public void LeftSilent()
         {
@@ -254,8 +254,8 @@ namespace GameCult.Networking
             _answered = true;
         }
 
-        /// <summary>A forward that never reached a primary that could have applied it: forget the claim, send nothing.</summary>
-        public void Unanswered()
+        /// <summary>A forward that was provably not sent (connect failed, or the send failed before any byte was written): forget the claim, send nothing.</summary>
+        public void NotSent()
         {
             if (_answered) return;
             _answered = true;

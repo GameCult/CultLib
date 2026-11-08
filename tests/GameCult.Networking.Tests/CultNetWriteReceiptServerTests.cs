@@ -636,10 +636,9 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
-        public async Task AForwardThatNeverReachedThePrimaryMayBeRetried()
+        public async Task AForwardThatWasNotSentMayBeRetriedUnderTheSameId()
         {
-            Exception failure = new TimeoutException("primary unreachable");
-            var forwarder = new ScriptedForwarder { OnPut = _ => Task.FromException(failure) };
+            var forwarder = new ScriptedForwarder { OnPut = _ => Task.FromException(new CultNetWriteNotSentException("fwd-1", new TimeoutException("primary unreachable"))) };
             var rig = Build(primary: false, forwarder: forwarder);
             var wire = new Wire();
             await rig.Hello(wire, BothFrames);
@@ -651,7 +650,176 @@ namespace GameCult.Networking.Tests
             forwarder.OnPut = _ => Task.CompletedTask;
             await rig.Put(wire, "fwd-1", KeyA, "one");
             AssertAdmitted(wire.Sent.Single(), "fwd-1", "put", KeyA.Value);
-            Assert.That(forwarder.Forwarded, Is.EqualTo(2), "the unanswered attempt left no claim behind");
+            Assert.That(forwarder.Forwarded, Is.EqualTo(2), "the unsent attempt left no claim behind");
+        }
+
+        // Once the frame may have gone out, whatever failed, the id is never forwarded again on the session.
+        private static IEnumerable<TestCaseData> PostSendFailures()
+        {
+            yield return new TestCaseData(new TimeoutException("no answer")).SetName("timeout");
+            yield return new TestCaseData(new System.IO.IOException("connection reset")).SetName("reset");
+            yield return new TestCaseData(new InvalidOperationException("client disconnected")).SetName("disconnected");
+            yield return new TestCaseData(new CultNetWriteUnconfirmedException("fwd-1")).SetName("no answer in the window");
+            yield return new TestCaseData(new Exception("anything else, ambiguous")).SetName("ambiguous");
+        }
+
+        [TestCaseSource(nameof(PostSendFailures))]
+        public async Task AForwardThatMayHaveBeenSentIsNeverForwardedAgainOnTheSession(Exception failure)
+        {
+            var forwarder = new ScriptedForwarder { OnPut = _ => Task.FromException(failure) };
+            var rig = Build(primary: false, forwarder: forwarder);
+            var wire = new Wire();
+            await rig.Hello(wire, BothFrames);
+            wire.Sent.Clear();
+
+            await rig.Put(wire, "fwd-1", KeyA, "one");
+            forwarder.OnPut = _ => Task.CompletedTask;
+            await rig.Put(wire, "fwd-1", KeyA, "one");
+
+            Assert.That(wire.Sent, Is.Empty, "unconfirmed: nothing answered, nothing synthesized");
+            Assert.That(forwarder.Forwarded, Is.EqualTo(1), "the claim stays");
+        }
+
+        [Test]
+        public async Task TheRealForwarderRetriesAConnectFailureButNotAFailureAfterTheWriteWasSent()
+        {
+            var clients = new Queue<ForwardingClient>();
+            var forwarder = new CultNetSchemaWriteForwarder(new CultNetSchemaWriteForwarderOptions
+            {
+                CreateClient = () => clients.Dequeue(),
+                ConnectTimeout = TimeSpan.FromMilliseconds(100),
+                ResultWindow = TimeSpan.FromMilliseconds(100)
+            });
+            var rig = Build(primary: false, forwarder: forwarder);
+            var wire = new Wire();
+            await rig.Hello(wire, BothFrames);
+            wire.Sent.Clear();
+
+            clients.Enqueue(new ForwardingClient { ConnectFails = true });
+            await rig.Put(wire, "fwd-1", KeyA, "one");
+            var sent = new ForwardingClient { AdmitWrites = true };
+            clients.Enqueue(sent);
+            await rig.Put(wire, "fwd-1", KeyA, "one");
+            AssertAdmitted(wire.Sent.Single(), "fwd-1", "put", KeyA.Value);
+
+            wire.Sent.Clear();
+            var reset = new ForwardingClient { WriteSendFails = true };
+            clients.Enqueue(reset);
+            await rig.Put(wire, "fwd-2", KeyA, "two");
+            clients.Enqueue(new ForwardingClient { AdmitWrites = true });
+            await rig.Put(wire, "fwd-2", KeyA, "two");
+            Assert.That(wire.Sent, Is.Empty, "the write send threw: it may have gone out");
+            Assert.That(clients, Has.Count.EqualTo(1), "and the id was not forwarded again");
+        }
+
+        private sealed class ForwardingClient : ICultNetSchemaClient
+        {
+            private Action<CultNetWriteAdmittedMessage>? _admitted;
+            public bool ConnectFails { get; set; }
+            public bool NeverConnects { get; set; }
+            public bool HelloSendFails { get; set; }
+            public bool WriteSendFails { get; set; }
+            public bool WriteNotSentFails { get; set; }
+            public bool AdmitWrites { get; set; }
+            public bool Connected { get; private set; }
+            public List<ICultNetSchemaMessage> Sent { get; } = new();
+
+            public void Connect(string host, int port)
+            {
+                if (ConnectFails) throw new System.Net.Sockets.SocketException();
+                Connected = !NeverConnects;
+            }
+
+            public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
+            {
+                if (message is CultNetHelloMessage)
+                {
+                    if (HelloSendFails) throw new System.IO.IOException("hello failed");
+                    return;
+                }
+
+                if (WriteNotSentFails) throw new CultNetWriteNotSentException("x");
+                if (WriteSendFails) throw new System.IO.IOException("send failed after an unknown number of bytes");
+                Sent.Add(message);
+                if (AdmitWrites && message is CultNetDocumentPutRawMessage put)
+                    _admitted?.Invoke(new CultNetWriteAdmittedMessage { MessageId = put.MessageId, Operation = "put", SchemaId = put.Document?.SchemaId, RecordKey = put.Document?.RecordKey });
+            }
+
+            public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+            {
+                if (callback is Action<CultNetWriteAdmittedMessage> admitted) _admitted = admitted;
+            }
+
+            public void Dispose() { }
+        }
+
+        private static CultNetSchemaWriteForwarder RealForwarder(ForwardingClient client) => new(new CultNetSchemaWriteForwarderOptions
+        {
+            CreateClient = () => client,
+            ConnectTimeout = TimeSpan.FromMilliseconds(100),
+            ResultWindow = TimeSpan.FromMilliseconds(100)
+        });
+
+        private static readonly CultNetShardDescriptor ForwardShard = new("notes", "primary", 1, isPrimary: false, primaryEndpoints: ["cultnet://primary.example.test:4075"]);
+
+        private static CultNetDocumentPutRawMessage ForwardPut() => new() { MessageId = "fwd-1", Document = new CultNetRawDocumentRecord { SchemaId = "s", RecordKey = "k", Payload = [1] } };
+
+        [TestCase("connect")]
+        [TestCase("never connects")]
+        [TestCase("hello")]
+        [TestCase("write not sent")]
+        public void TheForwarderNamesEveryFailureBeforeTheWriteWasSentAsNotSent(string stage)
+        {
+            var client = new ForwardingClient
+            {
+                ConnectFails = stage == "connect",
+                NeverConnects = stage == "never connects",
+                HelloSendFails = stage == "hello",
+                WriteNotSentFails = stage == "write not sent"
+            };
+
+            Assert.ThrowsAsync<CultNetWriteNotSentException>(() => RealForwarder(client).ForwardPutAsync(ForwardShard, ForwardPut()));
+            Assert.That(client.Sent, Is.Empty);
+        }
+
+        [Test]
+        public void TheForwarderNamesNoPrimaryEndpointAsNotSent()
+        {
+            var shard = new CultNetShardDescriptor("notes", "primary", 1, isPrimary: false, primaryEndpoints: []);
+            Assert.ThrowsAsync<CultNetWriteNotSentException>(() => RealForwarder(new ForwardingClient()).ForwardPutAsync(shard, ForwardPut()));
+        }
+
+        [Test]
+        public void ASendThatThrewWithoutProvingNothingWasWrittenIsNotNotSent()
+        {
+            var client = new ForwardingClient { WriteSendFails = true };
+            var failure = Assert.CatchAsync<Exception>(() => RealForwarder(client).ForwardPutAsync(ForwardShard, ForwardPut()));
+            Assert.That(failure, Is.Not.InstanceOf<CultNetWriteNotSentException>(), "ambiguous: unconfirmed");
+        }
+
+        [Test]
+        public void ASentWriteNobodyAnswersIsUnconfirmedNotNotSent()
+        {
+            var client = new ForwardingClient();
+            Assert.ThrowsAsync<CultNetWriteUnconfirmedException>(() => RealForwarder(client).ForwardPutAsync(ForwardShard, ForwardPut()));
+            Assert.That(client.Sent, Has.Count.EqualTo(1));
+        }
+
+        [Test]
+        public async Task TheRoutingRefusalAndTheUnownedSchemaRefusalCarryNoExceptionText()
+        {
+            var rig = Build(primary: false);
+            var wire = new Wire();
+            await rig.Hello(wire, BothFrames);
+            wire.Sent.Clear();
+            await rig.Put(wire, "fwd-1", KeyA, "one");
+            var routing = AssertRefused(wire.Sent.Single(), "fwd-1", null);
+            Assert.That(routing.Error, Is.EqualTo(CultNetDatabaseServer.RoutingRefusalText));
+
+            var secret = new CultNetUnownedSchemaException("secret.schema.v1", new CultRecordKey("secret:key"));
+            var unowned = CultNetErrorMessage.ForUnownedSchema(secret);
+            Assert.That(unowned.Error, Does.Not.Contain(secret.Message).And.Not.Contain("secret"));
+            Assert.That(unowned.Details!.Value, Is.EqualTo("secret.schema.v1"), "the structured detail still names the schema");
         }
 
         [Test]

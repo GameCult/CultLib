@@ -407,10 +407,10 @@ namespace GameCult.Networking
             }
 
             _server.Logger.LogWarning($"CultNet forwarded write was not answered by its primary: {failure.Message}");
-            // Silence past the window means the primary may have applied it: never forward the id again on this session.
-            // Any other failure never reached a primary that could have.
-            if (failure is CultNetWriteUnconfirmedException) write.LeftSilent();
-            else write.Unanswered();
+            // Only a forward that provably never left (not sent) may be forwarded again. Every other failure, silence or not, is
+            // unconfirmed: the primary may have applied it, so the id is never forwarded again on this session.
+            if (failure is CultNetWriteNotSentException) write.NotSent();
+            else write.LeftSilent();
         }
 
         private async Task HandlePutAsync(CultNetDocumentPutRawMessage message, CultNetServerPeer peer)
@@ -817,11 +817,14 @@ namespace GameCult.Networking
             exception is CultNetShardLogException ||
             exception is AggregateException aggregate && aggregate.Flatten().InnerExceptions.Any(inner => inner is CultNetShardLogException);
 
+        // Fixed text: the routing refusal never carries an exception's own message (the shard and reason travel in the hint).
+        internal const string RoutingRefusalText = "the write belongs to another shard primary";
+
         private static CultNetErrorMessage CreateRoutingError(CultNetShardAuthorityException exception)
         {
             return new CultNetErrorMessage
             {
-                Error = exception.Message,
+                Error = RoutingRefusalText,
                 RoutingHint = new CultNetShardRoutingHint
                 {
                     Reason = exception.Reason,
