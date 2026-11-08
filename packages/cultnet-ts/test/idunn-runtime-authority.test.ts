@@ -276,7 +276,10 @@ async function startOdinPeer(context: TestContext, endpoint: string) {
     peer.once("error", reject);
     peer.bind(port, "127.0.0.1", resolve);
   });
-  context.after(() => peer.close());
+  // The second packet of a split delivery is a timer; the test's end cancels it rather than racing the closed socket.
+  const timers = new Set<NodeJS.Timeout>();
+  const later = (send: () => void) => { timers.add(setTimeout(send, 120)); };
+  context.after(() => { for (const timer of timers) clearTimeout(timer); peer.close(); });
   const state = {
     reject: false,
     // How a refusal and the ack of the put reach the publisher: in one packet, or the ack first, or the refusal first.
@@ -309,10 +312,10 @@ async function startOdinPeer(context: TestContext, endpoint: string) {
       state.responseAck = response.ack;
       if (state.reject && state.order === "ack-then-refusal") {
         peer.send(encodeRudpPacket(serverSession.createAckForReceived(packet.sequence)), remote.port, remote.address);
-        setTimeout(() => { try { peer.send(encodeRudpPacket(response), remote.port, remote.address); } catch { /* the test ended */ } }, 120);
+        later(() => peer.send(encodeRudpPacket(response), remote.port, remote.address));
       } else if (state.reject && state.order === "refusal-then-ack") {
         peer.send(encodeRudpPacket({ ...response, ack: 0, ackMask: 0 }), remote.port, remote.address);
-        setTimeout(() => { try { peer.send(encodeRudpPacket(serverSession!.createAckForReceived(packet.sequence)), remote.port, remote.address); } catch { /* the test ended */ } }, 120);
+        later(() => peer.send(encodeRudpPacket(serverSession!.createAckForReceived(packet.sequence)), remote.port, remote.address));
       } else {
         peer.send(encodeRudpPacket(response), remote.port, remote.address);
       }
