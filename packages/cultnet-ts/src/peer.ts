@@ -95,6 +95,10 @@ export class CultNetPeer extends EventEmitter {
     return this.#transport?.profile;
   }
 
+  /**
+   * Fire-and-forget: an ack or a return is not admission; read the result frame (a write is refused with
+   * `cultnet.error.v0`, `write_not_authorized` or `message_invalid`, as a `message` event).
+   */
   send(message: CultNetMessage): void {
     const wireValue = encodeCultNetMessageForWire(message, this.#wireContract);
     const payload = encode(wireValue);
@@ -106,6 +110,7 @@ export class CultNetPeer extends EventEmitter {
     this.#stream?.write(encodeFrame(payload));
   }
 
+  /** Resolves when the transport has acknowledged what was sent. An ack is not admission; read the result frame. */
   async flush(timeoutMs?: number): Promise<void> {
     await this.#transport?.flush?.(timeoutMs);
   }
