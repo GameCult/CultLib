@@ -1101,6 +1101,25 @@ namespace GameCult.Networking.Tests
             Assert.That(rig.TextOf(KeyA), Is.Null, "a write that names nothing is never applied");
         }
 
+        // A nil payload names no document either; it is refused like an empty one, never handed to the store.
+        [Test]
+        public async Task APutWithANilPayloadIsRefusedAsUnreadable([Values] bool capable)
+        {
+            var rig = Build();
+            var wire = new Wire();
+            if (capable) await rig.Hello(wire, BothFrames);
+            wire.Sent.Clear();
+            var message = rig.PutOf("m1", KeyA, "one");
+            message.Document!.Payload = null!;
+
+            await rig.PutHandler(message, wire.Peer);
+
+            var refused = wire.Sent.Single();
+            var error = capable ? AssertRefused(refused, "m1", "message_invalid").ToV0() : (CultNetErrorMessage)refused;
+            Assert.That(error.Error, Is.EqualTo(UnreadableVectorText()));
+            Assert.That(rig.TextOf(KeyA), Is.Null);
+        }
+
         // The fixed text is also what an undecodable frame is answered with, from the transport, not a decoder's wording.
         [Test]
         public async Task AnUnreadableSchemaFrameIsAnsweredWithTheFixedText()
