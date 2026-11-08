@@ -60,10 +60,10 @@
     },
     {
       "name": "error_v1_unreadable_frame_has_null_message_id",
-      "messagePackHex": "86AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7631A56572726F72D9216D6573736167655F696E76616C69643A20756E7265616461626C65206672616D65AB726F7574696E6748696E74C0A4636F6465AF6D6573736167655F696E76616C6964A764657461696C7384A56669656C64A76D657373616765A576616C7565C0A461734F66C0A763757272656E74C0A96D6573736167654964C0",
+      "messagePackHex": "86AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7631A56572726F72D92E6D6573736167655F696E76616C69643A20746865206D65737361676520636F756C64206E6F742062652072656164AB726F7574696E6748696E74C0A4636F6465AF6D6573736167655F696E76616C6964A764657461696C7384A56669656C64A76D657373616765A576616C7565C0A461734F66C0A763757272656E74C0A96D6573736167654964C0",
       "message": {
         "schemaVersion": "cultnet.error.v1",
-        "error": "message_invalid: unreadable frame",
+        "error": "message_invalid: the message could not be read",
         "routingHint": null,
         "code": "message_invalid",
         "details": {
@@ -77,10 +77,10 @@
     },
     {
       "name": "error_v1_empty_schema_id_is_unreadable_and_names_the_write",
-      "messagePackHex": "86AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7631A56572726F72D9216D6573736167655F696E76616C69643A20756E7265616461626C65206672616D65AB726F7574696E6748696E74C0A4636F6465AF6D6573736167655F696E76616C6964A764657461696C7384A56669656C64A76D657373616765A576616C7565C0A461734F66C0A763757272656E74C0A96D6573736167654964A57075742D31",
+      "messagePackHex": "86AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7631A56572726F72D92E6D6573736167655F696E76616C69643A20746865206D65737361676520636F756C64206E6F742062652072656164AB726F7574696E6748696E74C0A4636F6465AF6D6573736167655F696E76616C6964A764657461696C7384A56669656C64A76D657373616765A576616C7565C0A461734F66C0A763757272656E74C0A96D6573736167654964A57075742D31",
       "message": {
         "schemaVersion": "cultnet.error.v1",
-        "error": "message_invalid: unreadable frame",
+        "error": "message_invalid: the message could not be read",
         "routingHint": null,
         "code": "message_invalid",
         "details": {
@@ -110,6 +110,27 @@
       }
     }
   ],
+  "blankFields": {
+    "semantics": "A put whose document 'names nothing' is refused like a frame that does not read (error.v1 message_invalid, details.field \"message\", the write's id, the fixed text of error_v1_empty_schema_id_is_unreadable_and_names_the_write) and never applied, on every connection, receipt-capable or not. Each case starts from this valid document: schemaId note.v0, recordKey note:1, storedAt 2026-11-08T00:00:00Z, payload 81A16101 (hex), no source ids, no tags; 'set' replaces or adds the named fields. A blank string is empty or only whitespace. Fields not listed are valid. 'unset' means the key is absent or nil, which is not blank: those cases are admitted.",
+    "validPutPayloadHex": "81A16101",
+    "cases": [
+      { "name": "valid_document_is_admitted", "set": {}, "outcome": "admitted" },
+      { "name": "empty_schema_id", "set": { "schemaId": "" }, "outcome": "refused" },
+      { "name": "blank_schema_id", "set": { "schemaId": "   " }, "outcome": "refused" },
+      { "name": "empty_record_key", "set": { "recordKey": "" }, "outcome": "refused" },
+      { "name": "blank_record_key", "set": { "recordKey": "  " }, "outcome": "refused" },
+      { "name": "empty_stored_at", "set": { "storedAt": "" }, "outcome": "refused" },
+      { "name": "blank_stored_at", "set": { "storedAt": " " }, "outcome": "refused" },
+      { "name": "empty_payload", "set": { "payloadHex": "" }, "outcome": "refused" },
+      { "name": "blank_source_runtime_id", "set": { "sourceRuntimeId": "" }, "outcome": "refused" },
+      { "name": "blank_source_agent_id", "set": { "sourceAgentId": "  " }, "outcome": "refused" },
+      { "name": "blank_source_role", "set": { "sourceRole": "" }, "outcome": "refused" },
+      { "name": "blank_tag", "set": { "tags": ["a", " "] }, "outcome": "refused" },
+      { "name": "source_ids_and_tags_present_and_named", "set": { "sourceRuntimeId": "r", "sourceAgentId": "a", "sourceRole": "w", "tags": ["a"] }, "outcome": "admitted" },
+      { "name": "source_ids_and_tags_nil", "set": { "sourceRuntimeId": null, "sourceAgentId": null, "sourceRole": null, "tags": null }, "outcome": "admitted" },
+      { "name": "empty_tag_list", "set": { "tags": [] }, "outcome": "admitted" }
+    ]
+  },
   "schemaInvalid": [
     {
       "name": "write_admitted_with_an_error_key",

@@ -3122,3 +3122,137 @@ fn an_unreliable_refusal_that_cannot_be_queued_ends_the_session_as_a_local_failu
     assert_eq!(goodbye.payload, b"server could not answer a write".to_vec());
     Ok(())
 }
+
+fn vectors() -> serde_json::Value {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../contracts/cultnet/interop/write-receipt-vectors.json");
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// The spec's one fixed text for a frame that does not read or a write that names nothing, read from the vector
+/// that carries it, so a server and the spec cannot drift apart unseen.
+fn unreadable_vector_text(vectors: &serde_json::Value) -> String {
+    let name = "error_v1_empty_schema_id_is_unreadable_and_names_the_write";
+    let vector = vectors["wire"].as_array().unwrap().iter().find(|v| v["name"] == name).unwrap();
+    vector["message"]["error"].as_str().unwrap().to_string()
+}
+
+/// The put frame of a `blankFields` case: the valid document with the case's `set` applied. Serialized without the
+/// typed encoder, because that refuses what the case is about.
+fn blank_field_put(vectors: &serde_json::Value, set: &serde_json::Value) -> Vec<u8> {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Put {
+        schema_version: &'static str,
+        message_id: &'static str,
+        document: CultNetRawDocumentRecord,
+    }
+    let hex = set.get("payloadHex").and_then(|v| v.as_str()).unwrap_or(vectors["blankFields"]["validPutPayloadHex"].as_str().unwrap());
+    let field = |name: &str, default: &str| set.get(name).and_then(|v| v.as_str()).unwrap_or(default).to_string();
+    let optional = |name: &str| set.get(name).and_then(|v| v.as_str()).map(str::to_string);
+    let document = CultNetRawDocumentRecord {
+        schema_id: field("schemaId", "note.v0"),
+        record_key: field("recordKey", "note:1"),
+        stored_at: field("storedAt", "2026-11-08T00:00:00Z"),
+        payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+        payload: (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect(),
+        source_runtime_id: optional("sourceRuntimeId"),
+        source_agent_id: optional("sourceAgentId"),
+        source_role: optional("sourceRole"),
+        tags: set.get("tags").and_then(|v| v.as_array()).map(|tags| tags.iter().map(|t| t.as_str().unwrap().to_string()).collect()),
+    };
+    rmp_serde::to_vec_named(&Put { schema_version: "cultnet.document_put_raw.v0", message_id: "m1", document }).unwrap()
+}
+
+/// Each `blankFields` case: a receipt-capable connection is answered with the admitted receipt, or with the one fixed
+/// unreadable text naming the write, and the sink sees a document only when the case is admitted.
+#[test]
+fn a_put_that_names_nothing_is_refused_as_unreadable_naming_the_write_and_a_named_one_is_admitted() -> Result<()> {
+    let vectors = vectors();
+    let fixed = unreadable_vector_text(&vectors);
+    assert_eq!(fixed, "message_invalid: the message could not be read");
+    let cases = vectors["blankFields"]["cases"].as_array().unwrap();
+    assert!(cases.len() >= 10);
+    for (index, case) in cases.iter().enumerate() {
+        let name = case["name"].as_str().unwrap();
+        let sink = Sink::default();
+        let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+        let mut peer = client(server.local_addr()?, 400 + index as u32)?;
+        connect(&mut server, &mut [&mut peer])?;
+        send_reliable(&mut peer, &receipt_hello())?;
+        peer.send_reliable("schema", blank_field_put(&vectors, &case["set"]))?;
+        let answers = answers_after(&mut server, &mut peer, 1)?;
+        match case["outcome"].as_str().unwrap() {
+            "admitted" => {
+                assert_eq!(
+                    answers,
+                    vec![CultNetMessage::WriteAdmitted {
+                        message_id: "m1".into(),
+                        operation: "put".into(),
+                        schema_id: "note.v0".into(),
+                        record_key: "note:1".into(),
+                    }],
+                    "{name}"
+                );
+                assert_eq!(sink.0.lock().unwrap().receipts.len(), 1, "{name}");
+            }
+            "refused" => {
+                assert_eq!(refusal_of(&answers[0]), (Some(CultNetErrorCode::MessageInvalid), Some("m1".into())), "{name}");
+                assert_eq!(error_text_and_field(&answers[0]), (fixed.clone(), Some("message".into())), "{name}");
+                assert_eq!(sink.0.lock().unwrap().receipts.len(), 0, "{name}: never applied");
+            }
+            other => panic!("{name}: unknown outcome {other}"),
+        }
+        assert_eq!(server.session_count(), 1, "{name}: the session is kept");
+    }
+    Ok(())
+}
+
+/// The same cases on a connection that never opted in: the same refusal as `error.v0`, the same text, nothing applied.
+#[test]
+fn a_put_that_names_nothing_is_refused_the_same_way_on_a_legacy_connection() -> Result<()> {
+    let vectors = vectors();
+    let fixed = unreadable_vector_text(&vectors);
+    for (index, case) in vectors["blankFields"]["cases"].as_array().unwrap().iter().enumerate() {
+        let name = case["name"].as_str().unwrap();
+        let sink = Sink::default();
+        let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+        let mut peer = client(server.local_addr()?, 500 + index as u32)?;
+        connect(&mut server, &mut [&mut peer])?;
+        let bytes = blank_field_put(&vectors, &case["set"]);
+        if case["outcome"] == "refused" {
+            let (code, details, error) = refusal_on_live_session(&mut server, &mut peer, bytes)?;
+            assert_eq!(code, Some(CultNetErrorCode::MessageInvalid), "{name}");
+            assert_eq!(details.and_then(|d| d.field), Some("message".into()), "{name}");
+            assert_eq!(error, fixed, "{name}");
+            assert_eq!(sink.0.lock().unwrap().receipts.len(), 0, "{name}");
+        } else {
+            peer.send_reliable("schema", bytes)?;
+            for _ in 0..2_000 {
+                server.poll_once()?;
+                if !sink.0.lock().unwrap().receipts.is_empty() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(sink.0.lock().unwrap().receipts.len(), 1, "{name}");
+        }
+    }
+    Ok(())
+}
+
+/// An unreadable frame from a receipt connection is sent the one fixed text, with no decoder wording in it.
+#[test]
+fn an_unreadable_frame_on_a_receipt_connection_is_sent_exactly_the_fixed_text() -> Result<()> {
+    let vectors = vectors();
+    let mut server = server(Default::default(), Clock::new(70_000), Sink::default(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 450)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    peer.send_reliable("schema", garbage())?;
+    let answers = answers_after(&mut server, &mut peer, 1)?;
+    assert_eq!(
+        error_text_and_field(&answers[0]),
+        (unreadable_vector_text(&vectors), Some("message".into()))
+    );
+    Ok(())
+}
