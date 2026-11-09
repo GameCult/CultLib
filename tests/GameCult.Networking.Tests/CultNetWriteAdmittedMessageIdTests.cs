@@ -87,5 +87,19 @@ namespace GameCult.Networking.Tests
                     if (Accepted("a" + char.ConvertFromUtf32(point)) != want) failures.Add($"a + U+{point:X} should be {(want ? "accepted" : "refused")}");
             Assert.That(failures, Is.Empty);
         }
+
+        // admittedMessageIdDuplicates: C# reads the raw map, so it sees a repeated messageId key and refuses it whatever the values.
+        [Test]
+        public void ARepeatedMessageIdKeyIsRefusedWhateverTheValues()
+        {
+            var cases = Vectors().GetProperty("admittedMessageIdDuplicates").GetProperty("cases").EnumerateArray().ToArray();
+            Assert.That(cases.Length, Is.EqualTo(Vectors().GetProperty("counts").GetProperty("admittedMessageIdDuplicateCases").GetInt32()));
+            foreach (var vector in cases)
+            {
+                Assert.That(vector.GetProperty("seesDuplicate").GetString(), Is.EqualTo("refuse"));
+                Assert.That(() => CultNetSchemaMessageSerialization.Deserialize(Convert.FromHexString(vector.GetProperty("wireHex").GetString()!)),
+                    Throws.Exception, vector.GetProperty("name").GetString());
+            }
+        }
     }
 }

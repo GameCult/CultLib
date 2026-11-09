@@ -323,3 +323,15 @@ test("write_admitted messageId: every range of the Unicode 16.0 tables is pinned
   }
   assert.deepEqual(failures, []);
 });
+
+// TypeScript decodes the frame to an object, so it cannot see a duplicate key: it judges the last one (admittedMessageIdDuplicates).
+test("write_admitted messageId: a repeated key follows the last-key-wins policy", () => {
+  const vectors = JSON.parse(readFileSync(join(__dirname, "..", "..", "..", "..", "contracts", "cultnet", "interop", "write-receipt-vectors.json"), "utf8"));
+  const section = vectors.admittedMessageIdDuplicates;
+  assert.equal(vectors.counts.admittedMessageIdDuplicateCases, section.cases.length);
+  for (const vector of section.cases as { name: string; wireHex: string; lastKeyWins: "accept" | "refuse"; lastKeyWinsEcho?: string }[]) {
+    const frame = decode(Uint8Array.from(Buffer.from(vector.wireHex, "hex")));
+    if (vector.lastKeyWins === "refuse") assert.throws(() => parseCultNetMessage(frame), /./s, vector.name);
+    else assert.equal((parseCultNetMessage(frame) as CultNetWriteAdmittedMessage).messageId, vector.lastKeyWinsEcho, vector.name);
+  }
+});

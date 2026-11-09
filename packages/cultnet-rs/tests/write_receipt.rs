@@ -238,3 +238,17 @@ fn every_range_of_the_unicode_tables_is_pinned_at_both_ends() {
     }
     assert!(failures.is_empty(), "{} failing:\n{}", failures.len(), failures.join("\n"));
 }
+
+/// Vectors `admittedMessageIdDuplicates`: Rust decodes a map it can see into, so a repeated messageId key is refused whatever the values.
+#[test]
+fn a_repeated_message_id_key_is_refused_whatever_the_values() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../contracts/cultnet/interop/write-receipt-vectors.json");
+    let vectors: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let cases = vectors["admittedMessageIdDuplicates"]["cases"].as_array().unwrap();
+    assert_eq!(vectors["counts"]["admittedMessageIdDuplicateCases"].as_u64().unwrap() as usize, cases.len());
+    for case in cases {
+        assert_eq!(case["seesDuplicate"], "refuse");
+        let decoded = decode_cultnet_message_from_slice(&unhex(case["wireHex"].as_str().unwrap()), CultNetWireContract::CultNetSchemaV0);
+        assert!(decoded.is_err(), "{}: a repeated messageId key must be refused", case["name"]);
+    }
+}

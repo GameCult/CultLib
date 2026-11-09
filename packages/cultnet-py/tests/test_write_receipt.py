@@ -57,7 +57,7 @@ class WriteReceiptVectorTests(unittest.TestCase):
     def test_vector_sections_are_the_ones_this_file_accounts_for(self) -> None:
         self.assertEqual(
             set(_VECTORS) - {"provenance", "specification"},
-            {"constants", "contentHash", "dedupe", "wire", "blankFields", "schemaInvalid", "scenarios", "counts", "admittedMessageId"},
+            {"constants", "contentHash", "dedupe", "wire", "blankFields", "schemaInvalid", "scenarios", "counts", "admittedMessageId", "admittedMessageIdDuplicates"},
         )
         self.assertEqual(len(_VECTORS["contentHash"]["cases"]), 4)
         self.assertEqual(len(_VECTORS["wire"]), 7)
@@ -93,6 +93,18 @@ class WriteReceiptVectorTests(unittest.TestCase):
             if refused != (case["expect"] == "refuse"):
                 failures.append(f"{case['name']}: expected {case['expect']}")
         self.assertEqual(failures, [])
+
+    def test_a_repeated_message_id_key_follows_the_last_key_wins_policy(self) -> None:
+        # Python decodes the frame to a dict, so it cannot see a duplicate: it judges the last key (admittedMessageIdDuplicates).
+        section = _VECTORS["admittedMessageIdDuplicates"]
+        self.assertEqual(_VECTORS["counts"]["admittedMessageIdDuplicateCases"], len(section["cases"]))
+        for case in section["cases"]:
+            raw = bytes.fromhex(case["wireHex"])
+            if case["lastKeyWins"] == "refuse":
+                with self.assertRaises(ValueError, msg=case["name"]):
+                    parse_message(raw)
+            else:
+                self.assertEqual(parse_message(raw).body["messageId"], case["lastKeyWinsEcho"], case["name"])
 
     def test_every_range_of_the_unicode_tables_is_pinned_at_both_ends(self) -> None:
         # write-admitted-message-id-ranges.json is the generated, independent copy: for each letter-or-number range its first and

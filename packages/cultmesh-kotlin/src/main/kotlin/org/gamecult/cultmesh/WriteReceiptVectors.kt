@@ -100,6 +100,20 @@ fun replayWriteReceiptVectors(path: String): Boolean {
         if (text.isNotEmpty()) emptyList() else listOf("decoded to an empty string")
     }
 
+    // admittedMessageIdDuplicates: Kotlin decodes the frame to a map, so it cannot see a repeated key: it judges the last one.
+    for (case in list(obj(vectors["admittedMessageIdDuplicates"])["cases"])) {
+        val c = obj(case)
+        check("admittedMessageIdDuplicates/${c["name"]}") {
+            val decoded = try { decodeReceiptFrame(parseCultNetMessage(unhex(c["wireHex"] as String))) } catch (_: IOException) { null }
+            when {
+                c["lastKeyWins"] == "refuse" -> if (decoded == null) emptyList() else listOf("accepted a frame whose last messageId key is invalid")
+                decoded == null -> listOf("refused a frame whose last messageId key is valid")
+                decoded.toWireMap()["messageId"] != c["lastKeyWinsEcho"] -> listOf("echoed ${decoded.toWireMap()["messageId"]}, wanted ${c["lastKeyWinsEcho"]}")
+                else -> emptyList()
+            }
+        }
+    }
+
     for (case in list(vectors["schemaInvalid"])) {
         val c = obj(case)
         check("schemaInvalid/${c["name"]}") {

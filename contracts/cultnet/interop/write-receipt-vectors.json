@@ -606,6 +606,31 @@
       }
     ]
   },
+  "admittedMessageIdDuplicates": {
+    "semantics": "A frame with more than one messageId key is malformed. A decoder that can see the duplicate (C#, Rust: raw MessagePack reader or ordered pairs) refuses it, whatever the values (`seesDuplicate`). A decoder that collapses the map (Python, TypeScript, Kotlin) judges the value it ends up with, the last key, and refuses exactly when that value is invalid (`lastKeyWins`); where it accepts it echoes the last key's id (`lastKeyWinsEcho`). Neither behaviour ever echoes an invalid id. Each runtime declares which policy it has and its runner asserts that policy's column, so a change of a decoder's key policy fails a named test. The first key is ZWSP (U+200B, Default_Ignorable) in `invalid_then_valid`; the second key is the last entry of the map. Frames are MessagePack hex.",
+    "cases": [
+      {
+        "name": "invalid_then_valid",
+        "wireHex": "86AD736368656D6156657273696F6EB963756C746E65742E77726974655F61646D69747465642E7630A96D6573736167654964A3E2808BA96F7065726174696F6EA3707574A8736368656D614964A76E6F74652E7630A97265636F72644B6579A66E6F74653A31A96D6573736167654964A161",
+        "seesDuplicate": "refuse",
+        "lastKeyWins": "accept",
+        "lastKeyWinsEcho": "a"
+      },
+      {
+        "name": "valid_then_invalid",
+        "wireHex": "86AD736368656D6156657273696F6EB963756C746E65742E77726974655F61646D69747465642E7630A96D6573736167654964A161A96F7065726174696F6EA3707574A8736368656D614964A76E6F74652E7630A97265636F72644B6579A66E6F74653A31A96D6573736167654964A3E2808B",
+        "seesDuplicate": "refuse",
+        "lastKeyWins": "refuse"
+      },
+      {
+        "name": "valid_then_valid",
+        "wireHex": "86AD736368656D6156657273696F6EB963756C746E65742E77726974655F61646D69747465642E7630A96D6573736167654964A161A96F7065726174696F6EA3707574A8736368656D614964A76E6F74652E7630A97265636F72644B6579A66E6F74653A31A96D6573736167654964A162",
+        "seesDuplicate": "refuse",
+        "lastKeyWins": "accept",
+        "lastKeyWinsEcho": "b"
+      }
+    ]
+  },
   "schemaInvalid": [
     {
       "name": "write_admitted_with_an_error_key",
@@ -1640,7 +1665,8 @@
     "schemaInvalid": 7,
     "contentHashCases": 4,
     "scenarioCases": 25,
-    "admittedMessageIdCases": 59
+    "admittedMessageIdCases": 59,
+    "admittedMessageIdDuplicateCases": 3
   },
   "contentHash": {
     "definition": "sha256(msgpack([operation, schemaId, recordKey, payload])), payload a msgpack bin for a put and nil for a delete; hex lowercase",
