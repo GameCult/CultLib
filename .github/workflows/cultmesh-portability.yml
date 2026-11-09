@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The forge runner (label `docker`) is Linux-only: Windows legs run on workflow_dispatch (GitHub or a Windows runner), Ubuntu gates push and PR.
+        # The forge runner (label `docker`) is Linux-only and no Windows runner exists: the Windows leg runs on workflow_dispatch only (GitHub or a Windows runner), the docker leg gates push and PR. Windows push/PR triggers return in the PR that registers a Windows runner.
         os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["windows-latest", "docker"]' || '["docker"]') }}
 
     steps:

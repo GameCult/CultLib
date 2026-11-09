@@ -49,11 +49,12 @@ jobs:
 
   # workflow_dispatch and a cultmesh-quic-native-v* tag run the two builds.
   # A dry (workflow_dispatch) run uploads artifacts and creates no release.
+  # No Windows runner is registered on the forge, so this job is workflow_dispatch only
+  # (run it on GitHub or a Windows runner). The tag trigger returns in the PR that registers one.
+  # Until then a tag push skips the release job, which needs this build.
   build-win32-x64:
     name: Build win32-x64
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cultmesh-quic-native-v'))
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
