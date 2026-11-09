@@ -35,7 +35,7 @@ namespace GameCult.Networking.Tests
                 .Single(c => c.GetProperty("name").GetString() == name);
             var id = string.Concat(Enumerable.Repeat(
                 string.Concat(vector.GetProperty("codePoints").EnumerateArray()
-                    .Select(cp => char.ConvertFromUtf32(Convert.ToInt32(cp.GetString(), 16)))),
+                    .Select(cp => Convert.ToInt32(cp.GetString(), 16)).Where(point => point < 0xD800 || point > 0xDFFF).Select(char.ConvertFromUtf32)),
                 vector.TryGetProperty("repeat", out var repeat) ? repeat.GetInt32() : 1));
             var bytes = vector.TryGetProperty("wireHex", out var wire)
                 ? Convert.FromHexString(wire.GetString()!)
