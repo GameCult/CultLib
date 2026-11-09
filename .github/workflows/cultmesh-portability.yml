@@ -98,8 +98,8 @@ jobs:
           --logger "console;verbosity=minimal"
 
       # The TypeScript side of the CultMesh authority rules. This job is the
-      # only one that runs on both Windows and Linux for main, codex/** and
-      # pull requests: cultnet-interop.yml is windows-latest and main-only, so
+      # only one that runs on Linux for main, codex/** and pull requests (and on
+      # Windows too under workflow_dispatch): cultnet-interop.yml is windows-latest and dispatch-only, so
       # until these steps existed the shared verifier's tests never ran on
       # Linux at all, and the browser client's never ran in CI on any OS.
       # packages/cultnet-ts verifies both vector files (content.test.ts judges both
