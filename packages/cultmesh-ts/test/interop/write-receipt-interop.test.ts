@@ -16,7 +16,7 @@ import { execFile, spawn, spawnSync, type ChildProcess } from "node:child_proces
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Duplex } from "node:stream";
-import { after, before, describe, test } from "node:test";
+import { after, before, beforeEach, describe, test } from "node:test";
 import { promisify } from "node:util";
 import { encode } from "@msgpack/msgpack";
 import { z } from "zod";
@@ -134,6 +134,20 @@ const rust: Target = {
   },
 };
 
+// The C# server admits 30 connection requests per IP per minute (Server.MaxConnectionAttemptsPerMinute) and answers the rest with
+// no hello. Every scenario wants a fresh session, so before each C# test the harness waits until the last minute holds at most
+// CONNECTIONS_PER_MINUTE connections, leaving room for the two a test may open. The server's limit stays as it is.
+const CONNECTIONS_PER_MINUTE = 24;
+const connectedAt: number[] = [];
+async function awaitConnectionBudget(): Promise<void> {
+  for (;;) {
+    const now = Date.now();
+    while (connectedAt.length > 0 && now - connectedAt[0] >= 61_000) connectedAt.shift();
+    if (connectedAt.length <= CONNECTIONS_PER_MINUTE) return;
+    await sleep(connectedAt[0] + 61_000 - now);
+  }
+}
+
 const csharp: Target = {
   name: "csharp",
   shard: { shardId: "receipt-interop-shard", shardEpoch: 1 },
@@ -143,6 +157,7 @@ const csharp: Target = {
     return launch(dotnet, [csharpDll, "receipt-serve"]);
   },
   async connect(server) {
+    connectedAt.push(Date.now());
     const relay = spawn(dotnet, [csharpDll, "receipt-relay", "--port", String(server.port)], { stdio: ["pipe", "pipe", "ignore"] });
     const peer = new CultNetPeer(Duplex.from({ readable: relay.stdout!, writable: relay.stdin! }), { wireContract: "cultnet.schema.v0" });
     return { peer, close: () => { relay.stdin!.end(); relay.kill(); } };
@@ -235,6 +250,7 @@ for (const target of [rust, csharp]) {
     let session: Session | undefined;
     before(async () => { server = await target.start(); }, { timeout: 180_000 });
     after(async () => { session?.close(); await server?.stop(); });
+    beforeEach(async () => { if (target === csharp) await awaitConnectionBudget(); }, { timeout: 90_000 });
 
     /** A fresh receipt session (hello sent, the server's hello read) for a scenario. */
     async function receiptSession(): Promise<Session> {
