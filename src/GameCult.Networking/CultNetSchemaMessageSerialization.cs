@@ -111,21 +111,24 @@ namespace GameCult.Networking
     {
         private static readonly System.Text.UTF8Encoding StrictUtf8 = new(false, true);
 
-        /// <summary>Throws unless every top-level <c>messageId</c> key of the frame is a valid write_admitted id; other keys are left to the serializer.</summary>
+        /// <summary>Throws unless the frame's one top-level <c>messageId</c> key is a valid write_admitted id (a repeated key is malformed); other keys are left to the serializer.</summary>
         public static void Require(byte[] payload)
         {
             var reader = new MessagePackReader(payload);
             var entries = reader.ReadMapHeader();
+            var seen = false;
             for (var index = 0; index < entries; index++)
             {
                 var key = reader.NextMessagePackType == MessagePackType.String ? reader.ReadString() : null;
                 if (key == "messageId" && reader.NextMessagePackType == MessagePackType.String)
                 {
+                    if (seen) throw new MessagePackSerializationException("cultnet.write_admitted.v0 carries messageId more than once.");
+                    seen = true;
                     string id;
                     try { id = StrictUtf8.GetString(reader.ReadStringSequence()!.Value.ToArray()); }
                     catch (System.Text.DecoderFallbackException) { throw new MessagePackSerializationException("cultnet.write_admitted.v0 messageId is not valid UTF-8."); }
                     if (!IsValid(id)) throw new MessagePackSerializationException("cultnet.write_admitted.v0 messageId must contain a letter or number and no Default_Ignorable code point.");
-                    continue; // a repeated messageId key is checked too: the serializer keeps the last, so every one must be valid
+                    continue;
                 }
 
                 if (key == null) reader.Skip();
