@@ -8,6 +8,9 @@ package org.gamecult.cultmesh
 import java.io.File
 import java.io.IOException
 
+// The event actions scenarios.semantics names; anything else is refused, not skipped.
+private val EVENT_KEYS = listOf("send", "frame", "tick", "sessionEnd", "sendFailed", "transportAck")
+
 fun replayWriteReceiptVectors(path: String): Boolean {
     @Suppress("UNCHECKED_CAST")
     val vectors = JsonReader(File(path).readText(Charsets.UTF_8)).readDocument() as Map<String, Any?>
@@ -87,12 +90,15 @@ fun replayWriteReceiptVectors(path: String): Boolean {
             }
             for (event in list(scenario["events"]).map(::obj).sortedBy { it["atMs"] as Long }) {
                 val at = event["atMs"] as Long
+                val actions = event.keys - "atMs"
+                if (actions.size != 1 || actions.first() !in EVENT_KEYS) { problems += "event at $at has keys $actions, wanted atMs and exactly one of $EVENT_KEYS"; continue }
                 when {
                     "send" in event -> tracker.send(event["send"] as String, at)
                     // A frame reaches the client as bytes: the fake server encodes it, the client decodes it.
                     "frame" in event -> tracker.frame(parseCultNetMessage(MessagePackWriter().value(event["frame"]).toByteArray()), at)
                     "tick" in event -> tracker.tick(at)
                     "sessionEnd" in event -> tracker.sessionEnd(at)
+                    "sendFailed" in event -> tracker.sendFailed(event["sendFailed"] as String, at)
                     // transportAck: delivery is not an answer; the tracker has no such input and must not need one.
                 }
             }
@@ -114,6 +120,19 @@ fun replayWriteReceiptVectors(path: String): Boolean {
             for (id in told.keys) if (id !in expect) problems += "$id: settled but the scenario expects nothing for it"
             problems
         }
+    }
+
+    // A runner that read fewer vectors than the file declares has silently skipped some.
+    check("counts") {
+        val declared = obj(vectors["counts"])
+        fun ran(prefix: String) = results.keys.count { it.startsWith(prefix) }
+        val loaded = mapOf(
+            "wire" to list(vectors["wire"]).size, "schemaInvalid" to list(vectors["schemaInvalid"]).size,
+            "contentHashCases" to list(obj(vectors["contentHash"])["cases"]).size, "scenarioCases" to list(obj(vectors["scenarios"])["cases"]).size,
+        )
+        val executed = mapOf("wire" to ran("wire/"), "schemaInvalid" to ran("schemaInvalid/"), "contentHashCases" to ran("contentHash/"), "scenarioCases" to ran("scenario/"))
+        loaded.keys.filter { loaded[it] != (declared[it] as Long).toInt() || executed[it] != loaded[it] }
+            .map { "$it: declared ${declared[it]}, loaded ${loaded[it]}, ran ${executed[it]}" }
     }
 
     for ((name, problems) in results) {
@@ -144,7 +163,7 @@ private class JsonReader(private val text: String) {
 
     fun readDocument(): Any? = readValue().also { skipSpace(); if (at != text.length) throw IOException("trailing JSON") }
 
-    private fun skipSpace() { while (at < text.length && text[at].isWhitespace()) at++ }
+    private fun skipSpace() { while (at < text.length && text[at] in " \t\r\n") at++ }
 
     private fun readValue(): Any? {
         skipSpace()

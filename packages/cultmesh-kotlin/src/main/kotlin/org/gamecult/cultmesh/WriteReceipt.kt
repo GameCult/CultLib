@@ -163,11 +163,16 @@ class WriteTracker(private val windowMs: Long, private val onSettle: (String, Wr
     }
 
     private val writes = linkedMapOf<String, Entry>()
+    private var ended = false
 
     /** Registers a write sent at [atMs]. Re-sending a known id is the same write and does not restart its window. */
     fun send(messageId: String, atMs: Long) {
         tick(atMs)
-        writes.getOrPut(messageId) { Entry(atMs) }
+        if (messageId in writes) return
+        val entry = Entry(atMs)
+        writes[messageId] = entry
+        // On a session that already ended nothing can answer this write.
+        if (ended) settle(messageId, entry, WriteSettlement.Unconfirmed(WriteUnconfirmedReason.SESSION_ENDED))
     }
 
     /** Feeds one received message. Only write_admitted, error.v1 and error.v0 answer; anything else is ignored. */
@@ -200,8 +205,10 @@ class WriteTracker(private val windowMs: Long, private val onSettle: (String, Wr
         }
     }
 
+    /** The session ended: every unanswered write settles unconfirmed, and so does any write sent afterwards. */
     fun sessionEnd(atMs: Long) {
         tick(atMs)
+        ended = true
         for ((id, entry) in writes) if (entry.settlement == null) settle(id, entry, WriteSettlement.Unconfirmed(WriteUnconfirmedReason.SESSION_ENDED))
     }
 
@@ -228,5 +235,23 @@ class WriteTracker(private val windowMs: Long, private val onSettle: (String, Wr
     private fun settle(messageId: String, entry: Entry, settlement: WriteSettlement) {
         entry.settlement = settlement
         onSettle(messageId, settlement)
+    }
+}
+
+/** Unicode White_Space (PropList), the one definition of "blank" in write-receipt.md rule 5; Kotlin's own isBlank takes U+001C to U+001F. */
+private val WHITE_SPACE_CODE_POINTS: Set<Int> = (0x0009..0x000D).toSet() + 0x0020 + 0x0085 + 0x00A0 + 0x1680 +
+    (0x2000..0x200A).toSet() + 0x2028 + 0x2029 + 0x202F + 0x205F + 0x3000
+
+/** True for null, empty, or only White_Space code points. */
+fun isBlankText(text: String?): Boolean = text == null || text.codePoints().allMatch { it in WHITE_SPACE_CODE_POINTS }
+
+/** Self-test: blank is White_Space, not Kotlin's isBlank (rule 5): U+001C to U+001F name something, U+00A0 and U+0085 do not. */
+fun rawDocumentRecordDropsOnlyWhiteSpaceSourceIds() {
+    fun wireKeys(id: String) = CultNetRawDocumentRecord("note.v0", "note:1", "2026-11-08T00:00:00Z", payload = byteArrayOf(1), sourceRuntimeId = id, sourceAgentId = id, sourceRole = id).toWireMap().keys
+    for (blank in listOf("", "\u0085", "\u00a0\u2003", "\u3000", "\t\r\n ")) {
+        check(isBlankText(blank) && "sourceRuntimeId" !in wireKeys(blank)) { "blank ${blank.map { it.code }} must be dropped" }
+    }
+    for (named in listOf("\u001c", "\u001f", "\u200b", "\ufeff", "\u180e", "a")) {
+        check(!isBlankText(named) && "sourceRuntimeId" in wireKeys(named) && "sourceRole" in wireKeys(named)) { "${named.map { it.code }} names something and must be kept" }
     }
 }

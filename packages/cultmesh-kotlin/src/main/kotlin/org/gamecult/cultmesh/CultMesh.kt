@@ -1100,9 +1100,9 @@ data class CultNetRawDocumentRecord(
             "payloadEncoding" to payloadEncoding,
             "payload" to payload.copyOf(),
         )
-        if (!sourceRuntimeId.isNullOrBlank()) wire["sourceRuntimeId"] = sourceRuntimeId
-        if (!sourceAgentId.isNullOrBlank()) wire["sourceAgentId"] = sourceAgentId
-        if (!sourceRole.isNullOrBlank()) wire["sourceRole"] = sourceRole
+        if (!isBlankText(sourceRuntimeId)) wire["sourceRuntimeId"] = sourceRuntimeId
+        if (!isBlankText(sourceAgentId)) wire["sourceAgentId"] = sourceAgentId
+        if (!isBlankText(sourceRole)) wire["sourceRole"] = sourceRole
         if (tags.isNotEmpty()) wire["tags"] = tags
         return wire
     }
@@ -3413,6 +3413,7 @@ fun main(args: Array<String>) {
         rudpClientBindsLoopbackOnlyForALoopbackEndpoint()
         rudpSocketTransportHandshakesAndCarriesReliableOrderedSchemaFrames()
         rudpSocketTransportCarriesFragmentedReliableOrderedSchemaFrames()
+        rawDocumentRecordDropsOnlyWhiteSpaceSourceIds()
         return
     }
 
