@@ -1478,7 +1478,8 @@ function isValidAdmittedMessageId(value: unknown): boolean {
   let hasLetterOrNumber = false;
   for (const ch of value) {
     const point = ch.codePointAt(0) as number;
-    if (inRanges(DEFAULT_IGNORABLE, point)) {
+    // The decoded string must be well-formed Unicode: @msgpack/msgpack turns invalid UTF-8 (ED A0 80) into a lone surrogate.
+    if ((point >= 0xd800 && point <= 0xdfff) || inRanges(DEFAULT_IGNORABLE, point)) {
       return false;
     }
     hasLetterOrNumber = hasLetterOrNumber || inRanges(LETTER_OR_NUMBER, point);
