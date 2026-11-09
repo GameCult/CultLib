@@ -780,6 +780,13 @@ where
             return Ok(CultMeshRudpPollOutcome::Handled);
         }
 
+        // Whether this packet is the first the session takes for its sequence: a repeat of an answered write, or a
+        // packet too far ahead to be remembered, is not, and the write is not answered for it again.
+        let first_receipt = packet.reliable
+            && self
+                .sessions
+                .get(&key)
+                .is_some_and(|entry| !entry.session.has_received(packet.sequence));
         let result = {
             let entry = self
                 .sessions
@@ -825,6 +832,8 @@ where
         // go unanswered. A packet that carries its whole frame is answered from its own payload. A superseded
         // fragment cannot be: the write's id may lie in a fragment this packet does not hold.
         if refuse_sequenced
+            && first_receipt
+            && self.sessions.get(&key).is_some_and(|entry| entry.session.has_received(packet.sequence))
             && packet.fragment_count == 0
             && !result.delivered.iter().any(|frame| frame.channel_id == "schema" && frame.sequence == packet.sequence)
         {

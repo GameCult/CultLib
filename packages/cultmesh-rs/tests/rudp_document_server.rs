@@ -3138,6 +3138,64 @@ fn a_superseded_sequenced_write_is_still_refused() -> Result<()> {
     Ok(())
 }
 
+/// One answer per write (write-receipt.md, rule 1): a sequenced packet the server already answered is answered
+/// once, however often the peer sends it again, and a packet too far ahead to be received draws nothing until it
+/// is received (the peer resends it, and the answer comes then).
+#[test]
+fn a_repeated_or_far_ahead_sequenced_write_draws_one_answer_not_one_per_send() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = RawPeer::connect(&mut server, 256)?;
+    peer.send(&receipt_hello())?;
+    server.poll_once()?;
+    let packet_for = |peer: &mut RawPeer, id: &str| -> Result<Vec<cultnet_rs::CultNetRudpPacket>> {
+        let payload = encode_cultnet_message_to_vec(&put(id, &format!("note:{id}"), vec![1]), CultNetWireContract::CultNetSchemaV0)?;
+        peer.session.send_many(
+            "schema",
+            payload,
+            cultnet_rs::CultNetRudpSendOptions { reliable: true, ordered: false, sequenced: true, now_ms: 3, reliable_expire_after_ms: None },
+            Some(1200),
+        )
+    };
+    let refusals_of = |peer: &mut RawPeer| -> Result<Vec<String>> {
+        let mut ids = Vec::new();
+        for packet in peer.drain() {
+            for frame in peer.session.receive(&packet, 4)?.delivered {
+                let answer = decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)?;
+                if matches!(answer, CultNetMessage::ErrorV1 { .. }) {
+                    ids.push(refusal_of(&answer).1.expect("a refusal names its write"));
+                }
+            }
+        }
+        Ok(ids)
+    };
+    // The same packet, sent three times (a resend whose acknowledgement was lost), is refused once.
+    let once = packet_for(&mut peer, "dup")?;
+    let mut refused = Vec::new();
+    for _ in 0..3 {
+        for packet in &once {
+            peer.send_packet(packet)?;
+        }
+        server.poll_once()?;
+        refused.extend(refusals_of(&mut peer)?);
+    }
+    assert_eq!(refused, vec!["dup".to_string()], "a repeat of an answered write is not answered again");
+
+    // A packet far past the receive window is not received: no answer yet, and none per resend.
+    let ahead = packet_for(&mut peer, "ahead")?;
+    let mut far = ahead[0].clone();
+    far.sequence = once[0].sequence + 5_000;
+    let mut refused = Vec::new();
+    for _ in 0..3 {
+        peer.send_packet(&far)?;
+        server.poll_once()?;
+        refused.extend(refusals_of(&mut peer)?);
+    }
+    assert_eq!(refused, Vec::<String>::new(), "an unreceived packet draws no answer");
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 0);
+    Ok(())
+}
+
 /// A superseded sequenced packet is answered even when its arrival fills a gap and releases another write: the
 /// frames that arrive with it do not stand in for its own.
 #[test]
