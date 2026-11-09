@@ -280,3 +280,24 @@ test("a blank messageId, record key or tag is exactly Unicode White_Space, not t
     parseCultNetMessage(put({ tags: [named] }));
   }
 });
+
+// `admittedMessageId` vectors: a write_admitted messageId needs a letter or number and no Default_Ignorable code point,
+// compared raw (never trimmed). JavaScript strings hold a lone surrogate, so the D800 vector is built from its code point.
+test("write_admitted messageId: every admittedMessageId vector is refused or accepted raw", () => {
+  const vectorsPath = join(__dirname, "..", "..", "..", "..", "contracts", "cultnet", "interop", "write-receipt-vectors.json");
+  const vectors = JSON.parse(readFileSync(vectorsPath, "utf8"));
+  assert.equal(vectors.counts.admittedMessageIdCases, vectors.admittedMessageId.cases.length);
+  const failures: string[] = [];
+  for (const vector of vectors.admittedMessageId.cases as { name: string; codePoints: string[]; repeat?: number; expect: "refuse" | "accept" }[]) {
+    const id = vector.codePoints.map((cp) => String.fromCodePoint(parseInt(cp, 16))).join("").repeat(vector.repeat ?? 1);
+    let decodedId: string | undefined;
+    try {
+      decodedId = (parseCultNetMessage(admitted(id)) as CultNetWriteAdmittedMessage).messageId;
+    } catch {
+      decodedId = undefined;
+    }
+    if ((decodedId === undefined) !== (vector.expect === "refuse")) failures.push(`${vector.name}: expected ${vector.expect}`);
+    else if (decodedId !== undefined && decodedId !== id) failures.push(`${vector.name}: id not echoed raw`);
+  }
+  assert.deepEqual(failures, []);
+});

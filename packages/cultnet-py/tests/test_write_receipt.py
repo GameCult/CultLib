@@ -57,7 +57,7 @@ class WriteReceiptVectorTests(unittest.TestCase):
     def test_vector_sections_are_the_ones_this_file_accounts_for(self) -> None:
         self.assertEqual(
             set(_VECTORS) - {"provenance", "specification"},
-            {"constants", "contentHash", "dedupe", "wire", "blankFields", "schemaInvalid", "scenarios", "counts"},
+            {"constants", "contentHash", "dedupe", "wire", "blankFields", "schemaInvalid", "scenarios", "counts", "admittedMessageId"},
         )
         self.assertEqual(len(_VECTORS["contentHash"]["cases"]), 4)
         self.assertEqual(len(_VECTORS["wire"]), 7)
@@ -68,6 +68,31 @@ class WriteReceiptVectorTests(unittest.TestCase):
         self.assertEqual(counts["schemaInvalid"], len(_VECTORS["schemaInvalid"]))
         self.assertEqual(counts["contentHashCases"], len(_VECTORS["contentHash"]["cases"]))
         self.assertEqual(counts["scenarioCases"], len(_VECTORS["scenarios"]["cases"]))
+        self.assertEqual(counts["admittedMessageIdCases"], len(_VECTORS["admittedMessageId"]["cases"]))
+
+    def test_admitted_message_id_vectors_are_refused_or_accepted_raw(self) -> None:
+        # `admittedMessageId`: a write_admitted messageId needs a letter or number and no Default_Ignorable code point,
+        # compared raw (never trimmed). A lone surrogate is not valid UTF-8, so its vector carries the whole frame.
+        cases = _VECTORS["admittedMessageId"]["cases"]
+        failures = []
+        for case in cases:
+            raw = (
+                bytes.fromhex(case["wireHex"])
+                if "wireHex" in case
+                else _pack(_admitted(messageId="".join(chr(int(cp, 16)) for cp in case["codePoints"]) * case.get("repeat", 1)))
+            )
+            try:
+                message = parse_message(raw)
+            except Exception:  # noqa: BLE001 - any refusal counts
+                refused = True
+            else:
+                refused = False
+                wanted = "".join(chr(int(cp, 16)) for cp in case["codePoints"]) * case.get("repeat", 1)
+                if message.body["messageId"] != wanted:
+                    failures.append(f"{case['name']}: id not echoed raw")
+            if refused != (case["expect"] == "refuse"):
+                failures.append(f"{case['name']}: expected {case['expect']}")
+        self.assertEqual(failures, [])
 
     def test_content_hash_matches_every_vector(self) -> None:
         for case in _VECTORS["contentHash"]["cases"]:

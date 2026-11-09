@@ -149,6 +149,280 @@
       { "name": "empty_tag_list", "set": { "tags": [] }, "outcome": "admitted" }
     ]
   },
+  "admittedMessageId": {
+    "semantics": "Decoder-side rule for a `cultnet.write_admitted.v0` frame's `messageId` (Heimdall's ruling, write-receipt.md). Valid only if it contains at least one Unicode letter (\\p{L}) or number (\\p{N}) AND no Default_Ignorable_Code_Point (DerivedCoreProperties). The compare is RAW: the id is echoed byte for byte, so a decoder neither trims nor normalizes. Each case's id is given as `codePoints` (hex, in order), repeated `repeat` times (default 1), so no lone surrogate appears in this file. A runner builds the frame {schemaVersion write_admitted.v0, messageId, operation put, schemaId note.v0, recordKey note:1} with its own encoder and decodes it with the write_admitted decoder; `refuse` means the decoder refuses the frame the way it refuses an empty or ill-typed messageId, `accept` means it decodes and the id comes back identical. A case with `wireHex` carries the whole frame in MessagePack hex, for an id a language string cannot hold: the lone surrogate U+D800 is not valid UTF-8, so the vector's messageId is a MessagePack str whose bytes are ED A0 80, and Rust, C#, Kotlin and Python build the frame from those bytes and must refuse it. Scope: write_admitted only; error.v1 is untouched.",
+    "cases": [
+      {
+        "name": "refuse_braille_blank_2800",
+        "codePoints": [
+          "2800"
+        ],
+        "expect": "refuse",
+        "why": "U+2800 is Default_Ignorable and not a letter or number"
+      },
+      {
+        "name": "refuse_hangul_filler_3164",
+        "codePoints": [
+          "3164"
+        ],
+        "expect": "refuse",
+        "why": "U+3164 Default_Ignorable (a letter by category Lo, so DI decides)"
+      },
+      {
+        "name": "refuse_hangul_choseong_filler_115F",
+        "codePoints": [
+          "115F"
+        ],
+        "expect": "refuse",
+        "why": "U+115F Default_Ignorable (category Lo)"
+      },
+      {
+        "name": "refuse_halfwidth_hangul_filler_FFA0",
+        "codePoints": [
+          "FFA0"
+        ],
+        "expect": "refuse",
+        "why": "U+FFA0 Default_Ignorable (category Lo)"
+      },
+      {
+        "name": "refuse_combining_grapheme_joiner_034F",
+        "codePoints": [
+          "034F"
+        ],
+        "expect": "refuse",
+        "why": "U+034F Default_Ignorable"
+      },
+      {
+        "name": "refuse_combining_mark_alone_0300",
+        "codePoints": [
+          "0300"
+        ],
+        "expect": "refuse",
+        "why": "a combining mark is not a letter or number"
+      },
+      {
+        "name": "refuse_private_use_E000",
+        "codePoints": [
+          "E000"
+        ],
+        "expect": "refuse",
+        "why": "private use is neither a letter nor a number"
+      },
+      {
+        "name": "refuse_unassigned_0378",
+        "codePoints": [
+          "0378"
+        ],
+        "expect": "refuse",
+        "why": "unassigned since Unicode 1.1, neither a letter nor a number"
+      },
+      {
+        "name": "refuse_lone_surrogate_D800",
+        "codePoints": [
+          "D800"
+        ],
+        "expect": "refuse",
+        "why": "not a Unicode scalar value; on the wire it is the invalid UTF-8 bytes ED A0 80 in a str, so the decoder must refuse the frame. Rust, C#, Kotlin and Python build the frame from wireHex; a runtime whose strings can hold a lone surrogate (TypeScript) may also build it from the code point",
+        "wireHex": "85AD736368656D6156657273696F6EB963756C746E65742E77726974655F61646D69747465642E7630A96D6573736167654964A3EDA080A96F7065726174696F6EA3707574A8736368656D614964A76E6F74652E7630A97265636F72644B6579A66E6F74653A31"
+      },
+      {
+        "name": "refuse_control_nul_0000",
+        "codePoints": [
+          "0000"
+        ],
+        "expect": "refuse",
+        "why": "a control character is neither a letter nor a number"
+      },
+      {
+        "name": "refuse_control_bel_0007",
+        "codePoints": [
+          "0007"
+        ],
+        "expect": "refuse",
+        "why": "a control character is neither a letter nor a number"
+      },
+      {
+        "name": "refuse_control_unit_separator_001F",
+        "codePoints": [
+          "001F"
+        ],
+        "expect": "refuse",
+        "why": "a control character is neither a letter nor a number"
+      },
+      {
+        "name": "refuse_control_delete_007F",
+        "codePoints": [
+          "007F"
+        ],
+        "expect": "refuse",
+        "why": "a control character is neither a letter nor a number"
+      },
+      {
+        "name": "refuse_control_next_line_0085",
+        "codePoints": [
+          "0085"
+        ],
+        "expect": "refuse",
+        "why": "a control character is neither a letter nor a number"
+      },
+      {
+        "name": "refuse_empty",
+        "codePoints": [],
+        "expect": "refuse",
+        "why": "empty"
+      },
+      {
+        "name": "refuse_whitespace_only_space_0020",
+        "codePoints": [
+          "0020"
+        ],
+        "expect": "refuse",
+        "why": "white space only"
+      },
+      {
+        "name": "refuse_whitespace_only_nbsp_00A0",
+        "codePoints": [
+          "00A0"
+        ],
+        "expect": "refuse",
+        "why": "white space only"
+      },
+      {
+        "name": "refuse_whitespace_only_ideographic_space_3000",
+        "codePoints": [
+          "3000"
+        ],
+        "expect": "refuse",
+        "why": "white space only"
+      },
+      {
+        "name": "refuse_letter_zwsp_letter",
+        "codePoints": [
+          "0061",
+          "200B",
+          "0062"
+        ],
+        "expect": "refuse",
+        "why": "a Default_Ignorable (U+200B) beside letters"
+      },
+      {
+        "name": "refuse_letter_cgj",
+        "codePoints": [
+          "0061",
+          "034F"
+        ],
+        "expect": "refuse",
+        "why": "a Default_Ignorable (U+034F) after a letter"
+      },
+      {
+        "name": "refuse_letter_soft_hyphen",
+        "codePoints": [
+          "0061",
+          "00AD"
+        ],
+        "expect": "refuse",
+        "why": "U+00AD is Default_Ignorable"
+      },
+      {
+        "name": "refuse_letter_zwj",
+        "codePoints": [
+          "0061",
+          "200D"
+        ],
+        "expect": "refuse",
+        "why": "U+200D is Default_Ignorable"
+      },
+      {
+        "name": "refuse_digit_mongolian_vowel_separator",
+        "codePoints": [
+          "0031",
+          "180E"
+        ],
+        "expect": "refuse",
+        "why": "U+180E is Default_Ignorable since Unicode 6.3"
+      },
+      {
+        "name": "refuse_digit_word_joiner_digit",
+        "codePoints": [
+          "0031",
+          "2060",
+          "0032"
+        ],
+        "expect": "refuse",
+        "why": "U+2060 is Default_Ignorable"
+      },
+      {
+        "name": "accept_abc",
+        "codePoints": [
+          "0061",
+          "0062",
+          "0063"
+        ],
+        "expect": "accept",
+        "why": "letters"
+      },
+      {
+        "name": "accept_digit_1",
+        "codePoints": [
+          "0031"
+        ],
+        "expect": "accept",
+        "why": "a number"
+      },
+      {
+        "name": "accept_padded_a_raw_compare",
+        "codePoints": [
+          "0020",
+          "0061",
+          "0020"
+        ],
+        "expect": "accept",
+        "why": "raw compare: the id is echoed byte for byte, never trimmed, so the padding stays and the letter makes it valid"
+      },
+      {
+        "name": "accept_e_acute_precomposed",
+        "codePoints": [
+          "00E9"
+        ],
+        "expect": "accept",
+        "why": "a letter"
+      },
+      {
+        "name": "accept_arabic_indic_digit_three",
+        "codePoints": [
+          "0663"
+        ],
+        "expect": "accept",
+        "why": "category Nd, a number"
+      },
+      {
+        "name": "accept_cjk_zhong",
+        "codePoints": [
+          "4E2D"
+        ],
+        "expect": "accept",
+        "why": "a letter (Lo, not Default_Ignorable)"
+      },
+      {
+        "name": "accept_letter_then_combining_acute",
+        "codePoints": [
+          "0065",
+          "0301"
+        ],
+        "expect": "accept",
+        "why": "a combining mark after a letter is allowed"
+      },
+      {
+        "name": "accept_256_ascii_letters",
+        "codePoints": [
+          "0061"
+        ],
+        "expect": "accept",
+        "why": "256 bytes is the size limit and is allowed",
+        "repeat": 256
+      }
+    ]
+  },
   "schemaInvalid": [
     {
       "name": "write_admitted_with_an_error_key",
@@ -1182,7 +1456,8 @@
     "wire": 7,
     "schemaInvalid": 7,
     "contentHashCases": 4,
-    "scenarioCases": 25
+    "scenarioCases": 25,
+    "admittedMessageIdCases": 32
   },
   "contentHash": {
     "definition": "sha256(msgpack([operation, schemaId, recordKey, payload])), payload a msgpack bin for a put and nil for a delete; hex lowercase",

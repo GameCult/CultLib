@@ -48,6 +48,26 @@ fun replayWriteReceiptVectors(path: String): Boolean {
         }
     }
 
+    // admittedMessageId: a write_admitted messageId needs a letter or number and no Default_Ignorable code point, compared
+    // raw. The frame is built with this runtime's own encoder; a case with `wireHex` (the lone surrogate, invalid UTF-8)
+    // supplies the whole frame.
+    for (case in list(obj(vectors["admittedMessageId"])["cases"])) {
+        val c = obj(case)
+        check("admittedMessageId/${c["name"]}") {
+            val id = list(c["codePoints"]).joinToString("") { String(Character.toChars((it as String).toInt(16))) }.repeat(((c["repeat"] as Long?) ?: 1L).toInt())
+            val bytes = (c["wireHex"] as String?)?.let(::unhex) ?: MessagePackWriter().value(linkedMapOf(
+                "schemaVersion" to WRITE_ADMITTED_VERSION, "messageId" to id, "operation" to "put", "schemaId" to "note.v0", "recordKey" to "note:1",
+            )).toByteArray()
+            val decoded = try { decodeReceiptFrame(parseCultNetMessage(bytes)) } catch (_: IOException) { null }
+            when {
+                c["expect"] == "refuse" -> if (decoded == null) emptyList() else listOf("accepted an id that must be refused (${c["why"]})")
+                decoded == null -> listOf("refused an id that must be accepted (${c["why"]})")
+                decoded.toWireMap()["messageId"] != id -> listOf("id not echoed raw: ${decoded.toWireMap()["messageId"]}")
+                else -> emptyList()
+            }
+        }
+    }
+
     for (case in list(vectors["schemaInvalid"])) {
         val c = obj(case)
         check("schemaInvalid/${c["name"]}") {
@@ -129,8 +149,9 @@ fun replayWriteReceiptVectors(path: String): Boolean {
         val loaded = mapOf(
             "wire" to list(vectors["wire"]).size, "schemaInvalid" to list(vectors["schemaInvalid"]).size,
             "contentHashCases" to list(obj(vectors["contentHash"])["cases"]).size, "scenarioCases" to list(obj(vectors["scenarios"])["cases"]).size,
+            "admittedMessageIdCases" to list(obj(vectors["admittedMessageId"])["cases"]).size,
         )
-        val executed = mapOf("wire" to ran("wire/"), "schemaInvalid" to ran("schemaInvalid/"), "contentHashCases" to ran("contentHash/"), "scenarioCases" to ran("scenario/"))
+        val executed = mapOf("wire" to ran("wire/"), "schemaInvalid" to ran("schemaInvalid/"), "contentHashCases" to ran("contentHash/"), "scenarioCases" to ran("scenario/"), "admittedMessageIdCases" to ran("admittedMessageId/"))
         loaded.keys.filter { loaded[it] != (declared[it] as Long).toInt() || executed[it] != loaded[it] }
             .map { "$it: declared ${declared[it]}, loaded ${loaded[it]}, ran ${executed[it]}" }
     }

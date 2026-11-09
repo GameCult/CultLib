@@ -153,3 +153,51 @@ fn error_v0_refuses_the_v1_only_limit_reached_code() {
     as_v0[at + 15] = b'0';
     assert!(decode_cultnet_message_from_slice(&as_v0, CultNetWireContract::CultNetSchemaV0).is_err());
 }
+
+/// Vectors `admittedMessageId`: a write_admitted messageId needs a letter or number and no Default_Ignorable code
+/// point, compared raw (never trimmed). The frame is the spec's `write_admitted_put` bytes with the id swapped in; a
+/// case with `wireHex` (the lone surrogate, invalid UTF-8) supplies the whole frame.
+#[test]
+fn write_admitted_message_id_vectors_are_refused_or_accepted_raw() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../contracts/cultnet/interop/write-receipt-vectors.json");
+    let vectors: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let cases = vectors["admittedMessageId"]["cases"].as_array().unwrap();
+    assert_eq!(vectors["counts"]["admittedMessageIdCases"].as_u64().unwrap() as usize, cases.len());
+    let template = unhex("85AD736368656D6156657273696F6EB963756C746E65742E77726974655F61646D69747465642E7630A96D6573736167654964A57075742D31A96F7065726174696F6EA3707574A8736368656D614964A76E6F74652E7630A97265636F72644B6579A66E6F74653A31");
+    let old_id_at = template.windows(5).position(|w| w == b"put-1").unwrap() - 1;
+    let mut failures = Vec::new();
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let id: String = case["codePoints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|cp| char::from_u32(u32::from_str_radix(cp.as_str().unwrap(), 16).unwrap()))
+            .collect::<String>()
+            .repeat(case["repeat"].as_u64().unwrap_or(1) as usize);
+        let frame = match case["wireHex"].as_str() {
+            Some(hex) => unhex(hex),
+            None => {
+                let len = id.len();
+                let header: Vec<u8> = if len < 32 {
+                    vec![0xA0 | len as u8]
+                } else if len < 256 {
+                    vec![0xD9, len as u8]
+                } else {
+                    vec![0xDA, (len >> 8) as u8, len as u8]
+                };
+                [&template[..old_id_at], &header[..], id.as_bytes(), &template[old_id_at + 6..]].concat()
+            }
+        };
+        let decoded = decode_cultnet_message_from_slice(&frame, CultNetWireContract::CultNetSchemaV0);
+        match (case["expect"].as_str().unwrap(), decoded) {
+            ("refuse", Ok(_)) => failures.push(format!("{name}: expected refuse")),
+            ("accept", Err(error)) => failures.push(format!("{name}: expected accept, got {error}")),
+            ("accept", Ok(CultNetMessage::WriteAdmitted { message_id, .. })) if message_id != id => {
+                failures.push(format!("{name}: id not echoed raw"))
+            }
+            _ => {}
+        }
+    }
+    assert!(failures.is_empty(), "{} failing:\n{}", failures.len(), failures.join("\n"));
+}
