@@ -394,18 +394,26 @@ namespace GameCult.Networking
         // (write-receipt.md, "Required fields"), never handed to the store: a blank schemaId, recordKey or storedAt, an empty
         // payload, and a source id or tag that is present but blank.
         private static bool IsUnreadableWriteTarget(string? schemaId, string? recordKey) =>
-            string.IsNullOrWhiteSpace(schemaId) || string.IsNullOrWhiteSpace(recordKey);
+            IsBlank(schemaId) || IsBlank(recordKey);
 
         private static bool IsUnreadableDocument(CultNetRawDocumentRecord document) =>
             IsUnreadableWriteTarget(document.SchemaId, document.RecordKey)
-            || string.IsNullOrWhiteSpace(document.StoredAt)
+            || IsBlank(document.StoredAt)
             || document.Payload == null || document.Payload.Length == 0
             || IsPresentButBlank(document.SourceRuntimeId)
             || IsPresentButBlank(document.SourceAgentId)
             || IsPresentButBlank(document.SourceRole)
-            || document.Tags != null && document.Tags.Any(tag => string.IsNullOrWhiteSpace(tag));
+            || document.Tags != null && document.Tags.Any(IsBlank);
 
-        private static bool IsPresentButBlank(string? value) => value != null && string.IsNullOrWhiteSpace(value);
+        private static bool IsPresentButBlank(string? value) => value != null && IsBlank(value);
+
+        // Blank is the Unicode White_Space property, listed here and in write-receipt.md, not char.IsWhiteSpace: the platform's
+        // own test follows its Unicode tables (and has put U+180E in the set), the spec's does not move. A null is not text.
+        private static bool IsBlank(string? value) => value == null || value.All(IsWhiteSpaceCodePoint);
+
+        private static bool IsWhiteSpaceCodePoint(char c) =>
+            c is (>= '\u0009' and <= '\u000D') or '\u0020' or '\u0085' or '\u00A0' or '\u1680'
+                or (>= '\u2000' and <= '\u200A') or '\u2028' or '\u2029' or '\u202F' or '\u205F' or '\u3000';
 
         // A refusal: error.v1 carrying the write's id for a receipt-capable connection, the v0 error for any other.
         private static void Refuse(CultNetServerPeer peer, CultNetReceiptedWrite? write, CultNetErrorMessage error)
