@@ -413,6 +413,16 @@
         "why": "a combining mark after a letter is allowed"
       },
       {
+        "name": "accept_letter_nul_letter",
+        "codePoints": [
+          "0061",
+          "0000",
+          "0062"
+        ],
+        "expect": "accept",
+        "why": "U+0000 is not Default_Ignorable and a letter is present, so the rule accepts; raw compare keeps the NUL"
+      },
+      {
         "name": "accept_256_ascii_letters",
         "codePoints": [
           "0061"
@@ -1457,7 +1467,7 @@
     "schemaInvalid": 7,
     "contentHashCases": 4,
     "scenarioCases": 25,
-    "admittedMessageIdCases": 32
+    "admittedMessageIdCases": 33
   },
   "contentHash": {
     "definition": "sha256(msgpack([operation, schemaId, recordKey, payload])), payload a msgpack bin for a put and nil for a delete; hex lowercase",
