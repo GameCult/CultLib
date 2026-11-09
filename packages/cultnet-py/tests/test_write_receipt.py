@@ -19,7 +19,7 @@ from cultnet_py import (
 )
 
 # Decoder-side conformance with contracts/cultnet/interop/write-receipt-vectors.json: `contentHash`, `wire` and
-# `schemaInvalid`. `dedupe` and `blankFields` are server obligations and `scenarios` is the client write tracker;
+# `schemaInvalid`. `dedupe` and `blankFields` are server obligations and `scenarios` is the client write tracker; `counts` is the file's own tally;
 # this runtime has neither a receipt server nor a write client, so it replays none of them.
 _INTEROP = Path(__file__).resolve().parents[3] / "contracts/cultnet/interop"
 _VECTORS = json.loads((_INTEROP / "write-receipt-vectors.json").read_text(encoding="utf-8"))
@@ -57,11 +57,17 @@ class WriteReceiptVectorTests(unittest.TestCase):
     def test_vector_sections_are_the_ones_this_file_accounts_for(self) -> None:
         self.assertEqual(
             set(_VECTORS) - {"provenance", "specification"},
-            {"constants", "contentHash", "dedupe", "wire", "blankFields", "schemaInvalid", "scenarios"},
+            {"constants", "contentHash", "dedupe", "wire", "blankFields", "schemaInvalid", "scenarios", "counts"},
         )
         self.assertEqual(len(_VECTORS["contentHash"]["cases"]), 4)
         self.assertEqual(len(_VECTORS["wire"]), 7)
         self.assertEqual(len(_VECTORS["schemaInvalid"]), 7)
+        # The file declares how many of each it holds; a loader that drops entries disagrees with it.
+        counts = _VECTORS["counts"]
+        self.assertEqual(counts["wire"], len(_VECTORS["wire"]))
+        self.assertEqual(counts["schemaInvalid"], len(_VECTORS["schemaInvalid"]))
+        self.assertEqual(counts["contentHashCases"], len(_VECTORS["contentHash"]["cases"]))
+        self.assertEqual(counts["scenarioCases"], len(_VECTORS["scenarios"]["cases"]))
 
     def test_content_hash_matches_every_vector(self) -> None:
         for case in _VECTORS["contentHash"]["cases"]:
