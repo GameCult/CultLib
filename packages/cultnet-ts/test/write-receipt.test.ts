@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { decode } from "@msgpack/msgpack";
 import {
   CULTNET_ERROR_CODES,
   CULTNET_ERROR_V1_CODES,
@@ -278,5 +279,61 @@ test("a blank messageId, record key or tag is exactly Unicode White_Space, not t
     parseCultNetMessage(put({}, named));
     parseCultNetMessage(put({ recordKey: named }));
     parseCultNetMessage(put({ tags: [named] }));
+  }
+});
+
+// `admittedMessageId` vectors: a write_admitted messageId needs a letter or number and no Default_Ignorable code point,
+// compared raw (never trimmed). The D800 vector is the frame's bytes (wireHex), decoded by the msgpack library like the others.
+test("write_admitted messageId: every admittedMessageId vector is refused or accepted raw", () => {
+  const vectorsPath = join(__dirname, "..", "..", "..", "..", "contracts", "cultnet", "interop", "write-receipt-vectors.json");
+  const vectors = JSON.parse(readFileSync(vectorsPath, "utf8"));
+  assert.equal(vectors.counts.admittedMessageIdCases, vectors.admittedMessageId.cases.length);
+  const failures: string[] = [];
+  for (const vector of vectors.admittedMessageId.cases as { name: string; codePoints: string[]; repeat?: number; wireHex?: string; expect: "refuse" | "accept" }[]) {
+    const id = vector.codePoints.map((cp) => String.fromCodePoint(parseInt(cp, 16))).join("").repeat(vector.repeat ?? 1);
+    let decodedId: string | undefined;
+    try {
+      const frame = vector.wireHex ? decode(Uint8Array.from(Buffer.from(vector.wireHex, "hex"))) : admitted(id);
+      decodedId = (parseCultNetMessage(frame) as CultNetWriteAdmittedMessage).messageId;
+    } catch {
+      decodedId = undefined;
+    }
+    if ((decodedId === undefined) !== (vector.expect === "refuse")) failures.push(`${vector.name}: expected ${vector.expect}`);
+    else if (decodedId !== undefined && decodedId !== id) failures.push(`${vector.name}: id not echoed raw`);
+  }
+  assert.deepEqual(failures, []);
+});
+
+// The generated ranges file is the independent copy of the embedded tables: first, last and the points either side of every range.
+test("write_admitted messageId: every range of the Unicode 16.0 tables is pinned at both ends", () => {
+  const ranges = JSON.parse(readFileSync(join(__dirname, "..", "..", "..", "..", "contracts", "cultnet", "interop", "write-admitted-message-id-ranges.json"), "utf8"));
+  assert.ok(ranges.letterOrNumber.length > 700);
+  assert.equal(ranges.defaultIgnorable.length, 17);
+  const accepted = (id: string) => { try { parseCultNetMessage(admitted(id)); return true; } catch { return false; } };
+  const failures: string[] = [];
+  for (const [low, high] of ranges.letterOrNumber as [number, number][]) {
+    for (const [point, want] of [[low, true], [high, true], [low - 1, false], [high + 1, false]] as [number, boolean][]) {
+      if (accepted(String.fromCodePoint(point)) !== want) failures.push(`U+${point.toString(16)} alone should be ${want ? "accepted" : "refused"}`);
+    }
+  }
+  for (const [low, high] of ranges.defaultIgnorable as [number, number][]) {
+    for (const [point, want] of [[low, false], [high, false], [low - 1, true], [high + 1, true]] as [number, boolean][]) {
+      if (accepted("a" + String.fromCodePoint(point)) !== want) failures.push(`a + U+${point.toString(16)} should be ${want ? "accepted" : "refused"}`);
+    }
+  }
+  assert.deepEqual(failures, []);
+});
+
+// TypeScript decodes the frame to an object, so it cannot see a duplicate key: it judges the last one (admittedMessageIdDuplicates).
+// This pins @msgpack/msgpack's last-key behaviour plus the id check on the decoded object, not a first-key or duplicate path in
+// cultnet-ts source: there is none, so a refuse-on-first mutation in src would not be killed.
+test("write_admitted messageId: a repeated key follows the last-key-wins policy", () => {
+  const vectors = JSON.parse(readFileSync(join(__dirname, "..", "..", "..", "..", "contracts", "cultnet", "interop", "write-receipt-vectors.json"), "utf8"));
+  const section = vectors.admittedMessageIdDuplicates;
+  assert.equal(vectors.counts.admittedMessageIdDuplicateCases, section.cases.length);
+  for (const vector of section.cases as { name: string; wireHex: string; lastKeyWins: "accept" | "refuse"; lastKeyWinsEcho?: string }[]) {
+    const frame = decode(Uint8Array.from(Buffer.from(vector.wireHex, "hex")));
+    if (vector.lastKeyWins === "refuse") assert.throws(() => parseCultNetMessage(frame), /./s, vector.name);
+    else assert.equal((parseCultNetMessage(frame) as CultNetWriteAdmittedMessage).messageId, vector.lastKeyWinsEcho, vector.name);
   }
 });

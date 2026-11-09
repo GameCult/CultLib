@@ -57,7 +57,7 @@ class WriteReceiptVectorTests(unittest.TestCase):
     def test_vector_sections_are_the_ones_this_file_accounts_for(self) -> None:
         self.assertEqual(
             set(_VECTORS) - {"provenance", "specification"},
-            {"constants", "contentHash", "dedupe", "wire", "blankFields", "schemaInvalid", "scenarios", "counts"},
+            {"constants", "contentHash", "dedupe", "wire", "blankFields", "schemaInvalid", "scenarios", "counts", "admittedMessageId", "admittedMessageIdDuplicates"},
         )
         self.assertEqual(len(_VECTORS["contentHash"]["cases"]), 4)
         self.assertEqual(len(_VECTORS["wire"]), 7)
@@ -68,6 +68,69 @@ class WriteReceiptVectorTests(unittest.TestCase):
         self.assertEqual(counts["schemaInvalid"], len(_VECTORS["schemaInvalid"]))
         self.assertEqual(counts["contentHashCases"], len(_VECTORS["contentHash"]["cases"]))
         self.assertEqual(counts["scenarioCases"], len(_VECTORS["scenarios"]["cases"]))
+        self.assertEqual(counts["admittedMessageIdCases"], len(_VECTORS["admittedMessageId"]["cases"]))
+
+    def test_admitted_message_id_vectors_are_refused_or_accepted_raw(self) -> None:
+        # `admittedMessageId`: a write_admitted messageId needs a letter or number and no Default_Ignorable code point,
+        # compared raw (never trimmed). A lone surrogate is not valid UTF-8, so its vector carries the whole frame.
+        cases = _VECTORS["admittedMessageId"]["cases"]
+        failures = []
+        for case in cases:
+            raw = (
+                bytes.fromhex(case["wireHex"])
+                if "wireHex" in case
+                else _pack(_admitted(messageId="".join(chr(int(cp, 16)) for cp in case["codePoints"]) * case.get("repeat", 1)))
+            )
+            try:
+                message = parse_message(raw)
+            except Exception:  # noqa: BLE001 - any refusal counts
+                refused = True
+            else:
+                refused = False
+                wanted = "".join(chr(int(cp, 16)) for cp in case["codePoints"]) * case.get("repeat", 1)
+                if message.body["messageId"] != wanted:
+                    failures.append(f"{case['name']}: id not echoed raw")
+            if refused != (case["expect"] == "refuse"):
+                failures.append(f"{case['name']}: expected {case['expect']}")
+        self.assertEqual(failures, [])
+
+    def test_a_repeated_message_id_key_follows_the_last_key_wins_policy(self) -> None:
+        # Python decodes the frame to a dict, so it cannot see a duplicate: it judges the last key (admittedMessageIdDuplicates).
+        section = _VECTORS["admittedMessageIdDuplicates"]
+        self.assertEqual(_VECTORS["counts"]["admittedMessageIdDuplicateCases"], len(section["cases"]))
+        for case in section["cases"]:
+            raw = bytes.fromhex(case["wireHex"])
+            if case["lastKeyWins"] == "refuse":
+                with self.assertRaises(ValueError, msg=case["name"]):
+                    parse_message(raw)
+            else:
+                self.assertEqual(parse_message(raw).body["messageId"], case["lastKeyWinsEcho"], case["name"])
+
+    def test_every_range_of_the_unicode_tables_is_pinned_at_both_ends(self) -> None:
+        # write-admitted-message-id-ranges.json is the generated, independent copy: for each letter-or-number range its first and
+        # last point are accepted and the points either side refused; for each Default_Ignorable range "a" beside its first and
+        # last point is refused and beside the points either side accepted. Deleting or narrowing any embedded range fails here.
+        ranges = json.loads((_INTEROP / "write-admitted-message-id-ranges.json").read_text(encoding="utf-8"))
+        self.assertGreater(len(ranges["letterOrNumber"]), 700)
+        self.assertEqual(len(ranges["defaultIgnorable"]), 17)
+
+        def accepted(text: str) -> bool:
+            try:
+                parse_message(_pack(_admitted(messageId=text)))
+                return True
+            except ValueError:
+                return False
+
+        failures = []
+        for low, high in ranges["letterOrNumber"]:
+            for point, want in ((low, True), (high, True), (low - 1, False), (high + 1, False)):
+                if accepted(chr(point)) != want:
+                    failures.append(f"U+{point:04X} alone should be {'accepted' if want else 'refused'}")
+        for low, high in ranges["defaultIgnorable"]:
+            for point, want in ((low, False), (high, False), (low - 1, True), (high + 1, True)):
+                if accepted("a" + chr(point)) != want:
+                    failures.append(f"a + U+{point:04X} should be {'accepted' if want else 'refused'}")
+        self.assertEqual(failures, [])
 
     def test_content_hash_matches_every_vector(self) -> None:
         for case in _VECTORS["contentHash"]["cases"]:

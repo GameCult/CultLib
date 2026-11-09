@@ -3,6 +3,7 @@ mod contracts;
 mod idunn_deployment_brake;
 mod idunn_lifecycle_brake;
 mod media_fec;
+mod unicode_messageid_tables;
 mod media_stream_contracts;
 mod media_stream_wire;
 mod provider_health_contracts;

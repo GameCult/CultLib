@@ -48,6 +48,72 @@ fun replayWriteReceiptVectors(path: String): Boolean {
         }
     }
 
+    // admittedMessageId: a write_admitted messageId needs a letter or number and no Default_Ignorable code point, compared
+    // raw. The frame is built with this runtime's own encoder; a case with `wireHex` (the lone surrogate, invalid UTF-8)
+    // supplies the whole frame.
+    for (case in list(obj(vectors["admittedMessageId"])["cases"])) {
+        val c = obj(case)
+        check("admittedMessageId/${c["name"]}") {
+            val id = list(c["codePoints"]).joinToString("") { String(Character.toChars((it as String).toInt(16))) }.repeat(((c["repeat"] as Long?) ?: 1L).toInt())
+            val bytes = (c["wireHex"] as String?)?.let(::unhex) ?: MessagePackWriter().value(linkedMapOf(
+                "schemaVersion" to WRITE_ADMITTED_VERSION, "messageId" to id, "operation" to "put", "schemaId" to "note.v0", "recordKey" to "note:1",
+            )).toByteArray()
+            val decoded = try { decodeReceiptFrame(parseCultNetMessage(bytes)) } catch (_: IOException) { null }
+            when {
+                c["expect"] == "refuse" -> if (decoded == null) emptyList() else listOf("accepted an id that must be refused (${c["why"]})")
+                decoded == null -> listOf("refused an id that must be accepted (${c["why"]})")
+                decoded.toWireMap()["messageId"] != id -> listOf("id not echoed raw: ${decoded.toWireMap()["messageId"]}")
+                else -> emptyList()
+            }
+        }
+    }
+
+    // The generated ranges file is the independent copy of the embedded tables: first, last and the points either side of every
+    // range, so deleting or narrowing any range fails here.
+    check("unicodeTableRanges") {
+        @Suppress("UNCHECKED_CAST")
+        val ranges = JsonReader(File(File(path).parentFile, "write-admitted-message-id-ranges.json").readText(Charsets.UTF_8)).readDocument() as Map<String, Any?>
+        fun pairs(key: String) = list(ranges[key]).map { list(it).map { n -> (n as Long).toInt() } }
+        val letters = pairs("letterOrNumber")
+        val ignorable = pairs("defaultIgnorable")
+        val problems = mutableListOf<String>()
+        if (letters.size <= 700 || ignorable.size != 17) problems += "ranges file holds ${letters.size} and ${ignorable.size} ranges"
+        fun accepted(id: String): Boolean = try {
+            decodeReceiptFrame(parseCultNetMessage(MessagePackWriter().value(linkedMapOf(
+                "schemaVersion" to WRITE_ADMITTED_VERSION, "messageId" to id, "operation" to "put", "schemaId" to "note.v0", "recordKey" to "note:1",
+            )).toByteArray()))
+            true
+        } catch (_: IOException) { false }
+        for ((low, high) in letters) for ((point, want) in listOf(low to true, high to true, low - 1 to false, high + 1 to false)) {
+            if (accepted(String(Character.toChars(point))) != want) problems += "U+${point.toString(16)} alone should be ${if (want) "accepted" else "refused"}"
+        }
+        for ((low, high) in ignorable) for ((point, want) in listOf(low to false, high to false, low - 1 to true, high + 1 to true)) {
+            if (accepted("a" + String(Character.toChars(point))) != want) problems += "a + U+${point.toString(16)} should be ${if (want) "accepted" else "refused"}"
+        }
+        problems
+    }
+
+    // A document payload string with a lone surrogate (ED A0 80) is not a write_admitted id: the shared MessagePack reader keeps
+    // reading it. Strictness is scoped to the write_admitted frame, never to the reader.
+    check("documentPayloadStringWithLoneSurrogateStillDecodes") {
+        val text = MessagePackReader(unhex("A3EDA080")).readString()
+        if (text.isNotEmpty()) emptyList() else listOf("decoded to an empty string")
+    }
+
+    // admittedMessageIdDuplicates: Kotlin decodes the frame to a map, so it cannot see a repeated key: it judges the last one.
+    for (case in list(obj(vectors["admittedMessageIdDuplicates"])["cases"])) {
+        val c = obj(case)
+        check("admittedMessageIdDuplicates/${c["name"]}") {
+            val decoded = try { decodeReceiptFrame(parseCultNetMessage(unhex(c["wireHex"] as String))) } catch (_: IOException) { null }
+            when {
+                c["lastKeyWins"] == "refuse" -> if (decoded == null) emptyList() else listOf("accepted a frame whose last messageId key is invalid")
+                decoded == null -> listOf("refused a frame whose last messageId key is valid")
+                decoded.toWireMap()["messageId"] != c["lastKeyWinsEcho"] -> listOf("echoed ${decoded.toWireMap()["messageId"]}, wanted ${c["lastKeyWinsEcho"]}")
+                else -> emptyList()
+            }
+        }
+    }
+
     for (case in list(vectors["schemaInvalid"])) {
         val c = obj(case)
         check("schemaInvalid/${c["name"]}") {
@@ -129,8 +195,9 @@ fun replayWriteReceiptVectors(path: String): Boolean {
         val loaded = mapOf(
             "wire" to list(vectors["wire"]).size, "schemaInvalid" to list(vectors["schemaInvalid"]).size,
             "contentHashCases" to list(obj(vectors["contentHash"])["cases"]).size, "scenarioCases" to list(obj(vectors["scenarios"])["cases"]).size,
+            "admittedMessageIdCases" to list(obj(vectors["admittedMessageId"])["cases"]).size,
         )
-        val executed = mapOf("wire" to ran("wire/"), "schemaInvalid" to ran("schemaInvalid/"), "contentHashCases" to ran("contentHash/"), "scenarioCases" to ran("scenario/"))
+        val executed = mapOf("wire" to ran("wire/"), "schemaInvalid" to ran("schemaInvalid/"), "contentHashCases" to ran("contentHash/"), "scenarioCases" to ran("scenario/"), "admittedMessageIdCases" to ran("admittedMessageId/"))
         loaded.keys.filter { loaded[it] != (declared[it] as Long).toInt() || executed[it] != loaded[it] }
             .map { "$it: declared ${declared[it]}, loaded ${loaded[it]}, ran ${executed[it]}" }
     }

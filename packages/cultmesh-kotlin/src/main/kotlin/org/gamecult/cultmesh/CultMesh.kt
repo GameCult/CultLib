@@ -19,6 +19,7 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.URI
 import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.security.SecureRandom
 import java.security.MessageDigest
@@ -2364,6 +2365,9 @@ fun parseCultNetMessage(payload: ByteArray): CultNetMessage {
     if (schemaVersion !is String || schemaVersion.isBlank()) {
         throw IOException("CultNet schema-v0 messages must declare schemaVersion")
     }
+    // A write_admitted id is echoed byte for byte, so that frame alone is read again with invalid UTF-8 refused; document payload
+    // strings elsewhere keep decoding as before.
+    if (schemaVersion == WRITE_ADMITTED_VERSION) MessagePackReader(payload, strictUtf8 = true).readAny()
     val body = linkedMapOf<String, Any?>()
     for ((key, value) in decoded) {
         if (key !is String) throw IOException("CultNet schema-v0 message keys must be strings")
@@ -6151,7 +6155,8 @@ private fun requireSchemaResponse(message: CultNetMessage?, expectedSchemaVersio
     return response
 }
 
-class MessagePackReader(payload: ByteArray) {
+/** [strictUtf8] makes a str whose bytes are not UTF-8 throw instead of becoming U+FFFD; only the write_admitted frame asks for it. */
+class MessagePackReader(payload: ByteArray, private val strictUtf8: Boolean = false) {
     private val input = DataInputStream(ByteArrayInputStream(payload))
     private var pushed = -1
 
@@ -6306,7 +6311,10 @@ class MessagePackReader(payload: ByteArray) {
             code == 0xdb -> input.readInt()
             else -> throw IOException("expected string")
         }
-        return String(readPayload(length), StandardCharsets.UTF_8)
+        val bytes = readPayload(length)
+        if (!strictUtf8) return String(bytes, StandardCharsets.UTF_8)
+        return StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes)).toString()
     }
 
     private fun readBinaryAfterCode(code: Int): ByteArray {
