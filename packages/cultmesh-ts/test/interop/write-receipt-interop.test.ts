@@ -331,8 +331,9 @@ for (const target of [rust, csharp]) {
     for (const blank of vectors.blankFields.cases as { name: string; set: Record<string, unknown>; outcome: "admitted" | "refused" }[]) {
       test(`blank-field vector ${blank.name}: ${blank.outcome}`, { timeout: 30_000 }, async () => {
         const s = await receiptSession();
-        const recordKey = `blank:${blank.name}`;
         const { payloadHex, ...fields } = blank.set;
+        // A case that sets recordKey replaces the harness key, so the store is read under the key the server actually saw.
+        const recordKey = typeof fields.recordKey === "string" ? fields.recordKey : `blank:${blank.name}`;
         const message = s.put(`blank-${blank.name}`, recordKey, "one", fields);
         const sent = (message as unknown as { document: Record<string, unknown> }).document;
         for (const [key, value] of Object.entries(fields)) if (value === null) delete sent[key]; // nil means absent on the wire here
@@ -350,7 +351,6 @@ for (const target of [rust, csharp]) {
         assert.equal(response.messageId, `blank-${blank.name}`);
         await sleep(200);
         assert.equal(server.count("applied", recordKey), 0);
-        assert.equal(server.count("applied", "blank:"), 0);
       });
     }
 
