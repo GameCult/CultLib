@@ -74,7 +74,32 @@ fun decodeWriteAdmitted(message: CultNetMessage): CultNetWriteAdmitted {
     closedKeys(message, setOf("messageId", "operation", "schemaId", "recordKey"))
     val operation = nonEmpty(message, "operation")
     if (operation != "put" && operation != "delete") throw IOException("operation must be put or delete")
-    return CultNetWriteAdmitted(nonEmpty(message, "messageId"), operation, nonEmpty(message, "schemaId"), nonEmpty(message, "recordKey"))
+    return CultNetWriteAdmitted(admittedMessageId(message), operation, nonEmpty(message, "schemaId"), nonEmpty(message, "recordKey"))
+}
+
+// Default_Ignorable_Code_Point ranges, DerivedCoreProperties.txt, Unicode 16.0 (unchanged since 15.1). The JDK has no such
+// property, so this runtime embeds it; the Python, C# and Rust decoders embed the same ranges, TypeScript uses its regex
+// engine's. Letters and numbers come from the JDK's Character categories (L*, and Nd, Nl, No); a code point the running JDK
+// does not assign (U+0378 in every version) has no such category, so it is refused either way.
+private val DEFAULT_IGNORABLE: List<IntRange> = listOf(
+    0x00AD..0x00AD, 0x034F..0x034F, 0x061C..0x061C, 0x115F..0x1160, 0x17B4..0x17B5, 0x180B..0x180F,
+    0x200B..0x200F, 0x202A..0x202E, 0x2060..0x206F, 0x3164..0x3164, 0xFE00..0xFE0F, 0xFEFF..0xFEFF,
+    0xFFA0..0xFFA0, 0xFFF0..0xFFF8, 0x1BCA0..0x1BCA3, 0x1D173..0x1D17A, 0xE0000..0xE0FFF,
+)
+
+/** write-receipt.md: a letter or number somewhere, no Default_Ignorable code point anywhere, compared raw (never trimmed). */
+private fun admittedMessageId(message: CultNetMessage): String {
+    val id = nonEmpty(message, "messageId")
+    var hasLetterOrNumber = false
+    id.codePoints().forEach { cp ->
+        if (DEFAULT_IGNORABLE.any { cp in it }) throw IOException("messageId holds a Default_Ignorable code point")
+        when (Character.getType(cp).toByte()) {
+            Character.UPPERCASE_LETTER, Character.LOWERCASE_LETTER, Character.TITLECASE_LETTER, Character.MODIFIER_LETTER,
+            Character.OTHER_LETTER, Character.DECIMAL_DIGIT_NUMBER, Character.LETTER_NUMBER, Character.OTHER_NUMBER -> hasLetterOrNumber = true
+        }
+    }
+    if (!hasLetterOrNumber) throw IOException("messageId must contain a letter or number")
+    return id
 }
 
 /** Strict decode of error.v0 (no messageId, no limit_reached) or error.v1 (messageId required, string or nil, never empty). */

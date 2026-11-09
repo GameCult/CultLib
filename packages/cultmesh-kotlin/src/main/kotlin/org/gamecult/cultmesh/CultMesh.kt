@@ -19,6 +19,7 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.URI
 import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.security.SecureRandom
 import java.security.MessageDigest
@@ -6306,7 +6307,9 @@ class MessagePackReader(payload: ByteArray) {
             code == 0xdb -> input.readInt()
             else -> throw IOException("expected string")
         }
-        return String(readPayload(length), StandardCharsets.UTF_8)
+        // Strict: bytes that are not UTF-8 (a lone surrogate's ED A0 80) refuse the frame instead of becoming U+FFFD.
+        return StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(readPayload(length))).toString()
     }
 
     private fun readBinaryAfterCode(code: Int): ByteArray {
