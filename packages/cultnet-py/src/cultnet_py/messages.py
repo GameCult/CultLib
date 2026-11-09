@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,6 +70,31 @@ def _is_name(value: Any) -> bool:
     return isinstance(value, str) and value != ""
 
 
+# Default_Ignorable_Code_Point ranges, DerivedCoreProperties.txt, Unicode 16.0 (unchanged since 15.1). This runtime has no
+# platform table for the property, so it embeds it; the Kotlin, C# and Rust decoders embed the same ranges, TypeScript uses its
+# regex engine's. Letters and numbers come from unicodedata (categories L* and N*); a code point the running Python's Unicode
+# data does not assign (U+0378 in every version) is Cn, so it is refused either way.
+_DEFAULT_IGNORABLE = (
+    (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
+    (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF),
+)
+
+
+def _is_admitted_message_id(value: Any) -> bool:
+    """write-receipt.md: a letter or number somewhere, no Default_Ignorable code point anywhere, compared raw (never stripped)."""
+    if not isinstance(value, str):
+        return False
+    has_letter_or_number = False
+    for ch in value:
+        point = ord(ch)
+        if any(low <= point <= high for low, high in _DEFAULT_IGNORABLE):
+            return False
+        if unicodedata.category(ch)[0] in ("L", "N"):
+            has_letter_or_number = True
+    return has_letter_or_number
+
+
 def _validate_write_admitted_body(body: dict[str, Any]) -> None:
     """Refuse a cultnet.write_admitted.v0 body that is not exactly the five keys of its closed schema."""
     expected = ("messageId", "operation", "schemaId", "recordKey")
@@ -77,6 +103,8 @@ def _validate_write_admitted_body(body: dict[str, Any]) -> None:
     for key in ("messageId", "schemaId", "recordKey"):
         if not _is_name(body[key]):
             raise ValueError(f"cultnet.write_admitted.v0 {key} must be a non-empty string")
+    if not _is_admitted_message_id(body["messageId"]):
+        raise ValueError("cultnet.write_admitted.v0 messageId must contain a letter or number and no Default_Ignorable code point")
     if body["operation"] not in ("put", "delete"):
         raise ValueError("cultnet.write_admitted.v0 operation must be put or delete")
 
