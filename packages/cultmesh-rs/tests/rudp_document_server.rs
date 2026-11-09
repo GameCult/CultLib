@@ -2983,6 +2983,324 @@ fn only_reliable_non_sequenced_writes_are_accepted_on_a_receipt_session() -> Res
     Ok(())
 }
 
+/// `bytes` with the MessagePack fixstr `from` replaced by the fixstr `to`, which may be blank.
+fn swap_fixstr(bytes: &[u8], from: &str, to: &str) -> Vec<u8> {
+    assert!(from.len() < 32 && to.len() < 32);
+    let mut needle = vec![0xa0 | from.len() as u8];
+    needle.extend_from_slice(from.as_bytes());
+    let at = bytes.windows(needle.len()).position(|window| window == needle).expect("marker is in the frame");
+    let mut out = bytes[..at].to_vec();
+    out.push(0xa0 | to.len() as u8);
+    out.extend_from_slice(to.as_bytes());
+    out.extend_from_slice(&bytes[at + needle.len()..]);
+    out
+}
+
+/// A `schemaId` or `recordKey` that is present but empty or only whitespace names nothing: the write is refused
+/// `message_invalid` like a frame that does not read (field "message", the write's id), never reaches the store,
+/// and the session goes on (write-receipt.md, rule 5; vector `error_v1_empty_schema_id_is_unreadable_and_names_the_write`).
+#[test]
+fn a_write_whose_schema_id_or_record_key_names_nothing_is_refused_and_never_handed_to_the_store() -> Result<()> {
+    let blanks = ["", " ", "\t \n"];
+    let mut connection_id = 300;
+    for blank in blanks {
+        for blank_field in ["schemaId", "recordKey"] {
+            for operation in ["put", "delete"] {
+                connection_id += 1;
+                let (schema_id, record_key) = match blank_field {
+                    "schemaId" => (blank, "note:1"),
+                    _ => ("test.raw.v1", blank),
+                };
+                // The encoder refuses a blank field, so encode a marker and swap the blank into the bytes.
+                let bad = if operation == "put" {
+                    let mut record = document("zz-key-zz", vec![1, 2, 3]);
+                    record.schema_id = "zz-schema-zz".into();
+                    encode_cultnet_message_to_vec(
+                        &CultNetMessage::DocumentPutRaw { message_id: "bad-1".into(), document: record },
+                        CultNetWireContract::CultNetSchemaV0,
+                    )?
+                } else {
+                    encode_cultnet_message_to_vec(
+                        &CultNetMessage::DocumentDelete {
+                            message_id: "bad-1".into(),
+                            schema_id: "zz-schema-zz".into(),
+                            record_key: "zz-key-zz".into(),
+                        },
+                        CultNetWireContract::CultNetSchemaV0,
+                    )?
+                };
+                let bad = swap_fixstr(&bad, "zz-schema-zz", schema_id);
+                let bad = swap_fixstr(&bad, "zz-key-zz", record_key);
+                let label = format!("{operation} with {blank_field} {blank:?}");
+                let sink = Sink::default();
+                let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+                let mut peer = client(server.local_addr()?, connection_id)?;
+                connect(&mut server, &mut [&mut peer])?;
+                send_reliable(&mut peer, &receipt_hello())?;
+                peer.send_reliable("schema", bad)?;
+                send_reliable(&mut peer, &put("good-1", "note:2", vec![1]))?;
+                let answers = answers_after(&mut server, &mut peer, 2)?;
+                assert_eq!(refusal_of(&answers[0]), (Some(CultNetErrorCode::MessageInvalid), Some("bad-1".into())), "{label}");
+                assert_eq!(error_text_and_field(&answers[0]).1, Some("message".into()), "{label}");
+                assert_eq!(answers[1], admitted("good-1", "note:2"), "{label}: the session goes on");
+                let state = sink.0.lock().unwrap();
+                assert_eq!(state.authorized, vec!["good-1".to_string()], "{label}: the store was never asked about the blank write");
+                assert_eq!(state.receipts.len(), 1, "{label}: only the good write was applied");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The sequenced-channel refusal belongs to the frame that arrived sequenced. A reliable-sequenced packet that
+/// fills the gap an earlier ordered packet was held behind delivers both frames in one go: the sequenced write is
+/// refused, the ordered write it released is admitted.
+#[test]
+fn a_sequenced_packet_releasing_a_held_ordered_write_refuses_only_its_own() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = RawPeer::connect(&mut server, 250)?;
+    peer.send(&receipt_hello())?;
+    server.poll_once()?;
+    let mut packet_for = |peer: &mut RawPeer, id: &str, ordered: bool, sequenced: bool| -> Result<Vec<cultnet_rs::CultNetRudpPacket>> {
+        let payload = encode_cultnet_message_to_vec(&put(id, &format!("note:{id}"), vec![1]), CultNetWireContract::CultNetSchemaV0)?;
+        peer.session.send_many(
+            "schema",
+            payload,
+            cultnet_rs::CultNetRudpSendOptions { reliable: true, ordered, sequenced, now_ms: 3, reliable_expire_after_ms: None },
+            Some(1200),
+        )
+    };
+    let sequenced = packet_for(&mut peer, "s1", false, true)?;
+    let ordered = packet_for(&mut peer, "o1", true, false)?;
+    // The ordered write arrives first, one sequence ahead of the gap, and is held.
+    for packet in &ordered {
+        peer.send_packet(packet)?;
+    }
+    server.poll_once()?;
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 0, "the ordered write waits behind the gap");
+    for packet in &sequenced {
+        peer.send_packet(packet)?;
+    }
+    server.poll_once()?;
+    let mut answers = Vec::new();
+    for packet in peer.drain() {
+        for frame in peer.session.receive(&packet, 4)?.delivered {
+            answers.push(decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)?);
+        }
+    }
+    let refusals: Vec<_> = answers.iter().filter(|a| matches!(a, CultNetMessage::ErrorV1 { .. })).collect();
+    assert_eq!(refusals.len(), 1, "only the sequenced write is refused: {answers:?}");
+    assert_eq!(refusal_of(refusals[0]), (Some(CultNetErrorCode::MessageInvalid), Some("s1".into())));
+    assert!(answers.contains(&admitted("o1", "note:o1")), "the released ordered write is admitted: {answers:?}");
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 1, "and applied");
+    Ok(())
+}
+
+/// The refusal of a write on a sequenced channel does not depend on the packet being the newest. A reliable-sequenced
+/// packet that arrives after a newer one on its channel is superseded: the session delivers no frame for it, yet
+/// the packet was acknowledged and will not be resent, so the server answers it from the packet's own payload.
+#[test]
+fn a_superseded_sequenced_write_is_still_refused() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = RawPeer::connect(&mut server, 253)?;
+    peer.send(&receipt_hello())?;
+    server.poll_once()?;
+    let packet_for = |peer: &mut RawPeer, id: &str| -> Result<Vec<cultnet_rs::CultNetRudpPacket>> {
+        let payload = encode_cultnet_message_to_vec(&put(id, &format!("note:{id}"), vec![1]), CultNetWireContract::CultNetSchemaV0)?;
+        peer.session.send_many(
+            "schema",
+            payload,
+            cultnet_rs::CultNetRudpSendOptions { reliable: true, ordered: false, sequenced: true, now_ms: 3, reliable_expire_after_ms: None },
+            Some(1200),
+        )
+    };
+    let older = packet_for(&mut peer, "old")?;
+    let newer = packet_for(&mut peer, "new")?;
+    let mut refused_ids = Vec::new();
+    for packets in [&newer, &older] {
+        for packet in packets {
+            peer.send_packet(packet)?;
+        }
+        server.poll_once()?;
+        for packet in peer.drain() {
+            for frame in peer.session.receive(&packet, 4)?.delivered {
+                let answer = decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)?;
+                if matches!(answer, CultNetMessage::ErrorV1 { .. }) {
+                    refused_ids.push(refusal_of(&answer).1.expect("a refusal names its write"));
+                }
+            }
+        }
+    }
+    assert_eq!(refused_ids, vec!["new".to_string(), "old".to_string()], "the superseded write is answered too");
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 0, "and nothing was applied");
+    Ok(())
+}
+
+/// One answer per write (write-receipt.md, rule 1): a sequenced packet the server already answered is answered
+/// once, however often the peer sends it again, and a packet too far ahead to be received draws nothing until it
+/// is received (the peer resends it, and the answer comes then).
+#[test]
+fn a_repeated_or_far_ahead_sequenced_write_draws_one_answer_not_one_per_send() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = RawPeer::connect(&mut server, 256)?;
+    peer.send(&receipt_hello())?;
+    server.poll_once()?;
+    let packet_for = |peer: &mut RawPeer, id: &str| -> Result<Vec<cultnet_rs::CultNetRudpPacket>> {
+        let payload = encode_cultnet_message_to_vec(&put(id, &format!("note:{id}"), vec![1]), CultNetWireContract::CultNetSchemaV0)?;
+        peer.session.send_many(
+            "schema",
+            payload,
+            cultnet_rs::CultNetRudpSendOptions { reliable: true, ordered: false, sequenced: true, now_ms: 3, reliable_expire_after_ms: None },
+            Some(1200),
+        )
+    };
+    let refusals_of = |peer: &mut RawPeer| -> Result<Vec<String>> {
+        let mut ids = Vec::new();
+        for packet in peer.drain() {
+            for frame in peer.session.receive(&packet, 4)?.delivered {
+                let answer = decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)?;
+                if matches!(answer, CultNetMessage::ErrorV1 { .. }) {
+                    ids.push(refusal_of(&answer).1.expect("a refusal names its write"));
+                }
+            }
+        }
+        Ok(ids)
+    };
+    // The same packet, sent three times (a resend whose acknowledgement was lost), is refused once.
+    let once = packet_for(&mut peer, "dup")?;
+    let mut refused = Vec::new();
+    for _ in 0..3 {
+        for packet in &once {
+            peer.send_packet(packet)?;
+        }
+        server.poll_once()?;
+        refused.extend(refusals_of(&mut peer)?);
+    }
+    assert_eq!(refused, vec!["dup".to_string()], "a repeat of an answered write is not answered again");
+
+    // A packet far past the receive window is not received: no answer yet, and none per resend.
+    let ahead = packet_for(&mut peer, "ahead")?;
+    let mut far = ahead[0].clone();
+    far.sequence = once[0].sequence + 5_000;
+    let mut refused = Vec::new();
+    for _ in 0..3 {
+        peer.send_packet(&far)?;
+        server.poll_once()?;
+        refused.extend(refusals_of(&mut peer)?);
+    }
+    assert_eq!(refused, Vec::<String>::new(), "an unreceived packet draws no answer");
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 0);
+    Ok(())
+}
+
+/// A superseded sequenced packet is answered even when its arrival fills a gap and releases another write: the
+/// frames that arrive with it do not stand in for its own.
+#[test]
+fn a_superseded_sequenced_write_is_refused_while_it_releases_a_held_ordered_write() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = RawPeer::connect(&mut server, 255)?;
+    peer.send(&receipt_hello())?;
+    server.poll_once()?;
+    let packet_for = |peer: &mut RawPeer, id: &str, ordered: bool, sequenced: bool| -> Result<Vec<cultnet_rs::CultNetRudpPacket>> {
+        let payload = encode_cultnet_message_to_vec(&put(id, &format!("note:{id}"), vec![1]), CultNetWireContract::CultNetSchemaV0)?;
+        peer.session.send_many(
+            "schema",
+            payload,
+            cultnet_rs::CultNetRudpSendOptions { reliable: true, ordered, sequenced, now_ms: 3, reliable_expire_after_ms: None },
+            Some(1200),
+        )
+    };
+    let older = packet_for(&mut peer, "old", false, true)?;
+    let ordered = packet_for(&mut peer, "o1", true, false)?;
+    let newer = packet_for(&mut peer, "new", false, true)?;
+    let mut answers = Vec::new();
+    for packets in [&newer, &ordered, &older] {
+        for packet in packets {
+            peer.send_packet(packet)?;
+        }
+        server.poll_once()?;
+        for packet in peer.drain() {
+            for frame in peer.session.receive(&packet, 4)?.delivered {
+                answers.push(decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)?);
+            }
+        }
+    }
+    let mut refused: Vec<String> = answers
+        .iter()
+        .filter(|a| matches!(a, CultNetMessage::ErrorV1 { .. }))
+        .map(|a| refusal_of(a).1.expect("a refusal names its write"))
+        .collect();
+    refused.sort();
+    assert_eq!(refused, vec!["new".to_string(), "old".to_string()], "{answers:?}");
+    assert!(answers.contains(&admitted("o1", "note:o1")), "the released ordered write is admitted: {answers:?}");
+    Ok(())
+}
+
+/// The refusal reaches a sequenced write however far apart its fragments' sequences sit: other traffic can take the
+/// sequences between the first fragment and the last, further back than the duplicate test's receive window.
+#[test]
+fn a_sequenced_write_whose_fragments_span_more_than_the_receive_window_is_refused() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = RawPeer::connect(&mut server, 254)?;
+    peer.send(&receipt_hello())?;
+    server.poll_once()?;
+    let payload = encode_cultnet_message_to_vec(&put("far", "note:far", vec![1; 64]), CultNetWireContract::CultNetSchemaV0)?;
+    let mut packets = peer.session.send_many(
+        "schema",
+        payload,
+        cultnet_rs::CultNetRudpSendOptions { reliable: true, ordered: false, sequenced: true, now_ms: 3, reliable_expire_after_ms: None },
+        Some(32),
+    )?;
+    let last = packets.pop().expect("the write is fragmented");
+    assert!(!packets.is_empty());
+    let mut next = last.sequence;
+    let mut refused_ids = Vec::new();
+    for packet in &packets {
+        peer.send_packet(packet)?;
+        server.poll_once()?;
+    }
+    // 5,000 reliable packets on another channel, in order, take the sequences between the fragments.
+    for count in 0..5_000 {
+        let mut filler = packets[0].clone();
+        filler.channel_id = "filler".into();
+        filler.sequenced = false;
+        filler.fragment_id = 0;
+        filler.fragment_index = 0;
+        filler.fragment_count = 0;
+        filler.payload = vec![0];
+        filler.sequence = next;
+        next += 1;
+        peer.send_packet(&filler)?;
+        server.poll_once()?;
+        if count % 100 == 99 {
+            // Read what the server sent, so the socket buffer never holds back the refusal.
+            for packet in peer.drain() {
+                peer.session.receive(&packet, 4)?;
+            }
+        }
+    }
+    let mut last = last;
+    last.sequence = next;
+    peer.send_packet(&last)?;
+    server.poll_once()?;
+    for packet in peer.drain() {
+        for frame in peer.session.receive(&packet, 4)?.delivered {
+            let answer = decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)?;
+            if matches!(answer, CultNetMessage::ErrorV1 { .. }) {
+                refused_ids.push(refusal_of(&answer).1.expect("a refusal names its write"));
+            }
+        }
+    }
+    assert_eq!(refused_ids, vec!["far".to_string()]);
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 0, "and nothing was applied");
+    Ok(())
+}
+
 /// A refused write is traffic: the peer that sends it is not idle, so its session outlives the idle timeout measured
 /// from the refusal and not from the packet before it.
 #[test]
