@@ -14,7 +14,9 @@ using R3;
 // ordered payload, and on the pipe it is a 4-byte big-endian length followed by the frame.
 namespace GameCult.Networking.InteropPeer
 {
-    [CultDocument("receipt.interop_note", ReceiptHarness.SchemaId)]
+    // CompatibleSchemaIds are the names the spec's blankFields vectors admit (U+200B, U+001C, and a name padded with NBSP and EM SPACE):
+    // a name is any string that is not blank, so the store must hold a record put under one of them.
+    [CultDocument("receipt.interop_note", ReceiptHarness.SchemaId, CompatibleSchemaIds = ["\u200b", "\u001c", "\u00a0a\u2003"])]
     [MessagePack.MessagePackObject]
     public sealed class ReceiptInteropNote
     {
