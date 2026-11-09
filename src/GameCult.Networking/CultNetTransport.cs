@@ -3571,7 +3571,7 @@ namespace GameCult.Networking
             try
             {
                 SendSchema(CultNetErrorV1Message.From(
-                    CultNetErrorMessage.ForMessageInvalid("message", "the message could not be read"),
+                    CultNetErrorMessage.ForUnreadableMessage(),
                     CultNetReadableMessageId.From(payload)));
             }
             catch (Exception)

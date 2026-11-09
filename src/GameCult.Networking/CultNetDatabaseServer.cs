@@ -390,15 +390,32 @@ namespace GameCult.Networking
             }
         }
 
-        // A refusal: error.v1 carrying the write's id for a receipt-capable connection, the v0 error for any other.
-        // An empty or blank schemaId or recordKey names no record: refused as a frame that does not read, exactly as the Rust
-        // server's decoder refuses it (write-receipt.md, "Required fields"), never handed to the store.
+        // A write that names nothing is refused as a frame that does not read, exactly as the Rust server's decoder refuses it
+        // (write-receipt.md, "Required fields"), never handed to the store: a blank schemaId, recordKey or storedAt, an empty
+        // payload, and a source id or tag that is present but blank.
         private static bool IsUnreadableWriteTarget(string? schemaId, string? recordKey) =>
-            string.IsNullOrWhiteSpace(schemaId) || string.IsNullOrWhiteSpace(recordKey);
+            IsBlank(schemaId) || IsBlank(recordKey);
 
-        private static CultNetErrorMessage UnreadableWriteTarget() =>
-            CultNetErrorMessage.ForMessageInvalid("message", "the message could not be read");
+        private static bool IsUnreadableDocument(CultNetRawDocumentRecord document) =>
+            IsUnreadableWriteTarget(document.SchemaId, document.RecordKey)
+            || IsBlank(document.StoredAt)
+            || document.Payload == null || document.Payload.Length == 0
+            || IsPresentButBlank(document.SourceRuntimeId)
+            || IsPresentButBlank(document.SourceAgentId)
+            || IsPresentButBlank(document.SourceRole)
+            || document.Tags != null && document.Tags.Any(IsBlank);
 
+        private static bool IsPresentButBlank(string? value) => value != null && IsBlank(value);
+
+        // Blank is the Unicode White_Space property, listed here and in write-receipt.md, not char.IsWhiteSpace: the platform's
+        // own test follows its Unicode tables (and has put U+180E in the set), the spec's does not move. A null is not text.
+        private static bool IsBlank(string? value) => value == null || value.All(IsWhiteSpaceCodePoint);
+
+        private static bool IsWhiteSpaceCodePoint(char c) =>
+            c is (>= '\u0009' and <= '\u000D') or '\u0020' or '\u0085' or '\u00A0' or '\u1680'
+                or (>= '\u2000' and <= '\u200A') or '\u2028' or '\u2029' or '\u202F' or '\u205F' or '\u3000';
+
+        // A refusal: error.v1 carrying the write's id for a receipt-capable connection, the v0 error for any other.
         private static void Refuse(CultNetServerPeer peer, CultNetReceiptedWrite? write, CultNetErrorMessage error)
         {
             if (write != null) write.Refused(error);
@@ -439,9 +456,9 @@ namespace GameCult.Networking
                 return;
             }
 
-            if (IsUnreadableWriteTarget(message.Document!.SchemaId, message.Document.RecordKey))
+            if (IsUnreadableDocument(message.Document!))
             {
-                Refuse(peer, write, UnreadableWriteTarget());
+                Refuse(peer, write, CultNetErrorMessage.ForUnreadableMessage());
                 return;
             }
 
@@ -522,7 +539,7 @@ namespace GameCult.Networking
 
             if (IsUnreadableWriteTarget(message.SchemaId, message.RecordKey))
             {
-                Refuse(peer, write, UnreadableWriteTarget());
+                Refuse(peer, write, CultNetErrorMessage.ForUnreadableMessage());
                 return;
             }
 

@@ -39,7 +39,7 @@ fn the_new_frames_decode_back_equal() {
     );
     // error.v1 with a nil id round-trips as nil, and the code enum is v0's.
     let error = CultNetMessage::ErrorV1 {
-        error: "message_invalid: unreadable frame".into(),
+        error: "message_invalid: the message could not be read".into(),
         code: Some(CultNetErrorCode::MessageInvalid),
         details: None,
         message_id: None,

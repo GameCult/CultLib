@@ -60,10 +60,10 @@
     },
     {
       "name": "error_v1_unreadable_frame_has_null_message_id",
-      "messagePackHex": "86AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7631A56572726F72D9216D6573736167655F696E76616C69643A20756E7265616461626C65206672616D65AB726F7574696E6748696E74C0A4636F6465AF6D6573736167655F696E76616C6964A764657461696C7384A56669656C64A76D657373616765A576616C7565C0A461734F66C0A763757272656E74C0A96D6573736167654964C0",
+      "messagePackHex": "86AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7631A56572726F72D92E6D6573736167655F696E76616C69643A20746865206D65737361676520636F756C64206E6F742062652072656164AB726F7574696E6748696E74C0A4636F6465AF6D6573736167655F696E76616C6964A764657461696C7384A56669656C64A76D657373616765A576616C7565C0A461734F66C0A763757272656E74C0A96D6573736167654964C0",
       "message": {
         "schemaVersion": "cultnet.error.v1",
-        "error": "message_invalid: unreadable frame",
+        "error": "message_invalid: the message could not be read",
         "routingHint": null,
         "code": "message_invalid",
         "details": {
@@ -77,10 +77,10 @@
     },
     {
       "name": "error_v1_empty_schema_id_is_unreadable_and_names_the_write",
-      "messagePackHex": "86AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7631A56572726F72D9216D6573736167655F696E76616C69643A20756E7265616461626C65206672616D65AB726F7574696E6748696E74C0A4636F6465AF6D6573736167655F696E76616C6964A764657461696C7384A56669656C64A76D657373616765A576616C7565C0A461734F66C0A763757272656E74C0A96D6573736167654964A57075742D31",
+      "messagePackHex": "86AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7631A56572726F72D92E6D6573736167655F696E76616C69643A20746865206D65737361676520636F756C64206E6F742062652072656164AB726F7574696E6748696E74C0A4636F6465AF6D6573736167655F696E76616C6964A764657461696C7384A56669656C64A76D657373616765A576616C7565C0A461734F66C0A763757272656E74C0A96D6573736167654964A57075742D31",
       "message": {
         "schemaVersion": "cultnet.error.v1",
-        "error": "message_invalid: unreadable frame",
+        "error": "message_invalid: the message could not be read",
         "routingHint": null,
         "code": "message_invalid",
         "details": {
@@ -110,6 +110,45 @@
       }
     }
   ],
+  "blankFields": {
+    "semantics": "A put whose document 'names nothing' is refused like a frame that does not read (error.v1 message_invalid, details.field \"message\", the write's id, the fixed text of error_v1_empty_schema_id_is_unreadable_and_names_the_write) and never applied, on every connection, receipt-capable or not. Each case starts from this valid document: schemaId note.v0, recordKey note:1, storedAt 2026-11-08T00:00:00Z, payload 81A16101 (hex), no source ids, no tags; 'set' replaces or adds the named fields. A blank string is empty or made only of Unicode White_Space code points (the list in whiteSpaceCodePoints, the PropList property, the same in every runtime; U+200B, U+FEFF, U+180E and U+001C to U+001F are not White_Space, though some platforms' whitespace tests accept some of them). Fields not listed are valid. 'unset' means the key is absent or nil, which is not blank: those cases are admitted.",
+    "validPutPayloadHex": "81A16101",
+    "whiteSpaceCodePoints": ["0009","000A","000B","000C","000D","0020","0085","00A0","1680","2000","2001","2002","2003","2004","2005","2006","2007","2008","2009","200A","2028","2029","202F","205F","3000"],
+    "notWhiteSpaceCodePoints": ["200B","200C","200D","2060","FEFF","180E","001C","001D","001E","001F"],
+    "codePointCases": "For every code point in whiteSpaceCodePoints, each of schemaId, recordKey, storedAt, sourceRuntimeId, sourceAgentId, sourceRole and one tags entry, set alone to a string of just that code point (and to that code point repeated three times), is refused; for every code point in notWhiteSpaceCodePoints the same string is not blank and the put is admitted.",
+    "cases": [
+      { "name": "valid_document_is_admitted", "set": {}, "outcome": "admitted" },
+      { "name": "empty_schema_id", "set": { "schemaId": "" }, "outcome": "refused" },
+      { "name": "blank_schema_id", "set": { "schemaId": "   " }, "outcome": "refused" },
+      { "name": "empty_record_key", "set": { "recordKey": "" }, "outcome": "refused" },
+      { "name": "blank_record_key", "set": { "recordKey": "  " }, "outcome": "refused" },
+      { "name": "empty_stored_at", "set": { "storedAt": "" }, "outcome": "refused" },
+      { "name": "blank_stored_at", "set": { "storedAt": " " }, "outcome": "refused" },
+      { "name": "empty_payload", "set": { "payloadHex": "" }, "outcome": "refused" },
+      { "name": "blank_source_runtime_id", "set": { "sourceRuntimeId": "" }, "outcome": "refused" },
+      { "name": "blank_source_agent_id", "set": { "sourceAgentId": "  " }, "outcome": "refused" },
+      { "name": "blank_source_role", "set": { "sourceRole": "" }, "outcome": "refused" },
+      { "name": "blank_tag", "set": { "tags": ["a", " "] }, "outcome": "refused" },
+      { "name": "nbsp_schema_id", "set": { "schemaId": "\u00a0" }, "outcome": "refused" },
+      { "name": "em_space_record_key", "set": { "recordKey": "\u2003\u2003" }, "outcome": "refused" },
+      { "name": "next_line_stored_at", "set": { "storedAt": "\u0085" }, "outcome": "refused" },
+      { "name": "line_separator_source_runtime_id", "set": { "sourceRuntimeId": "\u2028" }, "outcome": "refused" },
+      { "name": "ideographic_space_source_agent_id", "set": { "sourceAgentId": "\u3000" }, "outcome": "refused" },
+      { "name": "nbsp_source_role", "set": { "sourceRole": " \u00a0 " }, "outcome": "refused" },
+      { "name": "em_space_tag", "set": { "tags": ["a", "\u2003"] }, "outcome": "refused" },
+      { "name": "next_line_tag", "set": { "tags": ["\u0085"] }, "outcome": "refused" },
+      { "name": "zero_width_space_schema_id_is_a_name", "set": { "schemaId": "\u200b" }, "outcome": "admitted" },
+      { "name": "zero_width_space_record_key_is_a_name", "set": { "recordKey": "\u200b" }, "outcome": "admitted" },
+      { "name": "zero_width_space_tag_is_a_name", "set": { "tags": ["\u200b"] }, "outcome": "admitted" },
+      { "name": "bom_stored_at_is_a_name", "set": { "storedAt": "\ufeff" }, "outcome": "admitted" },
+      { "name": "mongolian_vowel_separator_source_role_is_a_name", "set": { "sourceRole": "\u180e" }, "outcome": "admitted" },
+      { "name": "padded_name_is_a_name", "set": { "schemaId": "\u00a0a\u2003", "tags": [" a"] }, "outcome": "admitted" },
+      { "name": "file_separator_schema_id_is_a_name", "set": { "schemaId": "\u001c" }, "outcome": "admitted" },
+      { "name": "source_ids_and_tags_present_and_named", "set": { "sourceRuntimeId": "r", "sourceAgentId": "a", "sourceRole": "w", "tags": ["a"] }, "outcome": "admitted" },
+      { "name": "source_ids_and_tags_nil", "set": { "sourceRuntimeId": null, "sourceAgentId": null, "sourceRole": null, "tags": null }, "outcome": "admitted" },
+      { "name": "empty_tag_list", "set": { "tags": [] }, "outcome": "admitted" }
+    ]
+  },
   "schemaInvalid": [
     {
       "name": "write_admitted_with_an_error_key",
@@ -215,7 +254,7 @@
     }
   ],
   "scenarios": {
-    "semantics": "Each scenario replays events in atMs order against a client that sent each write at its send event; a tick advances the clock without a frame. 'window' names the constant in vectors.constants that applies (server receipt -> RECEIPT_RESULT_WINDOW_MS, legacy -> LEGACY_RESULT_WINDOW_MS); a tick at or after the window settles unanswered writes as unconfirmed. expect gives the outcome the caller was told per write id; recorded, when present, is the write handle's later state. admitted/refused/unconfirmed are three distinct results; no scenario may settle admitted without a write_admitted frame carrying the write's id.",
+    "semantics": "Each scenario replays events in atMs order against a client that sent each write at its send event; a tick advances the clock without a frame. An event is atMs plus exactly one of: send (a write goes out), frame (a decoded frame arrives), transportAck (delivery, never an answer; the tracker has no input for it), tick (the clock advances), sendFailed (the client's own send of that write failed), sessionEnd (the session ended). Any other key is a defect in the vectors or the runner. A window ends when a write's age reaches it, so an event at exactly sentAt+window finds the write already unconfirmed. 'window' names the constant in vectors.constants that applies (server receipt -> RECEIPT_RESULT_WINDOW_MS, legacy -> LEGACY_RESULT_WINDOW_MS); a tick at or after the window settles unanswered writes as unconfirmed. expect gives the outcome the caller was told per write id; recorded, when present, is the write handle's later state. admitted/refused/unconfirmed are three distinct results; no scenario may settle admitted without a write_admitted frame carrying the write's id.",
     "cases": [
       {
         "name": "receipt_admits",
@@ -870,6 +909,266 @@
             "outcome": "admitted"
           }
         }
+      },
+      {
+        "name": "error_v1_without_id_with_one_write_in_flight_refuses",
+        "description": "An error.v1 whose messageId is nil names no write: like error.v0 it is attributable only because one write is unanswered.",
+        "server": "receipt",
+        "window": "RECEIPT_RESULT_WINDOW_MS",
+        "writes": [
+          "w1"
+        ],
+        "events": [
+          {
+            "atMs": 0,
+            "send": "w1"
+          },
+          {
+            "atMs": 30,
+            "frame": {
+              "schemaVersion": "cultnet.error.v1",
+              "error": "message_invalid",
+              "routingHint": null,
+              "code": "message_invalid",
+              "details": null,
+              "messageId": null
+            }
+          }
+        ],
+        "expect": {
+          "w1": {
+            "outcome": "refused",
+            "code": "message_invalid"
+          }
+        }
+      },
+      {
+        "name": "error_v1_without_id_with_two_writes_in_flight_is_unattributed",
+        "description": "An error.v1 with a nil messageId settles neither of two unanswered writes; each ends unconfirmed at its window.",
+        "server": "receipt",
+        "window": "RECEIPT_RESULT_WINDOW_MS",
+        "writes": [
+          "w1",
+          "w2"
+        ],
+        "events": [
+          {
+            "atMs": 0,
+            "send": "w1"
+          },
+          {
+            "atMs": 1,
+            "send": "w2"
+          },
+          {
+            "atMs": 30,
+            "frame": {
+              "schemaVersion": "cultnet.error.v1",
+              "error": "message_invalid",
+              "routingHint": null,
+              "code": "message_invalid",
+              "details": null,
+              "messageId": null
+            }
+          },
+          {
+            "atMs": 5001,
+            "tick": true
+          }
+        ],
+        "expect": {
+          "w1": {
+            "outcome": "unconfirmed",
+            "reason": "window_elapsed"
+          },
+          "w2": {
+            "outcome": "unconfirmed",
+            "reason": "window_elapsed"
+          }
+        }
+      },
+      {
+        "name": "send_failed_is_unconfirmed_and_touches_no_other_write",
+        "description": "The client's own send of w1 failed: w1 is unconfirmed local_send_failed, never refused; w2 is unaffected and settles on its own receipt.",
+        "server": "receipt",
+        "window": "RECEIPT_RESULT_WINDOW_MS",
+        "writes": [
+          "w1",
+          "w2"
+        ],
+        "events": [
+          {
+            "atMs": 0,
+            "send": "w1"
+          },
+          {
+            "atMs": 1,
+            "send": "w2"
+          },
+          {
+            "atMs": 2,
+            "sendFailed": "w1"
+          },
+          {
+            "atMs": 20,
+            "frame": {
+              "schemaVersion": "cultnet.write_admitted.v0",
+              "messageId": "w2",
+              "operation": "put",
+              "schemaId": "note.v0",
+              "recordKey": "note:1"
+            }
+          }
+        ],
+        "expect": {
+          "w1": {
+            "outcome": "unconfirmed",
+            "reason": "local_send_failed"
+          },
+          "w2": {
+            "outcome": "admitted"
+          }
+        }
+      },
+      {
+        "name": "error_without_id_after_the_window_settles_nothing",
+        "description": "Once w1 is unconfirmed no write is unanswered, so an error that names no write is attributed to nothing and records nothing on w1.",
+        "server": "legacy",
+        "window": "LEGACY_RESULT_WINDOW_MS",
+        "writes": [
+          "w1"
+        ],
+        "events": [
+          {
+            "atMs": 0,
+            "send": "w1"
+          },
+          {
+            "atMs": 500,
+            "tick": true
+          },
+          {
+            "atMs": 600,
+            "frame": {
+              "schemaVersion": "cultnet.error.v0",
+              "error": "write_not_authorized",
+              "routingHint": null,
+              "code": "write_not_authorized",
+              "details": null
+            }
+          }
+        ],
+        "expect": {
+          "w1": {
+            "outcome": "unconfirmed",
+            "reason": "window_elapsed"
+          }
+        }
+      },
+      {
+        "name": "receipt_one_millisecond_inside_the_window_admits",
+        "description": "A receipt 1 ms before the window ends settles the write admitted.",
+        "server": "receipt",
+        "window": "RECEIPT_RESULT_WINDOW_MS",
+        "writes": [
+          "w1"
+        ],
+        "events": [
+          {
+            "atMs": 0,
+            "send": "w1"
+          },
+          {
+            "atMs": 4999,
+            "frame": {
+              "schemaVersion": "cultnet.write_admitted.v0",
+              "messageId": "w1",
+              "operation": "put",
+              "schemaId": "note.v0",
+              "recordKey": "note:1"
+            }
+          }
+        ],
+        "expect": {
+          "w1": {
+            "outcome": "admitted"
+          }
+        }
+      },
+      {
+        "name": "receipt_at_the_exact_window_boundary_is_late",
+        "description": "The window ends when the write's age reaches it: a receipt at exactly that instant finds w1 already unconfirmed and is recorded admitted_late.",
+        "server": "receipt",
+        "window": "RECEIPT_RESULT_WINDOW_MS",
+        "writes": [
+          "w1"
+        ],
+        "events": [
+          {
+            "atMs": 0,
+            "send": "w1"
+          },
+          {
+            "atMs": 5000,
+            "frame": {
+              "schemaVersion": "cultnet.write_admitted.v0",
+              "messageId": "w1",
+              "operation": "put",
+              "schemaId": "note.v0",
+              "recordKey": "note:1"
+            }
+          }
+        ],
+        "expect": {
+          "w1": {
+            "outcome": "unconfirmed",
+            "reason": "window_elapsed",
+            "recorded": "admitted_late"
+          }
+        }
+      },
+      {
+        "name": "send_after_session_end_is_unconfirmed_at_once",
+        "description": "A write registered after the session ended can never be answered: it settles unconfirmed session_ended when sent, and the earlier write keeps its own receipt.",
+        "server": "receipt",
+        "window": "RECEIPT_RESULT_WINDOW_MS",
+        "writes": [
+          "w1",
+          "w2"
+        ],
+        "events": [
+          {
+            "atMs": 0,
+            "send": "w1"
+          },
+          {
+            "atMs": 5,
+            "frame": {
+              "schemaVersion": "cultnet.write_admitted.v0",
+              "messageId": "w1",
+              "operation": "put",
+              "schemaId": "note.v0",
+              "recordKey": "note:1"
+            }
+          },
+          {
+            "atMs": 40,
+            "sessionEnd": true
+          },
+          {
+            "atMs": 50,
+            "send": "w2"
+          }
+        ],
+        "expect": {
+          "w1": {
+            "outcome": "admitted"
+          },
+          "w2": {
+            "outcome": "unconfirmed",
+            "reason": "session_ended"
+          }
+        }
       }
     ]
   },
@@ -877,6 +1176,13 @@
     "RECEIPT_RESULT_WINDOW_MS": 5000,
     "LEGACY_RESULT_WINDOW_MS": 500,
     "DEDUPE_RETENTION_MS": 600000
+  },
+  "counts": {
+    "semantics": "How many of each a runner must have run. A runner that reads fewer (a parser that drops entries, a loop over nothing) fails instead of passing quietly; a runner that meets an event key outside scenarios.semantics fails too.",
+    "wire": 7,
+    "schemaInvalid": 7,
+    "contentHashCases": 4,
+    "scenarioCases": 25
   },
   "contentHash": {
     "definition": "sha256(msgpack([operation, schemaId, recordKey, payload])), payload a msgpack bin for a put and nil for a delete; hex lowercase",
