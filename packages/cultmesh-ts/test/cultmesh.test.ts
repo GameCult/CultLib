@@ -2986,8 +2986,9 @@ test("CultMesh TS publishes one registered document to a RUDP catalog", async ()
           maxFragmentBytes: 1024,
           maxPendingReliablePackets: 16,
           connectTimeoutMs: 1_000,
-          flushTimeoutMs: 25,
-          resultWindowMs: 100,
+          // The flush is bounded by the result window, so the window must outlast the transport ack on a loaded
+          // runner: a short one turns a slow ack into local_send_failed, which is not the path this test checks.
+          resultWindowMs: 750,
           sourceRole: "test-provider",
         },
       ),
