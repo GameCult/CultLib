@@ -31,7 +31,7 @@ jobs:
       github.event_name == 'pull_request' ||
       (github.event_name == 'push' &&
         (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/cultmesh-quic-native-v')))
-    runs-on: docker
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Check out CultLib
@@ -90,11 +90,11 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cultmesh-quic-native-v'))
-    runs-on: docker
+    runs-on: ubuntu-latest
     # Q6 A: this pinned Debian 13 container is the only permitted Linux
     # release builder. The digest is the pin; the `debian:13` tag is only a
     # label. The artifact links against this image's glibc (2.41);
-    # a bare runner (label `docker`) has no pinned glibc (a GitHub ubuntu-latest image carried 2.39), which is not the deploy host's
+    # a bare runner's OS image has its own glibc (a GitHub ubuntu-latest image carried 2.39), which is not the deploy host's
     # OS (docs/typescript-quic-realtime-cut.md:2192-2197).
     container:
       image: debian:13@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1
@@ -134,7 +134,7 @@ jobs:
     name: Release native binaries
     needs: [build-win32-x64, build-linux-x64]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cultmesh-quic-native-v')
-    runs-on: docker
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write

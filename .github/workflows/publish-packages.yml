@@ -50,7 +50,7 @@ jobs:
   cultcache-ts:
     name: "@gamecult/cultcache-ts to npm"
     if: startsWith(github.ref, 'refs/tags/cultcache-ts-v') || inputs.package == 'cultcache-ts'
-    runs-on: docker
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       # fetch-depth: 0 so the semver check in the release step can see every previously
@@ -103,7 +103,7 @@ jobs:
       fail-fast: false
       matrix:
         package: [cultcache-py, cultnet-py, cultmesh-py]
-    runs-on: docker
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: pypi
     permissions:
