@@ -49,6 +49,7 @@ export class WriteTracker {
   readonly #windowMs: number;
   readonly #onSettle?: (messageId: string, settlement: WriteSettlement) => void;
   readonly #writes = new Map<string, Entry>();
+  #ended = false;
 
   constructor(options: WriteTrackerOptions) {
     this.#windowMs = options.windowMs;
@@ -58,7 +59,11 @@ export class WriteTracker {
   /** Registers a write sent at `atMs`. A messageId is minted once per session: re-sending a known id is the same write. */
   send(messageId: string, atMs: number): void {
     this.tick(atMs);
-    if (!this.#writes.has(messageId)) this.#writes.set(messageId, { sentAtMs: atMs, state: { outcome: "pending" } });
+    if (this.#writes.has(messageId)) return;
+    const entry: Entry = { sentAtMs: atMs, state: { outcome: "pending" } };
+    this.#writes.set(messageId, entry);
+    // On a session that already ended nothing can answer this write.
+    if (this.#ended) this.#settle(messageId, entry, { outcome: "unconfirmed", reason: "session_ended" });
   }
 
   /** Feeds one decoded frame received at `atMs`. Frames that are not answers to a write are ignored. */
@@ -93,9 +98,10 @@ export class WriteTracker {
     }
   }
 
-  /** The session ended: every unanswered write settles unconfirmed. */
+  /** The session ended: every unanswered write settles unconfirmed, and so does any write sent afterwards. */
   sessionEnd(atMs: number): void {
     this.tick(atMs);
+    this.#ended = true;
     for (const [messageId, entry] of this.#writes) {
       if (entry.state.outcome === "pending") this.#settle(messageId, entry, { outcome: "unconfirmed", reason: "session_ended" });
     }

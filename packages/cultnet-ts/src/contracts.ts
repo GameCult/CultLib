@@ -1422,7 +1422,7 @@ function validateBinaryMessageRoot(
   if (candidate.schemaVersion !== schemaVersion) {
     throw new Error(`Validation failed for ${schemaVersion}: /schemaVersion: must equal ${schemaVersion}`);
   }
-  if (typeof candidate.messageId !== "string" || candidate.messageId.trim().length === 0) {
+  if (typeof candidate.messageId !== "string" || isBlank(candidate.messageId)) {
     throw new Error(`Validation failed for ${schemaVersion}: /messageId: must be a non-empty string`);
   }
 
@@ -1460,8 +1460,13 @@ function validateRawDocumentRecord(
   requireOptionalStringArray(candidate.tags, `${instancePath}/tags`);
 }
 
+/** Blank is empty or only Unicode White_Space (write-receipt.md, rule 5), not `trim()`: JS trims U+FEFF and keeps U+0085. */
+function isBlank(value: string): boolean {
+  return /^\p{White_Space}*$/u.test(value);
+}
+
 function requireNonEmptyString(input: unknown, instancePath: string): void {
-  if (typeof input !== "string" || input.trim().length === 0) {
+  if (typeof input !== "string" || isBlank(input)) {
     throw new Error(`Validation failed for raw CultNet document record: ${instancePath}: must be a non-empty string`);
   }
 }
@@ -1477,7 +1482,7 @@ function requireOptionalStringArray(input: unknown, instancePath: string): void 
   if (typeof input === "undefined" || input === null) {
     return;
   }
-  if (!Array.isArray(input) || input.some((item) => typeof item !== "string" || item.trim().length === 0)) {
+  if (!Array.isArray(input) || input.some((item) => typeof item !== "string" || isBlank(item))) {
     throw new Error(`Validation failed for raw CultNet document record: ${instancePath}: must be an array of non-empty strings`);
   }
 }
