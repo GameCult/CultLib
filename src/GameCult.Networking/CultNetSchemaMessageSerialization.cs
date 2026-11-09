@@ -111,7 +111,7 @@ namespace GameCult.Networking
     {
         private static readonly System.Text.UTF8Encoding StrictUtf8 = new(false, true);
 
-        /// <summary>Throws unless the frame's top-level <c>messageId</c> is a valid write_admitted id; other keys are left to the serializer.</summary>
+        /// <summary>Throws unless every top-level <c>messageId</c> key of the frame is a valid write_admitted id; other keys are left to the serializer.</summary>
         public static void Require(byte[] payload)
         {
             var reader = new MessagePackReader(payload);
@@ -125,7 +125,7 @@ namespace GameCult.Networking
                     try { id = StrictUtf8.GetString(reader.ReadStringSequence()!.Value.ToArray()); }
                     catch (System.Text.DecoderFallbackException) { throw new MessagePackSerializationException("cultnet.write_admitted.v0 messageId is not valid UTF-8."); }
                     if (!IsValid(id)) throw new MessagePackSerializationException("cultnet.write_admitted.v0 messageId must contain a letter or number and no Default_Ignorable code point.");
-                    return;
+                    continue; // a repeated messageId key is checked too: the serializer keeps the last, so every one must be valid
                 }
 
                 if (key == null) reader.Skip();
