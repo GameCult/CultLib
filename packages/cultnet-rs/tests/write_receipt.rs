@@ -201,3 +201,40 @@ fn write_admitted_message_id_vectors_are_refused_or_accepted_raw() {
     }
     assert!(failures.is_empty(), "{} failing:\n{}", failures.len(), failures.join("\n"));
 }
+
+/// The generated ranges file is the independent copy of the embedded tables: first, last and the points either side of every range.
+#[test]
+fn every_range_of_the_unicode_tables_is_pinned_at_both_ends() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../contracts/cultnet/interop/write-admitted-message-id-ranges.json");
+    let ranges: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let letters = ranges["letterOrNumber"].as_array().unwrap();
+    let ignorable = ranges["defaultIgnorable"].as_array().unwrap();
+    assert!(letters.len() > 700);
+    assert_eq!(ignorable.len(), 17);
+    let template = unhex("85AD736368656D6156657273696F6EB963756C746E65742E77726974655F61646D69747465642E7630A96D6573736167654964A57075742D31A96F7065726174696F6EA3707574A8736368656D614964A76E6F74652E7630A97265636F72644B6579A66E6F74653A31");
+    let old_id_at = template.windows(5).position(|w| w == b"put-1").unwrap() - 1;
+    let accepted = |id: &str| {
+        let header = vec![0xA0 | id.len() as u8];
+        let frame = [&template[..old_id_at], &header[..], id.as_bytes(), &template[old_id_at + 6..]].concat();
+        decode_cultnet_message_from_slice(&frame, CultNetWireContract::CultNetSchemaV0).is_ok()
+    };
+    let point = |value: i64| char::from_u32(value as u32).unwrap().to_string();
+    let mut failures = Vec::new();
+    for range in letters {
+        let (low, high) = (range[0].as_i64().unwrap(), range[1].as_i64().unwrap());
+        for (at, want) in [(low, true), (high, true), (low - 1, false), (high + 1, false)] {
+            if accepted(&point(at)) != want {
+                failures.push(format!("U+{at:X} alone should be {}", if want { "accepted" } else { "refused" }));
+            }
+        }
+    }
+    for range in ignorable {
+        let (low, high) = (range[0].as_i64().unwrap(), range[1].as_i64().unwrap());
+        for (at, want) in [(low, false), (high, false), (low - 1, true), (high + 1, true)] {
+            if accepted(&format!("a{}", point(at))) != want {
+                failures.push(format!("a + U+{at:X} should be {}", if want { "accepted" } else { "refused" }));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{} failing:\n{}", failures.len(), failures.join("\n"));
+}

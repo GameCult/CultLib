@@ -94,6 +94,32 @@ class WriteReceiptVectorTests(unittest.TestCase):
                 failures.append(f"{case['name']}: expected {case['expect']}")
         self.assertEqual(failures, [])
 
+    def test_every_range_of_the_unicode_tables_is_pinned_at_both_ends(self) -> None:
+        # write-admitted-message-id-ranges.json is the generated, independent copy: for each letter-or-number range its first and
+        # last point are accepted and the points either side refused; for each Default_Ignorable range "a" beside its first and
+        # last point is refused and beside the points either side accepted. Deleting or narrowing any embedded range fails here.
+        ranges = json.loads((_INTEROP / "write-admitted-message-id-ranges.json").read_text(encoding="utf-8"))
+        self.assertGreater(len(ranges["letterOrNumber"]), 700)
+        self.assertEqual(len(ranges["defaultIgnorable"]), 17)
+
+        def accepted(text: str) -> bool:
+            try:
+                parse_message(_pack(_admitted(messageId=text)))
+                return True
+            except ValueError:
+                return False
+
+        failures = []
+        for low, high in ranges["letterOrNumber"]:
+            for point, want in ((low, True), (high, True), (low - 1, False), (high + 1, False)):
+                if accepted(chr(point)) != want:
+                    failures.append(f"U+{point:04X} alone should be {'accepted' if want else 'refused'}")
+        for low, high in ranges["defaultIgnorable"]:
+            for point, want in ((low, False), (high, False), (low - 1, True), (high + 1, True)):
+                if accepted("a" + chr(point)) != want:
+                    failures.append(f"a + U+{point:04X} should be {'accepted' if want else 'refused'}")
+        self.assertEqual(failures, [])
+
     def test_content_hash_matches_every_vector(self) -> None:
         for case in _VECTORS["contentHash"]["cases"]:
             payload = None if case["payloadHex"] is None else bytes.fromhex(case["payloadHex"])

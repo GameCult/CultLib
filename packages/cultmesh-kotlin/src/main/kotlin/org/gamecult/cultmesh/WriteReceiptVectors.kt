@@ -68,6 +68,38 @@ fun replayWriteReceiptVectors(path: String): Boolean {
         }
     }
 
+    // The generated ranges file is the independent copy of the embedded tables: first, last and the points either side of every
+    // range, so deleting or narrowing any range fails here.
+    check("unicodeTableRanges") {
+        @Suppress("UNCHECKED_CAST")
+        val ranges = JsonReader(File(File(path).parentFile, "write-admitted-message-id-ranges.json").readText(Charsets.UTF_8)).readDocument() as Map<String, Any?>
+        fun pairs(key: String) = list(ranges[key]).map { list(it).map { n -> (n as Long).toInt() } }
+        val letters = pairs("letterOrNumber")
+        val ignorable = pairs("defaultIgnorable")
+        val problems = mutableListOf<String>()
+        if (letters.size <= 700 || ignorable.size != 17) problems += "ranges file holds ${letters.size} and ${ignorable.size} ranges"
+        fun accepted(id: String): Boolean = try {
+            decodeReceiptFrame(parseCultNetMessage(MessagePackWriter().value(linkedMapOf(
+                "schemaVersion" to WRITE_ADMITTED_VERSION, "messageId" to id, "operation" to "put", "schemaId" to "note.v0", "recordKey" to "note:1",
+            )).toByteArray()))
+            true
+        } catch (_: IOException) { false }
+        for ((low, high) in letters) for ((point, want) in listOf(low to true, high to true, low - 1 to false, high + 1 to false)) {
+            if (accepted(String(Character.toChars(point))) != want) problems += "U+${point.toString(16)} alone should be ${if (want) "accepted" else "refused"}"
+        }
+        for ((low, high) in ignorable) for ((point, want) in listOf(low to false, high to false, low - 1 to true, high + 1 to true)) {
+            if (accepted("a" + String(Character.toChars(point))) != want) problems += "a + U+${point.toString(16)} should be ${if (want) "accepted" else "refused"}"
+        }
+        problems
+    }
+
+    // A document payload string with a lone surrogate (ED A0 80) is not a write_admitted id: the shared MessagePack reader keeps
+    // reading it. Strictness is scoped to the write_admitted frame, never to the reader.
+    check("documentPayloadStringWithLoneSurrogateStillDecodes") {
+        val text = MessagePackReader(unhex("A3EDA080")).readString()
+        if (text.isNotEmpty()) emptyList() else listOf("decoded to an empty string")
+    }
+
     for (case in list(vectors["schemaInvalid"])) {
         val c = obj(case)
         check("schemaInvalid/${c["name"]}") {

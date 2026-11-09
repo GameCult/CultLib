@@ -54,5 +54,38 @@ namespace GameCult.Networking.Tests
                 Assert.That(decoded!.MessageId, Is.EqualTo(id));
             }
         }
+
+        // The generated ranges file is the independent copy of the embedded tables: first, last and the points either side of every range.
+        [Test]
+        public void EveryRangeOfTheUnicodeTablesIsPinnedAtBothEnds()
+        {
+            var directory = new DirectoryInfo(TestContext.CurrentContext.TestDirectory);
+            while (directory != null && !File.Exists(Path.Combine(directory.FullName, "CultLib.sln")))
+                directory = directory.Parent;
+            var ranges = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory!.FullName, "contracts", "cultnet", "interop", "write-admitted-message-id-ranges.json"))).RootElement;
+            var letters = ranges.GetProperty("letterOrNumber").EnumerateArray().Select(r => (r[0].GetInt32(), r[1].GetInt32())).ToArray();
+            var ignorable = ranges.GetProperty("defaultIgnorable").EnumerateArray().Select(r => (r[0].GetInt32(), r[1].GetInt32())).ToArray();
+            Assert.That(letters.Length, Is.GreaterThan(700));
+            Assert.That(ignorable.Length, Is.EqualTo(17));
+            static bool Accepted(string id)
+            {
+                try
+                {
+                    CultNetSchemaMessageSerialization.Deserialize(CultNetSchemaMessageSerialization.Serialize(
+                        new CultNetWriteAdmittedMessage { MessageId = id, Operation = "put", SchemaId = "note.v0", RecordKey = "note:1" }));
+                    return true;
+                }
+                catch (Exception) { return false; }
+            }
+
+            var failures = new List<string>();
+            foreach (var (low, high) in letters)
+                foreach (var (point, want) in new[] { (low, true), (high, true), (low - 1, false), (high + 1, false) })
+                    if (Accepted(char.ConvertFromUtf32(point)) != want) failures.Add($"U+{point:X} alone should be {(want ? "accepted" : "refused")}");
+            foreach (var (low, high) in ignorable)
+                foreach (var (point, want) in new[] { (low, false), (high, false), (low - 1, true), (high + 1, true) })
+                    if (Accepted("a" + char.ConvertFromUtf32(point)) != want) failures.Add($"a + U+{point:X} should be {(want ? "accepted" : "refused")}");
+            Assert.That(failures, Is.Empty);
+        }
     }
 }

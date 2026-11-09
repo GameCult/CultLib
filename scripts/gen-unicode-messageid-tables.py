@@ -13,6 +13,7 @@ https://www.unicode.org/Public/16.0.0/ucd/DerivedCoreProperties.txt. With --chec
 any generated file differs from what these inputs produce (a stale or hand-edited table). Standard library only.
 """
 import hashlib
+import json
 import re
 import sys
 from pathlib import Path
@@ -28,6 +29,9 @@ TARGETS = {
     "cs": ROOT / "src/GameCult.Networking/CultNetUnicodeMessageIdTables.cs",
     "rs": ROOT / "packages/cultnet-rs/src/unicode_messageid_tables.rs",
 }
+# The independent copy the runtimes' tests probe (first, last, and the code point either side of every range), so that deleting
+# or narrowing any range of any embedded table fails a test.
+RANGES_JSON = ROOT / "contracts/cultnet/interop/write-admitted-message-id-ranges.json"
 
 
 def parse(path, wanted):
@@ -95,8 +99,12 @@ def main():
     digest = hashlib.sha256(b"".join(Path(p).read_bytes() for p in (gc, dcp))).hexdigest()[:16]
     header = f"generated, Unicode {VERSION}, by scripts/gen-unicode-messageid-tables.py (inputs sha256 {digest}); do not edit"
     stale = []
-    for target, path in TARGETS.items():
-        text = emit(target, letters, ignorable, header)
+    texts = {path: emit(target, letters, ignorable, header) for target, path in TARGETS.items()}
+    texts[RANGES_JSON] = json.dumps(
+        {"generated": header, "unicodeVersion": VERSION, "letterOrNumber": [list(r) for r in letters], "defaultIgnorable": [list(r) for r in ignorable]},
+        separators=(",", ":"),
+    ) + "\n"
+    for path, text in texts.items():
         if check:
             if not path.exists() or path.read_text(encoding="utf-8") != text:
                 stale.append(str(path.relative_to(ROOT)))
@@ -104,7 +112,7 @@ def main():
             path.write_text(text, encoding="utf-8")
     if stale:
         sys.exit("stale or hand-edited: " + ", ".join(stale))
-    print(f"{'checked' if check else 'wrote'} {len(TARGETS)} tables: {len(letters)} letter-or-number ranges, {len(ignorable)} default-ignorable ranges")
+    print(f"{'checked' if check else 'wrote'} {len(texts)} files: {len(letters)} letter-or-number ranges, {len(ignorable)} default-ignorable ranges")
 
 
 if __name__ == "__main__":

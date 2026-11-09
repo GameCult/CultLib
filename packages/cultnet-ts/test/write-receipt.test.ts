@@ -303,3 +303,23 @@ test("write_admitted messageId: every admittedMessageId vector is refused or acc
   }
   assert.deepEqual(failures, []);
 });
+
+// The generated ranges file is the independent copy of the embedded tables: first, last and the points either side of every range.
+test("write_admitted messageId: every range of the Unicode 16.0 tables is pinned at both ends", () => {
+  const ranges = JSON.parse(readFileSync(join(__dirname, "..", "..", "..", "..", "contracts", "cultnet", "interop", "write-admitted-message-id-ranges.json"), "utf8"));
+  assert.ok(ranges.letterOrNumber.length > 700);
+  assert.equal(ranges.defaultIgnorable.length, 17);
+  const accepted = (id: string) => { try { parseCultNetMessage(admitted(id)); return true; } catch { return false; } };
+  const failures: string[] = [];
+  for (const [low, high] of ranges.letterOrNumber as [number, number][]) {
+    for (const [point, want] of [[low, true], [high, true], [low - 1, false], [high + 1, false]] as [number, boolean][]) {
+      if (accepted(String.fromCodePoint(point)) !== want) failures.push(`U+${point.toString(16)} alone should be ${want ? "accepted" : "refused"}`);
+    }
+  }
+  for (const [low, high] of ranges.defaultIgnorable as [number, number][]) {
+    for (const [point, want] of [[low, false], [high, false], [low - 1, true], [high + 1, true]] as [number, boolean][]) {
+      if (accepted("a" + String.fromCodePoint(point)) !== want) failures.push(`a + U+${point.toString(16)} should be ${want ? "accepted" : "refused"}`);
+    }
+  }
+  assert.deepEqual(failures, []);
+});

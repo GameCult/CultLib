@@ -150,7 +150,7 @@
     ]
   },
   "admittedMessageId": {
-    "semantics": "Decoder-side rule for a `cultnet.write_admitted.v0` frame's `messageId` (Heimdall's ruling, write-receipt.md). Valid only if it contains at least one Unicode letter (\\p{L}) or number (\\p{N}) AND no Default_Ignorable_Code_Point (DerivedCoreProperties). The compare is RAW: the id is echoed byte for byte, so a decoder neither trims nor normalizes. Each case's id is given as `codePoints` (hex, in order), repeated `repeat` times (default 1), so no lone surrogate appears in this file. A runner builds the frame {schemaVersion write_admitted.v0, messageId, operation put, schemaId note.v0, recordKey note:1} with its own encoder and decodes it with the write_admitted decoder; `refuse` means the decoder refuses the frame the way it refuses an empty or ill-typed messageId, `accept` means it decodes and the id comes back identical. A case with `wireHex` carries the whole frame in MessagePack hex, for an id a language string cannot hold: the lone surrogate U+D800 is not valid UTF-8, so the vector's messageId is a MessagePack str whose bytes are ED A0 80, and Rust, C#, Kotlin and Python build the frame from those bytes and must refuse it. Letters, numbers and Default_Ignorable are those of Unicode 16.0 in every runtime, from embedded tables (no platform category lookup), so a runtime's own Unicode version cannot change a result. Scope: write_admitted only; error.v1 is untouched.",
+    "semantics": "Decoder-side rule for a `cultnet.write_admitted.v0` frame's `messageId` (Heimdall's ruling, write-receipt.md). Valid only if it contains at least one Unicode letter (\\p{L}) or number (\\p{N}) AND no Default_Ignorable_Code_Point (DerivedCoreProperties). The compare is RAW: the id is echoed byte for byte, so a decoder neither trims nor normalizes. Each case's id is given as `codePoints` (hex, in order), repeated `repeat` times (default 1), so no lone surrogate appears in this file. Every messageId key of a frame must be valid. A runner builds the frame {schemaVersion write_admitted.v0, messageId, operation put, schemaId note.v0, recordKey note:1} with its own encoder and decodes it with the write_admitted decoder; `refuse` means the decoder refuses the frame the way it refuses an empty or ill-typed messageId, `accept` means it decodes and the id comes back identical. A case with `wireHex` carries the whole frame in MessagePack hex, for an id a language string or this file cannot hold (a lone surrogate is not valid UTF-8; the bytes are ED A0 80) or a frame that repeats a key. The rule is on the decoded string, which must be well-formed Unicode: a lone surrogate refuses. A runtime whose MessagePack reader rejects invalid UTF-8 refuses earlier; byte-level strictness is a property of the reader and is not required of a decoder. Scope: write_admitted only; error.v1 is untouched.",
     "cases": [
       {
         "name": "refuse_braille_blank_2800",
@@ -222,7 +222,7 @@
           "D800"
         ],
         "expect": "refuse",
-        "why": "not a Unicode scalar value; on the wire it is the invalid UTF-8 bytes ED A0 80 in a str, so the decoder must refuse the frame. Rust, C#, Kotlin and Python build the frame from wireHex; a runtime whose strings can hold a lone surrogate (TypeScript) may also build it from the code point",
+        "why": "a lone surrogate is not a Unicode scalar value and has no letter or number; on the wire it is the invalid UTF-8 bytes ED A0 80 in a str. A reader that rejects invalid UTF-8 refuses the frame; one that substitutes or keeps the surrogate refuses the id",
         "wireHex": "85AD736368656D6156657273696F6EB963756C746E65742E77726974655F61646D69747465642E7630A96D6573736167654964A3EDA080A96F7065726174696F6EA3707574A8736368656D614964A76E6F74652E7630A97265636F72644B6579A66E6F74653A31"
       },
       {
@@ -407,6 +407,122 @@
         ],
         "expect": "refuse",
         "why": "U+10D90 follows the Garay block and is unassigned in Unicode 16.0"
+      },
+      {
+        "name": "refuse_duplicate_message_id_second_is_default_ignorable",
+        "codePoints": ["0061"],
+        "expect": "refuse",
+        "why": "the frame carries messageId twice, \"a\" and then U+200B; every messageId key must be valid, and a reader that keeps the last one sees U+200B",
+        "wireHex": "86AD736368656D6156657273696F6EB963756C746E65742E77726974655F61646D69747465642E7630A96D6573736167654964A57075742D31A96F7065726174696F6EA3707574A8736368656D614964A76E6F74652E7630A97265636F72644B6579A66E6F74653A31A96D6573736167654964A3E2808B"
+      },
+      {
+        "name": "refuse_letter_then_lone_surrogate_D800",
+        "codePoints": ["0061"],
+        "expect": "refuse",
+        "why": "\"a\" followed by a lone surrogate: the id as decoded is not well-formed Unicode. A reader that rejects invalid UTF-8 refuses the frame earlier; one that substitutes or keeps the surrogate must still refuse the id. Byte-level strictness is a property of the reader, not required of the decoder",
+        "wireHex": "85AD736368656D6156657273696F6EB963756C746E65742E77726974655F61646D69747465642E7630A96D6573736167654964A461EDA080A96F7065726174696F6EA3707574A8736368656D614964A76E6F74652E7630A97265636F72644B6579A66E6F74653A31"
+      },
+      {
+        "name": "accept_astral_mathematical_bold_capital_a_1D400",
+        "codePoints": ["1D400"],
+        "expect": "accept",
+        "why": "an astral letter (Lu)"
+      },
+      {
+        "name": "accept_astral_cjk_ext_b_20000",
+        "codePoints": ["20000"],
+        "expect": "accept",
+        "why": "an astral letter (Lo)"
+      },
+      {
+        "name": "refuse_letter_then_default_ignorable_061C",
+        "codePoints": ["0061", "061C"],
+        "expect": "refuse",
+        "why": "U+061C is Default_Ignorable (an end of one of its ranges)"
+      },
+      {
+        "name": "refuse_letter_then_default_ignorable_17B4",
+        "codePoints": ["0061", "17B4"],
+        "expect": "refuse",
+        "why": "U+17B4 is Default_Ignorable (an end of one of its ranges)"
+      },
+      {
+        "name": "refuse_letter_then_default_ignorable_17B5",
+        "codePoints": ["0061", "17B5"],
+        "expect": "refuse",
+        "why": "U+17B5 is Default_Ignorable (an end of one of its ranges)"
+      },
+      {
+        "name": "refuse_letter_then_default_ignorable_202A",
+        "codePoints": ["0061", "202A"],
+        "expect": "refuse",
+        "why": "U+202A is Default_Ignorable (an end of one of its ranges)"
+      },
+      {
+        "name": "refuse_letter_then_default_ignorable_202E",
+        "codePoints": ["0061", "202E"],
+        "expect": "refuse",
+        "why": "U+202E is Default_Ignorable (an end of one of its ranges)"
+      },
+      {
+        "name": "refuse_letter_then_default_ignorable_FE00",
+        "codePoints": ["0061", "FE00"],
+        "expect": "refuse",
+        "why": "U+FE00 is Default_Ignorable (an end of one of its ranges)"
+      },
+      {
+        "name": "refuse_letter_then_default_ignorable_FE0F",
+        "codePoints": ["0061", "FE0F"],
+        "expect": "refuse",
+        "why": "U+FE0F is Default_Ignorable (an end of one of its ranges)"
+      },
+      {
+        "name": "refuse_letter_then_default_ignorable_FFF0",
+        "codePoints": ["0061", "FFF0"],
+        "expect": "refuse",
+        "why": "U+FFF0 is Default_Ignorable (an end of one of its ranges)"
+      },
+      {
+        "name": "refuse_letter_then_default_ignorable_FFF8",
+        "codePoints": ["0061", "FFF8"],
+        "expect": "refuse",
+        "why": "U+FFF8 is Default_Ignorable (an end of one of its ranges)"
+      },
+      {
+        "name": "refuse_letter_then_default_ignorable_1BCA0",
+        "codePoints": ["0061", "1BCA0"],
+        "expect": "refuse",
+        "why": "U+1BCA0 is Default_Ignorable (an end of one of its ranges)"
+      },
+      {
+        "name": "refuse_letter_then_default_ignorable_1BCA3",
+        "codePoints": ["0061", "1BCA3"],
+        "expect": "refuse",
+        "why": "U+1BCA3 is Default_Ignorable (an end of one of its ranges)"
+      },
+      {
+        "name": "refuse_letter_then_default_ignorable_1D173",
+        "codePoints": ["0061", "1D173"],
+        "expect": "refuse",
+        "why": "U+1D173 is Default_Ignorable (an end of one of its ranges)"
+      },
+      {
+        "name": "refuse_letter_then_default_ignorable_1D17A",
+        "codePoints": ["0061", "1D17A"],
+        "expect": "refuse",
+        "why": "U+1D17A is Default_Ignorable (an end of one of its ranges)"
+      },
+      {
+        "name": "refuse_letter_then_default_ignorable_E0000",
+        "codePoints": ["0061", "E0000"],
+        "expect": "refuse",
+        "why": "U+E0000 is Default_Ignorable (an end of one of its ranges)"
+      },
+      {
+        "name": "refuse_letter_then_default_ignorable_E0FFF",
+        "codePoints": ["0061", "E0FFF"],
+        "expect": "refuse",
+        "why": "U+E0FFF is Default_Ignorable (an end of one of its ranges)"
       },
       {
         "name": "accept_abc",
@@ -1524,7 +1640,7 @@
     "schemaInvalid": 7,
     "contentHashCases": 4,
     "scenarioCases": 25,
-    "admittedMessageIdCases": 40
+    "admittedMessageIdCases": 59
   },
   "contentHash": {
     "definition": "sha256(msgpack([operation, schemaId, recordKey, payload])), payload a msgpack bin for a put and nil for a delete; hex lowercase",
