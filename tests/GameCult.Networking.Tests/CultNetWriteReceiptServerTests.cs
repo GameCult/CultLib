@@ -1089,7 +1089,8 @@ namespace GameCult.Networking.Tests
             {
                 if (capable) AssertAdmitted(wire.Sent.Single(), "m1", "put", document.RecordKey);
                 else Assert.That(wire.Sent, Is.Empty, "a legacy connection is sent no receipt");
-                Assert.That(rig.TextOf(KeyA), Is.EqualTo("one"));
+                if (!vectors.GetProperty("set").EnumerateObject().Any(f => f.Name is "schemaId" or "recordKey"))
+                    Assert.That(rig.TextOf(KeyA), Is.EqualTo("one"));
                 return;
             }
 
@@ -1100,6 +1101,66 @@ namespace GameCult.Networking.Tests
             Assert.That(error.Error, Is.EqualTo(UnreadableVectorText()));
             Assert.That(rig.TextOf(KeyA), Is.Null, "a write that names nothing is never applied");
         }
+
+        public static IEnumerable<string> WhiteSpaceCodePoints() =>
+            Vectors().GetProperty("blankFields").GetProperty("whiteSpaceCodePoints").EnumerateArray().Select(c => c.GetString()!);
+
+        public static IEnumerable<string> NonWhiteSpaceCodePoints() =>
+            Vectors().GetProperty("blankFields").GetProperty("notWhiteSpaceCodePoints").EnumerateArray().Select(c => c.GetString()!);
+
+        private static readonly string[] BlankRuleFields =
+            { "schemaId", "recordKey", "storedAt", "sourceRuntimeId", "sourceAgentId", "sourceRole", "tags" };
+
+        // Blank is the Unicode White_Space property in every runtime (write-receipt.md, Required fields), not whatever the
+        // platform's char.IsWhiteSpace says: each listed code point, alone or repeated, in each covered field is refused as
+        // unreadable and never applied; each listed non-White_Space code point (U+200B, U+FEFF, U+180E, ...) is a name.
+        private async Task AssertBlankRule(string hex, bool blank)
+        {
+            foreach (var field in BlankRuleFields)
+            foreach (var times in new[] { 1, 3 })
+            {
+                var text = string.Concat(Enumerable.Repeat(char.ConvertFromUtf32(Convert.ToInt32(hex, 16)), times));
+                var rig = Build();
+                var wire = new Wire();
+                await rig.Hello(wire, BothFrames);
+                wire.Sent.Clear();
+                var message = rig.PutOf("m1", KeyA, "one");
+                var document = message.Document!;
+                switch (field)
+                {
+                    case "schemaId": document.SchemaId = text; break;
+                    case "recordKey": document.RecordKey = text; break;
+                    case "storedAt": document.StoredAt = text; break;
+                    case "sourceRuntimeId": document.SourceRuntimeId = text; break;
+                    case "sourceAgentId": document.SourceAgentId = text; break;
+                    case "sourceRole": document.SourceRole = text; break;
+                    default: document.Tags = new[] { "a", text }; break;
+                }
+                var what = $"U+{hex} in {field} x{times}";
+
+                await rig.PutHandler(message, wire.Peer);
+
+                if (blank)
+                {
+                    var error = AssertRefused(wire.Sent.Single(), "m1", "message_invalid").ToV0();
+                    Assert.That(error.Details!.Field, Is.EqualTo("message"), what);
+                    Assert.That(error.Error, Is.EqualTo(UnreadableVectorText()), what);
+                    Assert.That(rig.TextOf(KeyA), Is.Null, $"{what}: never applied");
+                }
+                else
+                {
+                    AssertAdmitted(wire.Sent.Single(), "m1", "put", document.RecordKey);
+                }
+            }
+        }
+
+        [Test]
+        public async Task EveryUnicodeWhiteSpaceCodePointIsBlank([ValueSource(nameof(WhiteSpaceCodePoints))] string hex) =>
+            await AssertBlankRule(hex, blank: true);
+
+        [Test]
+        public async Task CodePointsOutsideWhiteSpaceNameSomething([ValueSource(nameof(NonWhiteSpaceCodePoints))] string hex) =>
+            await AssertBlankRule(hex, blank: false);
 
         // A nil payload names no document either; it is refused like an empty one, never handed to the store.
         [Test]

@@ -3139,11 +3139,15 @@ fn unreadable_vector_text(vectors: &serde_json::Value) -> String {
 /// The put frame of a `blankFields` case: the valid document with the case's `set` applied. Serialized without the
 /// typed encoder, because that refuses what the case is about.
 fn blank_field_put(vectors: &serde_json::Value, set: &serde_json::Value) -> Vec<u8> {
+    blank_field_put_with_id(vectors, set, "m1")
+}
+
+fn blank_field_put_with_id(vectors: &serde_json::Value, set: &serde_json::Value, message_id: &str) -> Vec<u8> {
     #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Put {
         schema_version: &'static str,
-        message_id: &'static str,
+        message_id: String,
         document: CultNetRawDocumentRecord,
     }
     let hex = set.get("payloadHex").and_then(|v| v.as_str()).unwrap_or(vectors["blankFields"]["validPutPayloadHex"].as_str().unwrap());
@@ -3160,7 +3164,7 @@ fn blank_field_put(vectors: &serde_json::Value, set: &serde_json::Value) -> Vec<
         source_role: optional("sourceRole"),
         tags: set.get("tags").and_then(|v| v.as_array()).map(|tags| tags.iter().map(|t| t.as_str().unwrap().to_string()).collect()),
     };
-    rmp_serde::to_vec_named(&Put { schema_version: "cultnet.document_put_raw.v0", message_id: "m1", document }).unwrap()
+    rmp_serde::to_vec_named(&Put { schema_version: "cultnet.document_put_raw.v0", message_id: message_id.to_string(), document }).unwrap()
 }
 
 /// Each `blankFields` case: a receipt-capable connection is answered with the admitted receipt, or with the one fixed
@@ -3188,8 +3192,8 @@ fn a_put_that_names_nothing_is_refused_as_unreadable_naming_the_write_and_a_name
                     vec![CultNetMessage::WriteAdmitted {
                         message_id: "m1".into(),
                         operation: "put".into(),
-                        schema_id: "note.v0".into(),
-                        record_key: "note:1".into(),
+                        schema_id: case["set"]["schemaId"].as_str().unwrap_or("note.v0").into(),
+                        record_key: case["set"]["recordKey"].as_str().unwrap_or("note:1").into(),
                     }],
                     "{name}"
                 );
@@ -3203,6 +3207,54 @@ fn a_put_that_names_nothing_is_refused_as_unreadable_naming_the_write_and_a_name
             other => panic!("{name}: unknown outcome {other}"),
         }
         assert_eq!(server.session_count(), 1, "{name}: the session is kept");
+    }
+    Ok(())
+}
+
+fn code_point_string(hex: &str, times: usize) -> String {
+    std::char::from_u32(u32::from_str_radix(hex, 16).unwrap()).unwrap().to_string().repeat(times)
+}
+
+/// The Unicode White_Space set is the one blank rule: every listed code point, alone or repeated, blanks every field
+/// the rule covers; U+200B, U+FEFF, U+180E and the other listed non-White_Space code points name something.
+#[test]
+fn blank_means_exactly_the_unicode_white_space_code_points_in_every_field() -> Result<()> {
+    let vectors = vectors();
+    let fixed = unreadable_vector_text(&vectors);
+    let fields = ["schemaId", "recordKey", "storedAt", "sourceRuntimeId", "sourceAgentId", "sourceRole", "tags"];
+    let space = vectors["blankFields"]["whiteSpaceCodePoints"].as_array().unwrap();
+    let not_space = vectors["blankFields"]["notWhiteSpaceCodePoints"].as_array().unwrap();
+    assert_eq!(space.len(), 25);
+    for (index, (hex, blank)) in space.iter().map(|h| (h, true)).chain(not_space.iter().map(|h| (h, false))).enumerate() {
+        let hex = hex.as_str().unwrap();
+        for (field_index, field) in fields.iter().enumerate() {
+            // A session that is sent refusals is allowed to end, so each code point and field gets its own.
+            let sink = Sink::default();
+            let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+            let mut peer = client(server.local_addr()?, 600 + (index * fields.len() + field_index) as u32)?;
+            connect(&mut server, &mut [&mut peer])?;
+            send_reliable(&mut peer, &receipt_hello())?;
+            assert_eq!(frames_after(&mut server, &mut peer, 1)?, vec![server_hello()]);
+            let mut admitted = 0;
+            for times in [1, 3] {
+                let text = code_point_string(hex, times);
+                let value = if *field == "tags" { serde_json::json!(["a", text]) } else { serde_json::json!(text) };
+                let set = serde_json::json!({ *field: value });
+                let id = format!("{hex}-{field}-{times}");
+                peer.send_reliable("schema", blank_field_put_with_id(&vectors, &set, &id))?;
+                let answers = frames_after(&mut server, &mut peer, 1)?;
+                let what = format!("U+{hex} in {field} x{times}");
+                assert!(!answers.is_empty(), "{what}: no answer");
+                if blank {
+                    assert_eq!(refusal_of(&answers[0]), (Some(CultNetErrorCode::MessageInvalid), Some(id)), "{what}");
+                    assert_eq!(error_text_and_field(&answers[0]), (fixed.clone(), Some("message".into())), "{what}");
+                } else {
+                    assert!(matches!(answers[0], CultNetMessage::WriteAdmitted { .. }), "{what} is a name: {:?}", answers[0]);
+                    admitted += 1;
+                }
+            }
+            assert_eq!(sink.0.lock().unwrap().receipts.len(), admitted, "U+{hex} in {field}: only named writes are applied");
+        }
     }
     Ok(())
 }
