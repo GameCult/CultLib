@@ -23,6 +23,9 @@ const {
 const vectorsPath = process.argv[2] ?? path.join(here, "..", "..", "..", "contracts", "cultnet", "interop", "write-receipt-vectors.json");
 const vectors = JSON.parse(readFileSync(vectorsPath, "utf8"));
 
+// The event actions scenarios.semantics names; anything else is refused, not skipped.
+const EVENT_KEYS = ["send", "frame", "tick", "sessionEnd", "sendFailed", "transportAck"];
+
 const results = [];
 const check = (name, run) => {
   try {
@@ -79,10 +82,13 @@ for (const scenario of vectors.scenarios.cases) {
       told.set(id, settlement);
     } });
     for (const event of [...scenario.events].sort((a, b) => a.atMs - b.atMs)) {
+      const actions = Object.keys(event).filter((key) => key !== "atMs");
+      if (actions.length !== 1 || !EVENT_KEYS.includes(actions[0])) { problems.push(`event at ${event.atMs} has keys [${actions}], wanted atMs and exactly one of ${EVENT_KEYS}`); continue; }
       if ("send" in event) tracker.send(event.send, event.atMs);
       else if ("frame" in event) tracker.frame(delivered(event.frame), event.atMs);
       else if ("tick" in event) tracker.tick(event.atMs);
       else if ("sessionEnd" in event) tracker.sessionEnd(event.atMs);
+      else if ("sendFailed" in event) tracker.sendFailed(event.sendFailed, event.atMs);
       // transportAck: delivery is not an answer; the tracker has no such input and must not need one.
     }
     for (const [id, want] of Object.entries(scenario.expect)) {
@@ -98,6 +104,16 @@ for (const scenario of vectors.scenarios.cases) {
     return problems;
   });
 }
+
+// A runner that read fewer vectors than the file declares has silently skipped some. (contentHash is not replayed here.)
+check("counts", () => {
+  const ran = (prefix) => results.filter((r) => r.name.startsWith(prefix)).length;
+  const loaded = { wire: vectors.wire.length, schemaInvalid: vectors.schemaInvalid.length, scenarioCases: vectors.scenarios.cases.length };
+  const executed = { wire: ran("wire/"), schemaInvalid: ran("schemaInvalid/"), scenarioCases: ran("scenario/") };
+  return Object.keys(executed)
+    .filter((key) => loaded[key] !== vectors.counts[key] || executed[key] !== vectors.counts[key])
+    .map((key) => `${key}: declared ${vectors.counts[key]}, loaded ${loaded[key]}, ran ${executed[key]}`);
+});
 
 function sorted(value) {
   if (Array.isArray(value)) return value.map(sorted);

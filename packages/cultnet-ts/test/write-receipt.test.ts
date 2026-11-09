@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -193,6 +195,38 @@ test("the replay runner passes every vector against this runtime", () => {
   assert.equal(run.status, 0, run.stdout + run.stderr);
   assert.match(run.stdout, /^PASS scenario\/receipt_admits$/m);
   assert.doesNotMatch(run.stdout, /^FAIL/m);
+});
+
+// A runner that skips what it cannot read passes a file it did not replay. It must fail instead.
+test("the replay runner fails on an unknown event key and on a vector count the file does not declare", () => {
+  const script = join(__dirname, "..", "..", "tools", "replay-write-receipt-vectors.mjs");
+  const vectorsPath = join(__dirname, "..", "..", "..", "..", "contracts", "cultnet", "interop", "write-receipt-vectors.json");
+  const dir = mkdtempSync(join(tmpdir(), "receipt-vectors-"));
+  const runWith = (edit: (vectors: any) => void) => {
+    const vectors = JSON.parse(readFileSync(vectorsPath, "utf8"));
+    edit(vectors);
+    const file = join(dir, "vectors.json");
+    writeFileSync(file, JSON.stringify(vectors));
+    return spawnSync(process.execPath, [script, file], { encoding: "utf8" });
+  };
+  const typo = runWith((v) => { v.scenarios.cases[0].events[0] = { atMs: 0, sendfailed: "w1" }; });
+  assert.equal(typo.status, 1, typo.stdout);
+  assert.match(typo.stdout, /^FAIL scenario\/receipt_admits$/m);
+  const dropped = runWith((v) => { v.scenarios.cases.pop(); });
+  assert.equal(dropped.status, 1, dropped.stdout);
+  assert.match(dropped.stdout, /^FAIL counts$/m);
+  const undeclared = runWith((v) => { v.wire.push(v.wire[0]); });
+  assert.equal(undeclared.status, 1, undeclared.stdout);
+});
+
+test("a write sent after the session ended settles unconfirmed session_ended at once, and the earlier receipt stands", () => {
+  const settled: [string, WriteSettlement][] = [];
+  const tracker = new WriteTracker({ windowMs: 1000, onSettle: (id, settlement) => settled.push([id, settlement]) });
+  tracker.send("w1", 0);
+  tracker.frame(admitted("w1"), 5);
+  tracker.sessionEnd(40);
+  tracker.send("w2", 50);
+  assert.deepEqual(settled, [["w1", { outcome: "admitted" }], ["w2", { outcome: "unconfirmed", reason: "session_ended" }]]);
 });
 
 test("a failed local send settles only that write unconfirmed as local_send_failed, and an answer after it is recorded late", () => {
