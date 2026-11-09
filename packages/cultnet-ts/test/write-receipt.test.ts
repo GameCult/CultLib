@@ -227,3 +227,22 @@ test("a write whose own send failed settles local_send_failed even when its wind
   tracker.sendFailed("w1", 1000);
   assert.deepEqual(tracker.state("w1"), { outcome: "unconfirmed", reason: "local_send_failed" });
 });
+
+// Blank is Unicode White_Space (write-receipt.md, rule 5), not what String.prototype.trim() trims: trim() takes U+FEFF and
+// misses U+0085. Every frame decoder that rejects a blank text must agree with the servers that do.
+test("a blank messageId, record key or tag is exactly Unicode White_Space, not trim()", () => {
+  const put = (document: Record<string, unknown>, messageId = "p1") => ({
+    schemaVersion: "cultnet.document_put_raw.v0", messageId,
+    document: { schemaId: "note.v0", recordKey: "note:1", storedAt: "2026-11-08T00:00:00Z", payloadEncoding: "messagepack", payload: Uint8Array.of(0x81, 0xa1, 0x61, 0x01), ...document },
+  });
+  for (const blank of ["\u0085", "  ", "　"]) {
+    assert.throws(() => parseCultNetMessage(put({}, blank)), `messageId ${JSON.stringify(blank)}`);
+    assert.throws(() => parseCultNetMessage(put({ recordKey: blank })), `recordKey ${JSON.stringify(blank)}`);
+    assert.throws(() => parseCultNetMessage(put({ tags: [blank] })), `tag ${JSON.stringify(blank)}`);
+  }
+  for (const named of ["﻿", "​", "\u001c", "᠎"]) {
+    parseCultNetMessage(put({}, named));
+    parseCultNetMessage(put({ recordKey: named }));
+    parseCultNetMessage(put({ tags: [named] }));
+  }
+});
