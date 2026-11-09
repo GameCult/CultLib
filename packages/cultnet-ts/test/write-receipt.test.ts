@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { decode } from "@msgpack/msgpack";
 import {
   CULTNET_ERROR_CODES,
   CULTNET_ERROR_V1_CODES,
@@ -282,17 +283,18 @@ test("a blank messageId, record key or tag is exactly Unicode White_Space, not t
 });
 
 // `admittedMessageId` vectors: a write_admitted messageId needs a letter or number and no Default_Ignorable code point,
-// compared raw (never trimmed). JavaScript strings hold a lone surrogate, so the D800 vector is built from its code point.
+// compared raw (never trimmed). The D800 vector is the frame's bytes (wireHex), decoded by the msgpack library like the others.
 test("write_admitted messageId: every admittedMessageId vector is refused or accepted raw", () => {
   const vectorsPath = join(__dirname, "..", "..", "..", "..", "contracts", "cultnet", "interop", "write-receipt-vectors.json");
   const vectors = JSON.parse(readFileSync(vectorsPath, "utf8"));
   assert.equal(vectors.counts.admittedMessageIdCases, vectors.admittedMessageId.cases.length);
   const failures: string[] = [];
-  for (const vector of vectors.admittedMessageId.cases as { name: string; codePoints: string[]; repeat?: number; expect: "refuse" | "accept" }[]) {
+  for (const vector of vectors.admittedMessageId.cases as { name: string; codePoints: string[]; repeat?: number; wireHex?: string; expect: "refuse" | "accept" }[]) {
     const id = vector.codePoints.map((cp) => String.fromCodePoint(parseInt(cp, 16))).join("").repeat(vector.repeat ?? 1);
     let decodedId: string | undefined;
     try {
-      decodedId = (parseCultNetMessage(admitted(id)) as CultNetWriteAdmittedMessage).messageId;
+      const frame = vector.wireHex ? decode(Uint8Array.from(Buffer.from(vector.wireHex, "hex"))) : admitted(id);
+      decodedId = (parseCultNetMessage(frame) as CultNetWriteAdmittedMessage).messageId;
     } catch {
       decodedId = undefined;
     }

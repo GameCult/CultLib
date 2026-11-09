@@ -950,6 +950,10 @@ export function parseCultNetMessage(input: unknown, wireContract: CultNetWireCon
     return input as CultNetDatabaseChangeRawMessage;
   }
 
+  if (schemaVersion === "cultnet.write_admitted.v0" && !isValidAdmittedMessageId((input as { messageId?: unknown }).messageId)) {
+    throw new Error("Validation failed for cultnet.write_admitted.v0: /messageId: must contain a letter or number and no Default_Ignorable code point");
+  }
+
   if (!validator(input)) {
     const keys = Object.keys(input as Record<string, unknown>).join(",");
     throw new Error(`${renderValidationErrors(schemaVersion, validator)}; keys=${keys}`);
@@ -1458,6 +1462,15 @@ function validateRawDocumentRecord(
   requireOptionalNonEmptyString(candidate.sourceAgentId, `${instancePath}/sourceAgentId`);
   requireOptionalNonEmptyString(candidate.sourceRole, `${instancePath}/sourceRole`);
   requireOptionalStringArray(candidate.tags, `${instancePath}/tags`);
+}
+
+/**
+ * A write_admitted messageId is valid iff it holds a Unicode letter or number and no Default_Ignorable_Code_Point, compared raw
+ * (write-receipt.md; the id is echoed byte for byte, so nothing is trimmed). The platform's regex tables carry both properties,
+ * so this runtime embeds no table; the Kotlin, Python, C# and Rust decoders embed DerivedCoreProperties ranges.
+ */
+function isValidAdmittedMessageId(value: unknown): boolean {
+  return typeof value === "string" && /[\p{L}\p{N}]/u.test(value) && !/\p{Default_Ignorable_Code_Point}/u.test(value);
 }
 
 /** Blank is empty or only Unicode White_Space (write-receipt.md, rule 5), not `trim()`: JS trims U+FEFF and keeps U+0085. */
