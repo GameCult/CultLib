@@ -49,11 +49,12 @@ jobs:
 
   # workflow_dispatch and a cultmesh-quic-native-v* tag run the two builds.
   # A dry (workflow_dispatch) run uploads artifacts and creates no release.
+  # No Windows runner is registered on the forge, so this job is workflow_dispatch only
+  # (run it on GitHub or a Windows runner). The tag trigger returns in the PR that registers one.
+  # Until then a tag push skips the release job, which needs this build.
   build-win32-x64:
     name: Build win32-x64
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cultmesh-quic-native-v'))
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -92,8 +93,8 @@ jobs:
     runs-on: ubuntu-latest
     # Q6 A: this pinned Debian 13 container is the only permitted Linux
     # release builder. The digest is the pin; the `debian:13` tag is only a
-    # label. The artifact links against this image's glibc (2.41); a bare
-    # ubuntu-latest runner carries glibc 2.39, which is not the deploy host's
+    # label. The artifact links against this image's glibc (2.41);
+    # a bare runner's OS image has its own glibc (a GitHub ubuntu-latest image carried 2.39), which is not the deploy host's
     # OS (docs/typescript-quic-realtime-cut.md:2192-2197).
     container:
       image: debian:13@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1

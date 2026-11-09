@@ -1,7 +1,7 @@
 name: CultNet cross-runtime interop
 
 # workflow_dispatch only: this job is Windows-only (pwsh Kotlin build, setup steps), and the forge
-# runner is Ubuntu-only, so a push or pull_request trigger would queue a job that can never run.
+# runner is Ubuntu-only (no Windows runner exists; push and pull_request return in the PR that registers one), so a push or pull_request trigger would queue a job that can never run.
 # Run it from GitHub or any Windows runner.
 on:
   workflow_dispatch:

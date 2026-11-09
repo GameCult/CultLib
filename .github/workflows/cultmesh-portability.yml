@@ -16,12 +16,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The forge runner is Ubuntu-only: Windows legs run on workflow_dispatch (GitHub or a Windows runner), Ubuntu gates push and PR.
+        # The forge runner (label `ubuntu-latest`) is Linux-only and no Windows runner exists: the Windows leg runs on workflow_dispatch only (GitHub or a Windows runner), the ubuntu-latest leg gates push and PR. Windows push/PR triggers return in the PR that registers a Windows runner.
         os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["windows-latest", "ubuntu-latest"]' || '["ubuntu-latest"]') }}
 
     steps:
       - name: Check out CultLib
         uses: actions/checkout@v4
+        with:
+          # The declared-dependency-range test builds the admitted releases from their tags.
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
@@ -44,6 +48,34 @@ jobs:
 
       - name: Install Python CultLib packages
         run: python -m pip install -e packages/cultcache-py -e packages/cultnet-py -e packages/cultmesh-py
+
+      # The forge runner images carry no cargo either (the cross-runtime store tests build the Rust interop example); GitHub's hosted images do.
+      - name: Install Rust toolchain
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v cargo >/dev/null && [ ! -x "$HOME/.cargo/bin/cargo" ]; then
+            curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # The forge runner images carry no pwsh; GitHub's Windows and hosted images do.
+      - name: Install PowerShell
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v pwsh >/dev/null; then pwsh -Version; exit 0; fi
+          SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo"
+          PWSH_VERSION=7.4.6
+          curl -fsSL "https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VERSION}/powershell-${PWSH_VERSION}-linux-x64.tar.gz" -o "${RUNNER_TEMP:-/tmp}/powershell.tar.gz"
+          $SUDO mkdir -p /opt/microsoft/powershell/7
+          $SUDO tar -xzf "${RUNNER_TEMP:-/tmp}/powershell.tar.gz" -C /opt/microsoft/powershell/7
+          $SUDO chmod +x /opt/microsoft/powershell/7/pwsh
+          $SUDO ln -sf /opt/microsoft/powershell/7/pwsh /usr/local/bin/pwsh
+          echo "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1" >> "$GITHUB_ENV"
+          DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 pwsh -Version
 
       - name: Verify explicit reactive scheduling across runtimes
         shell: pwsh
