@@ -16,8 +16,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The forge runner is Ubuntu-only: Windows legs run on workflow_dispatch (GitHub or a Windows runner), Ubuntu gates push and PR.
-        os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["windows-latest", "ubuntu-latest"]' || '["ubuntu-latest"]') }}
+        # The forge runner (label `docker`) is Linux-only: Windows legs run on workflow_dispatch (GitHub or a Windows runner), Ubuntu gates push and PR.
+        os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["windows-latest", "docker"]' || '["docker"]') }}
 
     steps:
       - name: Check out CultLib
