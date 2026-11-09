@@ -1277,6 +1277,12 @@ impl CultNetRudpSession {
         }
     }
 
+    /// Whether `receive` has taken this reliable sequence: delivered, held, superseded or a duplicate. A packet
+    /// `receive` refused unremembered (too far ahead, or before the handshake) is not, and its sender resends it.
+    pub fn has_received(&self, sequence: u32) -> bool {
+        self.was_received(sequence)
+    }
+
     /// The one duplicate test: true for a sequence in the window that was
     /// received, for one below the window, and for one at or before the
     /// watermark. The watermark starts at the handshake's seed, so a frame the

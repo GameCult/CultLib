@@ -1,8 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { decode } from "@msgpack/msgpack";
 import {
   CULTNET_ERROR_CODES,
   CULTNET_ERROR_V1_CODES,
@@ -195,6 +198,38 @@ test("the replay runner passes every vector against this runtime", () => {
   assert.doesNotMatch(run.stdout, /^FAIL/m);
 });
 
+// A runner that skips what it cannot read passes a file it did not replay. It must fail instead.
+test("the replay runner fails on an unknown event key and on a vector count the file does not declare", () => {
+  const script = join(__dirname, "..", "..", "tools", "replay-write-receipt-vectors.mjs");
+  const vectorsPath = join(__dirname, "..", "..", "..", "..", "contracts", "cultnet", "interop", "write-receipt-vectors.json");
+  const dir = mkdtempSync(join(tmpdir(), "receipt-vectors-"));
+  const runWith = (edit: (vectors: any) => void) => {
+    const vectors = JSON.parse(readFileSync(vectorsPath, "utf8"));
+    edit(vectors);
+    const file = join(dir, "vectors.json");
+    writeFileSync(file, JSON.stringify(vectors));
+    return spawnSync(process.execPath, [script, file], { encoding: "utf8" });
+  };
+  const typo = runWith((v) => { v.scenarios.cases[0].events[0] = { atMs: 0, sendfailed: "w1" }; });
+  assert.equal(typo.status, 1, typo.stdout);
+  assert.match(typo.stdout, /^FAIL scenario\/receipt_admits$/m);
+  const dropped = runWith((v) => { v.scenarios.cases.pop(); });
+  assert.equal(dropped.status, 1, dropped.stdout);
+  assert.match(dropped.stdout, /^FAIL counts$/m);
+  const undeclared = runWith((v) => { v.wire.push(v.wire[0]); });
+  assert.equal(undeclared.status, 1, undeclared.stdout);
+});
+
+test("a write sent after the session ended settles unconfirmed session_ended at once, and the earlier receipt stands", () => {
+  const settled: [string, WriteSettlement][] = [];
+  const tracker = new WriteTracker({ windowMs: 1000, onSettle: (id, settlement) => settled.push([id, settlement]) });
+  tracker.send("w1", 0);
+  tracker.frame(admitted("w1"), 5);
+  tracker.sessionEnd(40);
+  tracker.send("w2", 50);
+  assert.deepEqual(settled, [["w1", { outcome: "admitted" }], ["w2", { outcome: "unconfirmed", reason: "session_ended" }]]);
+});
+
 test("a failed local send settles only that write unconfirmed as local_send_failed, and an answer after it is recorded late", () => {
   const settled: [string, WriteSettlement][] = [];
   const tracker = new WriteTracker({ windowMs: 1000, onSettle: (id, settlement) => settled.push([id, settlement]) });
@@ -226,4 +261,79 @@ test("a write whose own send failed settles local_send_failed even when its wind
   tracker.send("w1", 0);
   tracker.sendFailed("w1", 1000);
   assert.deepEqual(tracker.state("w1"), { outcome: "unconfirmed", reason: "local_send_failed" });
+});
+
+// Blank is Unicode White_Space (write-receipt.md, rule 5), not what String.prototype.trim() trims: trim() takes U+FEFF and
+// misses U+0085. Every frame decoder that rejects a blank text must agree with the servers that do.
+test("a blank messageId, record key or tag is exactly Unicode White_Space, not trim()", () => {
+  const put = (document: Record<string, unknown>, messageId = "p1") => ({
+    schemaVersion: "cultnet.document_put_raw.v0", messageId,
+    document: { schemaId: "note.v0", recordKey: "note:1", storedAt: "2026-11-08T00:00:00Z", payloadEncoding: "messagepack", payload: Uint8Array.of(0x81, 0xa1, 0x61, 0x01), ...document },
+  });
+  for (const blank of ["\u0085", "  ", "　"]) {
+    assert.throws(() => parseCultNetMessage(put({}, blank)), `messageId ${JSON.stringify(blank)}`);
+    assert.throws(() => parseCultNetMessage(put({ recordKey: blank })), `recordKey ${JSON.stringify(blank)}`);
+    assert.throws(() => parseCultNetMessage(put({ tags: [blank] })), `tag ${JSON.stringify(blank)}`);
+  }
+  for (const named of ["﻿", "​", "\u001c", "᠎"]) {
+    parseCultNetMessage(put({}, named));
+    parseCultNetMessage(put({ recordKey: named }));
+    parseCultNetMessage(put({ tags: [named] }));
+  }
+});
+
+// `admittedMessageId` vectors: a write_admitted messageId needs a letter or number and no Default_Ignorable code point,
+// compared raw (never trimmed). The D800 vector is the frame's bytes (wireHex), decoded by the msgpack library like the others.
+test("write_admitted messageId: every admittedMessageId vector is refused or accepted raw", () => {
+  const vectorsPath = join(__dirname, "..", "..", "..", "..", "contracts", "cultnet", "interop", "write-receipt-vectors.json");
+  const vectors = JSON.parse(readFileSync(vectorsPath, "utf8"));
+  assert.equal(vectors.counts.admittedMessageIdCases, vectors.admittedMessageId.cases.length);
+  const failures: string[] = [];
+  for (const vector of vectors.admittedMessageId.cases as { name: string; codePoints: string[]; repeat?: number; wireHex?: string; expect: "refuse" | "accept" }[]) {
+    const id = vector.codePoints.map((cp) => String.fromCodePoint(parseInt(cp, 16))).join("").repeat(vector.repeat ?? 1);
+    let decodedId: string | undefined;
+    try {
+      const frame = vector.wireHex ? decode(Uint8Array.from(Buffer.from(vector.wireHex, "hex"))) : admitted(id);
+      decodedId = (parseCultNetMessage(frame) as CultNetWriteAdmittedMessage).messageId;
+    } catch {
+      decodedId = undefined;
+    }
+    if ((decodedId === undefined) !== (vector.expect === "refuse")) failures.push(`${vector.name}: expected ${vector.expect}`);
+    else if (decodedId !== undefined && decodedId !== id) failures.push(`${vector.name}: id not echoed raw`);
+  }
+  assert.deepEqual(failures, []);
+});
+
+// The generated ranges file is the independent copy of the embedded tables: first, last and the points either side of every range.
+test("write_admitted messageId: every range of the Unicode 16.0 tables is pinned at both ends", () => {
+  const ranges = JSON.parse(readFileSync(join(__dirname, "..", "..", "..", "..", "contracts", "cultnet", "interop", "write-admitted-message-id-ranges.json"), "utf8"));
+  assert.ok(ranges.letterOrNumber.length > 700);
+  assert.equal(ranges.defaultIgnorable.length, 17);
+  const accepted = (id: string) => { try { parseCultNetMessage(admitted(id)); return true; } catch { return false; } };
+  const failures: string[] = [];
+  for (const [low, high] of ranges.letterOrNumber as [number, number][]) {
+    for (const [point, want] of [[low, true], [high, true], [low - 1, false], [high + 1, false]] as [number, boolean][]) {
+      if (accepted(String.fromCodePoint(point)) !== want) failures.push(`U+${point.toString(16)} alone should be ${want ? "accepted" : "refused"}`);
+    }
+  }
+  for (const [low, high] of ranges.defaultIgnorable as [number, number][]) {
+    for (const [point, want] of [[low, false], [high, false], [low - 1, true], [high + 1, true]] as [number, boolean][]) {
+      if (accepted("a" + String.fromCodePoint(point)) !== want) failures.push(`a + U+${point.toString(16)} should be ${want ? "accepted" : "refused"}`);
+    }
+  }
+  assert.deepEqual(failures, []);
+});
+
+// TypeScript decodes the frame to an object, so it cannot see a duplicate key: it judges the last one (admittedMessageIdDuplicates).
+// This pins @msgpack/msgpack's last-key behaviour plus the id check on the decoded object, not a first-key or duplicate path in
+// cultnet-ts source: there is none, so a refuse-on-first mutation in src would not be killed.
+test("write_admitted messageId: a repeated key follows the last-key-wins policy", () => {
+  const vectors = JSON.parse(readFileSync(join(__dirname, "..", "..", "..", "..", "contracts", "cultnet", "interop", "write-receipt-vectors.json"), "utf8"));
+  const section = vectors.admittedMessageIdDuplicates;
+  assert.equal(vectors.counts.admittedMessageIdDuplicateCases, section.cases.length);
+  for (const vector of section.cases as { name: string; wireHex: string; lastKeyWins: "accept" | "refuse"; lastKeyWinsEcho?: string }[]) {
+    const frame = decode(Uint8Array.from(Buffer.from(vector.wireHex, "hex")));
+    if (vector.lastKeyWins === "refuse") assert.throws(() => parseCultNetMessage(frame), /./s, vector.name);
+    else assert.equal((parseCultNetMessage(frame) as CultNetWriteAdmittedMessage).messageId, vector.lastKeyWinsEcho, vector.name);
+  }
 });

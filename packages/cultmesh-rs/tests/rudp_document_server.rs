@@ -2983,6 +2983,324 @@ fn only_reliable_non_sequenced_writes_are_accepted_on_a_receipt_session() -> Res
     Ok(())
 }
 
+/// `bytes` with the MessagePack fixstr `from` replaced by the fixstr `to`, which may be blank.
+fn swap_fixstr(bytes: &[u8], from: &str, to: &str) -> Vec<u8> {
+    assert!(from.len() < 32 && to.len() < 32);
+    let mut needle = vec![0xa0 | from.len() as u8];
+    needle.extend_from_slice(from.as_bytes());
+    let at = bytes.windows(needle.len()).position(|window| window == needle).expect("marker is in the frame");
+    let mut out = bytes[..at].to_vec();
+    out.push(0xa0 | to.len() as u8);
+    out.extend_from_slice(to.as_bytes());
+    out.extend_from_slice(&bytes[at + needle.len()..]);
+    out
+}
+
+/// A `schemaId` or `recordKey` that is present but empty or only whitespace names nothing: the write is refused
+/// `message_invalid` like a frame that does not read (field "message", the write's id), never reaches the store,
+/// and the session goes on (write-receipt.md, rule 5; vector `error_v1_empty_schema_id_is_unreadable_and_names_the_write`).
+#[test]
+fn a_write_whose_schema_id_or_record_key_names_nothing_is_refused_and_never_handed_to_the_store() -> Result<()> {
+    let blanks = ["", " ", "\t \n"];
+    let mut connection_id = 300;
+    for blank in blanks {
+        for blank_field in ["schemaId", "recordKey"] {
+            for operation in ["put", "delete"] {
+                connection_id += 1;
+                let (schema_id, record_key) = match blank_field {
+                    "schemaId" => (blank, "note:1"),
+                    _ => ("test.raw.v1", blank),
+                };
+                // The encoder refuses a blank field, so encode a marker and swap the blank into the bytes.
+                let bad = if operation == "put" {
+                    let mut record = document("zz-key-zz", vec![1, 2, 3]);
+                    record.schema_id = "zz-schema-zz".into();
+                    encode_cultnet_message_to_vec(
+                        &CultNetMessage::DocumentPutRaw { message_id: "bad-1".into(), document: record },
+                        CultNetWireContract::CultNetSchemaV0,
+                    )?
+                } else {
+                    encode_cultnet_message_to_vec(
+                        &CultNetMessage::DocumentDelete {
+                            message_id: "bad-1".into(),
+                            schema_id: "zz-schema-zz".into(),
+                            record_key: "zz-key-zz".into(),
+                        },
+                        CultNetWireContract::CultNetSchemaV0,
+                    )?
+                };
+                let bad = swap_fixstr(&bad, "zz-schema-zz", schema_id);
+                let bad = swap_fixstr(&bad, "zz-key-zz", record_key);
+                let label = format!("{operation} with {blank_field} {blank:?}");
+                let sink = Sink::default();
+                let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+                let mut peer = client(server.local_addr()?, connection_id)?;
+                connect(&mut server, &mut [&mut peer])?;
+                send_reliable(&mut peer, &receipt_hello())?;
+                peer.send_reliable("schema", bad)?;
+                send_reliable(&mut peer, &put("good-1", "note:2", vec![1]))?;
+                let answers = answers_after(&mut server, &mut peer, 2)?;
+                assert_eq!(refusal_of(&answers[0]), (Some(CultNetErrorCode::MessageInvalid), Some("bad-1".into())), "{label}");
+                assert_eq!(error_text_and_field(&answers[0]).1, Some("message".into()), "{label}");
+                assert_eq!(answers[1], admitted("good-1", "note:2"), "{label}: the session goes on");
+                let state = sink.0.lock().unwrap();
+                assert_eq!(state.authorized, vec!["good-1".to_string()], "{label}: the store was never asked about the blank write");
+                assert_eq!(state.receipts.len(), 1, "{label}: only the good write was applied");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The sequenced-channel refusal belongs to the frame that arrived sequenced. A reliable-sequenced packet that
+/// fills the gap an earlier ordered packet was held behind delivers both frames in one go: the sequenced write is
+/// refused, the ordered write it released is admitted.
+#[test]
+fn a_sequenced_packet_releasing_a_held_ordered_write_refuses_only_its_own() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = RawPeer::connect(&mut server, 250)?;
+    peer.send(&receipt_hello())?;
+    server.poll_once()?;
+    let mut packet_for = |peer: &mut RawPeer, id: &str, ordered: bool, sequenced: bool| -> Result<Vec<cultnet_rs::CultNetRudpPacket>> {
+        let payload = encode_cultnet_message_to_vec(&put(id, &format!("note:{id}"), vec![1]), CultNetWireContract::CultNetSchemaV0)?;
+        peer.session.send_many(
+            "schema",
+            payload,
+            cultnet_rs::CultNetRudpSendOptions { reliable: true, ordered, sequenced, now_ms: 3, reliable_expire_after_ms: None },
+            Some(1200),
+        )
+    };
+    let sequenced = packet_for(&mut peer, "s1", false, true)?;
+    let ordered = packet_for(&mut peer, "o1", true, false)?;
+    // The ordered write arrives first, one sequence ahead of the gap, and is held.
+    for packet in &ordered {
+        peer.send_packet(packet)?;
+    }
+    server.poll_once()?;
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 0, "the ordered write waits behind the gap");
+    for packet in &sequenced {
+        peer.send_packet(packet)?;
+    }
+    server.poll_once()?;
+    let mut answers = Vec::new();
+    for packet in peer.drain() {
+        for frame in peer.session.receive(&packet, 4)?.delivered {
+            answers.push(decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)?);
+        }
+    }
+    let refusals: Vec<_> = answers.iter().filter(|a| matches!(a, CultNetMessage::ErrorV1 { .. })).collect();
+    assert_eq!(refusals.len(), 1, "only the sequenced write is refused: {answers:?}");
+    assert_eq!(refusal_of(refusals[0]), (Some(CultNetErrorCode::MessageInvalid), Some("s1".into())));
+    assert!(answers.contains(&admitted("o1", "note:o1")), "the released ordered write is admitted: {answers:?}");
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 1, "and applied");
+    Ok(())
+}
+
+/// The refusal of a write on a sequenced channel does not depend on the packet being the newest. A reliable-sequenced
+/// packet that arrives after a newer one on its channel is superseded: the session delivers no frame for it, yet
+/// the packet was acknowledged and will not be resent, so the server answers it from the packet's own payload.
+#[test]
+fn a_superseded_sequenced_write_is_still_refused() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = RawPeer::connect(&mut server, 253)?;
+    peer.send(&receipt_hello())?;
+    server.poll_once()?;
+    let packet_for = |peer: &mut RawPeer, id: &str| -> Result<Vec<cultnet_rs::CultNetRudpPacket>> {
+        let payload = encode_cultnet_message_to_vec(&put(id, &format!("note:{id}"), vec![1]), CultNetWireContract::CultNetSchemaV0)?;
+        peer.session.send_many(
+            "schema",
+            payload,
+            cultnet_rs::CultNetRudpSendOptions { reliable: true, ordered: false, sequenced: true, now_ms: 3, reliable_expire_after_ms: None },
+            Some(1200),
+        )
+    };
+    let older = packet_for(&mut peer, "old")?;
+    let newer = packet_for(&mut peer, "new")?;
+    let mut refused_ids = Vec::new();
+    for packets in [&newer, &older] {
+        for packet in packets {
+            peer.send_packet(packet)?;
+        }
+        server.poll_once()?;
+        for packet in peer.drain() {
+            for frame in peer.session.receive(&packet, 4)?.delivered {
+                let answer = decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)?;
+                if matches!(answer, CultNetMessage::ErrorV1 { .. }) {
+                    refused_ids.push(refusal_of(&answer).1.expect("a refusal names its write"));
+                }
+            }
+        }
+    }
+    assert_eq!(refused_ids, vec!["new".to_string(), "old".to_string()], "the superseded write is answered too");
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 0, "and nothing was applied");
+    Ok(())
+}
+
+/// One answer per write (write-receipt.md, rule 1): a sequenced packet the server already answered is answered
+/// once, however often the peer sends it again, and a packet too far ahead to be received draws nothing until it
+/// is received (the peer resends it, and the answer comes then).
+#[test]
+fn a_repeated_or_far_ahead_sequenced_write_draws_one_answer_not_one_per_send() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = RawPeer::connect(&mut server, 256)?;
+    peer.send(&receipt_hello())?;
+    server.poll_once()?;
+    let packet_for = |peer: &mut RawPeer, id: &str| -> Result<Vec<cultnet_rs::CultNetRudpPacket>> {
+        let payload = encode_cultnet_message_to_vec(&put(id, &format!("note:{id}"), vec![1]), CultNetWireContract::CultNetSchemaV0)?;
+        peer.session.send_many(
+            "schema",
+            payload,
+            cultnet_rs::CultNetRudpSendOptions { reliable: true, ordered: false, sequenced: true, now_ms: 3, reliable_expire_after_ms: None },
+            Some(1200),
+        )
+    };
+    let refusals_of = |peer: &mut RawPeer| -> Result<Vec<String>> {
+        let mut ids = Vec::new();
+        for packet in peer.drain() {
+            for frame in peer.session.receive(&packet, 4)?.delivered {
+                let answer = decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)?;
+                if matches!(answer, CultNetMessage::ErrorV1 { .. }) {
+                    ids.push(refusal_of(&answer).1.expect("a refusal names its write"));
+                }
+            }
+        }
+        Ok(ids)
+    };
+    // The same packet, sent three times (a resend whose acknowledgement was lost), is refused once.
+    let once = packet_for(&mut peer, "dup")?;
+    let mut refused = Vec::new();
+    for _ in 0..3 {
+        for packet in &once {
+            peer.send_packet(packet)?;
+        }
+        server.poll_once()?;
+        refused.extend(refusals_of(&mut peer)?);
+    }
+    assert_eq!(refused, vec!["dup".to_string()], "a repeat of an answered write is not answered again");
+
+    // A packet far past the receive window is not received: no answer yet, and none per resend.
+    let ahead = packet_for(&mut peer, "ahead")?;
+    let mut far = ahead[0].clone();
+    far.sequence = once[0].sequence + 5_000;
+    let mut refused = Vec::new();
+    for _ in 0..3 {
+        peer.send_packet(&far)?;
+        server.poll_once()?;
+        refused.extend(refusals_of(&mut peer)?);
+    }
+    assert_eq!(refused, Vec::<String>::new(), "an unreceived packet draws no answer");
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 0);
+    Ok(())
+}
+
+/// A superseded sequenced packet is answered even when its arrival fills a gap and releases another write: the
+/// frames that arrive with it do not stand in for its own.
+#[test]
+fn a_superseded_sequenced_write_is_refused_while_it_releases_a_held_ordered_write() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = RawPeer::connect(&mut server, 255)?;
+    peer.send(&receipt_hello())?;
+    server.poll_once()?;
+    let packet_for = |peer: &mut RawPeer, id: &str, ordered: bool, sequenced: bool| -> Result<Vec<cultnet_rs::CultNetRudpPacket>> {
+        let payload = encode_cultnet_message_to_vec(&put(id, &format!("note:{id}"), vec![1]), CultNetWireContract::CultNetSchemaV0)?;
+        peer.session.send_many(
+            "schema",
+            payload,
+            cultnet_rs::CultNetRudpSendOptions { reliable: true, ordered, sequenced, now_ms: 3, reliable_expire_after_ms: None },
+            Some(1200),
+        )
+    };
+    let older = packet_for(&mut peer, "old", false, true)?;
+    let ordered = packet_for(&mut peer, "o1", true, false)?;
+    let newer = packet_for(&mut peer, "new", false, true)?;
+    let mut answers = Vec::new();
+    for packets in [&newer, &ordered, &older] {
+        for packet in packets {
+            peer.send_packet(packet)?;
+        }
+        server.poll_once()?;
+        for packet in peer.drain() {
+            for frame in peer.session.receive(&packet, 4)?.delivered {
+                answers.push(decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)?);
+            }
+        }
+    }
+    let mut refused: Vec<String> = answers
+        .iter()
+        .filter(|a| matches!(a, CultNetMessage::ErrorV1 { .. }))
+        .map(|a| refusal_of(a).1.expect("a refusal names its write"))
+        .collect();
+    refused.sort();
+    assert_eq!(refused, vec!["new".to_string(), "old".to_string()], "{answers:?}");
+    assert!(answers.contains(&admitted("o1", "note:o1")), "the released ordered write is admitted: {answers:?}");
+    Ok(())
+}
+
+/// The refusal reaches a sequenced write however far apart its fragments' sequences sit: other traffic can take the
+/// sequences between the first fragment and the last, further back than the duplicate test's receive window.
+#[test]
+fn a_sequenced_write_whose_fragments_span_more_than_the_receive_window_is_refused() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = RawPeer::connect(&mut server, 254)?;
+    peer.send(&receipt_hello())?;
+    server.poll_once()?;
+    let payload = encode_cultnet_message_to_vec(&put("far", "note:far", vec![1; 64]), CultNetWireContract::CultNetSchemaV0)?;
+    let mut packets = peer.session.send_many(
+        "schema",
+        payload,
+        cultnet_rs::CultNetRudpSendOptions { reliable: true, ordered: false, sequenced: true, now_ms: 3, reliable_expire_after_ms: None },
+        Some(32),
+    )?;
+    let last = packets.pop().expect("the write is fragmented");
+    assert!(!packets.is_empty());
+    let mut next = last.sequence;
+    let mut refused_ids = Vec::new();
+    for packet in &packets {
+        peer.send_packet(packet)?;
+        server.poll_once()?;
+    }
+    // 5,000 reliable packets on another channel, in order, take the sequences between the fragments.
+    for count in 0..5_000 {
+        let mut filler = packets[0].clone();
+        filler.channel_id = "filler".into();
+        filler.sequenced = false;
+        filler.fragment_id = 0;
+        filler.fragment_index = 0;
+        filler.fragment_count = 0;
+        filler.payload = vec![0];
+        filler.sequence = next;
+        next += 1;
+        peer.send_packet(&filler)?;
+        server.poll_once()?;
+        if count % 100 == 99 {
+            // Read what the server sent, so the socket buffer never holds back the refusal.
+            for packet in peer.drain() {
+                peer.session.receive(&packet, 4)?;
+            }
+        }
+    }
+    let mut last = last;
+    last.sequence = next;
+    peer.send_packet(&last)?;
+    server.poll_once()?;
+    for packet in peer.drain() {
+        for frame in peer.session.receive(&packet, 4)?.delivered {
+            let answer = decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)?;
+            if matches!(answer, CultNetMessage::ErrorV1 { .. }) {
+                refused_ids.push(refusal_of(&answer).1.expect("a refusal names its write"));
+            }
+        }
+    }
+    assert_eq!(refused_ids, vec!["far".to_string()]);
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 0, "and nothing was applied");
+    Ok(())
+}
+
 /// A refused write is traffic: the peer that sends it is not idle, so its session outlives the idle timeout measured
 /// from the refusal and not from the packet before it.
 #[test]
@@ -3120,5 +3438,191 @@ fn an_unreliable_refusal_that_cannot_be_queued_ends_the_session_as_a_local_failu
     assert_eq!(server.session_count(), 0, "the refusal the queue could not take ended the session");
     let goodbye = peer.drain().into_iter().find(is_goodbye).expect("the peer is told the session ended");
     assert_eq!(goodbye.payload, b"server could not answer a write".to_vec());
+    Ok(())
+}
+
+fn vectors() -> serde_json::Value {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../contracts/cultnet/interop/write-receipt-vectors.json");
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// The spec's one fixed text for a frame that does not read or a write that names nothing, read from the vector
+/// that carries it, so a server and the spec cannot drift apart unseen.
+fn unreadable_vector_text(vectors: &serde_json::Value) -> String {
+    let name = "error_v1_empty_schema_id_is_unreadable_and_names_the_write";
+    let vector = vectors["wire"].as_array().unwrap().iter().find(|v| v["name"] == name).unwrap();
+    vector["message"]["error"].as_str().unwrap().to_string()
+}
+
+/// The put frame of a `blankFields` case: the valid document with the case's `set` applied. Serialized without the
+/// typed encoder, because that refuses what the case is about.
+fn blank_field_put(vectors: &serde_json::Value, set: &serde_json::Value) -> Vec<u8> {
+    blank_field_put_with_id(vectors, set, "m1")
+}
+
+fn blank_field_put_with_id(vectors: &serde_json::Value, set: &serde_json::Value, message_id: &str) -> Vec<u8> {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Put {
+        schema_version: &'static str,
+        message_id: String,
+        document: CultNetRawDocumentRecord,
+    }
+    let hex = set.get("payloadHex").and_then(|v| v.as_str()).unwrap_or(vectors["blankFields"]["validPutPayloadHex"].as_str().unwrap());
+    let field = |name: &str, default: &str| set.get(name).and_then(|v| v.as_str()).unwrap_or(default).to_string();
+    let optional = |name: &str| set.get(name).and_then(|v| v.as_str()).map(str::to_string);
+    let document = CultNetRawDocumentRecord {
+        schema_id: field("schemaId", "note.v0"),
+        record_key: field("recordKey", "note:1"),
+        stored_at: field("storedAt", "2026-11-08T00:00:00Z"),
+        payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+        payload: (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect(),
+        source_runtime_id: optional("sourceRuntimeId"),
+        source_agent_id: optional("sourceAgentId"),
+        source_role: optional("sourceRole"),
+        tags: set.get("tags").and_then(|v| v.as_array()).map(|tags| tags.iter().map(|t| t.as_str().unwrap().to_string()).collect()),
+    };
+    rmp_serde::to_vec_named(&Put { schema_version: "cultnet.document_put_raw.v0", message_id: message_id.to_string(), document }).unwrap()
+}
+
+/// Each `blankFields` case: a receipt-capable connection is answered with the admitted receipt, or with the one fixed
+/// unreadable text naming the write, and the sink sees a document only when the case is admitted.
+#[test]
+fn a_put_that_names_nothing_is_refused_as_unreadable_naming_the_write_and_a_named_one_is_admitted() -> Result<()> {
+    let vectors = vectors();
+    let fixed = unreadable_vector_text(&vectors);
+    assert_eq!(fixed, "message_invalid: the message could not be read");
+    let cases = vectors["blankFields"]["cases"].as_array().unwrap();
+    assert!(cases.len() >= 10);
+    for (index, case) in cases.iter().enumerate() {
+        let name = case["name"].as_str().unwrap();
+        let sink = Sink::default();
+        let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+        let mut peer = client(server.local_addr()?, 400 + index as u32)?;
+        connect(&mut server, &mut [&mut peer])?;
+        send_reliable(&mut peer, &receipt_hello())?;
+        peer.send_reliable("schema", blank_field_put(&vectors, &case["set"]))?;
+        let answers = answers_after(&mut server, &mut peer, 1)?;
+        match case["outcome"].as_str().unwrap() {
+            "admitted" => {
+                assert_eq!(
+                    answers,
+                    vec![CultNetMessage::WriteAdmitted {
+                        message_id: "m1".into(),
+                        operation: "put".into(),
+                        schema_id: case["set"]["schemaId"].as_str().unwrap_or("note.v0").into(),
+                        record_key: case["set"]["recordKey"].as_str().unwrap_or("note:1").into(),
+                    }],
+                    "{name}"
+                );
+                assert_eq!(sink.0.lock().unwrap().receipts.len(), 1, "{name}");
+            }
+            "refused" => {
+                assert_eq!(refusal_of(&answers[0]), (Some(CultNetErrorCode::MessageInvalid), Some("m1".into())), "{name}");
+                assert_eq!(error_text_and_field(&answers[0]), (fixed.clone(), Some("message".into())), "{name}");
+                assert_eq!(sink.0.lock().unwrap().receipts.len(), 0, "{name}: never applied");
+            }
+            other => panic!("{name}: unknown outcome {other}"),
+        }
+        assert_eq!(server.session_count(), 1, "{name}: the session is kept");
+    }
+    Ok(())
+}
+
+fn code_point_string(hex: &str, times: usize) -> String {
+    std::char::from_u32(u32::from_str_radix(hex, 16).unwrap()).unwrap().to_string().repeat(times)
+}
+
+/// The Unicode White_Space set is the one blank rule: every listed code point, alone or repeated, blanks every field
+/// the rule covers; U+200B, U+FEFF, U+180E and the other listed non-White_Space code points name something.
+#[test]
+fn blank_means_exactly_the_unicode_white_space_code_points_in_every_field() -> Result<()> {
+    let vectors = vectors();
+    let fixed = unreadable_vector_text(&vectors);
+    let fields = ["schemaId", "recordKey", "storedAt", "sourceRuntimeId", "sourceAgentId", "sourceRole", "tags"];
+    let space = vectors["blankFields"]["whiteSpaceCodePoints"].as_array().unwrap();
+    let not_space = vectors["blankFields"]["notWhiteSpaceCodePoints"].as_array().unwrap();
+    assert_eq!(space.len(), 25);
+    for (index, (hex, blank)) in space.iter().map(|h| (h, true)).chain(not_space.iter().map(|h| (h, false))).enumerate() {
+        let hex = hex.as_str().unwrap();
+        for (field_index, field) in fields.iter().enumerate() {
+            // A session that is sent refusals is allowed to end, so each code point and field gets its own.
+            let sink = Sink::default();
+            let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+            let mut peer = client(server.local_addr()?, 600 + (index * fields.len() + field_index) as u32)?;
+            connect(&mut server, &mut [&mut peer])?;
+            send_reliable(&mut peer, &receipt_hello())?;
+            assert_eq!(frames_after(&mut server, &mut peer, 1)?, vec![server_hello()]);
+            let mut admitted = 0;
+            for times in [1, 3] {
+                let text = code_point_string(hex, times);
+                let value = if *field == "tags" { serde_json::json!(["a", text]) } else { serde_json::json!(text) };
+                let set = serde_json::json!({ *field: value });
+                let id = format!("{hex}-{field}-{times}");
+                peer.send_reliable("schema", blank_field_put_with_id(&vectors, &set, &id))?;
+                let answers = frames_after(&mut server, &mut peer, 1)?;
+                let what = format!("U+{hex} in {field} x{times}");
+                assert!(!answers.is_empty(), "{what}: no answer");
+                if blank {
+                    assert_eq!(refusal_of(&answers[0]), (Some(CultNetErrorCode::MessageInvalid), Some(id)), "{what}");
+                    assert_eq!(error_text_and_field(&answers[0]), (fixed.clone(), Some("message".into())), "{what}");
+                } else {
+                    assert!(matches!(answers[0], CultNetMessage::WriteAdmitted { .. }), "{what} is a name: {:?}", answers[0]);
+                    admitted += 1;
+                }
+            }
+            assert_eq!(sink.0.lock().unwrap().receipts.len(), admitted, "U+{hex} in {field}: only named writes are applied");
+        }
+    }
+    Ok(())
+}
+
+/// The same cases on a connection that never opted in: the same refusal as `error.v0`, the same text, nothing applied.
+#[test]
+fn a_put_that_names_nothing_is_refused_the_same_way_on_a_legacy_connection() -> Result<()> {
+    let vectors = vectors();
+    let fixed = unreadable_vector_text(&vectors);
+    for (index, case) in vectors["blankFields"]["cases"].as_array().unwrap().iter().enumerate() {
+        let name = case["name"].as_str().unwrap();
+        let sink = Sink::default();
+        let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+        let mut peer = client(server.local_addr()?, 500 + index as u32)?;
+        connect(&mut server, &mut [&mut peer])?;
+        let bytes = blank_field_put(&vectors, &case["set"]);
+        if case["outcome"] == "refused" {
+            let (code, details, error) = refusal_on_live_session(&mut server, &mut peer, bytes)?;
+            assert_eq!(code, Some(CultNetErrorCode::MessageInvalid), "{name}");
+            assert_eq!(details.and_then(|d| d.field), Some("message".into()), "{name}");
+            assert_eq!(error, fixed, "{name}");
+            assert_eq!(sink.0.lock().unwrap().receipts.len(), 0, "{name}");
+        } else {
+            peer.send_reliable("schema", bytes)?;
+            for _ in 0..2_000 {
+                server.poll_once()?;
+                if !sink.0.lock().unwrap().receipts.is_empty() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(sink.0.lock().unwrap().receipts.len(), 1, "{name}");
+        }
+    }
+    Ok(())
+}
+
+/// An unreadable frame from a receipt connection is sent the one fixed text, with no decoder wording in it.
+#[test]
+fn an_unreadable_frame_on_a_receipt_connection_is_sent_exactly_the_fixed_text() -> Result<()> {
+    let vectors = vectors();
+    let mut server = server(Default::default(), Clock::new(70_000), Sink::default(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 450)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    peer.send_reliable("schema", garbage())?;
+    let answers = answers_after(&mut server, &mut peer, 1)?;
+    assert_eq!(
+        error_text_and_field(&answers[0]),
+        (unreadable_vector_text(&vectors), Some("message".into()))
+    );
     Ok(())
 }

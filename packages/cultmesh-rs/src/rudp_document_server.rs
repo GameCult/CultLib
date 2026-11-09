@@ -780,6 +780,13 @@ where
             return Ok(CultMeshRudpPollOutcome::Handled);
         }
 
+        // Whether this packet is the first the session takes for its sequence: a repeat of an answered write, or a
+        // packet too far ahead to be remembered, is not, and the write is not answered for it again.
+        let first_receipt = packet.reliable
+            && self
+                .sessions
+                .get(&key)
+                .is_some_and(|entry| !entry.session.has_received(packet.sequence));
         let result = {
             let entry = self
                 .sessions
@@ -821,11 +828,28 @@ where
         }
 
         let mut kept_rejection = None;
+        // A superseded packet delivers no frame, yet it was acknowledged and will not be resent, so its write would
+        // go unanswered. A packet that carries its whole frame is answered from its own payload. A superseded
+        // fragment cannot be: the write's id may lie in a fragment this packet does not hold.
+        if refuse_sequenced
+            && first_receipt
+            && self.sessions.get(&key).is_some_and(|entry| entry.session.has_received(packet.sequence))
+            && packet.fragment_count == 0
+            && !result.delivered.iter().any(|frame| frame.channel_id == "schema" && frame.sequence == packet.sequence)
+        {
+            if let CultMeshRudpPollOutcome::ApplicationRejected(rejection) =
+                self.refuse_unreliable_write(key, &packet.payload)?
+            {
+                kept_rejection = Some(rejection);
+            }
+        }
         for frame in result.delivered {
             if frame.channel_id != "schema" {
                 continue;
             }
-            if refuse_sequenced {
+            // `delivered` also holds the ordered frames this packet's arrival released from the hold; those were
+            // not sent on the sequenced channel. They sit above the packet's own sequence, its own frame at or below.
+            if refuse_sequenced && sequence_at_or_before(frame.sequence, packet.sequence) {
                 if let CultMeshRudpPollOutcome::ApplicationRejected(rejection) =
                     self.refuse_unreliable_write(key, &frame.payload)?
                 {
@@ -1814,6 +1838,13 @@ where
 #[cfg(test)]
 mod send_failure_tests;
 
+/// Whether `sequence` is at or before `mark` in serial order (RFC 1982): the 32-bit space is compared modulo 2^32,
+/// so a frame that began before the wrap and a packet after it still order correctly. The receive window of
+/// `cultnet_rs`' duplicate test does not belong here: a frame's first fragment may lie any distance back.
+fn sequence_at_or_before(sequence: u32, mark: u32) -> bool {
+    mark.wrapping_sub(sequence) < 1 << 31
+}
+
 fn validate_options(options: &CultMeshRudpDocumentServerOptions) -> Result<()> {
     if options.max_sessions == 0 {
         return Err(anyhow!("max_sessions must be greater than zero"));
@@ -1928,5 +1959,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hex(&bytes), MESSAGE_INVALID_HEX);
+    }
+
+    #[test]
+    fn sequence_order_holds_across_the_wrap_and_beyond_the_receive_window() {
+        assert!(sequence_at_or_before(7, 7));
+        assert!(sequence_at_or_before(100, 5_200), "further back than the receive window");
+        assert!(!sequence_at_or_before(5_200, 100));
+        assert!(sequence_at_or_before(u32::MAX - 1, 1), "begun before the wrap, ended after it");
+        assert!(!sequence_at_or_before(1, u32::MAX - 1), "after the wrap is later than before it");
+        assert!(sequence_at_or_before(u32::MAX, 0), "the wrap itself");
+        assert!(!sequence_at_or_before(0, u32::MAX));
+        assert!(sequence_at_or_before(0, (1 << 31) - 1), "just inside half the space");
+        assert!(!sequence_at_or_before(0, 1 << 31), "half the space away is not before");
     }
 }
