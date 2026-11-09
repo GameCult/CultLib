@@ -287,18 +287,21 @@ test("a replaced RUDP generation drops operations queued behind an active handle
     runtimeId: identity.serviceInstanceId,
     connectionId,
     sessionToken: "signed-provider-token",
-    operationTimeoutMs: 100,
+    operationTimeoutMs: 1, // expires long before the test ends: the settle-by-timeout path is always exercised
     socketFactory: () => socket,
   }).connect(identity, new AbortController().signal);
   try {
+    // The handler is held open and the closed generation never answers, so these two settle only by the
+    // client's operation timeout or by connection.close(). Observe them from the start: whichever fires
+    // first is a legitimate end of the call, and this test asserts on server-side handler calls, not on it.
     const first = connection.register(
       { identity, requestedLeaseDurationMs: 10_000 },
       new AbortController().signal,
-    );
+    ).then(() => undefined, () => undefined);
     const second = connection.register(
       { identity, requestedLeaseDurationMs: 10_000 },
       new AbortController().signal,
-    );
+    ).then(() => undefined, () => undefined);
     await waitFor(() => handlerCalls === 1, "first queued provider operation");
 
     const replacement = new CultNetRudpSession({ connectionId });
@@ -318,7 +321,7 @@ test("a replaced RUDP generation drops operations queued behind an active handle
     assert.equal(handlerCalls, 1, "transport-queued work from the closed generation must be dropped");
 
     connection.close();
-    await Promise.allSettled([first, second]);
+    await Promise.all([first, second]);
   } finally {
     connection.close();
     server.close();
