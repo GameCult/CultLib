@@ -325,6 +325,8 @@ test("write_admitted messageId: every range of the Unicode 16.0 tables is pinned
 });
 
 // TypeScript decodes the frame to an object, so it cannot see a duplicate key: it judges the last one (admittedMessageIdDuplicates).
+// This pins @msgpack/msgpack's last-key behaviour plus the id check on the decoded object, not a first-key or duplicate path in
+// cultnet-ts source: there is none, so a refuse-on-first mutation in src would not be killed.
 test("write_admitted messageId: a repeated key follows the last-key-wins policy", () => {
   const vectors = JSON.parse(readFileSync(join(__dirname, "..", "..", "..", "..", "contracts", "cultnet", "interop", "write-receipt-vectors.json"), "utf8"));
   const section = vectors.admittedMessageIdDuplicates;

@@ -239,7 +239,8 @@ fn every_range_of_the_unicode_tables_is_pinned_at_both_ends() {
     assert!(failures.is_empty(), "{} failing:\n{}", failures.len(), failures.join("\n"));
 }
 
-/// Vectors `admittedMessageIdDuplicates`: Rust decodes a map it can see into, so a repeated messageId key is refused whatever the values.
+/// Vectors `admittedMessageIdDuplicates`: a repeated messageId key is refused whatever the values. This pins the outcome, not the
+/// cause (today serde's `duplicate field messageId` in the typed decode of write_admitted).
 #[test]
 fn a_repeated_message_id_key_is_refused_whatever_the_values() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../contracts/cultnet/interop/write-receipt-vectors.json");
