@@ -367,6 +367,10 @@ async function bind(): Promise<Socket> {
   return socket;
 }
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+// Wait for a datagram-driven condition rather than guessing how long loopback delivery takes on a loaded runner.
+const until = async (condition: () => boolean, limitMs = 2_000) => {
+  for (let waited = 0; !condition() && waited < limitMs; waited += 10) await sleep(10);
+};
 
 test("server mode admits a pinned client that restarts on a new port", async () => {
   const serverSocket = await bind();
@@ -385,24 +389,24 @@ test("server mode admits a pinned client that restarts on a new port", async () 
   try {
     const first = session(1);
     a.send(encodeRudpPacket(first.createConnect(0, enc("join"))), port, "127.0.0.1");
-    await sleep(100);
+    await until(() => atA.some((packet) => packet.packetType === "accept"));
     const accept = atA.find((packet) => packet.packetType === "accept");
     assert.ok(accept);
     first.receive(accept, 0);
     a.send(encodeRudpPacket(first.createAckForReceived(accept.sequence)), port, "127.0.0.1");
     a.send(encodeRudpPacket(send(first, "hello")), port, "127.0.0.1");
-    await sleep(100);
+    await until(() => frames.length === 1);
     assert.deepEqual(frames, ["hello"]);
 
     const second = session(1); // the process restarted on a new port, pinned
     b.send(encodeRudpPacket(second.createConnect(0, enc("join"))), port, "127.0.0.1");
-    await sleep(100);
+    await until(() => atB.some((packet) => packet.packetType === "accept"));
     const acceptB = atB.find((packet) => packet.packetType === "accept");
     assert.ok(acceptB, `the restarted client on a new port was not admitted: ${JSON.stringify(atB.map((packet) => packet.packetType))}`);
     second.receive(acceptB, 1);
     assert.ok(second.connected);
     b.send(encodeRudpPacket(send(second, "after")), port, "127.0.0.1");
-    await sleep(100);
+    await until(() => frames.length === 2);
     assert.deepEqual(frames, ["hello", "after"]);
   } finally {
     server.close();
