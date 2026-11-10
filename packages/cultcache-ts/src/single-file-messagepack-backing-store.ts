@@ -47,21 +47,11 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   }
 
   async pullAll(): Promise<CultCacheEnvelope[]> {
-    // The disk decides the header: a file that is gone or legacy is not marked.
-    this.#format = STORE_FORMAT_VERSION;
+    // A pure read: the disk decides the header, and a legacy file is normalized in memory only. The file is rewritten
+    // as v1 by the next push, delete or flush, which merges what this read returns; opening never replaces bytes the
+    // consumer's codec has not yet accepted.
     const disk = this.#readDisk();
     this.#format = disk.format;
-    if (disk.repairedLegacyPayload) {
-      // The heal decides from its own read, taken under the store lock.
-      await this.#enqueue(async () => {
-        const again = this.#readDisk();
-        this.#format = again.format;
-        if (again.repairedLegacyPayload) {
-          await this.#writeAll([], again.envelopes);
-        }
-      });
-    }
-
     return disk.envelopes;
   }
 
@@ -158,7 +148,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
 export function readSingleFileStore(path: string): SingleFileStoreRead {
   const data = readStoreBytes(path);
   if (data === undefined) {
-    return { absent: true, format: STORE_FORMAT_VERSION, envelopes: [], repairedLegacyPayload: false };
+    return { absent: true, format: STORE_FORMAT_VERSION, envelopes: [] };
   }
 
   try {
@@ -395,8 +385,6 @@ export type SingleFileStoreRead = {
   absent: boolean;
   format: StoreFormat;
   envelopes: CultCacheEnvelope[];
-  // A legacy file whose payloads were not bytes: reading it repairs them, and the store rewrites the file.
-  repairedLegacyPayload: boolean;
 };
 
 function decodeStoreFile(data: Uint8Array): Omit<SingleFileStoreRead, "absent"> {
@@ -420,7 +408,7 @@ function decodeStoreFile(data: Uint8Array): Omit<SingleFileStoreRead, "absent"> 
         storedAt: record.storedAt,
       };
     });
-    return { format: snapshot.format, envelopes, repairedLegacyPayload: false };
+    return { format: snapshot.format, envelopes };
   }
 
   const legacy = decodeLegacyEnvelopeArray(decoded);
@@ -428,19 +416,8 @@ function decodeStoreFile(data: Uint8Array): Omit<SingleFileStoreRead, "absent"> 
     throw new Error("CultCache file is not a recognized CultCache MessagePack store.");
   }
 
-  let repairedLegacyPayload = false;
-  const normalized = legacy.map((entry) => {
-    const payload = normalizePayload(entry.payload);
-    if (payload !== entry.payload) {
-      repairedLegacyPayload = true;
-    }
-
-    return {
-      ...entry,
-      payload,
-    };
-  });
-  return { format: STORE_FORMAT_VERSION, envelopes: envelopeArraySchema.parse(normalized).map((entry) => ({ ...entry, payload: documentPayloadFromBytes(entry.payload) })) as CultCacheEnvelope[], repairedLegacyPayload };
+  const normalized = legacy.map((entry) => ({ ...entry, payload: normalizePayload(entry.payload) }));
+  return { format: STORE_FORMAT_VERSION, envelopes: envelopeArraySchema.parse(normalized).map((entry) => ({ ...entry, payload: documentPayloadFromBytes(entry.payload) })) as CultCacheEnvelope[] };
 }
 
 function decodeSnapshot(decoded: unknown): DecodedSnapshot | undefined {

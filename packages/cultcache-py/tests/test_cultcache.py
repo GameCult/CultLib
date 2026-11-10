@@ -1121,6 +1121,25 @@ class CultCacheTests(unittest.TestCase):
             catalog_entry=catalog_entry,
         )
 
+    def test_pulling_a_synthetic_pre_v1_envelope_array_leaves_the_file_bytes_identical(self) -> None:
+        try:
+            import msgpack  # type: ignore
+        except ImportError:
+            self.skipTest("msgpack optional dependency is not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy.cc"
+            legacy = msgpack.packb(
+                [{"key": "note:hello", "type": "note", "payload": {"title": "Hello"}, "storedAt": "2026-10-20T00:00:00Z"}],
+                use_bin_type=True,
+            )
+            path.write_bytes(legacy)
+
+            envelopes = SingleFileMessagePackBackingStore(path).pull_all()
+
+            self.assertEqual([e.key for e in envelopes], ["note:hello"])
+            self.assertEqual(path.read_bytes(), legacy)
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["legacy.cc"])
+
     def test_legacy_key_global_loads_without_writing_and_first_write_leaves_one_global(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = define_document_type("settings", global_document=True)

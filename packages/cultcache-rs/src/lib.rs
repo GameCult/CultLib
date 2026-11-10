@@ -6137,6 +6137,27 @@ mod tests {
     }
 
     #[test]
+    fn pulling_a_synthetic_pre_v1_envelope_array_leaves_the_file_bytes_identical() -> Result<()> {
+        // SYNTHETIC pre-v1 vector: no real file of this shape is known; the Rust envelope payload is binary.
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("legacy.cc");
+        let legacy = rmp_serde::to_vec_named(&vec![CultCacheEnvelope {
+            key: "note:hello".to_string(),
+            r#type: "note".to_string(),
+            payload: vec![0x90],
+            stored_at: "2026-10-20T00:00:00Z".to_string(),
+            schema_id: None,
+        }])?;
+        fs::write(&path, &legacy)?;
+
+        let envelopes = SingleFileMessagePackBackingStore::new(&path).pull_all()?;
+
+        assert_eq!(envelopes.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(), ["note:hello"]);
+        assert_eq!(fs::read(&path)?, legacy);
+        Ok(())
+    }
+
+    #[test]
     fn a_newer_store_is_named_once_its_header_string_is_complete() -> Result<()> {
         let vector = fs::read(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/vectors/document-variants-c0/unknown-header.msgpack"),
