@@ -487,7 +487,7 @@ def dg(name, status, sha_expected, why, **kw):
     b = digest_bytes(i); got = sha(b)
     assert got == sha_expected, (name, got)
     return {"name": name, "status": status, "why": why, "input": i, "canonical": b.decode("utf-8"), "sha256": got}
-MAIN, FIX = "main_7ea11b4_must_not_move", "pending_eureka_merge_huginn_30_cut-desk-digest-retracted.r2"
+MAIN, FIX = "main_7ea11b4_must_not_move", "reproduced_on_huginn_main_f0ca504_reported_by_eureka_not_rerun_here"
 BODY_DIGESTS = [
   dg("plain_answer_choice_A", MAIN, "8a4d5b2ed0b3452bfed2f3a276b2828974e6824a3edcc643cfe9cfcdda34173a", "a plain answer: choice and note as sent, retracts null; no illegal or retracted key", choice="A"),
   dg("legal_retraction", MAIN, "9f8075382556898c0bea364ed7c6deb2a86d8c78288a1f34e06da6e9bf5f58a3", "a legal retraction as Huginn main pins it: retracts is `Q1.1`, a string no door produces (the key grammar is .n<seq>); kept for the frozen-form test", retracts="eureka-state:desk_answer:Q1.1"),
@@ -496,7 +496,7 @@ BODY_DIGESTS = [
   dg("illegal_ii_on_main", MAIN, "1a36c4aba0d1c30d0736f20243ebfdb84fe84a5eabd4f69709a096a32c3cc6e3", "(ii) no answer, no target, on main", illegal_retraction=True),
   dg("illegal_i_retraction_with_an_answer_retracted_true", FIX, "935cab1a0ae34606b809d8ebca7cffa2889d20b3585d2622d32153a4d6898af1", "(i) answer present, retracted true, target Q1.n1", choice="A", retracts=DT, illegal_retraction=True, retracted=True),
   dg("illegal_iii_plain_answer_with_a_target_retracted_false", FIX, "82b24cccb4ed2535a549f95f844fcd935074c3712b5b832f0b2cbd89c71fd9a6", "(iii) the same bytes as (i) with retracted false: another body, so request_id_conflict", choice="A", retracts=DT, illegal_retraction=True, retracted=False),
-  dg("illegal_i_retraction_with_an_answer_and_no_target_retracted_true", "pending_eureka_merge_huginn_30_cut-desk-digest-retracted.r2", "79eee623fd6712db6537a4867cedf54ca49ee4885416c2c8e4acec59f811b894", "(i) with the target null (the order doc: retracts set or null); Eureka re-derived it with sha256sum (order doc addendum); the fix branch's pinned test does not yet carry it", choice="A", illegal_retraction=True, retracted=True),
+  dg("illegal_i_retraction_with_an_answer_and_no_target_retracted_true", "reproduced_on_huginn_main_f0ca504_reported_by_eureka_not_rerun_here", "79eee623fd6712db6537a4867cedf54ca49ee4885416c2c8e4acec59f811b894", "(i) with the target null (the order doc: retracts set or null); Eureka re-derived it with sha256sum (order doc addendum)", choice="A", illegal_retraction=True, retracted=True),
   dg("illegal_ii_no_answer_no_target_retracted_true", FIX, "34ef86ed63b9318459965d4b85e794d2636ffc15736da866036b087c9c4a30eb", "(ii) no answer, no target, retracted true", illegal_retraction=True, retracted=True),
 ]
 fork = {
