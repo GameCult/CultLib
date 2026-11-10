@@ -228,7 +228,7 @@ def refusal_doc(code): return {"schemaVersion": "gamecult.fork.refusal.v0", "cod
 def unavailable_doc(retry=30): return {"schemaVersion": "gamecult.fork.unavailable.v0", "code": "unavailable", "error": "unavailable: the outcome is not confirmed, try again with the same request_id", "retryAfterSeconds": retry}
 def future(a, r):
     import datetime as dt
-    p = lambda x: dt.datetime.strptime(x, "%Y-%m-%dT%H:%M:%SZ")
+    p = lambda x: dt.datetime.fromisoformat(x.replace("Z", "+00:00"))
     return (p(a) - p(r)).total_seconds() > 300
 def da(outcome, link, code, b, server):
     a = b["answer"] or {"choice": None, "note": None}
@@ -309,6 +309,8 @@ scen = [
  sc("V5_receiver_order_decides_not_answered_at", CARD, [ok(x2, srv("n1", OP, T(2)), "Counted", None), ok(x1, srv("n2", OP, T(3)), "Revision", "n1")], "n1"),
  sc("V5_reversed_arrival_reverses_the_result", CARD, [ok(x1, srv("n1", OP, T(2)), "Counted", None), ok(x2, srv("n2", OP, T(3)), "Revision", "n1")], "n1"),
  sc("a_second_decider_answer_is_recorded_as_a_Revision", Y_CARD, [X1, ok(y1, sy1, "Revision", "n1")], "n1"),
+ sc("a_claim_exactly_five_minutes_ahead_is_not_flagged", CARD, [ok(body("no", NOTE, at="2026-11-12T19:07:05Z"), sx1, "Counted", None)], "n1"),
+ sc("a_claim_five_minutes_and_half_a_second_ahead_is_flagged_from_the_stored_received_at", CARD, [ok(body("no", NOTE, at="2026-11-12T19:07:05.500Z"), sx1, "Counted", None)], "n1"),
  sc("a_claim_more_than_five_minutes_ahead_is_accepted_and_flagged", CARD, [ok(body("no", NOTE, at="2026-11-12T19:09:00Z"), sx1, "Counted", None)], "n1"),
  sc("V6_a_matrix_edit_redaction_or_reaction_changes_nothing", CARD, [X1] + MATRIX, "n1"),
  sc("V7_a_choice_that_is_not_an_option_is_Refused_choice_invalid", CARD, [rf(body("maybe", None), sx1, "choice_invalid")], None),
@@ -427,9 +429,9 @@ def mcase(name, route, seg, fork=None, tok=None):
     code, opened, stored = mind_route(route, seg, fork, tok)
     return {"name": name, "route": route, "mind": seg, "fork_id": fork, "token": tok, "expect": code, "httpStatus": 200 if code == "ok" else HTTP[code], "opened": opened, "stored_in": stored}
 BAD_SEGMENTS = [("dot_dot", "../x"), ("slash", "a/b"), ("encoded_slash", "a%2fb"), ("encoded_dot_dot", "%2e%2e%2fx"), ("nul", "eureka%00"), ("four_kb", "a" * 4096),
-                ("other_case", "GAMECULT-CHAT"), ("trailing_space", "nibu%20"), ("invalid_utf8", "%ff")]
+                ("other_case", "GAMECULT-CHAT"), ("trailing_space", "nibu%20"), ("invalid_utf8", "%ff"), ("dot", "."), ("dots", ".."), ("double_encoded", "%256eibu")]
 MINDCASES = [
-  mcase("list_a_configured_mind", "list", "gamecult-chat"), mcase("list_another_configured_mind", "list", "nibu"),
+  mcase("list_a_percent_encoded_configured_mind_is_decoded_once", "list", "%6eibu"), mcase("list_a_configured_mind", "list", "gamecult-chat"), mcase("list_another_configured_mind", "list", "nibu"),
   mcase("read_a_fork_the_mind_holds", "read", "gamecult-chat", FID), mcase("answer_a_fork_the_mind_holds_is_stored_in_that_mind", "answer", "gamecult-chat", FID),
   mcase("answer_on_the_other_mind", "answer", "nibu", "nibu:question:glow-order"),
 ] + [mcase(f"M1_{route}_{n}_is_unknown_and_opens_nothing", route, seg, FID if route != "list" else None) for route in ("list", "read", "answer") for n, seg in BAD_SEGMENTS] + [

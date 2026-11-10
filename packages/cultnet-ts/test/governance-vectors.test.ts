@@ -106,7 +106,6 @@ const cardRuleErrors = (c: Card): string[] => {
   if (new Set(c.deciders).size !== c.deciders.length) errors.push("duplicate deciders");
   if (c.status === "open" && c.ruling !== null) errors.push("an open card names a ruling");
   if (c.ruling === null && c.ruled_from.length > 0) errors.push("ruled_from without a ruling");
-  if (c.status === "open" && c.ruled_from.length > 0) errors.push("an open card cites an answer in ruled_from");
   if (c.options_hash !== optionsHash(c)) errors.push("options_hash is not the hash of the shown members");
   return errors;
 };
@@ -408,10 +407,12 @@ test("fork transport: the mind segment is only compared with the configured list
   for (const [a, b] of config.sameResponse) {
     const x = byName.get(a)!, y = byName.get(b)!;
     assert.equal(x.code, y.code);
-    assert.equal(refusals.get(x.code).messagePackHex, refusals.get(y.code).messagePackHex, `${a} and ${b} answer with the same bytes`);
+    const built = (code: string) => hexOf({ schemaVersion: "gamecult.fork.refusal.v0", code, error: `${code}: ${TAILS[code]}` });
+    assert.equal(built(x.code), built(y.code), `${a} and ${b} answer with the same bytes, built from the spec's rule`);
+    assert.equal(built(x.code), refusals.get(x.code).messagePackHex, a);
   }
   const all = [...byName.values()];
-  assert.ok(all.filter((v) => v.code === "fork_unknown" && v.opened === null).length >= 27, "every bad segment opens nothing");
+  assert.ok(all.filter((v) => v.code === "fork_unknown" && v.opened === null).length >= 39, "every bad segment opens nothing");
   assert.equal(new Set(all.filter((v) => v.storedIn !== null).map((v) => v.storedIn)).size, 2, "an answer is stored in the route's Mind only, and both Minds take one");
 });
 

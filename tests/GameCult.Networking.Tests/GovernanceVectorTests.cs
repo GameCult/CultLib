@@ -180,7 +180,6 @@ namespace GameCult.Networking.Tests
             if (deciders.Distinct().Count() != deciders.Count) yield return "duplicate deciders";
             if (S(c["status"]) == "open" && c["ruling"] is not null) yield return "an open card names a ruling";
             if (c["ruling"] is null && c["ruled_from"]!.AsArray().Count > 0) yield return "ruled_from without a ruling";
-            if (S(c["status"]) == "open" && c["ruled_from"]!.AsArray().Count > 0) yield return "an open card cites an answer in ruled_from";
             if (S(c["options_hash"]) != HashOf(c)) yield return "options_hash is not the hash of the shown members";
         }
 
@@ -524,13 +523,25 @@ namespace GameCult.Networking.Tests
             return huginnDown ? "unavailable" : "ok";
         }
 
+        private static string PercentDecode(string s)
+        {
+            var bytes = new List<byte>();
+            for (var i = 0; i < s.Length;)
+            {
+                if (s[i] == '%' && i + 2 < s.Length && Uri.IsHexDigit(s[i + 1]) && Uri.IsHexDigit(s[i + 2])) { bytes.Add(Convert.ToByte(s.Substring(i + 1, 2), 16)); i += 3; continue; }
+                var rune = System.Text.Rune.GetRuneAt(s, i);
+                bytes.AddRange(Encoding.UTF8.GetBytes(rune.ToString())); i += rune.Utf16SequenceLength;
+            }
+            return new UTF8Encoding(false, true).GetString(bytes.ToArray());   // throws DecoderFallbackException (an ArgumentException) on invalid UTF-8
+        }
+
         // The {mind} segment is decoded once and compared, ordinally, only with the configured list; nothing is opened from it (fork-card.md, "The {mind} segment").
         private static (string Code, string? Opened, string? StoredIn) MindRoute(JsonNode config, string route, string segment, string? fork, JsonNode? token)
         {
             var auth = AuthJudge(route, token, false);
             if (auth != "ok") return (auth, null, null);
             string mind;
-            try { mind = Uri.UnescapeDataString(segment); } catch (UriFormatException) { return ("fork_unknown", null, null); }
+            try { mind = PercentDecode(segment); } catch (ArgumentException) { return ("fork_unknown", null, null); }   // bytes that are not UTF-8 are a miss
             var minds = config["minds"]!.AsObject();
             if (!minds.TryGetPropertyValue(mind, out var socket)) return ("fork_unknown", null, null);
             if (route != "list" && !config["forks"]![mind]!.AsArray().Any(f => S(f) == fork)) return ("fork_unknown", S(socket), null);
@@ -562,9 +573,10 @@ namespace GameCult.Networking.Tests
             {
                 var a = byName[S(pair![0])]; var b = byName[S(pair[1])];
                 Assert.That(a.Code, Is.EqualTo(b.Code));
-                Assert.That(S(refusals[a.Code]["messagePackHex"]), Is.EqualTo(S(refusals[b.Code]["messagePackHex"])), $"{S(pair[0])} and {S(pair[1])} answer with the same bytes");
+                string Built(string code) => HexOf(new JsonObject { ["schemaVersion"] = "gamecult.fork.refusal.v0", ["code"] = code, ["error"] = $"{code}: {Tails[code]}" });
+                Assert.That(Built(a.Code), Is.EqualTo(Built(b.Code)).And.EqualTo(S(refusals[a.Code]["messagePackHex"])), $"{S(pair[0])} and {S(pair[1])} answer with the same bytes, built from the spec's rule");
             }
-            Assert.That(byName.Values.Count(v => v.Code == "fork_unknown" && v.Opened is null), Is.GreaterThanOrEqualTo(27), "every bad segment opens nothing");
+            Assert.That(byName.Values.Count(v => v.Code == "fork_unknown" && v.Opened is null), Is.GreaterThanOrEqualTo(39), "every bad segment opens nothing");
             Assert.That(byName.Values.Where(v => v.StoredIn is not null).Select(v => v.StoredIn).Distinct().Count(), Is.EqualTo(2), "an answer is stored in the route's Mind only, and both Minds take one");
         }
 
