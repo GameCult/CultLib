@@ -104,7 +104,8 @@ const cardRuleErrors = (c: Card): string[] => {
   if (!ids.includes(c.recommendation)) errors.push("recommendation is not an option");
   if (c.leans !== null && !ids.includes(c.leans)) errors.push("leans is not an option");
   if (new Set(c.deciders).size !== c.deciders.length) errors.push("duplicate deciders");
-  if (c.status === "closed" && c.ruling === null) errors.push("closed without a ruling");
+  if (c.status === "open" && c.ruling !== null) errors.push("an open card names a ruling");
+  if (c.ruling === null && c.ruled_from.length > 0) errors.push("ruled_from without a ruling");
   if (c.status === "open" && c.ruled_from.length > 0) errors.push("an open card cites an answer in ruled_from");
   if (c.options_hash !== optionsHash(c)) errors.push("options_hash is not the hash of the shown members");
   return errors;

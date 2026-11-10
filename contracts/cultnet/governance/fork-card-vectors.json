@@ -418,6 +418,44 @@
           "options_hash": "f856edce121db4121b5f1af400b1c471ebbfa6579a042aca9a34ae31c15f5c86"
         },
         "messagePackHex": "DE0010AD736368656D6156657273696F6EB567616D6563756C742E666F726B2E636172642E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74A57469746C65B1536C6F74206D61726B20636F6E73656E74A7636F6E74657874BD53686F756C64206120736C6F74206D61726B206265207368617265643FA76F7074696F6E739282A26964A3796573A474657874A953686172652069742E82A26964A26E6FA474657874AE4B656570206974206C6F63616C2EAE7265636F6D6D656E646174696F6EA26E6FA7646570656E647390A56C65616E73A3796573A4666C6167D92670726F766973696F6E616C3A2053656C662065787065637473207468697320746F206D6F7665A97261697365645F696EC0A8646563696465727392D92465306431633262332D613439352D343638372D383837392D366135623463336432653166D92439663865376436632D356234612D343339322D383137302D306631653264336334623561A6737461747573A6636C6F736564A672756C696E67AE783A7265736F6C7574696F6E3A79AA72756C65645F66726F6D91A26E31A56F7264657200AC6F7074696F6E735F68617368D94066383536656463653132316462343132316235663161663430306231633437316562626661363537396130343261636139613334616533316331356635633836"
+      },
+      {
+        "name": "closed_without_a_ruling_the_question_was_withdrawn",
+        "message": {
+          "schemaVersion": "gamecult.fork.card.v0",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "title": "Slot mark consent",
+          "context": "Should a slot mark be shared?",
+          "options": [
+            {
+              "id": "yes",
+              "text": "Share it."
+            },
+            {
+              "id": "no",
+              "text": "Keep it local."
+            }
+          ],
+          "recommendation": "no",
+          "depends": [
+            "gamecult-chat:question:file-zone-audience"
+          ],
+          "leans": null,
+          "flag": null,
+          "raised_in": {
+            "kind": "CutSpec",
+            "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+          },
+          "deciders": [
+            "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+          ],
+          "status": "closed",
+          "ruling": null,
+          "ruled_from": [],
+          "order": 3,
+          "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48"
+        },
+        "messagePackHex": "DE0010AD736368656D6156657273696F6EB567616D6563756C742E666F726B2E636172642E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74A57469746C65B1536C6F74206D61726B20636F6E73656E74A7636F6E74657874BD53686F756C64206120736C6F74206D61726B206265207368617265643FA76F7074696F6E739282A26964A3796573A474657874A953686172652069742E82A26964A26E6FA474657874AE4B656570206974206C6F63616C2EAE7265636F6D6D656E646174696F6EA26E6FA7646570656E647391D92967616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365A56C65616E73C0A4666C6167C0A97261697365645F696E82A46B696E64A743757453706563A26964D92B63756C746C69622D676170733A6375745F737065633A6375742D736C6F742D746F6C6572616E63652E7234A8646563696465727391D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A6737461747573A6636C6F736564A672756C696E67C0AA72756C65645F66726F6D90A56F7264657203AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438"
       }
     ],
     "invalid": [
@@ -877,8 +915,46 @@
         }
       },
       {
-        "name": "closed_without_ruling",
-        "why": "rule: a closed card names its ruling (not expressible in the schema)",
+        "name": "open_card_names_a_ruling",
+        "why": "rule: only a closed card names a ruling (not expressible in the schema)",
+        "message": {
+          "schemaVersion": "gamecult.fork.card.v0",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "title": "Slot mark consent",
+          "context": "Should a slot mark be shared?",
+          "options": [
+            {
+              "id": "yes",
+              "text": "Share it."
+            },
+            {
+              "id": "no",
+              "text": "Keep it local."
+            }
+          ],
+          "recommendation": "no",
+          "depends": [
+            "gamecult-chat:question:file-zone-audience"
+          ],
+          "leans": null,
+          "flag": null,
+          "raised_in": {
+            "kind": "CutSpec",
+            "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+          },
+          "deciders": [
+            "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+          ],
+          "status": "open",
+          "ruling": "cultlib-gaps:resolution:question.slot-mark-consent.n1",
+          "ruled_from": [],
+          "order": 3,
+          "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48"
+        }
+      },
+      {
+        "name": "ruled_from_without_a_ruling",
+        "why": "rule: ruled_from lists answers a ruling was admitted from, so it needs the ruling (not expressible in the schema)",
         "message": {
           "schemaVersion": "gamecult.fork.card.v0",
           "fork_id": "gamecult-chat:question:slot-mark-consent",
@@ -909,7 +985,9 @@
           ],
           "status": "closed",
           "ruling": null,
-          "ruled_from": [],
+          "ruled_from": [
+            "n1"
+          ],
           "order": 3,
           "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48"
         }

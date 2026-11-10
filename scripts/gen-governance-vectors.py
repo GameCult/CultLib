@@ -409,7 +409,8 @@ fork = {
   "optionsHash": hashes,
   "card": {"valid": [{"name": "operator_fork", "message": CARD, "messagePackHex": hx(CARD)},
                      {"name": "leans_flag_closed_two_deciders", "message": card(leans="yes", flag="provisional: Self expects this to move", deciders=[OP, HM], depends=[], raised_in=None, status="closed", ruling="x:resolution:y", ruled_from=["n1"], order=0),
-                      "messagePackHex": hx(card(leans="yes", flag="provisional: Self expects this to move", deciders=[OP, HM], depends=[], raised_in=None, status="closed", ruling="x:resolution:y", ruled_from=["n1"], order=0))}],
+                      "messagePackHex": hx(card(leans="yes", flag="provisional: Self expects this to move", deciders=[OP, HM], depends=[], raised_in=None, status="closed", ruling="x:resolution:y", ruled_from=["n1"], order=0))},
+                     {"name": "closed_without_a_ruling_the_question_was_withdrawn", "message": card(status="closed"), "messagePackHex": hx(card(status="closed"))}],
            "invalid": [bad(n, w, m) for n, w, m in [
                ("one_option", "two or more options", card(options=[OPT[0]], recommendation="yes")),
                ("no_deciders", "a fork with no decider cannot be answered", card(deciders=[])),
@@ -423,7 +424,8 @@ fork = {
                ("leans_not_an_option", "rule: leans is nil or an option id (not expressible in the schema)", card(leans="maybe")),
                ("duplicate_deciders", "rule: deciders are unique (not expressible in the schema)", card(deciders=[OP, OP])),
                ("ruled_from_on_an_open_card", "rule: a ruling that answers a fork closes it, so an open card cites no answer in ruled_from (not expressible in the schema)", card(ruled_from=["n1"])),
-               ("closed_without_ruling", "rule: a closed card names its ruling (not expressible in the schema)", card(status="closed")),
+               ("open_card_names_a_ruling", "rule: only a closed card names a ruling (not expressible in the schema)", card(ruling="cultlib-gaps:resolution:question.slot-mark-consent.n1")),
+               ("ruled_from_without_a_ruling", "rule: ruled_from lists answers a ruling was admitted from, so it needs the ruling (not expressible in the schema)", card(status="closed", ruled_from=["n1"])),
                ("options_hash_of_another_card", "rule: options_hash equals the hash of the shown members (not expressible in the schema)", dict(card(), options_hash=STALE_H)),
            ]]},
   "request": {"valid": [{"name": n, "message": m, "messagePackHex": hx(m)} for n, m in

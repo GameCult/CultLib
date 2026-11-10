@@ -178,7 +178,8 @@ namespace GameCult.Networking.Tests
             if (c["leans"] is not null && !ids.Contains(S(c["leans"]))) yield return "leans is not an option";
             var deciders = c["deciders"]!.AsArray().Select(S).ToList();
             if (deciders.Distinct().Count() != deciders.Count) yield return "duplicate deciders";
-            if (S(c["status"]) == "closed" && c["ruling"] is null) yield return "closed without a ruling";
+            if (S(c["status"]) == "open" && c["ruling"] is not null) yield return "an open card names a ruling";
+            if (c["ruling"] is null && c["ruled_from"]!.AsArray().Count > 0) yield return "ruled_from without a ruling";
             if (S(c["status"]) == "open" && c["ruled_from"]!.AsArray().Count > 0) yield return "an open card cites an answer in ruled_from";
             if (S(c["options_hash"]) != HashOf(c)) yield return "options_hash is not the hash of the shown members";
         }
