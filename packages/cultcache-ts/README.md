@@ -357,7 +357,7 @@ That is the TypeScript version of the original CultCache trick:
 - the top-level MessagePack value is `[formatVersion, schemaCatalog, records]`
 - each record is `[key, schemaId, storedAt, payload]`
 - each catalog entry is `[schemaId, schemaName, schemaVersion, contentHash, canonicalSchemaJson, compatibleSchemaIds, members]`
-- it still reads the older TS/Rust-style envelope array and rewrites repaired legacy payloads as v1 snapshots
+- it still reads the older TS/Rust-style envelope array (object payloads are normalized in memory; opening never rewrites the file) and replaces it with a v1 snapshot on the next push, delete or flush
 - it queues local writes in order, then takes the shared `<file>.lock` (`flock` on Unix, `LockFileEx` on Windows, via koffi, loaded on the first write) for each one, so C#, Rust and TypeScript writers exclude each other; the read a write merges from is taken under that lock
 - it fsyncs the staged file and, on Unix, the directory after the replace; on Windows it replaces with a POSIX-semantics rename and falls back to a write-through `MoveFileExW`, retrying briefly on sharing violations
 - it persists raw MessagePack payload bytes inside schema-addressed records

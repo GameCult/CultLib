@@ -3,6 +3,15 @@
 All notable changes to `@gamecult/cultcache-ts` are recorded here, following
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- Opening a legacy (pre-v1) store is a pure read: payloads that were not bytes are normalized in memory and the
+  file is left as it was, so a codec that refuses the content cannot lose the old bytes. The next push, delete or
+  flush rewrites the file as v1, merging what the open read.
+- `SingleFileStoreRead` no longer carries `repairedLegacyPayload`; no consumer used it.
+
 ## [0.15.0]
 
 0.14.1 and 0.14.2 were never tagged or published; this entry carries them with the Unreleased work, and `cultcache-ts-v0.14.0` is the previous release.
@@ -41,8 +50,6 @@ All notable changes to `@gamecult/cultcache-ts` are recorded here, following
 - The Windows replace is a POSIX-semantics rename first (it lands while C# and Rust readers
   hold the store open), falling back to a write-through `MoveFileExW`, with 25 attempts 20 ms
   apart on errors 5, 32 and 33. Writers wait up to 30 s for the lock.
-- Opening a legacy store that needs healing rewrites it under the lock, from a read taken
-  under the lock.
 
 ### Dependencies
 

@@ -504,46 +504,56 @@ test("SingleFileMessagePackBackingStore refuses a record whose schema the catalo
   await assert.rejects(() => cache.pullAllBackingStores(), StoreUnreadableError);
 });
 
-test("SingleFileMessagePackBackingStore heals legacy envelopes whose payload was persisted as an object", async () => {
-  const noteDocument = defineDocumentType({
-    type: "note",
-    schema: z.object({
-      title: z.string(),
-      body: z.string(),
-    }),
-  });
+const legacyNoteType = defineDocumentType({
+  type: "note",
+  schema: z.object({ title: z.string(), body: z.string().optional() }),
+});
 
+// SYNTHETIC pre-v1 file (no real one is known): an envelope array with object payloads.
+async function legacyNoteStore(second: unknown): Promise<{ storePath: string; bytes: Uint8Array }> {
   const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-ts-")), "legacy.msgpack");
-  const envelopePayload = {
-    title: "Hello",
-    body: "world",
-  };
+  const bytes = encode([
+    { key: "note:hello", type: "note", payload: { title: "Hello", body: "world" }, storedAt: "2026-10-20T00:00:00Z" },
+    { key: "note:other", type: "note", payload: second, storedAt: "2026-10-20T00:00:00Z" },
+  ]);
+  await writeFile(storePath, bytes);
+  return { storePath, bytes };
+}
 
-  await writeFile(
-    storePath,
-    encode([
-      {
-        key: "note:hello",
-        type: "note",
-        payload: envelopePayload,
-        storedAt: new Date().toISOString(),
-      },
-    ]),
-  );
-
+test("a codec that refuses a synthetic pre-v1 store's content leaves the file byte-identical", async () => {
+  const { storePath, bytes } = await legacyNoteStore({ title: 42 });
   const cache = CultCache.builder()
-    .withDocumentType(noteDocument)
+    .withDocumentType(legacyNoteType)
+    .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
+    .build();
+
+  await assert.rejects(() => cache.pullAllBackingStores());
+  assert.deepEqual([...(await readFile(storePath))], [...bytes]);
+  assert.deepEqual((await readdir(dirname(storePath))).sort(), ["legacy.msgpack"]);
+});
+
+test("a synthetic pre-v1 store is read untouched and becomes v1 only when the consumer writes, keeping its other entries", async () => {
+  const { storePath, bytes } = await legacyNoteStore({ title: "Other" });
+  const cache = CultCache.builder()
+    .withDocumentType(legacyNoteType)
     .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
     .build();
 
   await cache.pullAllBackingStores();
-  assert.deepEqual(cache.getRequired(noteDocument, "note:hello"), envelopePayload);
+  assert.deepEqual(cache.getRequired(legacyNoteType, "note:hello"), { title: "Hello", body: "world" });
+  assert.deepEqual([...(await readFile(storePath))], [...bytes], "reading does not rewrite the file");
 
-  const rewritten = decode(await readFile(storePath)) as unknown[];
-  assert.equal(rewritten[0], "cultcache.store.v1");
-  const records = rewritten[2] as unknown[][];
-  assert.equal(records.length, 1);
-  assert.ok(records[0]?.[3] instanceof Uint8Array);
+  await cache.put(legacyNoteType, "note:new", { title: "New" });
+  assert.equal((decode(await readFile(storePath)) as unknown[])[0], "cultcache.store.v1");
+
+  const reopened = CultCache.builder()
+    .withDocumentType(legacyNoteType)
+    .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
+    .build();
+  await reopened.pullAllBackingStores();
+  assert.deepEqual(reopened.getRequired(legacyNoteType, "note:hello"), { title: "Hello", body: "world" });
+  assert.deepEqual(reopened.getRequired(legacyNoteType, "note:other"), { title: "Other" });
+  assert.deepEqual(reopened.getRequired(legacyNoteType, "note:new"), { title: "New" });
 });
 
 test("CultCache rejects a second generic backing store", async () => {

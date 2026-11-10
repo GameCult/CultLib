@@ -471,44 +471,70 @@ test("the store lock is released when the operation throws", async () => {
   }
 });
 
+// SYNTHETIC pre-v1 vector: no real file of this shape is known to exist. A top-level array of {key,type,payload,storedAt}
+// whose payload is not binary (an object, a Node Buffer JSON, an int array) is what the removed heal-on-open rewrote.
 const legacyObjectPayload = (): Uint8Array =>
   encode([{ key: "note:hello", type: "note", payload: { title: "Hello" }, storedAt: "2026-10-20T00:00:00Z" }]);
 
-test("an open that heals a legacy store waits for the store lock and heals from its own read", async () => {
+test("opening a synthetic pre-v1 store with object payloads returns them normalized and leaves the file untouched, even while another holder has the lock", async () => {
   const directory = await scratch();
   try {
     const path = join(directory, "legacy.cc");
     const legacy = legacyObjectPayload();
     await writeFile(path, legacy);
     const store = new SingleFileMessagePackBackingStore(path);
-    let healed: Promise<unknown> | undefined;
-    let settled = false;
     await withStoreWriteLock(path, async () => {
-      healed = store.pullAll().then(() => {
-        settled = true;
-      });
-      await sleepFor(300);
-      assert.equal(settled, false, "the heal must wait for the lock");
-      assert.deepEqual([...(await readFile(path))], [...legacy], "the file keeps its legacy bytes while the lock is held elsewhere");
+      const [lockHeld] = await Promise.all([readdir(directory)]);
+      const envelopes = await within(store.pullAll(), 5000, "an open does not wait for the write lock");
+      assert.deepEqual(envelopes.map((entry) => entry.key), ["note:hello"]);
+      assert.deepEqual(decode(documentPayloadBytes(envelopes[0].payload)), { title: "Hello" });
+      assert.deepEqual([...(await readFile(path))], [...legacy]);
+      assert.deepEqual((await readdir(directory)).sort(), lockHeld.sort(), "an open adds no lock or temp file");
     });
-    await within(healed!, 5000, "the heal");
-    assert.equal((decode(await readFile(path)) as unknown[])[0], "cultcache.store.v1");
+    assert.deepEqual([...(await readFile(path))], [...legacy]);
+    assert.deepEqual((await readdir(directory)).filter((name) => name !== "legacy.cc" && name !== "legacy.cc.lock"), []);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-test("push and delete over a legacy store that needs healing finish instead of waiting on their own lock", async () => {
+test("opening a synthetic pre-v1 store with Buffer-JSON and int-array payloads normalizes them in memory and leaves the file untouched", async () => {
+  const directory = await scratch();
+  try {
+    const path = join(directory, "legacy.cc");
+    const inner = encode({ title: "Hello" });
+    const legacy = encode([
+      { key: "a", type: "note", payload: { type: "Buffer", data: [...inner] }, storedAt: "2026-10-20T00:00:00Z" },
+      { key: "b", type: "note", payload: [...inner], storedAt: "2026-10-20T00:00:00Z" },
+    ]);
+    await writeFile(path, legacy);
+    const envelopes = await new SingleFileMessagePackBackingStore(path).pullAll();
+    assert.deepEqual(envelopes.map((entry) => entry.key), ["a", "b"]);
+    for (const envelope of envelopes) {
+      assert.deepEqual(decode(documentPayloadBytes(envelope.payload)), { title: "Hello" });
+    }
+    assert.deepEqual([...(await readFile(path))], [...legacy]);
+    assert.deepEqual(await readdir(directory), ["legacy.cc"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("push and delete over a synthetic pre-v1 store write v1 and keep the other legacy entries, normalized payloads included", async () => {
   const directory = await scratch();
   try {
     const path = join(directory, "legacy.cc");
     await writeFile(path, legacyObjectPayload());
     const store = new SingleFileMessagePackBackingStore(path);
     await within(store.push(entryOf("a")), 5000, "push");
+    assert.equal((decode(await readFile(path)) as unknown[])[0], "cultcache.store.v1");
+    assert.deepEqual((await store.pullAll()).map((entry) => entry.key).sort(), ["a", "note:hello"]);
     await writeFile(path, legacyObjectPayload());
     await within(store.delete(entryOf("a")), 5000, "delete");
-    const keys = (await store.pullAll()).map((entry) => entry.key);
-    assert.deepEqual(keys, ["note:hello"]);
+    assert.equal((decode(await readFile(path)) as unknown[])[0], "cultcache.store.v1");
+    const kept = await store.pullAll();
+    assert.deepEqual(kept.map((entry) => entry.key), ["note:hello"]);
+    assert.deepEqual(decode(documentPayloadBytes(kept[0].payload)), { title: "Hello" });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -697,7 +723,7 @@ test("a store file of an unrecognized shape is refused, and a store naming a mis
   }
 });
 
-test("opening a store that needs no healing writes nothing: a missing store leaves no lock file, a legacy store with byte payloads keeps its bytes", async () => {
+test("opening writes nothing: a missing store leaves no lock file, a legacy store with byte payloads keeps its bytes", async () => {
   const directory = await scratch();
   try {
     const absent = join(directory, "nested", "absent.cc");
