@@ -233,10 +233,10 @@ def future(a, r):
 def da(outcome, link, code, b, server):
     a = b["answer"] or {"choice": None, "note": None}
     return {"schemaVersion": "gamecult.desk_answer.v0", "answer_id": server["answer_id"], "fork_id": b["fork_id"], "outcome": outcome,
-            "of": link if outcome == "Revision" else None, "retracts": link if outcome == "Retraction" else None, "code": code if outcome == "Refused" else None,
+            "of": link if outcome == "Revision" else None, "retracts": link if outcome == "Retraction" else (b["retracts"] if outcome == "Refused" else None), "code": code if outcome == "Refused" else None,
             "options_hash": b["options_hash"], "choice": a["choice"], "note": a["note"], "answered_at": b["answered_at"], "received_at": server["received_at"],
             "claim_in_future": future(b["answered_at"], server["received_at"]), "answerer": server["answerer"], "authority": server["authority"], "request_id": b["request_id"]}
-def result(answer, c=None): return {"schemaVersion": "gamecult.fork.answer_result.v0", "answer": answer, "card": c}
+def result(answer, c=None): return {"schemaVersion": "gamecult.fork.answer_result.v0", "answer": answer, "card": c, "counted_answer_id": None}   # sc() fills counted_answer_id
 def record(counted, answers, h=H, fork=FID): return {"schemaVersion": "gamecult.fork.record.v0", "fork_id": fork, "options_hash": h, "counted_answer_id": counted, "answers": answers}
 T = lambda m, sec=5: f"2026-11-12T19:{m:02d}:{sec:02d}Z"
 def step(kind, body_=None, server=None, response=None, **kw):
@@ -247,8 +247,18 @@ def rf(b, server, code, c=None):
     a = da("Refused", None, code, b, server); return step("answer", b, server, result(a, c)), a
 def door(b, server, code): return step("answer", b, server, refusal_doc(code)), None
 def sc(name, c, items, counted, h=None):
-    steps = [i[0] if isinstance(i, tuple) else i for i in items]
-    answers = [i[1] for i in items if isinstance(i, tuple) and i[1] is not None]
+    # answer_result.counted_answer_id: the counted answer after the step, derived from the answers stored so far under the card's current hash
+    steps, answers, cur = [], [], c["options_hash"]
+    def live(): return next((a["answer_id"] for a in answers if a["outcome"] in ("Counted", "Revision") and a["options_hash"] == cur
+                             and not any(r["outcome"] == "Retraction" and r["retracts"] == a["answer_id"] for r in answers)), None)
+    for i in items:
+        st = i[0] if isinstance(i, tuple) else i
+        if isinstance(i, tuple) and i[1] is not None: answers.append(i[1])
+        if st["kind"] == "card": cur = st["card"]["options_hash"]
+        if st["kind"] == "answer" and (st["response"] or {}).get("schemaVersion") == "gamecult.fork.answer_result.v0":
+            st = dict(st, response=dict(st["response"], counted_answer_id=live()))
+        steps.append(st)
+    assert live() == counted, (name, live(), counted)
     return (name, c, steps, record(counted, answers, h or c["options_hash"]))
 
 x1 = body("no", NOTE); sx1 = srv("n1", OP, T(2))
@@ -330,6 +340,22 @@ scen = [
  sc("V11_retracting_the_counted_answer_makes_the_next_decider_answer_counted", Y_CARD, [X1, ok(y1, sy1, "Revision", "n1"), ok(RET("n1"), sr("n8"), "Retraction", "n1")], "n3"),
  sc("V11_retracting_an_answer_that_was_not_counted_changes_nothing", Y_CARD, [X1, ok(y1, sy1, "Revision", "n1"), ok(RET("n3"), sr("n8"), "Retraction", "n3")], "n1"),
  sc("after_every_answer_is_retracted_a_fresh_answer_is_Counted_again", CARD, [X1, ok(RET("n1"), sr("n8"), "Retraction", "n1"), ok(x2, sx2, "Counted", None)], "n2"),
+]
+# The three illegal forms (R1) under fixed request ids (a fresh next_rid() here would move every later vector). A and C differ only in `retracted`.
+IL_A = dict(retraction("n1", rid="0000a001-0000-4000-8000-00000000a001"), answer={"choice": "no", "note": None})   # a retraction carrying an answer
+IL_B = dict(retraction("n1", rid="0000b001-0000-4000-8000-00000000b001"), retracts=None)                           # a retraction naming no target
+IL_C = dict(body("no", None, rid="0000a001-0000-4000-8000-00000000a001"), retracts="n1")                          # a plain answer carrying a target
+assert {k: v for k, v in IL_A.items() if k != "retracted"} == {k: v for k, v in IL_C.items() if k != "retracted"} and IL_A["retracted"] and not IL_C["retracted"]
+def replayed(first, server): return (step("answer", first[0]["body"], dict(server, answer_id="n9"), first[0]["response"]), None)
+for _n, _f in (("a_retraction_with_an_answer", IL_A), ("a_retraction_with_no_target", IL_B), ("a_plain_answer_with_a_target", IL_C)):
+    _r = rf(_f, sr("n2"), "bad_retraction")
+    scen.append(sc(f"R1_{_n}_is_a_stored_bad_retraction_and_a_retry_replays_it", CARD, [X1, _r, replayed(_r, sr("n2"))], "n1"))
+scen += [
+ sc("a_replay_returns_the_counted_answer_id_current_at_the_retry_not_the_one_stored", CARD, [X1, ok(RET("n1"), sr("n8"), "Retraction", "n1"), REPLAY1], None),
+ sc("R1_retracted_true_with_an_answer_and_no_target_is_a_stored_bad_retraction", CARD, [X1, rf(dict(IL_A, retracts=None), sr("n2"), "bad_retraction")], "n1"),
+ sc("R1_retracted_true_then_false_under_one_request_id_is_request_id_conflict", CARD, [X1, rf(IL_A, sr("n2"), "bad_retraction"), door(IL_C, sr("n9"), "request_id_conflict")], "n1"),
+ sc("R1_retracted_false_then_true_under_one_request_id_is_request_id_conflict", CARD, [X1, rf(IL_C, sr("n2"), "bad_retraction"), door(IL_A, sr("n9"), "request_id_conflict")], "n1"),
+ sc("R1_a_target_less_retraction_with_retracted_flipped_is_body_invalid_before_any_request_id_lookup", CARD, [X1, rf(IL_B, sr("n2"), "bad_retraction"), door(dict(IL_B, retracted=False), sr("n9"), "body_invalid")], "n1"),
 ]
 REASON_CODES = ["stale_fork", "not_a_decider", "fork_closed", "choice_invalid", "bad_retraction", "already_retracted"]
 HTTP = {"unauthenticated": 401, "body_forbidden_field": 400, "body_unknown_field": 400, "body_invalid": 400, "fork_unknown": 404, "insufficient_scope": 403, "forbidden": 403, "request_id_conflict": 409, "request_invalid": 400,
@@ -448,9 +474,34 @@ MINDCASES = [
 SAME_RESPONSE = [["M2_read_unknown_mind_known_fork", "M2_read_known_mind_unknown_fork"], ["M2_answer_unknown_mind_known_fork", "M2_answer_known_mind_unknown_fork"],
                  ["M2_list_unknown_mind", "M2_read_known_mind_unknown_fork"], ["M3_answer_on_nibu_with_a_fork_gamecult_chat_holds", "M2_answer_known_mind_unknown_fork"]]
 def bad(name, why, m, **kw): return dict({"name": name, "why": why, "message": m}, **kw)
+# body_sha256: Huginn's private "same body" digest (fork-card.md, "The mind's record"); no wire document carries it. Input per
+# /opt/commons/handoff/desk-body-digest-order-20261110.md (Eureka): SHA-256 of compact serde_json UTF-8, keys in this order, null for missing,
+# `retracts` the full stored key, request_id out. `illegal_retraction` and `retracted` are written only when the input has them (non-null).
+DIGEST_KEYS = ["fork", "options_hash", "answered_at", "choice", "note", "retracts", "illegal_retraction", "retracted"]
+def digest_bytes(i): return json.dumps({k: i[k] for k in DIGEST_KEYS if k in ("fork", "options_hash", "answered_at", "choice", "note", "retracts") or i.get(k) is not None},
+                                       separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+DQ = {"fork": "eureka-state:question:Q1", "options_hash": "a" * 64, "answered_at": "2026-11-10T12:00:00Z"}
+DT = "eureka-state:desk_answer:Q1.n1"
+def dg(name, status, sha_expected, why, **kw):
+    i = dict(DQ, choice=None, note=None, retracts=None, illegal_retraction=None, retracted=None); i.update(kw)
+    b = digest_bytes(i); got = sha(b)
+    assert got == sha_expected, (name, got)
+    return {"name": name, "status": status, "why": why, "input": i, "canonical": b.decode("utf-8"), "sha256": got}
+MAIN, FIX = "main_7ea11b4_must_not_move", "pending_eureka_merge_cut-desk-digest-retracted.r2"
+BODY_DIGESTS = [
+  dg("plain_answer_choice_A", MAIN, "8a4d5b2ed0b3452bfed2f3a276b2828974e6824a3edcc643cfe9cfcdda34173a", "a plain answer: choice and note as sent, retracts null; no illegal or retracted key", choice="A"),
+  dg("legal_retraction", MAIN, "9f8075382556898c0bea364ed7c6deb2a86d8c78288a1f34e06da6e9bf5f58a3", "a legal retraction: choice and note null, retracts the full stored key (Huginn's pinned test names Q1.1)", retracts="eureka-state:desk_answer:Q1.1"),
+  dg("illegal_i_and_iii_alike_on_main", MAIN, "69074cc60829ef5edb12358746f7549ad08da97653d59359c945cea102f53565", "main writes `illegal_retraction: true` and no `retracted`, so (i) and (iii) collide: the defect the fix removes", choice="A", retracts=DT, illegal_retraction=True),
+  dg("illegal_ii_on_main", MAIN, "1a36c4aba0d1c30d0736f20243ebfdb84fe84a5eabd4f69709a096a32c3cc6e3", "(ii) no answer, no target, on main", illegal_retraction=True),
+  dg("illegal_i_retraction_with_an_answer_retracted_true", FIX, "935cab1a0ae34606b809d8ebca7cffa2889d20b3585d2622d32153a4d6898af1", "(i) answer present, retracted true, target Q1.n1", choice="A", retracts=DT, illegal_retraction=True, retracted=True),
+  dg("illegal_iii_plain_answer_with_a_target_retracted_false", FIX, "82b24cccb4ed2535a549f95f844fcd935074c3712b5b832f0b2cbd89c71fd9a6", "(iii) the same bytes as (i) with retracted false: another body, so request_id_conflict", choice="A", retracts=DT, illegal_retraction=True, retracted=False),
+  dg("illegal_i_retraction_with_an_answer_and_no_target_retracted_true", "computed_here_by_the_same_rule_not_in_the_order_doc_pending_eureka_merge", "79eee623fd6712db6537a4867cedf54ca49ee4885416c2c8e4acec59f811b894", "(i) with the target null (the order doc: retracts set or null); verified with sha256sum, but Eureka has not published this golden", choice="A", illegal_retraction=True, retracted=True),
+  dg("illegal_ii_no_answer_no_target_retracted_true", FIX, "34ef86ed63b9318459965d4b85e794d2636ffc15736da866036b087c9c4a30eb", "(ii) no answer, no target, retracted true", illegal_retraction=True, retracted=True),
+]
 fork = {
   "provenance": "Rule source: /opt/commons/handoff/fork-desk-answer-binding-20261110.md (Heimdall), amended by the Persona briefs of 2026-11-10 (Eureka's fit check). Bytes spec-authored with msgpack-python (scripts/gen-governance-vectors.py); every runtime re-encodes `message` and must match messagePackHex. options_hash follows fork-card.md 'Options hash'; the vectors named heimdall_* are that file's, with its digests.",
   "optionsHash": hashes,
+  "bodyDigests": BODY_DIGESTS,
   "card": {"valid": [{"name": "operator_fork", "message": CARD, "messagePackHex": hx(CARD)},
                      {"name": "leans_flag_closed_two_deciders", "message": card(leans="yes", flag="provisional: Self expects this to move", deciders=[OP, HM], depends=[], raised_in=None, status="closed", ruling="x:resolution:y", ruled_from=["n1"], order=0),
                       "messagePackHex": hx(card(leans="yes", flag="provisional: Self expects this to move", deciders=[OP, HM], depends=[], raised_in=None, status="closed", ruling="x:resolution:y", ruled_from=["n1"], order=0))},
@@ -502,7 +553,7 @@ fork = {
   "deskAnswer": {"valid": [{"name": n, "message": m, "messagePackHex": hx(m)} for n, m in
                            [("counted", CNT), ("revision", REV), ("retraction", da("Retraction", "n1", None, retraction("n1"), sr("n8"))),
                             ("refused_stale", da("Refused", None, "stale_fork", stale_body(), sx1)),
-                            ("refused_closed_retraction_keeps_no_target", da("Refused", None, "fork_closed", retraction("n1"), sr("n9")))]],
+                            ("refused_closed_retraction_names_its_target", da("Refused", None, "fork_closed", retraction("n1"), sr("n9")))]],
                  "invalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
                    ("counted_with_a_code", "only Refused carries a code", dict(CNT, code="fork_closed")),
                    ("refused_without_a_code", "Refused carries a reason code", dict(REF, code=None)),
@@ -511,7 +562,8 @@ fork = {
                    ("revision_naming_none", "a Revision names the counted answer", dict(REV, of=None)),
                    ("revision_that_also_retracts", "a variant carries only its own link (a retraction with no target, or a target with no retraction, cannot exist)", dict(REV, retracts="n1")),
                    ("retraction_naming_no_target", "a Retraction names the answer it retracts", dict(da("Retraction", "n1", None, retraction("n1"), sr("n8")), retracts=None)),
-                   ("refused_naming_a_target", "Refused carries only its code", dict(REF, retracts="n1")),
+                   ("refused_naming_another_answer_as_of", "a Refused answer names no counted answer (`of` is a Revision's)", dict(REF, of="n1")),
+                   ("refused_with_a_target_that_is_not_an_answer_id", "a Refused answer's retracts is nil or an answer id (n<seq>), never the stored key", dict(REF, retracts="cultlib-gaps:desk_answer:slot-mark-consent.n1")),
                    ("retraction_carrying_a_choice", "a Retraction carries no choice or note", dict(da("Retraction", "n1", None, retraction("n1"), sr("n8")), choice="no")),
                    ("outcome_lower_case", "outcome tags are Counted, Revision, Retraction, Refused", dict(CNT, outcome="counted")),
                    ("no_answerer", "answerer is stamped on every stored answer", dict(CNT, answerer="")),
