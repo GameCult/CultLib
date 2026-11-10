@@ -72,7 +72,7 @@ namespace GameCult.Networking.Tests
 
         private static string Sha(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         private static string S(JsonNode? n) => n!.GetValue<string>();
-        private static JsonNode Clone(JsonNode? n) => JsonNode.Parse(n!.ToJsonString())!;
+        private static JsonNode? Clone(JsonNode? n) => n is null ? null : JsonNode.Parse(n.ToJsonString());
 
         [Test]
         public void VoteApi_ValidDocuments_ValidateEncodeToTheVectorBytesAndDecodeBack()
