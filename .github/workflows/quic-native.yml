@@ -18,6 +18,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  # A newer push or PR update replaces the older run on the same ref. Tag pushes and
+  # workflow_dispatch runs are never cancelled: a tag run carries a release.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')) }}
+
 permissions:
   contents: read
 
