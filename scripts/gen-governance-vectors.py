@@ -474,6 +474,7 @@ MINDCASES = [
 SAME_RESPONSE = [["M2_read_unknown_mind_known_fork", "M2_read_known_mind_unknown_fork"], ["M2_answer_unknown_mind_known_fork", "M2_answer_known_mind_unknown_fork"],
                  ["M2_list_unknown_mind", "M2_read_known_mind_unknown_fork"], ["M3_answer_on_nibu_with_a_fork_gamecult_chat_holds", "M2_answer_known_mind_unknown_fork"]]
 def bad(name, why, m, **kw): return dict({"name": name, "why": why, "message": m}, **kw)
+DECIDERS_64 = [f"{i:08x}-0000-4000-8000-{i:012x}" for i in range(1, 65)]   # the card's `deciders` holds at most 64 (Huginn's bound)
 # body_sha256: Huginn's private "same body" digest (fork-card.md, "The mind's record"); no wire document carries it. Input per
 # /opt/commons/handoff/desk-body-digest-order-20261110.md (Eureka): SHA-256 of compact serde_json UTF-8, keys in this order, null for missing,
 # `retracts` the full stored key, request_id out. `illegal_retraction` and `retracted` are written only when the input has them (non-null).
@@ -507,7 +508,8 @@ fork = {
                      {"name": "leans_flag_closed_two_deciders", "message": card(leans="yes", flag="provisional: Self expects this to move", deciders=[OP, HM], depends=[], raised_in=None, status="closed", ruling="x:resolution:y", ruled_from=["n1"], order=0),
                       "messagePackHex": hx(card(leans="yes", flag="provisional: Self expects this to move", deciders=[OP, HM], depends=[], raised_in=None, status="closed", ruling="x:resolution:y", ruled_from=["n1"], order=0))},
                      {"name": "depends_at_both_caps", "message": card(depends=["a"] * 7 + ["\u00e9" * 500]), "messagePackHex": hx(card(depends=["a"] * 7 + ["\u00e9" * 500]))},
-                     {"name": "closed_without_a_ruling_the_question_was_withdrawn", "message": card(status="closed"), "messagePackHex": hx(card(status="closed"))}],
+                     {"name": "closed_without_a_ruling_the_question_was_withdrawn", "message": card(status="closed"), "messagePackHex": hx(card(status="closed"))},
+                     {"name": "deciders_at_the_cap_of_64", "message": card(deciders=DECIDERS_64), "messagePackHex": hx(card(deciders=DECIDERS_64))}],
            "invalid": [bad(n, w, m) for n, w, m in [
                ("depends_nine_lines", "depends holds at most 8 lines (the stored question's limit)", card(depends=["a"] * 9)),
                ("depends_line_1001_code_points", "a depends line is at most 1000 characters", card(depends=["a" * 1001])),
@@ -528,6 +530,7 @@ fork = {
                ("open_card_names_a_ruling", "rule: only a closed card names a ruling (not expressible in the schema)", card(ruling="cultlib-gaps:resolution:question.slot-mark-consent.n1")),
                ("ruled_from_without_a_ruling", "rule: ruled_from lists answers a ruling was admitted from, so it needs the ruling (not expressible in the schema)", card(status="closed", ruled_from=["n1"])),
                ("options_hash_of_another_card", "rule: options_hash equals the hash of the shown members (not expressible in the schema)", dict(card(), options_hash=STALE_H)),
+               ("deciders_65", "deciders holds at most 64 (Huginn's bound)", card(deciders=DECIDERS_64 + ["00000041-0000-4000-8000-000000000041"])),
            ]]},
   "request": {"valid": [{"name": n, "message": m, "messagePackHex": hx(m)} for n, m in
                        [("choice_and_note", x1), ("choice_alone", pick), ("note_alone_clear_pick", words), ("retraction", retraction("n1")),
