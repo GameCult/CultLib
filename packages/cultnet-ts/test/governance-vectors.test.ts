@@ -128,6 +128,27 @@ test("fork card: options hash is SHA-256 of the canonical JSON, computed here, a
   }
 });
 
+// body_sha256 is Huginn's private "same body" digest, not a wire field: compact JSON, fixed key order, null for missing, the two illegal-form keys only when present.
+test("fork card: the body digest is SHA-256 of the compact JSON in the stated key order, and the fixed forms separate retracted true from false", () => {
+  const byName = new Map<string, any>(fork.bodyDigests.map((d: { name: string }) => [d.name, d]));
+  for (const d of fork.bodyDigests) {
+    const o: Record<string, unknown> = {};
+    for (const key of ["fork", "options_hash", "answered_at", "choice", "note", "retracts", "illegal_retraction", "retracted"]) {
+      if ((key === "illegal_retraction" || key === "retracted") && d.input[key] === null) continue;
+      o[key] = d.input[key];
+    }
+    const json = JSON.stringify(o);
+    assert.equal(json, d.canonical, d.name);
+    assert.equal(sha(Buffer.from(json, "utf8")), d.sha256, d.name);
+  }
+  assert.ok(byName.get("plain_answer_choice_A").sha256.startsWith("8a4d5b2e"));
+  assert.ok(byName.get("legal_retraction").sha256.startsWith("9f807538"));
+  assert.ok(byName.get("illegal_i_retraction_with_an_answer_retracted_true").sha256.startsWith("935cab1a"));
+  assert.ok(byName.get("illegal_iii_plain_answer_with_a_target_retracted_false").sha256.startsWith("82b24ccc"));
+  assert.ok(byName.get("illegal_ii_no_answer_no_target_retracted_true").sha256.startsWith("34ef86ed"));
+  assert.equal(new Set(fork.bodyDigests.map((d: { sha256: string }) => d.sha256)).size, fork.bodyDigests.length, "no two vectors share a digest");
+});
+
 test("fork card: mutating any shown member, an option id included, changes the hash", () => {
   const card = fork.card.valid[0].message as Card;
   const base = optionsHash(card);
@@ -232,11 +253,11 @@ function judge(start: Card, steps: { kind: string; body: Record<string, any> | n
     const store = (outcome: string, link: string | null, code: string | null) => {
       const a = b.answer ?? { choice: null, note: null };
       const doc = { schemaVersion: "gamecult.desk_answer.v0", answer_id: s.answer_id, fork_id: b.fork_id, outcome,
-        of: outcome === "Revision" ? link : null, retracts: outcome === "Retraction" ? link : null, code: outcome === "Refused" ? code : null,
+        of: outcome === "Revision" ? link : null, retracts: outcome === "Retraction" ? link : outcome === "Refused" ? b.retracts : null, code: outcome === "Refused" ? code : null,
         options_hash: b.options_hash, choice: a.choice, note: a.note, answered_at: b.answered_at, received_at: s.received_at,
         claim_in_future: SECONDS(b.answered_at) - SECONDS(s.received_at) > 300_000, answerer: s.answerer, authority: s.authority, request_id: b.request_id };
       answers.push(doc);
-      const stored = { schemaVersion: "gamecult.fork.answer_result.v0", answer: doc, card: code === "stale_fork" ? card : null };
+      const stored = { schemaVersion: "gamecult.fork.answer_result.v0", answer: doc, card: code === "stale_fork" ? card : null, counted_answer_id: counted() };
       seen.set(`${s.answerer}|${b.request_id}`, { body: structuredClone(b), response: structuredClone(stored) });
       return stored;
     };
@@ -244,7 +265,7 @@ function judge(start: Card, steps: { kind: string; body: Record<string, any> | n
     const down = s.door_down === true, reached = s.stored === true;   // the second door failed to answer; "stored" says whether Huginn had the request by then
     const unavailable = () => ({ schemaVersion: "gamecult.fork.unavailable.v0", code: "unavailable", error: "unavailable: the outcome is not confirmed, try again with the same request_id", retryAfterSeconds: s.retry_after_seconds });
     // a stored desk_answer has no card, so a replayed stale_fork carries the CURRENT card (fork-card.md, request_id)
-    const replay = (stored: any) => { const copy = structuredClone(stored); if (copy.answer.code === "stale_fork") copy.card = structuredClone(card); return copy; };
+    const replay = (stored: any) => { const copy = structuredClone(stored); if (copy.answer.code === "stale_fork") copy.card = structuredClone(card); copy.counted_answer_id = counted(); return copy; };
     let response: unknown;
     if (s.answerer === null) response = door("unauthenticated");
     else if (s.active === false) response = door("forbidden");

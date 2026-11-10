@@ -578,7 +578,14 @@
           "type": "null"
         },
         "retracts": {
-          "type": "null"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/answerId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "code": {
           "enum": [
@@ -655,7 +662,8 @@
       "required": [
         "schemaVersion",
         "answer",
-        "card"
+        "card",
+        "counted_answer_id"
       ],
       "properties": {
         "schemaVersion": {
@@ -668,6 +676,16 @@
           "oneOf": [
             {
               "$ref": "#/$defs/card"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "counted_answer_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/answerId"
             },
             {
               "type": "null"

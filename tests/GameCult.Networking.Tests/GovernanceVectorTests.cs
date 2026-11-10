@@ -184,6 +184,30 @@ namespace GameCult.Networking.Tests
             if (S(c["options_hash"]) != HashOf(c)) yield return "options_hash is not the hash of the shown members";
         }
 
+        // body_sha256 is Huginn's private "same body" digest, not a wire field: compact JSON, fixed key order, null for missing, the two illegal-form keys only when present.
+        [Test]
+        public void ForkCard_BodyDigest_IsSha256OfTheCompactJsonInTheStatedKeyOrder_AndTheFixedFormsSeparateRetractedTrueFromFalse()
+        {
+            var options = new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+            var digests = Fork["bodyDigests"]!.AsArray().ToDictionary(d => S(d!["name"]), d => d!);
+            foreach (var d in digests.Values)
+            {
+                var i = d["input"]!;
+                var o = new JsonObject();
+                foreach (var key in new[] { "fork", "options_hash", "answered_at", "choice", "note", "retracts", "illegal_retraction", "retracted" })
+                    if (key is "illegal_retraction" or "retracted" ? i[key] is not null : true) o[key] = Clone(i[key]);
+                var json = o.ToJsonString(options);
+                Assert.That(json, Is.EqualTo(S(d["canonical"])), S(d["name"]));
+                Assert.That(Sha(Encoding.UTF8.GetBytes(json)), Is.EqualTo(S(d["sha256"])), S(d["name"]));
+            }
+            Assert.That(S(digests["plain_answer_choice_A"]["sha256"]), Does.StartWith("8a4d5b2e"));
+            Assert.That(S(digests["legal_retraction"]["sha256"]), Does.StartWith("9f807538"));
+            Assert.That(S(digests["illegal_i_retraction_with_an_answer_retracted_true"]["sha256"]), Does.StartWith("935cab1a"));
+            Assert.That(S(digests["illegal_iii_plain_answer_with_a_target_retracted_false"]["sha256"]), Does.StartWith("82b24ccc"));
+            Assert.That(S(digests["illegal_ii_no_answer_no_target_retracted_true"]["sha256"]), Does.StartWith("34ef86ed"));
+            Assert.That(digests.Values.Select(d => S(d["sha256"])).Distinct().Count(), Is.EqualTo(digests.Count), "no two vectors share a digest");
+        }
+
         [Test]
         public void ForkCard_OptionsHash_IsSha256OfTheCanonicalJson_ComputedHere_AndEveryShownMemberMovesIt()
         {
@@ -341,14 +365,14 @@ namespace GameCult.Networking.Tests
                     var doc = new JsonObject
                     {
                         ["schemaVersion"] = "gamecult.desk_answer.v0", ["answer_id"] = S(s["answer_id"]), ["fork_id"] = Clone(b["fork_id"]), ["outcome"] = outcome,
-                        ["of"] = outcome == "Revision" ? link : null, ["retracts"] = outcome == "Retraction" ? link : null, ["code"] = outcome == "Refused" ? code : null,
+                        ["of"] = outcome == "Revision" ? link : null, ["retracts"] = outcome == "Retraction" ? link : outcome == "Refused" ? Clone(b["retracts"]) : null, ["code"] = outcome == "Refused" ? code : null,
                         ["options_hash"] = Clone(b["options_hash"]), ["choice"] = Clone(a?["choice"]), ["note"] = Clone(a?["note"]), ["answered_at"] = Clone(b["answered_at"]),
                         ["received_at"] = Clone(s["received_at"]),
                         ["claim_in_future"] = (DateTimeOffset.Parse(S(b["answered_at"])) - DateTimeOffset.Parse(S(s["received_at"]))).TotalSeconds > 300,
                         ["answerer"] = Clone(s["answerer"]), ["authority"] = Clone(s["authority"]), ["request_id"] = Clone(b["request_id"])
                     };
                     answers.Add(Clone(doc));
-                    var stored = new JsonObject { ["schemaVersion"] = "gamecult.fork.answer_result.v0", ["answer"] = doc, ["card"] = code == "stale_fork" ? Clone(card) : null };
+                    var stored = new JsonObject { ["schemaVersion"] = "gamecult.fork.answer_result.v0", ["answer"] = doc, ["card"] = code == "stale_fork" ? Clone(card) : null, ["counted_answer_id"] = Counted() };
                     seen[S(s["answerer"]) + "|" + S(b["request_id"])] = (Clone(b)!, Clone(stored)!);
                     return stored;
                 }
@@ -359,7 +383,7 @@ namespace GameCult.Networking.Tests
                 var reached = s["stored"] is not null;
                 JsonNode Unavailable() => new JsonObject { ["schemaVersion"] = "gamecult.fork.unavailable.v0", ["code"] = "unavailable", ["error"] = "unavailable: the outcome is not confirmed, try again with the same request_id", ["retryAfterSeconds"] = Clone(s["retry_after_seconds"]) };
                 // a stored desk_answer has no card, so a replayed stale_fork carries the CURRENT card (fork-card.md, request_id)
-                JsonNode Replay(JsonNode stored) { var copy = Clone(stored)!; if (S(copy["answer"]!["code"] ?? "") == "stale_fork") copy["card"] = Clone(card); return copy; }
+                JsonNode Replay(JsonNode stored) { var copy = Clone(stored)!; if (S(copy["answer"]!["code"] ?? "") == "stale_fork") copy["card"] = Clone(card); copy["counted_answer_id"] = Counted(); return copy; }
                 JsonNode response;
                 if (s["answerer"] is null) response = Door("unauthenticated");
                 else if (s["active"] is JsonValue activeValue && !activeValue.GetValue<bool>()) response = Door("forbidden");
