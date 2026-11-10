@@ -35,25 +35,27 @@ C_MEMBER = digest(B_MEMBER); C_PERSONA = digest(B_PERSONA)
 def receipt(commitment, revision=1, revealed=False, motion=M1):
     return {"schemaVersion": "gamecult.vote.receipt.v0", "motionId": motion, "voterUserAccountId": V1,
             "commitment": commitment, "revision": revision, "committedAtUtc": "2026-11-12T19:04:11.1234567Z", "revealed": revealed}
-def motion(phase, your=None, mid=M1):
+def motion(phase, your=None, mid=M1, high=False):
     return {"schemaVersion": "gamecult.vote.motion.v0", "id": mid, "title": "Ledger or lantern", "summary": "Pick one.",
             "round": 1, "priorMotionId": None, "ballotSchema": "gamecult.sealed_ballot.v0", "phase": phase,
-            "candidates": ["Adopt the ledger", "Defer to round two"], "commitClosesAtUtc": T0, "closesAtUtc": T1,
+            "candidates": ["Adopt the ledger", "Defer to round two"], "commitClosesAtUtc": T0, "closesAtUtc": T1, "highStakes": high,
             "yourVoterId": V1, "yourCommitment": your, "announcement": None}
 def cast_commit(c, motion=M1): return {"schemaVersion": "gamecult.vote.cast.v0", "motionId": motion, "verb": "commit", "commitment": c, "ballot": None}
 def cast_reveal(b): return {"schemaVersion": "gamecult.vote.cast.v0", "motionId": b["motionId"], "verb": "reveal", "commitment": None, "ballot": b}
 def refusal(code, error, retry=None): return {"schemaVersion": "gamecult.vote.refusal.v0", "code": code, "error": error, "retryAfterSeconds": retry}
-def item(i, title, phase): return {"id": i, "title": title, "round": 1, "phase": phase, "commitClosesAtUtc": T0, "closesAtUtc": T1}
+def item(i, title, phase, high=False): return {"id": i, "title": title, "round": 1, "phase": phase, "commitClosesAtUtc": T0, "closesAtUtc": T1, "highStakes": high}
 
 valid = [
  ("motion_list_request_all", "motionListRequest", {"schemaVersion": "gamecult.vote.motion_list_request.v0", "phase": None}),
  ("motion_list_request_reveal", "motionListRequest", {"schemaVersion": "gamecult.vote.motion_list_request.v0", "phase": "Reveal"}),
- ("motion_list_two", "motionList", {"schemaVersion": "gamecult.vote.motion_list.v0", "motions": [item(M1, "Ledger or lantern", "Commit"), item(M2, "Second thoughts", "Closed")]}),
+ ("motion_list_two", "motionList", {"schemaVersion": "gamecult.vote.motion_list.v0", "motions": [item(M1, "Ledger or lantern", "Commit"), item(M2, "Second thoughts", "Closed", True)]}),
  ("motion_list_empty", "motionList", {"schemaVersion": "gamecult.vote.motion_list.v0", "motions": []}),
  ("motion_read_request", "motionReadRequest", {"schemaVersion": "gamecult.vote.motion_read_request.v0", "motionId": M1}),
  ("motion_commit_phase_no_receipt", "motion", motion("Commit")),
+ ("motion_high_stakes_commit_phase", "motion", motion("Commit", high=True)),
  ("motion_reveal_phase_committed", "motion", motion("Reveal", receipt(C_MEMBER))),
  ("motion_closed_revealed", "motion", motion("Closed", receipt(C_MEMBER, 2, True))),
+ ("cast_reveal_reason_140_astral_280_units", "cast", cast_reveal(ballot(reason="\U0001F600" * 140))),
  ("cast_commit", "cast", cast_commit(C_MEMBER)),
  ("cast_reveal_member", "cast", cast_reveal(B_MEMBER)),
  ("cast_reveal_persona", "cast", cast_reveal(B_PERSONA)),
@@ -62,6 +64,7 @@ valid = [
 ]
 refusals = [
  ("unauthenticated", 401, "no bearer, or one Heimdall does not know", refusal("unauthenticated", "A bearer token is required.")),
+ ("reauthentication_required", 401, "a commit on a high-stakes motion with no sign-in fresh enough (Bifrost PR #37, D2); the voter signs in again at the top level and retries", refusal("reauthentication_required", "Sign in again to commit on this motion.")),
  ("forbidden", 403, "authenticated, not an Active member, or a Mind key used on a motion route it may not call", refusal("forbidden", "Only Active members may vote.")),
  ("not_found", 404, "unknown motion id, a standard (non-sealed) motion id, or reveal without a prior commit", refusal("not_found", "No such sealed-ballot motion.")),
  ("wrong_phase", 409, "commit outside Commit, reveal outside Reveal", refusal("wrong_phase", "The commit window is not open.")),
@@ -69,7 +72,8 @@ refusals = [
  ("invalid", 400, "body fails vote-api.schema.json or an in-document rule (untrimmed candidate or reason, candidate not in the motion, round or motionId mismatch, persona wrong for the credential)", refusal("invalid", "The cast does not satisfy gamecult.vote.cast.v0.")),
  ("commitment_mismatch", 400, "reveal whose canonical bytes do not hash to the stored commitment", refusal("commitment_mismatch", "The ballot does not match the stored commitment.")),
  ("payload_too_large", 413, "body over 4096 bytes", refusal("payload_too_large", "The body exceeds 4096 bytes.")),
- ("rate_limited", 429, "more than the per-credential cast rate; Retry-After mirrors retryAfterSeconds", refusal("rate_limited", "Too many casts.", 30)),
+ ("held", 503, "the Ratatoskr voting brake is set (Bifrost PR #37, D5): no cast is read or stored while it is", refusal("held", "Voting is held.")),
+ ("rate_limited", 429, "more than the per-account cast rate; Retry-After mirrors retryAfterSeconds", refusal("rate_limited", "Too many casts.", 30)),
 ]
 def tweak(d, **kw):
     d = json.loads(json.dumps(d)); 
@@ -89,6 +93,7 @@ invalid = [
  ("cast_motion_id_uppercase", "cast", cast_commit(C_MEMBER, M1.upper()), "ids are lowercase D-format uuids"),
  ("ballot_reason_empty", "cast", tweak(rev, b_reason=""), "reason is 1 to 280 characters"),
  ("ballot_reason_281", "cast", tweak(rev, b_reason="x" * 281), "reason is at most 280 characters"),
+ ("ballot_reason_141_astral_282_units", "cast", tweak(rev, b_reason="\U0001F600" * 141), "reason is at most 280 UTF-16 code units (vote-api.md); the schema counts code points and accepts this, so a rule refuses it"),
  ("ballot_reason_multiline", "cast", tweak(rev, b_reason="one\ntwo"), "reason is a single line"),
  ("ballot_reason_leading_space", "cast", tweak(rev, b_reason=" because"), "the contract refuses untrimmed text; it never trims for the sender, so the hashed bytes are the sent bytes"),
  ("ballot_candidate_trailing_nbsp", "cast", tweak(rev, b_candidate="Adopt the ledger "), "NO-BREAK SPACE is White_Space; trimming is judged by the same list as write-receipt Required fields"),
@@ -103,6 +108,9 @@ invalid = [
  ("receipt_time_without_zone", "receipt", dict(receipt(C_MEMBER), committedAtUtc="2026-11-12T19:04:11"), "instants are UTC with a Z"),
  ("motion_one_candidate", "motion", dict(motion("Commit"), candidates=["Only"]), "a motion has two or more candidates"),
  ("motion_phase_unknown", "motion", dict(motion("Commit"), phase="Open"), "phase is Commit, Reveal or Closed"),
+ ("motion_high_stakes_not_boolean", "motion", dict(motion("Commit"), highStakes="yes"), "highStakes is a boolean, fixed at open"),
+ ("motion_without_high_stakes", "motion", {k: v for k, v in motion("Commit").items() if k != "highStakes"}, "map-mode writes every key; a motion states whether it is high-stakes"),
+ ("motion_list_item_without_high_stakes", "motionListItem", {k: v for k, v in item(M1, "x", "Commit").items() if k != "highStakes"}, "every list item states whether the motion is high-stakes"),
  ("motion_leaks_tally", "motion", dict(motion("Reveal"), tally=[]), "mid-vote a client sees no tallies; the document is closed"),
  ("motion_list_item_without_phase", "motionList", {"schemaVersion": "gamecult.vote.motion_list.v0", "motions": [{k: v for k, v in item(M1, "x", "Commit").items() if k != "phase"}]}, "every item names its phase"),
  ("refusal_code_unknown", "refusal", refusal("teapot", "no"), "the code set is closed"),
@@ -245,6 +253,7 @@ pick = body("no", None); words = body(None, NOTE)
 STALE_H = chash(card(recommendation="yes"))
 def stale_body(**kw): return body("no", NOTE, h=STALE_H, **kw)
 FORKC = card(status="closed", ruling="cultlib-gaps:resolution:question.slot-mark-consent.n1")
+RULED = card(status="closed", ruling="cultlib-gaps:resolution:question.slot-mark-consent.n1", ruled_from=["n1"])
 Y_CARD = card(deciders=[OP, HM])
 fork_edit = card(title="Slot mark consent (revised)"); H2 = fork_edit["options_hash"]
 RET = lambda t: retraction(t, at="2026-11-12T19:09:00Z")
@@ -287,16 +296,14 @@ scen = [
  sc("V8_retraction_under_a_stale_hash_is_stale_fork", CARD, [X1, rf(retraction("n1", h=STALE_H), sr("n9"), "stale_fork", c=CARD)], "n1"),
  sc("V9_another_decider_retracts_and_the_answer_stops_counting", Y_CARD, [X1, ok(RET("n1"), sr("n7", HM, 9, "Steward"), "Retraction", "n1")], None),
  sc("V9_an_account_off_the_list_cannot_retract", CARD, [X1, rf(RET("n1"), sr("n6", ST, 9, "Member"), "not_a_decider")], "n1"),
- sc("V10_after_a_ruling_from_the_answer_retraction_is_ruled", card(ruled_from=["n1"]), [X1, rf(RET("n1"), sr("n9"), "ruled")], "n1"),
+ sc("V10a_a_ruling_that_closed_the_fork_makes_a_retraction_fork_closed", CARD, [X1, step("card", None, None, None, card=RULED), rf(RET("n1"), sr("n9"), "fork_closed")], "n1"),
  sc("V11_retracting_the_counted_answer_makes_the_next_decider_answer_counted", Y_CARD, [X1, ok(y1, sy1, "Revision", "n1"), ok(RET("n1"), sr("n8"), "Retraction", "n1")], "n3"),
  sc("V11_retracting_an_answer_that_was_not_counted_changes_nothing", Y_CARD, [X1, ok(y1, sy1, "Revision", "n1"), ok(RET("n3"), sr("n8"), "Retraction", "n3")], "n1"),
  sc("after_every_answer_is_retracted_a_fresh_answer_is_Counted_again", CARD, [X1, ok(RET("n1"), sr("n8"), "Retraction", "n1"), ok(x2, sx2, "Counted", None)], "n2"),
 ]
-for n, c, steps, r in scen:
-    if n.startswith("V10"): assert c["status"] == "open"
-REASON_CODES = ["stale_fork", "not_a_decider", "fork_closed", "choice_invalid", "bad_retraction", "already_retracted", "ruled"]
+REASON_CODES = ["stale_fork", "not_a_decider", "fork_closed", "choice_invalid", "bad_retraction", "already_retracted"]
 HTTP = {"unauthenticated": 401, "body_forbidden_field": 400, "body_unknown_field": 400, "body_invalid": 400, "fork_unknown": 404,
-        "stale_fork": 409, "not_a_decider": 403, "fork_closed": 409, "choice_invalid": 400, "bad_retraction": 400, "already_retracted": 409, "ruled": 409}
+        "stale_fork": 409, "not_a_decider": 403, "fork_closed": 409, "choice_invalid": 400, "bad_retraction": 400, "already_retracted": 409}
 STORED_REFUSALS = []
 for reason in REASON_CODES:
     a = da("Refused", None, reason, x1, sx1)
@@ -335,6 +342,7 @@ fork = {
                ("recommendation_not_an_option", "rule: recommendation is an option id (not expressible in the schema)", card(recommendation="maybe")),
                ("leans_not_an_option", "rule: leans is nil or an option id (not expressible in the schema)", card(leans="maybe")),
                ("duplicate_deciders", "rule: deciders are unique (not expressible in the schema)", card(deciders=[OP, OP])),
+               ("ruled_from_on_an_open_card", "rule: a ruling that answers a fork closes it, so an open card cites no answer in ruled_from (not expressible in the schema)", card(ruled_from=["n1"])),
                ("closed_without_ruling", "rule: a closed card names its ruling (not expressible in the schema)", card(status="closed")),
                ("options_hash_of_another_card", "rule: options_hash equals the hash of the shown members (not expressible in the schema)", dict(card(), options_hash=STALE_H)),
            ]]},
@@ -355,9 +363,9 @@ fork = {
   "deskAnswer": {"valid": [{"name": n, "message": m, "messagePackHex": hx(m)} for n, m in
                            [("counted", CNT), ("revision", REV), ("retraction", da("Retraction", "n1", None, retraction("n1"), sr("n8"))),
                             ("refused_stale", da("Refused", None, "stale_fork", stale_body(), sx1)),
-                            ("refused_ruled_retraction_keeps_no_target", da("Refused", None, "ruled", retraction("n1"), sr("n9")))]],
+                            ("refused_closed_retraction_keeps_no_target", da("Refused", None, "fork_closed", retraction("n1"), sr("n9")))]],
                  "invalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
-                   ("counted_with_a_code", "only Refused carries a code", dict(CNT, code="ruled")),
+                   ("counted_with_a_code", "only Refused carries a code", dict(CNT, code="fork_closed")),
                    ("refused_without_a_code", "Refused carries a reason code", dict(REF, code=None)),
                    ("refused_with_an_unknown_code", "the code set is closed", dict(REF, code="because")),
                    ("counted_naming_another_answer", "Counted names none", dict(CNT, of="n0")),

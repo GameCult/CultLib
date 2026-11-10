@@ -74,6 +74,12 @@ namespace GameCult.Networking.Tests
         private static string S(JsonNode? n) => n!.GetValue<string>();
         private static JsonNode? Clone(JsonNode? n) => n is null ? null : JsonNode.Parse(n.ToJsonString());
 
+        // Rules a JSON Schema cannot say: vote-api.md counts a reason in UTF-16 code units (as Bifrost does); maxLength counts code points.
+        private static IEnumerable<string> VoteRuleErrors(string def, JsonNode? message)
+        {
+            if (def == "cast" && message?["ballot"] is JsonNode ballot && S(ballot["reason"]).Length > 280) yield return "reason is over 280 UTF-16 code units";
+        }
+
         [Test]
         public void VoteApi_ValidDocuments_ValidateEncodeToTheVectorBytesAndDecodeBack()
         {
@@ -81,6 +87,7 @@ namespace GameCult.Networking.Tests
             {
                 var name = S(v!["name"]);
                 Assert.That(Errors(VoteSchema, S(v["def"]), v["message"]), Is.Empty, name);
+                Assert.That(VoteRuleErrors(S(v["def"]), v["message"]), Is.Empty, name);
                 Assert.That(HexOf(v["message"]), Is.EqualTo(S(v["messagePackHex"])), name);
                 var decoded = JsonNode.Parse(MessagePackSerializer.ConvertToJson(Convert.FromHexString(S(v["messagePackHex"]))))!;
                 Assert.That(JsonNode.DeepEquals(decoded, v["message"]), Is.True, name);
@@ -93,7 +100,7 @@ namespace GameCult.Networking.Tests
             foreach (var v in Vote["invalid"]!.AsArray())
             {
                 var name = S(v!["name"]);
-                Assert.That(Errors(VoteSchema, S(v["def"]), v["message"]), Is.Not.Empty, $"{name}: {S(v["why"])}");
+                Assert.That(Errors(VoteSchema, S(v["def"]), v["message"]).Count > 0 || VoteRuleErrors(S(v["def"]), v["message"]).Any(), Is.True, $"{name}: {S(v["why"])}");
                 Assert.That(HexOf(v["message"]), Is.EqualTo(S(v["messagePackHex"])), name);
             }
         }
@@ -171,6 +178,7 @@ namespace GameCult.Networking.Tests
             var deciders = c["deciders"]!.AsArray().Select(S).ToList();
             if (deciders.Distinct().Count() != deciders.Count) yield return "duplicate deciders";
             if (S(c["status"]) == "closed" && c["ruling"] is null) yield return "closed without a ruling";
+            if (S(c["status"]) == "open" && c["ruled_from"]!.AsArray().Count > 0) yield return "an open card cites an answer in ruled_from";
             if (S(c["options_hash"]) != HashOf(c)) yield return "options_hash is not the hash of the shown members";
         }
 
@@ -339,7 +347,6 @@ namespace GameCult.Networking.Tests
                         && S(a["outcome"]) is "Counted" or "Revision" && S(a["options_hash"]) == S(b["options_hash"]));
                     if (!retracted || b["answer"] is not null || b["retracts"] is null || target is null) response = Refuse("bad_retraction");
                     else if (answers.Any(a => S(a!["outcome"]) == "Retraction" && S(a["retracts"]) == S(target["answer_id"]))) response = Refuse("already_retracted");
-                    else if (card["ruled_from"]!.AsArray().Any(r => S(r) == S(target["answer_id"]))) response = Refuse("ruled");
                     else response = Store("Retraction", S(target["answer_id"]), null);
                 }
                 else if (b["answer"]!["choice"] is not null && !card["options"]!.AsArray().Any(o => S(o!["id"]) == S(b["answer"]!["choice"]))) response = Refuse("choice_invalid");
@@ -396,7 +403,7 @@ namespace GameCult.Networking.Tests
             }
             Assert.That(doorRefusals, Is.GreaterThanOrEqualTo(8));
             foreach (var want in new[] { "Counted", "Revision", "Retraction", "Refused", "unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown", "stale_fork",
-                                         "not_a_decider", "fork_closed", "choice_invalid", "bad_retraction", "already_retracted", "ruled" })
+                                         "not_a_decider", "fork_closed", "choice_invalid", "bad_retraction", "already_retracted" })
                 Assert.That(seen, Does.Contain(want));
         }
 

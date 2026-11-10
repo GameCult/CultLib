@@ -28,9 +28,14 @@ const check = (schema: { $id: string }, def: string, value: unknown): boolean =>
 const hexOf = (value: unknown): string => Buffer.from(encode(value)).toString("hex").toUpperCase();
 const sha = (bytes: Buffer | string): string => createHash("sha256").update(bytes).digest("hex");
 
+// Rules a JSON Schema cannot say: vote-api.md counts a reason in UTF-16 code units (as Bifrost does); maxLength counts code points.
+const voteRuleErrors = (def: string, message: any): string[] =>
+  def === "cast" && message.ballot !== null && message.ballot.reason.length > 280 ? ["reason is over 280 UTF-16 code units"] : [];
+
 test("vote API: every valid document validates, encodes to the vector bytes and decodes back", () => {
   for (const v of vote.valid) {
     assert.ok(check(voteSchema, v.def, v.message), v.name);
+    assert.deepEqual(voteRuleErrors(v.def, v.message), [], v.name);
     assert.equal(hexOf(v.message), v.messagePackHex, v.name);
     assert.deepEqual(decode(Buffer.from(v.messagePackHex, "hex")), v.message, v.name);
   }
@@ -38,7 +43,7 @@ test("vote API: every valid document validates, encodes to the vector bytes and 
 
 test("vote API: every negative is refused by the schema, and its bytes are the vector's", () => {
   for (const v of vote.invalid) {
-    assert.equal(check(voteSchema, v.def, v.message), false, `${v.name}: ${v.why}`);
+    assert.ok(!check(voteSchema, v.def, v.message) || voteRuleErrors(v.def, v.message).length > 0, `${v.name}: ${v.why}`);
     assert.equal(hexOf(v.message), v.messagePackHex, v.name);
   }
 });
@@ -99,6 +104,7 @@ const cardRuleErrors = (c: Card): string[] => {
   if (c.leans !== null && !ids.includes(c.leans)) errors.push("leans is not an option");
   if (new Set(c.deciders).size !== c.deciders.length) errors.push("duplicate deciders");
   if (c.status === "closed" && c.ruling === null) errors.push("closed without a ruling");
+  if (c.status === "open" && c.ruled_from.length > 0) errors.push("an open card cites an answer in ruled_from");
   if (c.options_hash !== optionsHash(c)) errors.push("options_hash is not the hash of the shown members");
   return errors;
 };
@@ -228,7 +234,6 @@ function judge(start: Card, steps: { kind: string; body: Record<string, any> | n
       const target = answers.find((a) => a.answer_id === b.retracts && (a.outcome === "Counted" || a.outcome === "Revision") && a.options_hash === b.options_hash);
       if (!b.retracted || b.answer !== null || b.retracts === null || !target) response = refuse("bad_retraction");
       else if (answers.some((a) => a.outcome === "Retraction" && a.retracts === target.answer_id)) response = refuse("already_retracted");
-      else if (card.ruled_from.includes(target.answer_id)) response = refuse("ruled");
       else response = store("Retraction", target.answer_id, null);
     } else if (b.answer.choice !== null && !card.options.some((o) => o.id === b.answer.choice)) response = refuse("choice_invalid");
     else {
@@ -253,7 +258,7 @@ test("fork card: every scenario replays to the vector's responses and record, by
   }
 });
 
-test("fork card: a body refused for its shape reaches Huginn never, so the record stores nothing for it", () => {
+test("fork card: a body refused at the door or naming an unknown fork is never stored", () => {
   const door = new Set(["unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown"]);
   let doorRefusals = 0;
   for (const sc of fork.scenarios) {
@@ -274,7 +279,7 @@ test("fork card: the scenarios cover every outcome and every refusal code", () =
     for (const a of sc.record.answers) seen.add(a.outcome);
   }
   for (const want of ["Counted", "Revision", "Retraction", "Refused", "unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown", "stale_fork", "not_a_decider",
-                      "fork_closed", "choice_invalid", "bad_retraction", "already_retracted", "ruled"]) {
+                      "fork_closed", "choice_invalid", "bad_retraction", "already_retracted"]) {
     assert.ok(seen.has(want), want);
   }
 });
