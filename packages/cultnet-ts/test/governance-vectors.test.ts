@@ -128,6 +128,13 @@ test("fork card: options hash is SHA-256 of the canonical JSON, computed here, a
   }
 });
 
+test("fork card: an answer result without counted_answer_id is refused by the schema", () => {
+  const result = structuredClone(fork.scenarios.flatMap((sc: any) => sc.steps).find((st: any) => st.response?.answer).response);
+  assert.ok(check(forkSchema, "answerResult", result));
+  delete result.counted_answer_id;
+  assert.ok(!check(forkSchema, "answerResult", result));
+});
+
 // body_sha256 is Huginn's private "same body" digest, not a wire field: compact JSON, fixed key order, null for missing, the two illegal-form keys only when present.
 test("fork card: the body digest is SHA-256 of the compact JSON in the stated key order, and the fixed forms separate retracted true from false", () => {
   const byName = new Map<string, any>(fork.bodyDigests.map((d: { name: string }) => [d.name, d]));

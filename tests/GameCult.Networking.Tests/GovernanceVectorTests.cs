@@ -186,6 +186,15 @@ namespace GameCult.Networking.Tests
 
         // body_sha256 is Huginn's private "same body" digest, not a wire field: compact JSON, fixed key order, null for missing, the two illegal-form keys only when present.
         [Test]
+        public void ForkCard_AnAnswerResultWithoutCountedAnswerId_IsRefusedBySchema()
+        {
+            var result = Clone(Fork["scenarios"]!.AsArray().SelectMany(sc => sc!["steps"]!.AsArray()).First(st => st!["response"]?["answer"] is not null)!["response"])!.AsObject();
+            Assert.That(Errors(ForkSchema, "answerResult", result), Is.Empty);
+            result.Remove("counted_answer_id");
+            Assert.That(Errors(ForkSchema, "answerResult", result), Is.Not.Empty);
+        }
+
+        [Test]
         public void ForkCard_BodyDigest_IsSha256OfTheCompactJsonInTheStatedKeyOrder_AndTheFixedFormsSeparateRetractedTrueFromFalse()
         {
             var options = new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };

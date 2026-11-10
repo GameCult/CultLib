@@ -351,6 +351,8 @@ for _n, _f in (("a_retraction_with_an_answer", IL_A), ("a_retraction_with_no_tar
     _r = rf(_f, sr("n2"), "bad_retraction")
     scen.append(sc(f"R1_{_n}_is_a_stored_bad_retraction_and_a_retry_replays_it", CARD, [X1, _r, replayed(_r, sr("n2"))], "n1"))
 scen += [
+ sc("a_replay_returns_the_counted_answer_id_current_at_the_retry_not_the_one_stored", CARD, [X1, ok(RET("n1"), sr("n8"), "Retraction", "n1"), REPLAY1], None),
+ sc("R1_retracted_true_with_an_answer_and_no_target_is_a_stored_bad_retraction", CARD, [X1, rf(dict(IL_A, retracts=None), sr("n2"), "bad_retraction")], "n1"),
  sc("R1_retracted_true_then_false_under_one_request_id_is_request_id_conflict", CARD, [X1, rf(IL_A, sr("n2"), "bad_retraction"), door(IL_C, sr("n9"), "request_id_conflict")], "n1"),
  sc("R1_retracted_false_then_true_under_one_request_id_is_request_id_conflict", CARD, [X1, rf(IL_C, sr("n2"), "bad_retraction"), door(IL_A, sr("n9"), "request_id_conflict")], "n1"),
  sc("R1_a_target_less_retraction_with_retracted_flipped_is_body_invalid_before_any_request_id_lookup", CARD, [X1, rf(IL_B, sr("n2"), "bad_retraction"), door(dict(IL_B, retracted=False), sr("n9"), "body_invalid")], "n1"),
@@ -493,6 +495,7 @@ BODY_DIGESTS = [
   dg("illegal_ii_on_main", MAIN, "1a36c4aba0d1c30d0736f20243ebfdb84fe84a5eabd4f69709a096a32c3cc6e3", "(ii) no answer, no target, on main", illegal_retraction=True),
   dg("illegal_i_retraction_with_an_answer_retracted_true", FIX, "935cab1a0ae34606b809d8ebca7cffa2889d20b3585d2622d32153a4d6898af1", "(i) answer present, retracted true, target Q1.n1", choice="A", retracts=DT, illegal_retraction=True, retracted=True),
   dg("illegal_iii_plain_answer_with_a_target_retracted_false", FIX, "82b24cccb4ed2535a549f95f844fcd935074c3712b5b832f0b2cbd89c71fd9a6", "(iii) the same bytes as (i) with retracted false: another body, so request_id_conflict", choice="A", retracts=DT, illegal_retraction=True, retracted=False),
+  dg("illegal_i_retraction_with_an_answer_and_no_target_retracted_true", "computed_here_by_the_same_rule_not_in_the_order_doc_pending_eureka_merge", "79eee623fd6712db6537a4867cedf54ca49ee4885416c2c8e4acec59f811b894", "(i) with the target null (the order doc: retracts set or null); verified with sha256sum, but Eureka has not published this golden", choice="A", illegal_retraction=True, retracted=True),
   dg("illegal_ii_no_answer_no_target_retracted_true", FIX, "34ef86ed63b9318459965d4b85e794d2636ffc15736da866036b087c9c4a30eb", "(ii) no answer, no target, retracted true", illegal_retraction=True, retracted=True),
 ]
 fork = {
