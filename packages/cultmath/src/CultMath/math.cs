@@ -515,6 +515,12 @@ public static partial class math
     // HLSL mul: mul(m, v) treats v as a column vector, mul(v, m) as a row vector.
     public static float mul(float left, float right) => left * right;
 
+    // mul(v, v) is the inner product, as in HLSL. It also keeps mul(float4, float4) from binding to the
+    // quaternion product through float4's implicit conversion to quaternion.
+    public static float mul(float2 left, float2 right) => dot(left, right);
+    public static float mul(float3 left, float3 right) => dot(left, right);
+    public static float mul(float4 left, float4 right) => dot(left, right);
+
     public static float2 mul(float2x2 m, float2 v) =>
         new(m._m00 * v.x + m._m01 * v.y, m._m10 * v.x + m._m11 * v.y);
 
