@@ -211,6 +211,8 @@ namespace GameCult.Networking.Tests
             }
             Assert.That(S(digests["plain_answer_choice_A"]["sha256"]), Does.StartWith("8a4d5b2e"));
             Assert.That(S(digests["legal_retraction"]["sha256"]), Does.StartWith("9f807538"));
+            Assert.That(S(digests["legal_retraction_door_form"]["sha256"]), Does.StartWith("84576840"));
+            Assert.That(digests["legal_retraction_door_form"]["input"]!["retracts"]!.ToString(), Does.EndWith(".n1"), "the door's form: the wire n<seq> converted to the full key");
             Assert.That(S(digests["illegal_i_retraction_with_an_answer_retracted_true"]["sha256"]), Does.StartWith("935cab1a"));
             Assert.That(S(digests["illegal_iii_plain_answer_with_a_target_retracted_false"]["sha256"]), Does.StartWith("82b24ccc"));
             Assert.That(S(digests["illegal_ii_no_answer_no_target_retracted_true"]["sha256"]), Does.StartWith("34ef86ed"));
