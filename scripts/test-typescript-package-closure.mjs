@@ -79,8 +79,8 @@ try {
 const assert = require("node:assert/strict");
 const cache = require("@gamecult/cultcache-ts");
 const documentEntry = require("@gamecult/cultcache-ts/document");
-const net = require("cultnet-ts");
-const mesh = require("cultmesh-ts");
+const net = require("@gamecult/cultnet-ts");
+const mesh = require("@gamecult/cultmesh-ts");
 assert.equal(typeof cache.defineDocumentType, "function");
 // The document owner is also an entry of its own, which the browser client imports without the Node-only cache.
 assert.equal(documentEntry.decodeDocumentPayload, cache.decodeDocumentPayload);
@@ -147,8 +147,8 @@ assert.deepEqual(mesh.CultMesh.vec2(3, 4), { x: 3, y: 4 });
 
   writeFileSync(join(consumerRoot, "browser-runtime-smoke.mjs"), `
 import assert from "node:assert/strict";
-import { CultMeshBrowserClient, decodeCultNetPayload } from "cultmesh-browser";
-import { parseCultNetMessage } from "cultnet-ts/contracts";
+import { CultMeshBrowserClient, decodeCultNetPayload } from "@gamecult/cultmesh-browser";
+import { parseCultNetMessage } from "@gamecult/cultnet-ts/contracts";
 assert.equal(typeof CultMeshBrowserClient.connect, "function");
 assert.equal(typeof decodeCultNetPayload, "function");
 assert.equal(typeof parseCultNetMessage, "function");
@@ -159,14 +159,14 @@ assert.equal("putDocument" in CultMeshBrowserClient.prototype, false);
   writeFileSync(join(consumerRoot, "types-smoke.ts"), `
 import { defineDocumentType } from "@gamecult/cultcache-ts";
 import { decodeDocumentPayload, type DocumentPayload } from "@gamecult/cultcache-ts/document";
-import { CultNetPeer } from "cultnet-ts";
+import { CultNetPeer } from "@gamecult/cultnet-ts";
 import {
   CultMesh,
   CultMeshProviderSession,
   type CultMeshProviderIdentity,
   type CultMeshProviderTransport,
   type CultMeshVec2,
-} from "cultmesh-ts";
+} from "@gamecult/cultmesh-ts";
 
 const point: CultMeshVec2 = CultMesh.vec2(3, 4);
 const defineDocument: typeof defineDocumentType = defineDocumentType;
@@ -209,7 +209,7 @@ import {
   CultMeshBrowserClient,
   type CultMeshBrowserIdentity,
   type CultMeshRawDocumentLeaseOptions,
-} from "cultmesh-browser";
+} from "@gamecult/cultmesh-browser";
 
 const identity: CultMeshBrowserIdentity = {
   verseId: "smoke",

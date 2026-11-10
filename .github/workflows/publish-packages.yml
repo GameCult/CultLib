@@ -8,15 +8,26 @@ name: Publish packages
 # directly, which is already how Ghostlight, Epiphany, CodexConnector and Odin
 # consume the core stack.
 #
-# Tag a release to publish, for example `cultcache-ts-v0.13.6` or
-# `cultnet-py-v0.1.0`. The tag's version must match the version in the package
-# manifest; scripts/release-after-suite.mjs refuses the release otherwise rather
-# than shipping a mislabelled artifact.
+# Tag a Python release to publish, for example `cultnet-py-v0.1.0`. The tag's
+# version must match the version in the package manifest;
+# scripts/release-after-suite.mjs refuses the release otherwise rather than
+# shipping a mislabelled artifact.
+#
+# npm publishing of @gamecult/cultcache-ts is deliberately off: `cultcache-ts-v*`
+# is not a tag trigger until it is ruled on (the cultcache-ts job below runs from
+# workflow_dispatch only, which publishes nothing). A tag run uses the workflow
+# file at the tagged commit, not the one on main, so a tag on an older commit
+# (`cultcache-ts-v0.15.0` sits on 7d292085, before the guard) still runs that
+# commit's triggers and jobs. Read this file at the tagged sha before pushing a tag.
 
 on:
   push:
+    # cultcache-ts-v* is deliberately not a trigger: publishing @gamecult/cultcache-ts is disabled
+    # until it is ruled on, and whether NPM_TOKEN is set is unknown, so a pushed tag must not reach
+    # `npm publish`. The cultcache-ts jobs below still run from workflow_dispatch, which publishes nothing.
+    # (The comment sits above `tags:` because the tag-prefix pin in scripts/check-changelog-semver.test.mjs
+    # reads the list as `tags:` followed directly by its items.)
     tags:
-      - "cultcache-ts-v*"
       - "cultcache-py-v*"
       - "cultnet-py-v*"
       - "cultmesh-py-v*"

@@ -12,6 +12,19 @@ PEER_EXCHANGE_REQUEST = "cultmesh.peer_exchange_request.v0"
 TRANSPORT_PROFILE_SCHEMA_VERSION = "cultnet.transport_profile.v0"
 TRANSPORT_PROFILE_SCHEMA_ID = f"{CULTNET_SCHEMA_BASE}/cultnet.transport-profile.schema.json"
 
+# The closed code set of contracts/cultnet/cultnet.error.schema.json; a code outside it is one coordinated change across every runtime.
+CULTNET_ERROR_CODES = (
+    "selection_invalid",
+    "cursor_stale",
+    "cursor_invalid",
+    "reference_outside_target",
+    "variant_unsupported",
+    "unowned_schema",
+    "write_not_authorized",
+    "unsupported_schema_version",
+    "message_invalid",
+)
+
 WIRE_MESSAGE_SCHEMA_VERSIONS = (
     ("cultnet.hello.v0", "CultNet Hello Message", f"{CULTNET_SCHEMA_BASE}/cultnet.hello.schema.json"),
     ("cultnet.error.v0", "CultNet Error Message", f"{CULTNET_SCHEMA_BASE}/cultnet.error.schema.json"),
@@ -269,7 +282,7 @@ def shared_contract_schema_json(schema_id: str, title: str, schema_version: str)
 def wire_message_required_fields(schema_version: str) -> list[str]:
     required = {
         "cultnet.hello.v0": ["schemaVersion", "runtimeId"],
-        "cultnet.error.v0": ["schemaVersion", "error"],
+        "cultnet.error.v0": ["schemaVersion", "error", "routingHint", "code", "details"],
         "cultnet.login.v0": ["schemaVersion", "nonce", "auth", "password"],
         "cultnet.register.v0": ["schemaVersion", "nonce", "email", "password", "name"],
         "cultnet.verify.v0": ["schemaVersion", "nonce", "session"],
@@ -355,10 +368,10 @@ def wire_message_schema_properties(schema_version: str) -> dict[str, Any]:
             "supportsSchemaCatalog": {"type": "boolean"},
         },
         "cultnet.error.v0": {
-            "messageId": common["messageId"],
-            "error": {"type": "string"},
-            "code": {"type": "string"},
-            "details": {"type": "object", "additionalProperties": True},
+            "error": {"type": "string", "minLength": 1},
+            "routingHint": {"type": ["object", "null"]},
+            "code": {"type": ["string", "null"], "enum": [None, *CULTNET_ERROR_CODES]},
+            "details": {"type": ["object", "null"]},
         },
         "cultnet.login.v0": {
             "nonce": {"type": "string", "minLength": 1},

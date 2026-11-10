@@ -322,6 +322,10 @@ node_modules/
 !packages/cultmesh-browser/**
 !packages/cultmesh-kotlin/
 !packages/cultmesh-kotlin/**
+!packages/heimdall-delegation/
+!packages/heimdall-delegation/**
+!packages/heimdall-stake/
+!packages/heimdall-stake/**
 packages/**/node_modules/
 packages/**/dist/
 packages/**/dist-test/

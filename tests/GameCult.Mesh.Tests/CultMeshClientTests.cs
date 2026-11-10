@@ -291,6 +291,51 @@ public sealed class CultMeshClientTests
         submitted.Document.SourceRole.Should().Be("pilot");
     }
 
+    [TestCase("write_not_authorized", 0)]
+    [TestCase("message_invalid", 0)]
+    [TestCase("write_not_authorized", 150)]
+    public async Task SubmitDocument_ARefusalRejectsWithTheTypedError_WhateverItsOrderAgainstTheSend(string code, int delayMs)
+    {
+        var connector = new DocumentConnector
+        {
+            RefuseSubmissionsWith = code,
+            RefusalDelay = TimeSpan.FromMilliseconds(delayMs)
+        };
+        using var mesh = new CultMeshClient(new CultMeshClientOptions
+        {
+            RendezvousEndpoints = new[] { "rudp://odin:3076" },
+            Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
+            Connectors = new[] { connector }
+        });
+        var request = new ClientTestDocument { Id = "command:1", Text = "move" };
+
+        var act = () => mesh.SubmitDocumentAsync(Target, request.Id, request, "pilot-one", "pilot");
+
+        (await act.Should().ThrowAsync<CultNetWriteRefusedException>()).Which.Code.Should().Be(code);
+    }
+
+    [Test]
+    public async Task SubmitDocument_CompletesOnlyAfterTheResultWindow_NotOnTheSendReturning()
+    {
+        var connector = new DocumentConnector();
+        using var mesh = new CultMeshClient(new CultMeshClientOptions
+        {
+            RendezvousEndpoints = new[] { "rudp://odin:3076" },
+            Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
+            Connectors = new[] { connector },
+            SubmitResultWindow = TimeSpan.FromMilliseconds(400)
+        });
+        var request = new ClientTestDocument { Id = "command:1", Text = "move" };
+        await mesh.ConnectAsync(Target, CultMeshProtocols.Documents);
+        var started = DateTime.UtcNow;
+
+        await mesh.SubmitDocumentAsync(Target, request.Id, request, "pilot-one", "pilot");
+
+        (DateTime.UtcNow - started).Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(380));
+    }
+
     [Test]
     public async Task InvokeOperation_CorrelatesProviderReceiptThroughStableIdentitySession()
     {
@@ -496,6 +541,8 @@ public sealed class CultMeshClientTests
         public bool SuppressFirstSnapshot { get; set; }
         public bool SuppressFirstSubscriptionSnapshot { get; set; }
         public bool RejectOperations { get; set; }
+        public string? RefuseSubmissionsWith { get; set; }
+        public TimeSpan RefusalDelay { get; set; }
         public bool FailFirstOperationBeforeResponse { get; set; }
         public string ResponseSourceRuntimeId { get; set; } = "aetheria-daemon";
         public string ConnectorId => "document-test";
@@ -515,6 +562,8 @@ public sealed class CultMeshClientTests
                 rejectOperations: RejectOperations,
                 failOperationBeforeResponse: FailFirstOperationBeforeResponse && Clients.Count == 0,
                 responseSourceRuntimeId: ResponseSourceRuntimeId);
+            client.RefuseSubmissionsWith = RefuseSubmissionsWith;
+            client.RefusalDelay = RefusalDelay;
             Clients.Add(client);
             return Task.FromResult<ICultNetSchemaClient>(client);
         }
@@ -522,6 +571,9 @@ public sealed class CultMeshClientTests
 
     private sealed class DocumentClient : ICultNetSchemaClient, ICultNetSchemaClientHealth, ICultMeshVerifiedSchemaClient
     {
+        private readonly List<Action<CultNetErrorMessage>> _errors = new();
+        public string? RefuseSubmissionsWith { get; set; }
+        public TimeSpan RefusalDelay { get; set; }
         private readonly List<Action<CultNetSnapshotResponseRawMessage>> _snapshots = new();
         private readonly List<Action<CultNetOperationResponseMessage>> _operationResponses = new();
         private readonly CultNetDocumentRegistry _documents;
@@ -558,6 +610,15 @@ public sealed class CultMeshClientTests
             if (message is CultNetDocumentPutRawMessage submitted)
             {
                 Submitted.Add(submitted);
+                if (RefuseSubmissionsWith != null)
+                {
+                    var refusal = new CultNetErrorMessage { Error = "not allowed", Code = RefuseSubmissionsWith };
+                    // A refusal that follows the send's return (and any transport ack) must still reject the submit.
+                    Task.Delay(RefusalDelay).ContinueWith(_ =>
+                    {
+                        foreach (var handler in _errors.ToArray()) handler(refusal);
+                    });
+                }
                 return;
             }
             if (message is CultNetOperationRequestMessage operation)
@@ -642,6 +703,8 @@ public sealed class CultMeshClientTests
                 _snapshots.Add(response => callback((T)(object)response));
             if (typeof(T) == typeof(CultNetOperationResponseMessage))
                 _operationResponses.Add(response => callback((T)(object)response));
+            if (typeof(T) == typeof(CultNetErrorMessage))
+                _errors.Add(error => callback((T)(object)error));
         }
         public void Dispose() { }
         public void Fail(Exception error) => _failure.TrySetResult(error);

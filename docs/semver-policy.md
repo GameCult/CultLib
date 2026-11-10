@@ -26,7 +26,7 @@ caught before it ships instead of written up afterward.
 | `org.gamecult.cultlib` | Unity UPM | `scripts/build-unity-package.ps1`, consumed by git tag |
 | `org.gamecult.caching.unity` | Unity UPM | tagged directly (no build script; see "Coverage gaps") |
 | `org.gamecult.cultmath` | Unity UPM | `packages/cultmath/scripts/build-unity-package.ps1`, consumed by git tag |
-| `@gamecult/cultcache-ts` | npm | `.github/workflows/publish-packages.yml` |
+| `@gamecult/cultcache-ts` | npm | `.github/workflows/publish-packages.yml`, `workflow_dispatch` only; npm publishing is off (see "Coverage gaps") |
 | `cultcache-py` | PyPI | `.github/workflows/publish-packages.yml` |
 | `cultnet-py` | PyPI | `.github/workflows/publish-packages.yml` |
 | `cultmesh-py` | PyPI | `.github/workflows/publish-packages.yml` |
@@ -198,8 +198,8 @@ or a missing declaration refuses), and:
    proof: with no tag of its own prefix it is a first release. The suite test
    that pins every declared prefix guards it: each prefix is declared once, each
    workflow tag trigger must be a declared prefix, and each such package's prefix
-   must be a workflow trigger or, for the Caching Unity package the workflow does
-   not build, the prefix of tags that hold its own manifest at the tag's own
+   must be a workflow trigger or, for a package the workflow does not tag-trigger
+   (the Caching Unity package, `cultcache-ts`), the prefix of tags that hold its own manifest at the tag's own
    version, so a typo or a copied prefix fails the suite. Nothing releases
    without the suite passing; see below for how each release path runs it.
    Releases run from a full clone with every tag (`fetch-depth: 0` in CI), the
@@ -352,10 +352,40 @@ own path into the DLL. No `global.json` pins the .NET SDK, so the same refusal
 at unchanged source and CRLF checkout means this SDK or host differs from the
 one that built the tracked DLL.
 
+### Before pushing a tag
+
+A tag run uses the workflow files at the tagged commit, not the ones on main, and
+the forge's GitHub mirror forwards the tag, so both CI systems run it. Before
+pushing any tag, resolve the commit it will point at and read the tag-triggering
+workflows as they are at that commit:
+
+```
+sha=$(git rev-parse <commit-the-tag-will-point-at>)
+git ls-tree -r --name-only "$sha" .github/workflows
+git show "$sha":.github/workflows/publish-packages.yml | sed -n '/^on:/,/^jobs:/p'
+```
+
+Confirm that the tag's prefix is a trigger there if you mean it to publish, and
+is not if you do not. Do the same for every other workflow listed that has a
+`tags:` trigger. A guard merged after that commit does not protect a tag that
+points before it.
+
+`cultcache-ts-v0.15.0` was pushed on `7d292085`, which predates the guard, and
+its push started a publish run on both systems (GitHub run 42392334869, forge run
+454). The forge job log shows how it ended: the Publish step ran
+`release-after-suite.mjs`, whose `npm test` failed (11 cross-runtime tests,
+`cargo: not found` on the runner), so it printed "@gamecult/cultcache-ts's own
+tests failed; not releasing." and never reached `npm publish`. Neither
+`cultcache-ts` nor `@gamecult/cultcache-ts` exists on the npm registry
+(both return 404, checked 2026-11-08). The GitHub run's own log needs a login
+to read, so its failure cause is inferred from the identical workflow and sha.
+
 ### Coverage gaps
 
-`publish-packages.yml` only triggers on `cultcache-ts-v*`, `cultcache-py-v*`,
-`cultnet-py-v*`, and `cultmesh-py-v*` tag pushes — it does not build or gate
+`publish-packages.yml` only triggers on `cultcache-py-v*`, `cultnet-py-v*`, and
+`cultmesh-py-v*` tag pushes (`cultcache-ts-v*` is deliberately not a trigger: npm
+publishing is off until ruled on, and the cultcache-ts job runs from
+`workflow_dispatch` only, publishing nothing) — it does not build or gate
 the Unity UPM packages at all; those are consumed directly by git tag
 (`unity/org.gamecult.cultlib`, `packages/cultmath/unity/org.gamecult.cultmath`,
 `src/GameCult.Unity/Assets/Caching`), so a workflow trigger on their tags

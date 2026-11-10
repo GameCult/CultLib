@@ -220,6 +220,32 @@ namespace GameCult.Networking.Tests
             Assert.That(Convert.ToHexString(CultNetSchemaMessageSerialization.Serialize(message)), Is.EqualTo("85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D92177726974655F6E6F745F617574686F72697A65643A206E6F74206772616E746564AB726F7574696E6748696E74C0A4636F6465B477726974655F6E6F745F617574686F72697A6564A764657461696C7384A56669656C64A97265636F72644B6579A576616C7565A8736F6D653A6B6579A461734F66C0A763757272656E74C0"));
         }
 
+        [Test]
+        public void ErrorMessage_UnsupportedSchemaVersionRealBytes_MatchesItsSchema()
+        {
+            var message = CultNetErrorMessage.ForUnsupportedSchemaVersion("cultnet.hello.v1");
+
+            Assert.That(message.Code, Is.EqualTo("unsupported_schema_version"));
+            Assert.That(message.Details!.Field, Is.EqualTo("schemaVersion"));
+            Assert.That(message.Details.Value, Is.EqualTo("cultnet.hello.v1"));
+            AssertErrorMatchesSchema(message);
+            // The bytes cultnet-rs's error_message.rs unsupported_schema_version case decodes and re-encodes.
+            Assert.That(Convert.ToHexString(CultNetSchemaMessageSerialization.Serialize(message)), Is.EqualTo("85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D92C756E737570706F727465645F736368656D615F76657273696F6E3A2063756C746E65742E68656C6C6F2E7631AB726F7574696E6748696E74C0A4636F6465BA756E737570706F727465645F736368656D615F76657273696F6EA764657461696C7384A56669656C64AD736368656D6156657273696F6EA576616C7565B063756C746E65742E68656C6C6F2E7631A461734F66C0A763757272656E74C0"));
+        }
+
+        [Test]
+        public void ErrorMessage_MessageInvalidRealBytes_MatchesItsSchema()
+        {
+            var message = CultNetErrorMessage.ForMessageInvalid("document", "Raw put messages must contain a document map.");
+
+            Assert.That(message.Code, Is.EqualTo("message_invalid"));
+            Assert.That(message.Details!.Field, Is.EqualTo("document"));
+            Assert.That(message.Details.Value, Is.Null);
+            AssertErrorMatchesSchema(message);
+            // The bytes cultnet-rs's error_message.rs message_invalid case decodes and re-encodes.
+            Assert.That(Convert.ToHexString(CultNetSchemaMessageSerialization.Serialize(message)), Is.EqualTo("85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D93E6D6573736167655F696E76616C69643A2052617720707574206D65737361676573206D75737420636F6E7461696E206120646F63756D656E74206D61702EAB726F7574696E6748696E74C0A4636F6465AF6D6573736167655F696E76616C6964A764657461696C7384A56669656C64A8646F63756D656E74A576616C7565C0A461734F66C0A763757272656E74C0"));
+        }
+
         private static void AssertErrorMatchesSchema(CultNetErrorMessage message)
         {
             var validator = new MiniJsonSchemaValidator(SchemaDir());

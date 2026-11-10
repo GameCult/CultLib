@@ -44,6 +44,12 @@ namespace GameCult.Mesh
 
         /// <summary>Gets or sets the deadline for one correlated typed operation response.</summary>
         public TimeSpan OperationResponseTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+        /// <summary>
+        /// Gets or sets how long after a submitted document the provider's refusal may still arrive. The provider
+        /// sends no success frame for an admitted submission, so this window bounds <c>SubmitDocumentAsync</c>.
+        /// </summary>
+        public TimeSpan SubmitResultWindow { get; set; } = CultNetWriteCompletion.DefaultResultWindow;
     }
 
     /// <summary>
@@ -149,6 +155,7 @@ namespace GameCult.Mesh
         private readonly CultMeshSessionManager _sessions;
         private readonly TimeSpan _subscriptionResponseTimeout;
         private readonly TimeSpan _operationResponseTimeout;
+        private readonly TimeSpan _submitResultWindow;
         private readonly ConcurrentDictionary<string, SharedResource> _documents = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, SharedResource> _collections = new(StringComparer.Ordinal);
         private bool _disposed;
@@ -191,6 +198,7 @@ namespace GameCult.Mesh
                 options.Sessions);
             _subscriptionResponseTimeout = options.SubscriptionResponseTimeout;
             _operationResponseTimeout = options.OperationResponseTimeout;
+            _submitResultWindow = options.SubmitResultWindow;
         }
 
         /// <summary>Connects to one stable Verse/provider target using one application protocol.</summary>
@@ -319,7 +327,10 @@ namespace GameCult.Mesh
 
         /// <summary>
         /// Submits one typed document to a provider by stable identity. Submission is uncommitted input;
-        /// only a provider-authored receipt or resulting state can establish acceptance.
+        /// only a provider-authored receipt or resulting state can establish acceptance. The task completes on
+        /// the provider's result frame: a refusal (<c>write_not_authorized</c>, <c>message_invalid</c>, ...) throws
+        /// <see cref="CultNetWriteRefusedException"/>, and a submission not refused within
+        /// <see cref="CultMeshClientOptions.SubmitResultWindow"/> completes.
         /// </summary>
         public async Task SubmitDocumentAsync<TDocument>(
             CultMeshSessionTarget target,
@@ -351,7 +362,11 @@ namespace GameCult.Mesh
             var session = await ConnectAsync(target, CultMeshProtocols.Documents, cancellationToken)
                 .ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            session.OpenSchemaClient().SendCultNet(message);
+            await CultNetWriteCompletion.SendAndAwaitResultAsync(
+                refuse => session.OnCultNet(refuse),
+                () => session.SendCultNet(message),
+                _submitResultWindow,
+                cancellationToken).ConfigureAwait(false);
         }
 
         /// <summary>

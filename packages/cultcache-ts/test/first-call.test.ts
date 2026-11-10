@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+// The TypeScript first-call snippet that docs/start/README.md shows: define a typed document, store it
+// in a .cc file, read it back through a second cache. Keep it small; it is the front door. The docs show
+// the region between the `snippet` markers verbatim, except that the package import reads
+// "@gamecult/cultcache-ts" where this file reads "../src/index"; the docs test below fails when they differ.
+// snippet:begin
 import { z } from "zod";
-
 import {
   CultCache,
   SingleFileMessagePackBackingStore,
@@ -13,8 +17,6 @@ import {
   defineDocumentType,
 } from "../src/index";
 
-// The TypeScript first-call snippet that docs/start/README.md links: define a typed document,
-// store it in a .cc file, read it back through a second cache. Keep it small; it is the front door.
 const itemDocument = defineDocumentType({
   type: "item",
   schemaId: "gamecult.first_call_item.v1",
@@ -26,26 +28,43 @@ const itemDocument = defineDocumentType({
 });
 const registry = defineDocumentRegistry(itemDocument);
 
+async function firstCall(path: string) {
+  const cache = CultCache.builder()
+    .withRegistry(registry)
+    .withGenericStore(new SingleFileMessagePackBackingStore(path))
+    .build();
+  await cache.pullAllBackingStores();
+  await cache.put(itemDocument, "item:potion", { name: "Potion", category: "Consumable", value: 50 });
+
+  const reopened = CultCache.builder()
+    .withRegistry(registry)
+    .withGenericStore(new SingleFileMessagePackBackingStore(path))
+    .build();
+  await reopened.pullAllBackingStores();
+  const potion = reopened.get(itemDocument, "item:potion");
+  const byName = reopened.getByName(itemDocument, "Potion");
+  return { potion, byName };
+}
+// snippet:end
+
 test("define, store and read back a typed document", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-first-call-"));
-  const path = join(dir, "first-call.cc");
   try {
-    const cache = CultCache.builder()
-      .withRegistry(registry)
-      .withGenericStore(new SingleFileMessagePackBackingStore(path))
-      .build();
-    await cache.pullAllBackingStores();
-    await cache.put(itemDocument, "item:potion", { name: "Potion", category: "Consumable", value: 50 });
-
-    const reopened = CultCache.builder()
-      .withRegistry(registry)
-      .withGenericStore(new SingleFileMessagePackBackingStore(path))
-      .build();
-    await reopened.pullAllBackingStores();
-
-    assert.equal(reopened.get(itemDocument, "item:potion")?.value, 50);
-    assert.equal(reopened.getByName(itemDocument, "Potion")?.category, "Consumable");
+    const { potion, byName } = await firstCall(join(dir, "first-call.cc"));
+    assert.equal(potion?.value, 50);
+    assert.equal(byName?.category, "Consumable");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("docs show the tested snippet", async () => {
+  // Compiled to dist-test/test/first-call.test.js, so the package root is two levels up.
+  const source = await readFile(join(__dirname, "..", "..", "test", "first-call.test.ts"), "utf8");
+  const snippet = source
+    .split("// snippet:begin\n")[1]
+    .split("// snippet:end\n")[0]
+    .replace('"../src/index"', '"@gamecult/cultcache-ts"');
+  const docs = (await readFile(join(__dirname, "..", "..", "..", "..", "docs", "start", "README.md"), "utf8")).replace(/\r\n/g, "\n");
+  assert.ok(docs.includes("```ts\n" + snippet + "```"), "docs/start/README.md no longer shows test/first-call.test.ts");
 });

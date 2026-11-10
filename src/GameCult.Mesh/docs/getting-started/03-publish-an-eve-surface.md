@@ -101,7 +101,7 @@ The real-process C# sample is then rebuilt from that same temporary NuGet feed.
 The source project references in its `.csproj` are contributor convenience only
 and are disabled by the checkpoint; they are not the consumer contract.
 
-The first layer builds and packs `cultcache-ts`, `cultnet-ts`, `cultmesh-ts`,
+The first layer builds and packs `cultcache-ts`, `@gamecult/cultnet-ts`, `@gamecult/cultmesh-ts`,
 `@gamecult/eve-contracts`, and `@gamecult/eve-browser-lowering`, installs the
 tarballs into an empty temporary consumer, and runs
 `samples/eve-two-runtime/sample.mjs`. Eve's generated runtime validators reject
@@ -135,7 +135,9 @@ does **not** prove the network layer; the second program owns that evidence.
 
 The network program is
 [`samples/eve-browser-network`](../../../../samples/eve-browser-network/README.md).
-Run it separately only while diagnosing that layer. A smoke against the
+Running it needs a sibling Eve checkout (`--eve-root`); it is not part of
+`CultLib.sln` and does not build standalone. Run it separately only while
+diagnosing that layer. A smoke against the
 deployed Odin daemon remains a separate infrastructure gate. Its owner map
 and full acceptance contract are recorded in
 [`browser-verse-transport.md`](../browser-verse-transport.md).

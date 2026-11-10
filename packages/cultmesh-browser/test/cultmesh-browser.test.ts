@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { codecs, defineDocumentType, documentPayloadFromBytes } from "@gamecult/cultcache-ts";
-import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
+import { decodeWireValue, encodeWireValue } from "@gamecult/cultnet-ts/wire";
 import {
   encodeCultNetMessageForWire,
   parseCultNetMessage,
@@ -12,7 +12,7 @@ import {
   type CultNetRawDocumentRecord,
   type CultMeshVerseCatalogResponseMessage,
   type CultMeshSessionOpenMessage,
-} from "cultnet-ts/contracts";
+} from "@gamecult/cultnet-ts/contracts";
 
 import {
   CultMeshBrowserClient,

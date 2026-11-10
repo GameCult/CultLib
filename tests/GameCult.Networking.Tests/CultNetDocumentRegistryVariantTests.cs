@@ -418,6 +418,7 @@ namespace GameCult.Networking.Tests
                 CultNetDatabaseChangeKind.Added, VariantKey, schemaId, database.Shards[0], cache.Get<VariantWireFixture>(VariantKey)!, previousDocument: null);
             Assert.That(Deliver(databaseServer, added, selection, refused, errors), Is.Null);
             Assert.That(errors, Has.Count.EqualTo(1));
+            Assert.That(errors[0].Error, Is.EqualTo("the record is a variant CultNet cannot carry"));
 
             var removed = new CultNetDatabaseChange<VariantWireFixture>(
                 CultNetDatabaseChangeKind.Removed, VariantKey, schemaId, database.Shards[0], document: null, previousDocument: cache.Get<VariantWireFixture>(VariantKey)!);

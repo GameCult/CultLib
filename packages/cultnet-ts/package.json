@@ -1,5 +1,5 @@
 {
-  "name": "cultnet-ts",
+  "name": "@gamecult/cultnet-ts",
   "version": "0.3.0",
   "description": "CultNet-style typed direct-pipe messaging and state replication for TypeScript runtimes.",
   "main": "dist/index.js",
@@ -73,7 +73,7 @@
   "dependencies": {
     "@msgpack/msgpack": "^3.1.3",
     "ajv": "^8.17.1",
-    "@gamecult/cultcache-ts": "^0.14.1"
+    "@gamecult/cultcache-ts": "^0.15.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
+import { decodeWireValue, encodeWireValue } from "@gamecult/cultnet-ts/wire";
 import { z } from "zod";
 import { SchemaConflictError, defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "@gamecult/cultcache-ts";
 import {
@@ -12,6 +12,7 @@ import {
   CultNetPeer,
   CultNetRudpSession,
   cultNetBuiltinSchemaRegistry,
+  cultNetTextError,
   decodeRudpPacket,
   defineCultNetDocumentBinding,
   encodeRudpPacket,
@@ -19,8 +20,8 @@ import {
   type CultNetRudpPacket,
   type CultNetMessage,
   type CultNetSnapshotResponseRawMessage,
-} from "cultnet-ts";
-import { CultMesh, CultMeshRudpUnservableDocumentError } from "../src/index";
+} from "@gamecult/cultnet-ts";
+import { CultMesh, CultMeshGrantAllWrites, CultMeshRudpUnservableDocumentError, CultMeshRudpWriteUnconfirmedError } from "../src/index";
 
 // A record's payload as the bytes a peer would put on the wire.
 const payloadOf = (value: unknown) => documentPayloadFromBytes(encodeWireValue(value));
@@ -2856,6 +2857,7 @@ test("CultMesh TS RUDP document server accepts raw document puts from multiple p
     "cultmesh-ts-document-server",
     connectionId,
     {
+      writeAuthority: new CultMeshGrantAllWrites(),
       documents: new CultNetDocumentRegistry(),
       bindHost: "127.0.0.1",
       bindPort: 0,
@@ -2944,6 +2946,7 @@ test("CultMesh TS publishes one registered document to a RUDP catalog", async ()
     "cultmesh-ts-odin-catalog",
     connectionId,
     {
+      writeAuthority: new CultMeshGrantAllWrites(),
       documents: new CultNetDocumentRegistry(),
       bindHost: "127.0.0.1",
       bindPort: 0,
@@ -2965,25 +2968,31 @@ test("CultMesh TS publishes one registered document to a RUDP catalog", async ()
 
   try {
     await server.start();
-    await CultMesh.publishRudpDocumentOnce(
-      "cultmesh-ts-muninn",
-      connectionId,
-      `rudp://127.0.0.1:${server.bind.port}`,
-      defineCultNetDocumentBinding({ definition: noteDocument }),
-      "note:odin",
-      {
-        noteId: "note:odin",
-        body: "pay respects once",
-      },
-      {
-        resendDelayMs: 25,
-        resendPollMs: 5,
-        maxFragmentBytes: 1024,
-        maxPendingReliablePackets: 16,
-        connectTimeoutMs: 1_000,
-        flushTimeoutMs: 25,
-        sourceRole: "test-provider",
-      },
+    // This server answers a put with nothing, so the writer cannot know the put landed: unconfirmed, though it did.
+    await assert.rejects(
+      CultMesh.publishRudpDocumentOnce(
+        "cultmesh-ts-muninn",
+        connectionId,
+        `rudp://127.0.0.1:${server.bind.port}`,
+        defineCultNetDocumentBinding({ definition: noteDocument }),
+        "note:odin",
+        {
+          noteId: "note:odin",
+          body: "pay respects once",
+        },
+        {
+          resendDelayMs: 25,
+          resendPollMs: 5,
+          maxFragmentBytes: 1024,
+          maxPendingReliablePackets: 16,
+          connectTimeoutMs: 1_000,
+          // The flush is bounded by the result window, so the window must outlast the transport ack on a loaded
+          // runner: a short one turns a slow ack into local_send_failed, which is not the path this test checks.
+          resultWindowMs: 750,
+          sourceRole: "test-provider",
+        },
+      ),
+      (error: unknown) => error instanceof CultMeshRudpWriteUnconfirmedError && error.reason === "window_elapsed",
     );
 
     await waitFor(() => received !== undefined, "published RUDP document");
@@ -3019,6 +3028,7 @@ test("CultMesh TS returns a correlated provider receipt after a RUDP document mu
   const commandBinding = defineCultNetDocumentBinding({ definition: noteDocument });
   const receiptBinding = defineCultNetDocumentBinding({ definition: noteReceiptDocument });
   const server = CultMesh.createRudpDocumentServer("cultmesh-ts-receipt-server", connectionId, {
+    writeAuthority: new CultMeshGrantAllWrites(),
     documents: new CultNetDocumentRegistry([commandBinding, receiptBinding]), bindHost: "127.0.0.1", bindPort: 0,
     resendDelayMs: 25, resendPollMs: 5,
     onDocumentPutRaw: async (document) => ({
@@ -3054,6 +3064,7 @@ test("CultMesh TS reads remote RUDP snapshots through document handles", async (
     "cultmesh-ts-rudp-snapshot-server",
     connectionId,
     {
+      writeAuthority: new CultMeshGrantAllWrites(),
       documents: new CultNetDocumentRegistry([
         defineCultNetDocumentBinding({ definition: noteDocument }),
       ]),
@@ -3151,6 +3162,7 @@ test("CultMesh TS syncs remote RUDP snapshots into a local node", async () => {
     "cultmesh-ts-rudp-sync-server",
     connectionId,
     {
+      writeAuthority: new CultMeshGrantAllWrites(),
       documents: new CultNetDocumentRegistry([
         defineCultNetDocumentBinding({ definition: noteDocument }),
       ]),
@@ -3232,6 +3244,7 @@ test("CultMesh TS peer snapshots never take another type's record at the key", a
     "cultmesh-ts-rudp-foreign-snapshot-server",
     connectionId,
     {
+      writeAuthority: new CultMeshGrantAllWrites(),
       documents: new CultNetDocumentRegistry([
         defineCultNetDocumentBinding({ definition: incompatibleNoteDocument }),
         defineCultNetDocumentBinding({ definition: foreignNoteDocument }),
@@ -3473,6 +3486,7 @@ async function withServedBoundRig(
   const messages: CultNetMessage[] = [];
   const unparsed: Error[] = [];
   const server = CultMesh.createRudpDocumentServer(SERVED_BOUND_SERVER, connectionId, {
+    writeAuthority: new CultMeshGrantAllWrites(),
     documents: registry,
     getCache: () => node.cache,
     bindHost: "127.0.0.1",
@@ -3634,6 +3648,7 @@ async function withRawPeerRig(
   for (const put of stored) await registry.applyRawDocumentPutMessage(node.cache, put);
   const errors: Error[] = [];
   const server = CultMesh.createRudpDocumentServer(SERVED_BOUND_SERVER, connectionId, {
+    writeAuthority: new CultMeshGrantAllWrites(),
     documents: registry,
     getCache: () => (getCache ? getCache(node.cache) : node.cache) as typeof node.cache,
     bindHost: "127.0.0.1",
@@ -3708,7 +3723,7 @@ test("CultMesh TS RUDP document server answers a peer whose reliable queue is fu
     while (!refusalIn(rig.inbox) && Date.now() - startedAt < 3_000) await delay(5);
     const refusal = refusalIn(rig.inbox);
     assert.ok(refusal, "the refusal reaches the peer");
-    assert.deepEqual(refusal.message, { schemaVersion: "cultnet.error.v0", error: "the snapshot response could not be queued" });
+    assert.deepEqual(refusal.message, cultNetTextError("the snapshot response could not be queued"));
     for (const part of refusal.parts) {
       assert.ok(refused.every((sequence) => !acknowledges(part, sequence)), `ack ${part.ack} mask ${part.ackMask}`);
     }
@@ -3725,7 +3740,7 @@ test("CultMesh TS RUDP document server refuses a snapshot with fixed text, never
     while (!refusalIn(rig.inbox) && Date.now() - startedAt < 3_000) await delay(5);
     const refusal = refusalIn(rig.inbox);
     assert.ok(refusal, "the refusal reaches the peer");
-    assert.deepEqual(refusal.message, { schemaVersion: "cultnet.error.v0", error: "the snapshot source failed" });
+    assert.deepEqual(refusal.message, cultNetTextError("the snapshot source failed"));
     assert.match(rig.errors[0]?.message ?? "", /CANARY-7f3a/);
   });
 });

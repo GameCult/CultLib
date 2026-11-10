@@ -25,7 +25,7 @@ static async Task<int> ProgramMainAsync(string[] args)
     {
         if (args.Length == 0)
         {
-            throw new InvalidOperationException("Expected mode: serve | probe | dial | rudp-serve-once | rudp-dial-once | rudp-serve-message-once | rudp-dial-message-once | quic-realtime-serve");
+            throw new InvalidOperationException("Expected mode: serve | probe | dial | rudp-serve-once | rudp-dial-once | rudp-serve-message-once | rudp-dial-message-once | quic-realtime-serve | receipt-serve | receipt-relay");
         }
 
         var mode = args[0];
@@ -52,6 +52,12 @@ static async Task<int> ProgramMainAsync(string[] args)
                 return 0;
             case "rudp-dial-message-once":
                 RudpDialMessageOnce(options);
+                return 0;
+            case "receipt-serve":
+                await GameCult.Networking.InteropPeer.ReceiptHarness.ServeAsync();
+                return 0;
+            case "receipt-relay":
+                await GameCult.Networking.InteropPeer.ReceiptHarness.RelayAsync(int.Parse(options["port"], CultureInfo.InvariantCulture));
                 return 0;
             case "quic-realtime-serve":
                 await QuicRealtimeServeAsync(ParseQuicRealtimeServeConfig(options));

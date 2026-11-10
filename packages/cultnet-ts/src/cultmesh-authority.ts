@@ -39,8 +39,8 @@ export interface CultMeshAuthorityRouteCertificate {
 /**
  * Maps an advertised route's wire-shaped certificate to the view
  * `verifyAuthorityRoute` and the transports consume. Shared by the QUIC
- * realtime session manager (`cultmesh-ts`) and the browser WebSocket client
- * (`cultmesh-browser`), which advertise the same `CultMeshAuthorityRouteMessage`
+ * realtime session manager (`@gamecult/cultmesh-ts`) and the browser WebSocket client
+ * (`@gamecult/cultmesh-browser`), which advertise the same `CultMeshAuthorityRouteMessage`
  * certificate shape and were computing this mapping independently.
  */
 export function routeCertificateView(

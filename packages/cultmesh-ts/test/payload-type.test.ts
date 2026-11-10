@@ -8,8 +8,8 @@ import {
   documentPayloadFromBytes,
   type DocumentPayload,
 } from "@gamecult/cultcache-ts";
-import { decodeWireValue } from "cultnet-ts/wire";
-import type { CultNetRawDocumentRecord } from "cultnet-ts";
+import { decodeWireValue } from "@gamecult/cultnet-ts/wire";
+import type { CultNetRawDocumentRecord } from "@gamecult/cultnet-ts";
 
 import type { CultMeshRudpDocumentPut } from "../src/index";
 import { decodeRealtimeFrame, encodeRealtimeFrame, type CultMeshRealtimeFrame } from "../src/realtime-wire";

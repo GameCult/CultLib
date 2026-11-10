@@ -58,6 +58,7 @@ class CultNetRawClient:
     create_transport: CultNetSchemaTransportFactory | None = None
 
     def send(self, message: CultNetMessage | dict[str, Any]) -> None:
+        """Fire-and-forget: an ack or a return is not admission; read the result frame."""
         wire = message.to_wire() if isinstance(message, CultNetMessage) else message
         with self.open_transport() as transport:
             transport.send("schema", msgpack.packb(wire, use_bin_type=True))
@@ -319,6 +320,7 @@ class CultNetDatabaseSubscription:
                 self._transport = None
 
     def send(self, message: CultNetMessage | dict[str, Any]) -> None:
+        """Fire-and-forget: an ack or a return is not admission; read the result frame."""
         if self._transport is None:
             raise RuntimeError("CultNet database subscription is not open")
         wire = message.to_wire() if isinstance(message, CultNetMessage) else message

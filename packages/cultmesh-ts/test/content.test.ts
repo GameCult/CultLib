@@ -8,7 +8,7 @@ import { join } from "node:path";
 import test, { mock } from "node:test";
 import { execFileSync } from "node:child_process";
 
-import { EMPTY_SHA256, chunkRecordKey, packContent, sha256Hex } from "cultnet-ts/content";
+import { EMPTY_SHA256, chunkRecordKey, packContent, sha256Hex } from "@gamecult/cultnet-ts/content";
 import { closeSync, constants as fsConstants, openSync, symlinkSync } from "node:fs";
 
 import {

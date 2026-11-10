@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Net;
@@ -113,8 +114,23 @@ namespace GameCult.Networking
         private readonly CultNetRudpSocketTransportServer _transport;
         private readonly ConcurrentDictionary<Type, Delegate> _handlers = new();
         private readonly ConcurrentDictionary<Delegate, Delegate> _schemaPeerAdapters = new();
+        private readonly ConditionalWeakTable<CultNetRudpSocketServerPeer, StrongBox<int>> _undecodableFramesInARow = new();
         private bool _disposed;
         private ILogger _logger = new NullLogger();
+
+        /// <summary>
+        /// How many consecutive undecodable frames a peer's session may send before it is ended. Fewer are
+        /// answered with a typed <c>message_invalid</c> and the session is kept; the frame that reaches this
+        /// number is answered too, then the session ends. Any frame that decodes resets the run. The same
+        /// number is the cap in every runtime.
+        /// </summary>
+        public const int MaxConsecutiveRefusedFrames = 8;
+
+        /// <summary>
+        /// How long a session whose capped frame was answered waits for the peer to acknowledge the answer
+        /// before it ends anyway.
+        /// </summary>
+        internal const long CappedAnswerGraceMs = 2000;
 
         /// <summary>
         /// Gets or sets the logger used by the server. R-AM: the dispatch backstop in DispatchAsync
@@ -300,6 +316,9 @@ namespace GameCult.Networking
         {
             if (!string.Equals(delivered.Frame.ChannelId, "schema", StringComparison.Ordinal))
                 return false;
+            // The capped frame was answered: nothing after it is served while the answer is delivered.
+            if (delivered.Peer.EndingReason != null)
+                return false;
 
             // A peer's message that cannot be decoded (malformed bytes, an unknown schemaVersion) or
             // handled ends that peer's session, never the poll: the drain goes on serving every other
@@ -317,11 +336,23 @@ namespace GameCult.Networking
             }
             catch (Exception ex)
             {
-                // The peer sent something no runtime can read: the refusal is the peer's.
-                var ended = _transport.EndPeerSession(delivered.Peer, CultNetRudpSession.RefusedPacketReason);
-                Logger.LogError($"CultNet RUDP schema server could not decode a peer's message ({ex.GetType().Name}); {SessionOutcome(ended)}");
+                // The peer sent something no runtime can read: the refusal is the peer's. It is answered
+                // message_invalid and the session kept, until MaxConsecutiveRefusedFrames in a row end it.
+                var run = _undecodableFramesInARow.GetOrCreateValue(delivered.Peer);
+                run.Value++;
+                _transport.SendSchemaMessage(delivered.Peer, CultNetErrorMessage.ForMessageInvalid("message", "CultNet RUDP schema server could not read the message."));
+                if (run.Value < MaxConsecutiveRefusedFrames)
+                {
+                    Logger.LogError($"CultNet RUDP schema server could not decode a peer's message ({ex.GetType().Name}); it was refused and that peer's session kept.");
+                    return false;
+                }
+                // The answer was sent reliably: the session ends once the peer has acknowledged it (a lost
+                // datagram is resent first), or after the grace.
+                _transport.EndPeerSessionWhenAnswered(delivered.Peer, CultNetRudpSession.RefusedPacketReason, CappedAnswerGraceMs);
+                Logger.LogError($"CultNet RUDP schema server could not decode a peer's message ({ex.GetType().Name}); that peer's session ends once its answer is acknowledged.");
                 return false;
             }
+            _undecodableFramesInARow.GetOrCreateValue(delivered.Peer).Value = 0;
 
             if (!_handlers.TryGetValue(message.GetType(), out var handler) || handler == null)
             {

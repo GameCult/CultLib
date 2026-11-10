@@ -127,10 +127,11 @@ export class CultNetDocumentRegistry {
         recordKey: documentKey,
         storedAt: options.storedAt ?? new Date().toISOString(),
         payload: parsed,
-        sourceRuntimeId: options.sourceRuntimeId,
-        sourceAgentId: options.sourceAgentId,
-        sourceRole: options.sourceRole,
-        tags: options.tags,
+        // Absent optional fields must be omitted, not set to undefined: MessagePack encodes undefined as nil and the peer rejects it.
+        ...(options.sourceRuntimeId !== undefined && { sourceRuntimeId: options.sourceRuntimeId }),
+        ...(options.sourceAgentId !== undefined && { sourceAgentId: options.sourceAgentId }),
+        ...(options.sourceRole !== undefined && { sourceRole: options.sourceRole }),
+        ...(options.tags !== undefined && { tags: options.tags }),
       },
     };
   }
@@ -267,6 +268,20 @@ export class CultNetDocumentRegistry {
       message.document.recordKey,
       binding.definition.schema.parse(message.document.payload),
     );
+  }
+
+  /**
+   * The canonical schema id a put or delete naming `schemaId` writes under, from the id alone, or `undefined` when no
+   * binding takes it (or several claim it). A server asks its write authority about this id, not the alias a peer sent.
+   */
+  canonicalSchemaId(schemaId: string): string | undefined {
+    try {
+      const binding = this.getBySchemaId(schemaId);
+      return binding ? schemaIdForBinding(binding) : undefined;
+    } catch (error) {
+      if (error instanceof SchemaConflictError) return undefined;
+      throw error;
+    }
   }
 
   async applyDocumentDeleteMessage(

@@ -468,6 +468,14 @@ impl CultNetRudpSession {
         self.create_disconnect(RUDP_REFUSED_PACKET_REASON.to_vec())
     }
 
+    /// Ends a session because the server itself could not answer a write it owes an answer to (its answer
+    /// could not be encoded, queued or sent). The peer did nothing wrong: this goodbye is not the
+    /// "session refused a packet" of a protocol refusal.
+    pub fn end_local_failure_session(&mut self) -> CultNetRudpPacket {
+        self.reset_peer_state();
+        self.create_disconnect(RUDP_LOCAL_FAILURE_REASON.to_vec())
+    }
+
     /// Ends a session that owes its peer a packet that can never be sent as
     /// built (see `is_permanent_send_error`). Resending it would fail forever,
     /// and dropping it would leave a reliable sequence the peer waits on for
@@ -1267,6 +1275,12 @@ impl CultNetRudpSession {
                 .saturating_sub(RUDP_RECEIVED_SEQUENCE_WINDOW as u32 - 1);
             self.received_sequences = self.received_sequences.split_off(&keep_from);
         }
+    }
+
+    /// Whether `receive` has taken this reliable sequence: delivered, held, superseded or a duplicate. A packet
+    /// `receive` refused unremembered (too far ahead, or before the handshake) is not, and its sender resends it.
+    pub fn has_received(&self, sequence: u32) -> bool {
+        self.was_received(sequence)
     }
 
     /// The one duplicate test: true for a sequence in the window that was
@@ -2198,6 +2212,7 @@ impl CultNetRudpSocketTransportConnection {
         self.send_packet(&packet)
     }
 
+    /// Fire-and-forget: an ack or a return is not admission; read the result frame.
     pub fn send(&mut self, channel_id: &str, payload: Vec<u8>) -> Result<()> {
         let options =
             channel_send_options(
@@ -2216,6 +2231,8 @@ impl CultNetRudpSocketTransportConnection {
 
     /// Sends one frame on a reliable channel whose packets cannot expire and
     /// returns the transport receipt used to observe its exact acknowledgement.
+    ///
+    /// Fire-and-forget: an ack or a return is not admission; read the result frame.
     pub fn send_reliable(
         &mut self,
         channel_id: &str,
@@ -2309,6 +2326,9 @@ impl CultNetRudpSocketTransportConnection {
         self.session.outstanding_reliable_packet_count()
     }
 
+    /// Waits until every reliable write is acknowledged by the transport.
+    ///
+    /// Fire-and-forget: an ack or a return is not admission; read the result frame.
     pub fn flush_reliable(&mut self, timeout: Duration) -> Result<()> {
         let original_timeout = self.socket.read_timeout()?;
         let poll_timeout = original_timeout
@@ -2603,6 +2623,8 @@ where
 /// Sent to a peer whose session refused one of its packets, and reported to
 /// the local caller as the disconnect reason.
 const RUDP_REFUSED_PACKET_REASON: &[u8] = b"session refused a packet";
+/// Goodbye reason of a session whose server could not answer a write (`end_local_failure_session`).
+const RUDP_LOCAL_FAILURE_REASON: &[u8] = b"server could not answer a write";
 const SESSION_TIMED_OUT_REASON: &[u8] = b"session timed out";
 /// Prefix of the goodbye reason for a session that owed a packet which can
 /// never be sent; the failure's fixed name (`send_error_code`) follows it.

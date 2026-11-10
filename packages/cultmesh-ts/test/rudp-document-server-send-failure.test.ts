@@ -6,15 +6,15 @@ import assert from "node:assert/strict";
 import { createSocket, type RemoteInfo, type Socket } from "node:dgram";
 import test from "node:test";
 import { documentPayloadFromBytes } from "@gamecult/cultcache-ts";
-import { encodeWireValue } from "cultnet-ts/wire";
+import { encodeWireValue } from "@gamecult/cultnet-ts/wire";
 import {
   CultNetDocumentRegistry,
   CultNetRudpSession,
   decodeRudpPacket,
   encodeRudpPacket,
   type CultNetPeer,
-} from "cultnet-ts";
-import { CultMesh } from "../src/index";
+} from "@gamecult/cultnet-ts";
+import { CultMesh, CultMeshGrantAllWrites } from "../src/index";
 
 async function waitFor(predicate: () => boolean, description: string): Promise<void> {
   const startedAt = Date.now();
@@ -64,6 +64,7 @@ async function startServer(connectionId: number, socket: Socket): Promise<Server
   const closed: number[] = [];
   const errors: Error[] = [];
   const server = CultMesh.createRudpDocumentServer("send-failure-server", connectionId, {
+    writeAuthority: new CultMeshGrantAllWrites(),
     documents: new CultNetDocumentRegistry(),
     socket,
     bindHost: "127.0.0.1",

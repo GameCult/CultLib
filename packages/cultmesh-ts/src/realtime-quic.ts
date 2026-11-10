@@ -21,8 +21,8 @@ import {
   trimCSharp,
   verifyAuthorityRoute,
   type CultMeshAuthorityTrustPolicy,
-} from "cultnet-ts";
-import type { CultMeshVerseDescriptorMessage } from "cultnet-ts/contracts";
+} from "@gamecult/cultnet-ts";
+import type { CultMeshVerseDescriptorMessage } from "@gamecult/cultnet-ts/contracts";
 
 import {
   decodeRealtimeFrame,

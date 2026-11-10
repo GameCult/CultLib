@@ -5,7 +5,7 @@ import {
   CultMeshBrowserOdinRendezvous,
   decodeCultNetOperationPayload,
   decodeCultNetPayload,
-} from "cultmesh-browser";
+} from "@gamecult/cultmesh-browser";
 import { defineDocumentType } from "@gamecult/cultcache-ts/document";
 
 // A payload is read through the definition that says how its bytes are laid out. These are plain-map definitions: the

@@ -8,7 +8,7 @@ wire contracts that both a node and a bare peer have to agree on.
 
 It depends on `cultcache-py` and `msgpack`; AES-GCM helpers on `CultNetSecret`
 light up with the optional `crypto` extra. `cultmesh-py` builds on it. The
-layering mirrors `cultnet-rs` and `cultnet-ts`.
+layering mirrors `cultnet-rs` and `@gamecult/cultnet-ts`.
 
 ## Example
 

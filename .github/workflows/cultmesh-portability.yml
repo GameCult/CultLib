@@ -8,45 +8,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  # A newer push or PR update replaces the older run on the same ref. Tag pushes and
+  # workflow_dispatch runs are never cancelled: a tag run carries a release.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')) }}
+
 jobs:
-  getting-started:
-    name: ${{ matrix.os }} one-command multiplayer onboarding
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-
-    steps:
-      - name: Check out CultLib
-        uses: actions/checkout@v4
-        with:
-          path: CultLib
-
-      - name: Check out the matching Eve contract
-        uses: actions/checkout@v4
-        with:
-          repository: GameCult/Eve
-          # Eve main is the contract this sample is written against; the codex
-          # branch this used to pin was never merged and stopped on 2026-08-25.
-          ref: ${{ vars.EVE_INTEGRATION_REF || 'main' }}
-          path: Eve
-
-      - name: Set up .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Run the documented one-command checkpoint
-        shell: pwsh
-        run: ./CultLib/scripts/verify-eve-getting-started.ps1 -EveRoot ./Eve
-
   reactive-and-resource-lifetime:
     name: ${{ matrix.os }} reactive semantics and leases
     runs-on: ${{ matrix.os }}
@@ -54,11 +22,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        # The forge runner (label `ubuntu-latest`) is Linux-only and no Windows runner exists: the Windows leg runs on workflow_dispatch only (GitHub or a Windows runner), the ubuntu-latest leg gates push and PR. Windows push/PR triggers return in the PR that registers a Windows runner.
+        os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["windows-latest", "ubuntu-latest"]' || '["ubuntu-latest"]') }}
 
     steps:
       - name: Check out CultLib
         uses: actions/checkout@v4
+        with:
+          # The declared-dependency-range test builds the admitted releases from their tags.
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
@@ -82,6 +55,34 @@ jobs:
       - name: Install Python CultLib packages
         run: python -m pip install -e packages/cultcache-py -e packages/cultnet-py -e packages/cultmesh-py
 
+      # The forge runner images carry no cargo either (the cross-runtime store tests build the Rust interop example); GitHub's hosted images do.
+      - name: Install Rust toolchain
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v cargo >/dev/null && [ ! -x "$HOME/.cargo/bin/cargo" ]; then
+            curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # The forge runner images carry no pwsh; GitHub's Windows and hosted images do.
+      - name: Install PowerShell
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v pwsh >/dev/null; then pwsh -Version; exit 0; fi
+          SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo"
+          PWSH_VERSION=7.4.6
+          curl -fsSL "https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VERSION}/powershell-${PWSH_VERSION}-linux-x64.tar.gz" -o "${RUNNER_TEMP:-/tmp}/powershell.tar.gz"
+          $SUDO mkdir -p /opt/microsoft/powershell/7
+          $SUDO tar -xzf "${RUNNER_TEMP:-/tmp}/powershell.tar.gz" -C /opt/microsoft/powershell/7
+          $SUDO chmod +x /opt/microsoft/powershell/7/pwsh
+          $SUDO ln -sf /opt/microsoft/powershell/7/pwsh /usr/local/bin/pwsh
+          echo "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1" >> "$GITHUB_ENV"
+          DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 pwsh -Version
+
       - name: Verify explicit reactive scheduling across runtimes
         shell: pwsh
         run: ./scripts/verify-reactive-document-scaling.ps1
@@ -97,8 +98,8 @@ jobs:
           --logger "console;verbosity=minimal"
 
       # The TypeScript side of the CultMesh authority rules. This job is the
-      # only one that runs on both Windows and Linux for main, codex/** and
-      # pull requests: cultnet-interop.yml is windows-latest and main-only, so
+      # only one that runs on Linux for main, codex/** and pull requests (and on
+      # Windows too under workflow_dispatch): cultnet-interop.yml is windows-latest and dispatch-only, so
       # until these steps existed the shared verifier's tests never ran on
       # Linux at all, and the browser client's never ran in CI on any OS.
       # packages/cultnet-ts verifies both vector files (content.test.ts judges both

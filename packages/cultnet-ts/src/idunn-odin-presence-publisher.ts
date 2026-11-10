@@ -52,7 +52,7 @@ export function createIdunnRuntimePresencePublisher(
   const publish = async (detail: string) => {
     const signed = signer.sign(detail);
     messageSequence += 1;
-    await publishDocument(endpoint, connectionId, {
+    await sendPresenceDocument(endpoint, connectionId, {
       schemaVersion: "cultnet.document_put_raw.v0",
       messageId: `runtime-presence:${signer.authority.expected.target}:${signer.runtimeInstanceId}:${messageSequence}`,
       document: signed.document,
@@ -86,11 +86,19 @@ export function createIdunnRuntimePresencePublisher(
   };
 }
 
-async function publishDocument(
+/**
+ * Sends one presence put and says only that it was sent (write-receipt.md: the explicit send-only mode). Odin does not
+ * answer a write with a receipt yet, so no frame, whatever id it carries, is admission; this never claims it. It returns
+ * once the transport has acknowledged the put, rejects `IdunnPresenceRefusedError` if a refusal arrives by then, and
+ * rejects if the put is never acknowledged.
+ *
+ * @internal exported for tests
+ */
+export async function sendPresenceDocument(
   endpoint: { host: string; port: number },
   connectionId: number,
   message: Record<string, unknown>,
-): Promise<void> {
+): Promise<"sent"> {
   const socket = dgram.createSocket(endpoint.host.includes(":") ? "udp6" : "udp4");
   await new Promise<void>((resolve, reject) => {
     socket.once("error", reject);
@@ -107,23 +115,31 @@ async function publishDocument(
     const wirePayload = encode(encodeCultNetMessageForWire(message as never, "cultnet.schema.v0"));
     const packets = session.sendMany("schema", wirePayload, { reliable: true, ordered: true, nowMs: Date.now() });
     for (const packet of packets) await sendPacket(socket, endpoint, packet);
-    await receiveUntil(
-      receiver,
-      session,
-      endpoint,
-      () => session.outstandingReliablePacketCount === 0,
-      2000,
-      (frame) => {
-        if (frame.channelId !== "schema") return;
-        const response = parseCultNetMessage(decode(frame.payload));
-        if (response.schemaVersion === "cultnet.error.v0") {
-          throw new Error(`Odin rejected runtime presence: ${response.error}`);
-        }
-      },
-    );
+    // The transport ack is delivery, not admission. A refusal that arrives by then rejects; no other frame means anything.
+    const onFrame = (frame: { channelId: string; payload: Uint8Array }) => {
+      if (frame.channelId !== "schema") return;
+      const response = parseCultNetMessage(decode(frame.payload));
+      if (response.schemaVersion === "cultnet.error.v0") throw new IdunnPresenceRefusedError(response);
+      // An error.v1 refuses this put only when it names it (or names nothing).
+      if (response.schemaVersion === "cultnet.error.v1" && (response.messageId === null || response.messageId === message.messageId)) {
+        throw new IdunnPresenceRefusedError(response);
+      }
+    };
+    await receiveUntil(receiver, session, endpoint, () => session.outstandingReliablePacketCount === 0, 2000, onFrame);
+    return "sent";
   } finally {
     receiver.close();
     socket.close();
+  }
+}
+
+/** Odin refused the presence put: the typed `cultnet.error.v0` it answered with. */
+export class IdunnPresenceRefusedError extends Error {
+  readonly code: string | undefined;
+  constructor(readonly response: { error: string; code?: string | null }) {
+    super(`Odin rejected runtime presence: ${response.error}`);
+    this.name = "IdunnPresenceRefusedError";
+    this.code = response.code ?? undefined;
   }
 }
 

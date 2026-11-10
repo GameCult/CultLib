@@ -1,6 +1,6 @@
 import { decodeDocumentPayload } from "@gamecult/cultcache-ts/document";
 import type { AnyCultCacheDocumentDefinition, CultCacheDocumentValue } from "@gamecult/cultcache-ts";
-import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
+import { decodeWireValue, encodeWireValue } from "@gamecult/cultnet-ts/wire";
 import {
   encodeCultNetMessageForWire,
   parseCultNetMessage,
@@ -16,7 +16,7 @@ import {
   type CultMeshVerseCatalogResponseMessage,
   type CultMeshSessionAcceptedMessage,
   type CultMeshSessionOpenMessage,
-} from "cultnet-ts/contracts";
+} from "@gamecult/cultnet-ts/contracts";
 import {
   base64ToBytes,
   bytesToBase64,
@@ -31,7 +31,7 @@ import {
   type CultMeshAuthorityTrustMode,
   type CultMeshAuthorityTrustPolicy,
   type CultMeshP256PublicKey,
-} from "cultnet-ts/authority";
+} from "@gamecult/cultnet-ts/authority";
 export * from "./content.js";
 
 export type CultMeshBrowserIdentity = CultMeshAuthorityIdentity;

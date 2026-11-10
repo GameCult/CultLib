@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import logging
 import socket
 import threading
@@ -10,6 +11,9 @@ from typing import Any
 import msgpack
 
 from cultnet_py import (
+    error_message,
+    message_invalid_error,
+    unsupported_schema_version_error,
     CultNetRawSnapshotResponse,
     CultNetSimulationObservationHub,
     CultNetRudpPacket,
@@ -27,6 +31,12 @@ from cultnet_py import (
 )
 
 from .node import CultMeshNode
+from .write_authority import (
+    CultMeshRemoteWriteAuthority,
+    CultMeshRemoteWriteOperation,
+    CultMeshRemoteWriteRequest,
+    CultMeshServerPeer,
+)
 
 # The shortest message id this server answers a snapshot request under. It takes a
 # request's messageId as given, an empty one included, so no response it sends is smaller.
@@ -49,6 +59,17 @@ from cultnet_py.cultmesh_contracts import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# How many consecutive refused frames of one kind a RUDP session may send before it is ended: undecodable
+# frames (reset by any frame that decodes) and deletes the write authority refuses (reset by any decoded
+# frame that is not a refused delete). Fewer are answered with a typed refusal and the session is kept; the
+# frame that reaches this number is answered too, then the session ends. The same number is the cap in every
+# runtime.
+MAX_CONSECUTIVE_REFUSED_FRAMES = 8
+
+# How long a session whose capped frame was answered waits for the peer to acknowledge the answer before it ends anyway.
+_RUDP_CAPPED_ANSWER_GRACE_MS = 2000
+_EPHEMERAL_PAIR_ATTEMPTS = 64
 
 
 class _ReplyUnqueueable(Exception):
@@ -79,6 +100,10 @@ class _DatabaseSubscription:
 class _RudpPeerConnection:
     session: CultNetRudpSession
     subscriptions: dict[str, _DatabaseSubscription] = field(default_factory=dict)
+    undecodable_frames_in_a_row: int = 0
+    refused_deletes_in_a_row: int = 0
+    # Set once the peer's capped frame has been answered: the session ends when the answers are acknowledged.
+    ending_deadline_ms: int | None = None
 
 
 @dataclass
@@ -87,6 +112,9 @@ class CultMeshLocalServer:
     verse_catalog: CultMeshVerseCatalog = field(default_factory=CultMeshVerseCatalog)
     peer_catalog: CultMeshPeerCatalog = field(default_factory=CultMeshPeerCatalog)
     observation_hub: CultNetSimulationObservationHub | None = None
+    # Asked once per peer put and delete. None refuses every one of them (write_not_authorized); a node's own
+    # writes never come through here.
+    write_authority: CultMeshRemoteWriteAuthority | None = None
     host: str = "127.0.0.1"
     port: int = 0
     display_name: str | None = None
@@ -157,25 +185,48 @@ class CultMeshLocalServer:
     def start(self) -> "CultMeshLocalServer":
         if self._socket is not None:
             return self
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind((self.host, self.port))
-        server.listen()
+        server, rudp_socket = self._bind_sockets()
         server.settimeout(0.2)
         self._socket = server
         self.port = int(server.getsockname()[1])
         self._stop.clear()
         self._thread = threading.Thread(target=self._accept_loop, daemon=True)
         self._thread.start()
-        if self.enable_rudp:
-            rudp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            rudp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            rudp_socket.bind((self.host, self.port))
+        if rudp_socket is not None:
             rudp_socket.settimeout(0.02)
             self._rudp_socket = rudp_socket
             self._rudp_thread = threading.Thread(target=self._rudp_loop, daemon=True)
             self._rudp_thread.start()
         return self
+
+    def _bind_sockets(self) -> tuple[socket.socket, socket.socket | None]:
+        """The listening TCP socket and, when RUDP is on, the UDP socket on the same port number.
+
+        An explicit port is bound as asked and a failure is the caller's. Port 0 asks for any free port, and the
+        kernel picks the TCP one without knowing whether another process holds that number for UDP, so a
+        UDP collision retries with a fresh TCP port instead of failing the start. Both sockets are bound
+        before any thread starts, so a failed start leaves nothing running or open.
+        """
+        attempts = _EPHEMERAL_PAIR_ATTEMPTS if self.port == 0 and self.enable_rudp else 1
+        for attempt in range(attempts):
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            rudp_socket = None
+            try:
+                server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server.bind((self.host, self.port))
+                server.listen()
+                if self.enable_rudp:
+                    rudp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    rudp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    rudp_socket.bind((self.host, int(server.getsockname()[1])))
+                return server, rudp_socket
+            except OSError as error:
+                server.close()
+                if rudp_socket is not None:
+                    rudp_socket.close()
+                if error.errno != errno.EADDRINUSE or attempt == attempts - 1:
+                    raise
+        raise AssertionError("unreachable")
 
     def stop(self) -> None:
         self._stop.set()
@@ -229,12 +280,7 @@ class CultMeshLocalServer:
         if schema_version == "cultnet.simulation_observation.v0":
             candidates = self._candidate_responses(message)
             return candidates[0] if candidates else None
-        return self._error_response(
-            f"Unsupported CultNet message schema: {schema_version!r}.",
-            message_id=str(message.get("messageId") or ""),
-            code="unsupported_schema_version",
-            details={"schemaVersion": schema_version},
-        )
+        return unsupported_schema_version_error(schema_version).to_wire()
 
     def _accept_loop(self) -> None:
         while not self._stop.is_set():
@@ -242,14 +288,15 @@ class CultMeshLocalServer:
             if server is None:
                 return
             try:
-                client, _ = server.accept()
+                client, address = server.accept()
             except TimeoutError:
                 continue
             except OSError:
                 return
-            threading.Thread(target=self._handle_connection, args=(client,), daemon=True).start()
+            peer = CultMeshServerPeer(f"{address[0]}:{address[1]}", "tcp")
+            threading.Thread(target=self._handle_connection, args=(client, peer), daemon=True).start()
 
-    def _handle_connection(self, client: socket.socket) -> None:
+    def _handle_connection(self, client: socket.socket, peer: CultMeshServerPeer) -> None:
         with client:
             stream = client.makefile("rwb")
             transport = TcpFramedTransportConnection(
@@ -271,7 +318,7 @@ class CultMeshLocalServer:
                 if not isinstance(message, dict):
                     continue
                 try:
-                    responses = self._handle_connection_message(message, subscriptions)
+                    responses = self._handle_connection_message(message, subscriptions, peer=peer)
                 except Exception as error:  # noqa: BLE001 - one message never ends the connection
                     # Whatever a peer's message makes the handling raise is that peer's failure:
                     # it is refused with fixed text and the connection serves on. The log names
@@ -313,6 +360,7 @@ class CultMeshLocalServer:
             if packet.connection_id != self.rudp_connection_id:
                 continue
 
+            self._end_answered_peers(rudp_socket, peers)
             now_ms = _now_ms()
             peer = peers.get(remote_addr)
             if packet.packet_type == CultNetRudpPacketType.CONNECT:
@@ -361,13 +409,31 @@ class CultMeshLocalServer:
                 for delivered in result.delivered:
                     if delivered.channel_id != "schema":
                         continue
+                    if peer.ending_deadline_ms is not None:
+                        # The capped frame was answered; nothing after it is served while the answer is delivered.
+                        break
                     try:
                         message = msgpack.unpackb(delivered.payload, raw=False)
                     except (msgpack.ExtraData, msgpack.FormatError, msgpack.StackError, ValueError):
-                        continue
-                    if not isinstance(message, dict):
-                        continue
-                    responses = self._handle_connection_message(message, peer.subscriptions, over_rudp=True)
+                        message = None
+                    if isinstance(message, dict):
+                        peer.undecodable_frames_in_a_row = 0
+                        responses = self._handle_connection_message(
+                            message,
+                            peer.subscriptions,
+                            over_rudp=True,
+                            peer=CultMeshServerPeer(f"{remote_addr[0]}:{remote_addr[1]}", "rudp"),
+                        )
+                        refused_delete = message.get("schemaVersion") == "cultnet.document_delete.v0" and any(
+                            response.get("code") == "write_not_authorized" for response in responses
+                        )
+                        peer.refused_deletes_in_a_row = peer.refused_deletes_in_a_row + 1 if refused_delete else 0
+                        refused, run = refused_delete, peer.refused_deletes_in_a_row
+                    else:
+                        # A frame that is no CultNet message is answered, not dropped, and the session kept.
+                        peer.undecodable_frames_in_a_row += 1
+                        refused, run = True, peer.undecodable_frames_in_a_row
+                        responses = [self._message_invalid({}, "message", "CultMesh RUDP server could not read the message.")]
                     for response in responses:
                         if unsendable is None:
                             unsendable = self._send_rudp_schema_frame(
@@ -377,6 +443,11 @@ class CultMeshLocalServer:
                                 msgpack.packb(response, use_bin_type=True),
                                 message_id=str(response.get("messageId") or ""),
                             )
+                    if refused and run >= MAX_CONSECUTIVE_REFUSED_FRAMES:
+                        # The capped frame is answered like any other, reliably. The session ends once the peer
+                        # has acknowledged every answer (or the grace runs out): see _end_answered_peers.
+                        peer.ending_deadline_ms = now_ms + _RUDP_CAPPED_ANSWER_GRACE_MS
+                        break
             except Exception as error:  # noqa: BLE001 - one peer's message never ends the thread
                 # Whatever a peer's message makes the handling raise is that peer's failure.
                 # The session recorded the frame's sequence, so it cannot be kept: a retransmit
@@ -407,11 +478,26 @@ class CultMeshLocalServer:
             if unsendable is not None:
                 self._end_unsendable_peer(rudp_socket, peers, remote_addr, unsendable)
 
+    def _end_answered_peers(
+        self,
+        rudp_socket: socket.socket,
+        peers: dict[tuple[str, int], _RudpPeerConnection],
+    ) -> None:
+        """Ends each session whose capped frame was answered once the peer has acknowledged every answer (a lost
+        answer is resent first), or when the grace has run out."""
+        now_ms = _now_ms()
+        for remote_addr, peer in list(peers.items()):
+            if peer.ending_deadline_ms is None:
+                continue
+            if peer.session.outstanding_reliable_packet_count == 0 or now_ms >= peer.ending_deadline_ms:
+                self._end_refused_peer(rudp_socket, peers, remote_addr)
+
     def _poll_rudp_resends(
         self,
         rudp_socket: socket.socket,
         peers: dict[tuple[str, int], _RudpPeerConnection],
     ) -> None:
+        self._end_answered_peers(rudp_socket, peers)
         now_ms = _now_ms()
         for remote_addr, peer in list(peers.items()):
             for packet in peer.session.due_resends(now_ms):
@@ -523,6 +609,7 @@ class CultMeshLocalServer:
         subscriptions: dict[str, _DatabaseSubscription],
         *,
         over_rudp: bool = False,
+        peer: CultMeshServerPeer | None = None,
     ) -> list[dict[str, Any]]:
         schema_version = message.get("schemaVersion")
         if schema_version == "cultnet.database_subscribe.v0":
@@ -546,9 +633,9 @@ class CultMeshLocalServer:
             subscriptions.pop(str(message.get("subscriptionId") or ""), None)
             return []
         if schema_version == "cultnet.document_put_raw.v0":
-            return self._handle_raw_put(message, subscriptions, over_rudp=over_rudp)
+            return self._handle_raw_put(message, subscriptions, over_rudp=over_rudp, peer=peer)
         if schema_version == "cultnet.document_delete.v0":
-            return self._handle_raw_delete(message, subscriptions)
+            return self._handle_raw_delete(message, subscriptions, peer=peer)
         if schema_version == "cultnet.simulation_observation.v0":
             return self._candidate_responses(message)
         response = self.handle_message(message)
@@ -560,14 +647,27 @@ class CultMeshLocalServer:
         subscriptions: dict[str, _DatabaseSubscription],
         *,
         over_rudp: bool = False,
+        peer: CultMeshServerPeer | None = None,
     ) -> list[dict[str, Any]]:
         document_record = message.get("document")
         if not isinstance(document_record, dict):
-            return [self._error_response(
-                "Raw put messages must contain a document map.",
-                message_id=str(message.get("messageId") or ""),
-                code="malformed_document_put",
-            )]
+            return [self._message_invalid(message, "document", "Raw put messages must contain a document map.")]
+        malformed_shard = self._malformed_shard_fields(message)
+        if malformed_shard is not None:
+            return [malformed_shard]
+        # Refusal precedes every other judgment of the put. The node resolves the schema first, because the
+        # authority must be asked about the canonical schema id (a payload-inferred alias included), as C#
+        # does; only a payload of the wire shape is resolved, so nothing of an ungranted peer's is
+        # allocated. A put the node cannot resolve is asked about under the ids as sent. Residual: the
+        # refusal is the same either way, but an ungranted peer can still tell registered from unregistered
+        # schemas by timing.
+        target = self.node.database.raw_put_target(message) or (
+            str(document_record.get("schemaId") or ""),
+            str(document_record.get("recordKey") or ""),
+        )
+        refusal = self._refuse_unauthorized_write(peer, CultMeshRemoteWriteOperation.PUT, target, message)
+        if refusal is not None:
+            return [refusal]
         unservable = self._unservable_put(message, over_rudp=over_rudp)
         if unservable is not None:
             return [unservable]
@@ -579,11 +679,7 @@ class CultMeshLocalServer:
             # raises. It is refused to the peer that sent it; no thread and no other peer is
             # affected. Neither the refusal nor the log quotes the error, which can quote the put.
             _LOGGER.warning("CultMesh server refused a raw put the store could not take (%s).", type(error).__name__)
-            return [self._error_response(
-                "Raw put document could not be stored.",
-                message_id=str(message.get("messageId") or ""),
-                code="malformed_document_put",
-            )]
+            return [self._message_invalid(message, "document", "Raw put document could not be stored.")]
         if change is None:
             return [self._error_response(
                 "Raw put message did not apply to a registered document.",
@@ -602,15 +698,22 @@ class CultMeshLocalServer:
         self,
         message: dict[str, Any],
         subscriptions: dict[str, _DatabaseSubscription],
+        *,
+        peer: CultMeshServerPeer | None = None,
     ) -> list[dict[str, Any]]:
         schema_id = str(message.get("schemaId") or "")
         record_key = str(message.get("recordKey") or "")
         if not schema_id or not record_key:
-            return [self._error_response(
-                "Raw delete messages must contain schemaId and recordKey.",
-                message_id=str(message.get("messageId") or ""),
-                code="malformed_document_delete",
+            return [self._message_invalid(
+                message, "schemaId" if not schema_id else "recordKey", "Raw delete messages must contain schemaId and recordKey.",
             )]
+        malformed_shard = self._malformed_shard_fields(message)
+        if malformed_shard is not None:
+            return [malformed_shard]
+        target = self.node.database.raw_delete_target(message) or (schema_id, record_key)
+        refusal = self._refuse_unauthorized_write(peer, CultMeshRemoteWriteOperation.DELETE, target, message)
+        if refusal is not None:
+            return [refusal]
         change = self.node.database.apply_raw_delete_message(message)
         if change is None:
             return [self._error_response(
@@ -619,6 +722,70 @@ class CultMeshLocalServer:
                 code="unregistered_document_delete",
             )]
         return self._database_delete_notifications(message, subscriptions, resolved_schema_id=change.schema_id)
+
+    def _message_invalid(self, message: dict[str, Any], field: str, reason: str) -> dict[str, Any]:
+        """The typed `message_invalid` refusal naming the request field at fault, under the request's messageId."""
+        response = message_invalid_error(field, reason).to_wire()
+        response["messageId"] = str(message.get("messageId") or "")
+        return response
+
+    def _malformed_shard_fields(self, message: dict[str, Any]) -> dict[str, Any] | None:
+        """The protocol error for a shardId that is not a string or a shardEpoch that is not an int (a bool is
+        not), else None. It precedes the gate, so the authority only ever judges a write whose shard it can
+        read, and the store never files a write under a shard the authority did not see."""
+        shard_id = message.get("shardId")
+        shard_epoch = message.get("shardEpoch")
+        if (shard_id is None or isinstance(shard_id, str)) and (
+            shard_epoch is None or (isinstance(shard_epoch, int) and not isinstance(shard_epoch, bool))
+        ):
+            return None
+        return self._message_invalid(
+            message,
+            "shardId" if not (shard_id is None or isinstance(shard_id, str)) else "shardEpoch",
+            "shardId must be a string and shardEpoch an integer.",
+        )
+
+    def _refuse_unauthorized_write(
+        self,
+        peer: CultMeshServerPeer | None,
+        operation: CultMeshRemoteWriteOperation,
+        target: tuple[str, str],
+        message: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """None when the write may proceed, else the typed refusal for the sending peer.
+
+        No authority configured refuses; an authority that raises refuses too (fail closed) and is logged.
+        """
+        schema_id, record_key = target
+        reason: str | None
+        authority = self.write_authority
+        if authority is None:
+            reason = "no remote write authority is configured"
+        else:
+            request = CultMeshRemoteWriteRequest(
+                peer=peer or CultMeshServerPeer("", "unknown"),
+                operation=operation,
+                schema_id=schema_id,
+                record_key=record_key,
+                shard_id=message.get("shardId"),
+                shard_epoch=message.get("shardEpoch"),
+            )
+            try:
+                decision = authority.decide(request)
+            except Exception as error:  # noqa: BLE001 - a failing authority refuses
+                _LOGGER.error("CultMesh remote write authority failed (%s); the write was refused.", type(error).__name__)
+                decision = None
+                reason = "the write authority failed"
+            else:
+                reason = getattr(decision, "reason", None)
+            if decision is not None and getattr(decision, "is_granted", False) is True:
+                return None
+        _LOGGER.warning("CultMesh %s of %s refused: write not authorized.", operation.value, schema_id)
+        return error_message(
+            f"write_not_authorized: {reason}" if reason and reason.strip() else "write_not_authorized",
+            code="write_not_authorized",
+            details={"field": "recordKey", "value": record_key},
+        ).to_wire()
 
     def _database_change_notifications(
         self,
@@ -807,11 +974,7 @@ class CultMeshLocalServer:
             and isinstance(document_record.get("recordKey"), str)
             and isinstance(document_record.get("payload"), (bytes, bytearray))
         ):
-            return self._error_response(
-                "Raw put documents must carry a string recordKey and a binary payload.",
-                message_id=str(message.get("messageId") or ""),
-                code="malformed_document_put",
-            )
+            return self._message_invalid(message, "document", "Raw put documents must carry a string recordKey and a binary payload.")
         if self.max_snapshot_bytes is None and not over_rudp:
             return None
         alone = self.node.database.raw_put_served_alone(message, message_id=_SHORTEST_SERVED_MESSAGE_ID)

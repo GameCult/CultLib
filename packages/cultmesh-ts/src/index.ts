@@ -1,5 +1,5 @@
 import { createSocket, type Socket } from "node:dgram";
-import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
+import { decodeWireValue, encodeWireValue } from "@gamecult/cultnet-ts/wire";
 
 import {
   CultCache,
@@ -20,6 +20,13 @@ import {
   CultNetRudpSocketTransportConnection,
   rudpClientBindHost,
   CultNetSchemaCatalog,
+  CULTNET_WRITE_RECEIPT_MESSAGE_VERSIONS,
+  WriteTracker,
+  helloAdvertisesWriteReceipts,
+  resultWindowMs,
+  cultNetMessageInvalidError,
+  cultNetTextError,
+  cultNetWriteNotAuthorizedError,
   CultNetShardCatalog,
   cultNetBuiltinSchemaRegistry,
   decodeRudpPacket,
@@ -31,6 +38,7 @@ import {
   sendRudpDatagram,
   type CultNetErrorMessage,
   type CultNetDocumentBinding,
+  type CultNetDocumentDeleteMessage,
   type CultNetMessage,
   type CultNetOperationRequestMessage,
   type CultNetOperationResponseMessage,
@@ -40,7 +48,9 @@ import {
   type CultNetSchemaCatalogOptions,
   type CultNetSnapshotResponseRawMessage,
   type CultNetWireContract,
-} from "cultnet-ts";
+  type WriteSettlement,
+  type WriteUnconfirmedReason,
+} from "@gamecult/cultnet-ts";
 
 import {
   CultMeshQuicRealtimeConnector,
@@ -3991,6 +4001,63 @@ export type CultMeshRudpDocumentPut = {
   | { readonly decoded: false; readonly payload: DocumentPayload }
 );
 
+/** The peer a write arrived from: the datagram's source, nothing the peer claimed. */
+export interface CultMeshRemoteWritePeer {
+  address: string;
+  family: string;
+  port: number;
+}
+
+export type CultMeshRemoteWriteOperation = "put" | "delete";
+
+/**
+ * One peer write as the authority sees it. `schemaId` is the canonical id the registry resolved for the write (the id
+ * as sent when no binding takes it), never an alias the peer used when a binding resolves it. `shardId` and
+ * `shardEpoch` are as a put carried them, `null` when it sent none (always `null` for a delete, which has none); a
+ * put carrying either with the wrong type is refused before any authority is asked.
+ */
+export interface CultMeshRemoteWriteRequest {
+  peer: CultMeshRemoteWritePeer;
+  operation: CultMeshRemoteWriteOperation;
+  schemaId: string;
+  recordKey: string;
+  shardId: string | null;
+  shardEpoch: number | null;
+}
+
+export interface CultMeshRemoteWriteDecision {
+  granted: boolean;
+  /** Told to the refused peer after `write_not_authorized:`; keep it free of anything secret. */
+  reason?: string;
+}
+
+/**
+ * The one question a document server asks before it applies a peer's put or delete (C# `ICultNetRemoteWriteAuthority`).
+ * A server with no authority refuses every peer write; one whose authority throws, rejects or answers anything but
+ * `granted: true` refuses too.
+ */
+export interface CultMeshRemoteWriteAuthority {
+  decide(request: CultMeshRemoteWriteRequest): CultMeshRemoteWriteDecision | Promise<CultMeshRemoteWriteDecision>;
+}
+
+/**
+ * Grants every peer write. For a host that has already authenticated its peers, or a test rig: it is an explicit
+ * choice because serving without an authority refuses writes.
+ */
+export class CultMeshGrantAllWrites implements CultMeshRemoteWriteAuthority {
+  decide(): CultMeshRemoteWriteDecision {
+    return { granted: true };
+  }
+}
+
+/** A delete as `onDocumentDeleteRaw` receives it, after the authority granted it. */
+export interface CultMeshRudpDocumentDelete {
+  messageId: string;
+  schemaId: string;
+  recordKey: string;
+  remote: CultMeshRemoteWritePeer;
+}
+
 export interface CultMeshRudpDocumentReceipt<TDefinition extends AnyCultCacheDocumentDefinition = AnyCultCacheDocumentDefinition> {
   binding: CultNetDocumentBinding<TDefinition>;
   recordKey: string;
@@ -4030,10 +4097,24 @@ export interface CultMeshRudpDocumentServerOptions extends CultMeshRudpSocketOpt
   documents: CultNetDocumentRegistry;
   getCache?: () => Promise<CultCache> | CultCache;
   onError?: (error: Error) => void;
+  /**
+   * Who may put and delete. Without it every peer put and delete is refused with a typed `write_not_authorized`
+   * (and `onDocumentPutRaw` is never called); pass `new CultMeshGrantAllWrites()` to accept them all. The authority is
+   * asked before the document is sized, resolved or decoded.
+   */
+  writeAuthority?: CultMeshRemoteWriteAuthority;
+  /**
+   * How long the write authority has to answer before the write is refused (default
+   * `CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_DECIDE_TIMEOUT_MS`). A `decide()` that never settles is a refusal like any
+   * other, so it cannot hold up the frames that follow it on the session.
+   */
+  writeAuthorityTimeoutMs?: number;
   onDocumentPutRaw?: (document: CultMeshRudpDocumentPut) =>
     | CultMeshRudpDocumentReceipt
     | void
     | Promise<CultMeshRudpDocumentReceipt | void>;
+  /** Applies a delete the authority granted. Without it a granted delete is answered with a text refusal. */
+  onDocumentDeleteRaw?: (request: CultMeshRudpDocumentDelete) => void | Promise<void>;
   onOperationRequest?: (
     request: CultNetOperationRequestMessage,
     session: CultMeshRudpServerSession,
@@ -4042,6 +4123,19 @@ export interface CultMeshRudpDocumentServerOptions extends CultMeshRudpSocketOpt
   wireContract?: CultNetWireContract;
   sessionTimeoutMs?: number;
 }
+
+/** A write authority that has not answered in this long has refused the write. */
+export const CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_DECIDE_TIMEOUT_MS = 5_000;
+
+/**
+ * How many consecutive refused frames of one kind a `createRudpDocumentServer` session may send before it is
+ * ended: undecodable frames (reset by any frame that decodes) and deletes the write authority refuses (reset by any
+ * decoded frame that is not a refused delete). Fewer are answered with a typed refusal and the session is kept; the
+ * frame that reaches this number is answered too, then the session ends. The same number is the cap in every runtime.
+ */
+export const CULTMESH_RUDP_DOCUMENT_SERVER_MAX_CONSECUTIVE_REFUSED_FRAMES = 8;
+/** How long a session whose capped frame was answered waits for the peer to acknowledge the answers before it ends anyway. */
+const CULTMESH_RUDP_DOCUMENT_SERVER_CAPPED_ANSWER_GRACE_MS = 2000;
 
 /** Replies larger than one fragment are split into fragments of at most this many bytes. */
 export const CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_MAX_FRAGMENT_BYTES = 1200;
@@ -4095,7 +4189,64 @@ export interface CultMeshRudpDocumentServer {
   close(): void;
 }
 
+/**
+ * A write the peer refused: the typed `cultnet.error.v0` it answered with (`write_not_authorized`,
+ * `message_invalid`, ...), whichever of the transport ack and the result frame came first.
+ */
+export class CultMeshRudpWriteRefusedError extends Error {
+  readonly code: string | undefined;
+  readonly response: Extract<CultNetMessage, { schemaVersion: "cultnet.error.v0" | "cultnet.error.v1" }>;
+  constructor(response: Extract<CultNetMessage, { schemaVersion: "cultnet.error.v0" | "cultnet.error.v1" }>) {
+    super(response.error);
+    this.name = "CultMeshRudpWriteRefusedError";
+    this.code = response.code ?? undefined;
+    this.response = response;
+  }
+}
+
+/**
+ * Nothing settled the write (write-receipt.md, "unconfirmed"): the result window ran out with no answer, the
+ * session ended first, or the client's own send failed. Not success and not refusal; a caller that needs admission treats it as not admitted.
+ */
+export class CultMeshRudpWriteUnconfirmedError extends Error {
+  readonly reason: WriteUnconfirmedReason;
+  readonly messageId: string;
+  constructor(messageId: string, reason: WriteUnconfirmedReason) {
+    super(`Write ${messageId} was not confirmed: ${reason}.`);
+    this.name = "CultMeshRudpWriteUnconfirmedError";
+    this.reason = reason;
+    this.messageId = messageId;
+  }
+}
+
 export interface CultMeshRudpDocumentPublishOptions extends CultMeshRudpPeerOptions {
+  /**
+   * How long, counted from the send, the put may wait for its result frame. A reliable-transport ack is not
+   * admission; the outcome is the peer's result frame. Default: 5000 ms against a server whose hello lists the
+   * write-receipt frames, 500 ms otherwise. A put nothing settled within the window is unconfirmed, never
+   * published, whatever the server advertised: only a `write_admitted` is admission. The send itself is also
+   * bounded by the window (`flushTimeoutMs` is the upper bound); a send not acknowledged by then is
+   * unconfirmed as `local_send_failed`.
+   */
+  resultWindowMs?: number;
+  /**
+   * Declare the write-receipt capability: send a hello listing `cultnet.write_admitted.v0` and `cultnet.error.v1`
+   * before the put. A server that lists both back is receipt-capable: the put then resolves only on its
+   * `write_admitted`, rejects with `CultMeshRudpWriteRefusedError` on its `error.v1`, and rejects with
+   * `CultMeshRudpWriteUnconfirmedError` when nothing settles it. Unset, no hello is sent and the server answers
+   * as it always did.
+   */
+  writeReceipts?: boolean;
+  /** With `writeReceipts`, how long to wait for the server's hello before treating it as legacy. Default 500 ms. */
+  helloWaitMs?: number;
+  /**
+   * Send the put and report only that it was sent: no hello, no wait for a result frame. Resolves `"sent"` once the
+   * transport has acknowledged the put (`flushTimeoutMs`), rejects `CultMeshRudpWriteUnconfirmedError`
+   * (`local_send_failed`) if it cannot be sent, and never resolves `"admitted"`: whether the server applied or
+   * refused it is unknown. For callers whose server cannot answer a write yet. Opt-in per call; not combinable with
+   * `writeReceipts`.
+   */
+  sendOnly?: boolean;
   messageId?: string;
   sourceRuntimeId?: string;
   sourceAgentId?: string;
@@ -5459,6 +5610,11 @@ export class CultMesh {
       closed: boolean;
       /** A packet it owed could never be sent, so the session ended. */
       unsendable: boolean;
+      /** Consecutive undecodable frames, and consecutive deletes the authority refused. */
+      unreadableInARow: number;
+      refusedDeletesInARow: number;
+      /** Set once the peer's capped frame is answered: the session ends when the answers are acknowledged, or at this time. */
+      endingDeadlineMs?: number;
       work: Promise<void>;
     };
     const sessions = new Map<string, SessionRecord>();
@@ -5466,6 +5622,11 @@ export class CultMesh {
     let sendFailures = 0;
     const resendPollMs = Math.max(10, options.resendPollMs ?? 25);
     const sessionTimeoutMs = Math.max(1_000, options.sessionTimeoutMs ?? 30_000);
+    const decideTimeoutMs = options.writeAuthorityTimeoutMs ?? CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_DECIDE_TIMEOUT_MS;
+    // A timer past 2^31-1 ms (or NaN) fires after 1 ms in Node, which would refuse every write that is not instant.
+    if (!(decideTimeoutMs > 0 && decideTimeoutMs <= 0x7fffffff)) {
+      throw new RangeError("CultMesh RUDP document server writeAuthorityTimeoutMs must be greater than zero and at most 2147483647.");
+    }
     const wireContract = options.wireContract ?? "cultnet.schema.v0";
     const maxFragmentBytes = options.maxFragmentBytes ?? CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_MAX_FRAGMENT_BYTES;
     if (!(maxFragmentBytes > 0)) {
@@ -5508,6 +5669,8 @@ export class CultMesh {
             connectPayload,
             closed: false,
             unsendable: false,
+            unreadableInARow: 0,
+            refusedDeletesInARow: 0,
             session: new CultNetRudpSession({
               connectionId,
               initialSequence: options.initialSequence,
@@ -5572,15 +5735,36 @@ export class CultMesh {
       record: SessionRecord,
       payload: Uint8Array,
     ): Promise<void> {
-      if (record.closed) return;
-      const message = parseCultNetMessage(decodeWireValue(payload), wireContract);
+      // Nothing after the capped frame is served while its answer is delivered.
+      if (record.closed || record.endingDeadlineMs !== undefined) return;
+      let decoded: unknown;
+      let message: CultNetMessage;
+      try {
+        decoded = decodeWireValue(payload);
+        message = parseCultNetMessage(decoded, wireContract);
+      } catch (error) {
+        // A frame the server cannot read is judged as the write it looks like (a put when it does not even decode), so
+        // an ungranted peer hears the same refusal for it as for any other write, not a parse error.
+        const write = readableWrite(decoded);
+        record.unreadableInARow += 1;
+        if (decoded !== undefined && !write) {
+          // It decodes but is no message the parser takes (an unknown schemaVersion, a non-map) and is no write the
+          // authority could judge: answered and counted like any other unreadable frame.
+          reportError(error);
+          sendSchemaMessage(record, cultNetMessageInvalidError("message", "CultMesh RUDP document server could not read the message."));
+        } else if (!await writeRefused(record, write?.operation ?? "put", write?.schemaId ?? "", write?.recordKey ?? "", null, null)) {
+          reportError(error);
+          sendSchemaMessage(record, cultNetMessageInvalidError("message", "CultMesh RUDP document server could not read the write."));
+        }
+        if (record.unreadableInARow >= CULTMESH_RUDP_DOCUMENT_SERVER_MAX_CONSECUTIVE_REFUSED_FRAMES) endCappedSession(record);
+        return;
+      }
+      record.unreadableInARow = 0;
+      if (message.schemaVersion !== "cultnet.document_delete.v0") record.refusedDeletesInARow = 0;
       switch (message.schemaVersion) {
         case "cultnet.snapshot_request.v0": {
           if (!options.getCache) {
-            sendSchemaMessage(record, {
-              schemaVersion: "cultnet.error.v0",
-              error: "CultMesh RUDP document server has no cache for snapshot requests.",
-            });
+            sendSchemaMessage(record, cultNetTextError("CultMesh RUDP document server has no cache for snapshot requests."));
             return;
           }
           let reply: CultNetMessage;
@@ -5609,11 +5793,32 @@ export class CultMesh {
           sendSchemaMessage(record, cultNetBuiltinSchemaRegistry.createCatalogResponse(message));
           return;
         case "cultnet.document_put_raw.v0":
+          {
+            // The parser passes shard fields of any type through a put. The authority is asked first, with the shard
+            // fields it can trust (null when wrong-typed), so an ungranted peer hears only the refusal; a granted peer
+            // whose shard fields are wrong-typed is then refused as malformed.
+            const { shardId, shardEpoch } = message as { shardId?: unknown; shardEpoch?: unknown };
+            const malformedShard =
+              (shardId !== undefined && typeof shardId !== "string") ||
+              (shardEpoch !== undefined && !Number.isSafeInteger(shardEpoch));
+            if (await writeRefused(
+              record, "put", message.document.schemaId, message.document.recordKey,
+              malformedShard ? null : (shardId as string | undefined) ?? null,
+              malformedShard ? null : (shardEpoch as number | undefined) ?? null,
+            )) return;
+            if (malformedShard) {
+              sendSchemaMessage(record, cultNetMessageInvalidError(
+                typeof shardId !== "undefined" && typeof shardId !== "string" ? "shardId" : "shardEpoch",
+                "Raw put messages must carry a string shardId and an integer shardEpoch.",
+              ));
+              return;
+            }
+          }
           if (options.onDocumentPutRaw) {
             const unservable = unservablePut(message);
             if (unservable) {
               reportError(unservable);
-              sendSchemaMessage(record, { schemaVersion: "cultnet.error.v0", error: unservable.message });
+              sendSchemaMessage(record, cultNetTextError(unservable.message));
               return;
             }
             const receipt = await options.onDocumentPutRaw(normalizeRudpDocumentPut(message, record.remote, options.documents));
@@ -5623,30 +5828,117 @@ export class CultMesh {
               } catch (error) {
                 // The put is stored: the peer must hear that its receipt is not coming.
                 reportError(error);
-                sendSchemaMessage(record, {
-                  schemaVersion: "cultnet.error.v0",
-                  error: `CultMesh RUDP document server stored a put but could not send its receipt.`,
-                });
+                sendSchemaMessage(record, cultNetTextError(`CultMesh RUDP document server stored a put but could not send its receipt.`));
               }
             }
           }
           return;
+        case "cultnet.document_delete.v0": {
+          if (await writeRefused(record, "delete", message.schemaId, message.recordKey, null, null)) {
+            record.refusedDeletesInARow += 1;
+            if (record.refusedDeletesInARow >= CULTMESH_RUDP_DOCUMENT_SERVER_MAX_CONSECUTIVE_REFUSED_FRAMES) endCappedSession(record);
+            return;
+          }
+          record.refusedDeletesInARow = 0;
+          if (!options.onDocumentDeleteRaw) {
+            sendSchemaMessage(record, cultNetTextError("CultMesh RUDP document server has no delete handler."));
+            return;
+          }
+          await options.onDocumentDeleteRaw({
+            messageId: message.messageId,
+            schemaId: message.schemaId,
+            recordKey: message.recordKey,
+            remote: { ...record.remote },
+          });
+          return;
+        }
         case "cultnet.operation_request.v0":
           if (!options.onOperationRequest) {
-            sendSchemaMessage(record, {
-              schemaVersion: "cultnet.error.v0",
-              error: "CultMesh RUDP document server has no operation handler.",
-            });
+            sendSchemaMessage(record, cultNetTextError("CultMesh RUDP document server has no operation handler."));
             return;
           }
           sendSchemaMessage(record, await options.onOperationRequest(message, publicSession(record)));
           return;
         default:
-          sendSchemaMessage(record, {
-            schemaVersion: "cultnet.error.v0",
-            error: `Unsupported CultMesh RUDP document request ${message.schemaVersion}.`,
-          });
+          sendSchemaMessage(record, cultNetTextError(`Unsupported CultMesh RUDP document request ${message.schemaVersion}.`));
       }
+    }
+
+    function clipUtf8(text: string, maxBytes: number): string {
+      const bytes = Buffer.from(text, "utf8");
+      return bytes.byteLength <= maxBytes ? text : new TextDecoder().decode(bytes.subarray(0, maxBytes)).replace(/\uFFFD+$/, "");
+    }
+
+    /** The put or delete a decoded frame claims to be, with the ids it carries when they are strings. */
+    function readableWrite(value: unknown): { operation: CultMeshRemoteWriteOperation; schemaId: string; recordKey: string } | undefined {
+      if (typeof value !== "object" || value === null) return undefined;
+      const frame = value as { schemaVersion?: unknown; schemaId?: unknown; recordKey?: unknown; document?: unknown };
+      const str = (v: unknown): string => (typeof v === "string" ? v : "");
+      if (frame.schemaVersion === "cultnet.document_delete.v0") {
+        return { operation: "delete", schemaId: str(frame.schemaId), recordKey: str(frame.recordKey) };
+      }
+      if (frame.schemaVersion === "cultnet.document_put_raw.v0") {
+        const document = (typeof frame.document === "object" && frame.document !== null ? frame.document : {}) as { schemaId?: unknown; recordKey?: unknown };
+        return { operation: "put", schemaId: str(document.schemaId), recordKey: str(document.recordKey) };
+      }
+      return undefined;
+    }
+
+    /**
+     * Asks the write authority about a put or delete, before anything of the write is sized, resolved or decoded, and
+     * answers a refusal with the typed `write_not_authorized` naming the record. True when the write is refused.
+     * No authority refuses; an authority that throws, rejects or does not say `granted: true` refuses too (fail
+     * closed), and a failure is reported without quoting it.
+     */
+    async function writeRefused(
+      record: SessionRecord,
+      operation: CultMeshRemoteWriteOperation,
+      schemaId: string,
+      recordKey: string,
+      shardId: string | null,
+      shardEpoch: number | null,
+    ): Promise<boolean> {
+      let reason: string | undefined;
+      const authority = options.writeAuthority;
+      if (!authority) {
+        reason = "no remote write authority is configured";
+      } else {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const timedOut = Symbol("decide timeout");
+          const decision = await Promise.race([
+            Promise.resolve().then(() => authority.decide({
+              peer: { ...record.remote },
+              operation,
+              schemaId: options.documents.canonicalSchemaId(schemaId) ?? schemaId,
+              recordKey,
+              shardId,
+              shardEpoch,
+            })),
+            new Promise<typeof timedOut>((resolve) => { timer = setTimeout(() => resolve(timedOut), decideTimeoutMs); }),
+          ]);
+          if (decision === timedOut) {
+            reportError(new Error(`CultMesh remote write authority did not answer within ${decideTimeoutMs} ms; the write was refused.`));
+            reason = "the write authority timed out";
+          } else {
+            if (decision?.granted === true) return false;
+            reason = typeof decision?.reason === "string" ? decision.reason : undefined;
+          }
+        } catch (error) {
+          reportError(new Error(`CultMesh remote write authority failed (${error instanceof Error ? error.name : typeof error}); the write was refused.`));
+          reason = "the write authority failed";
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      try {
+        // The key is the peer's and the reason the authority's: both are clipped so the refusal fits `maxPayloadBytes`
+        // whatever they are (the peer is told the clipped key; a `maxPayloadBytes` under about 512 can still not carry it).
+        sendSchemaMessage(record, cultNetWriteNotAuthorizedError(clipUtf8(recordKey, 64), reason === undefined ? undefined : clipUtf8(reason, 96)));
+      } catch (error) {
+        reportError(error);
+      }
+      return true;
     }
 
     function publicSession(record: SessionRecord): CultMeshRudpServerSession {
@@ -5698,6 +5990,17 @@ export class CultMesh {
       sendRudpDatagram(socket, goodbye, record.remote.port, record.remote.address, () => {});
     }
 
+    /**
+     * A session that reached the cap of consecutive refused frames: its last refusal went out like any reply
+     * (reliable, so a lost datagram is resent), and the session ends once the peer has acknowledged every reply or
+     * the grace runs out. The resend timer ends it.
+     */
+    function endCappedSession(record: SessionRecord): void {
+      const key = `${record.remote.address}:${record.remote.port}`;
+      if (sessions.get(key) !== record) return;
+      record.endingDeadlineMs ??= Date.now() + CULTMESH_RUDP_DOCUMENT_SERVER_CAPPED_ANSWER_GRACE_MS;
+    }
+
     /** The session owes its peer a packet that can never be sent as built. */
     function endUnsendableSession(record: SessionRecord, error: Error): void {
       if (record.unsendable) return;
@@ -5741,7 +6044,7 @@ export class CultMesh {
      */
     function refuse(record: SessionRecord, text: string): void {
       if (record.closed) return;
-      const payload = encodeSchemaMessage({ schemaVersion: "cultnet.error.v0", error: text });
+      const payload = encodeSchemaMessage(cultNetTextError(text));
       for (const packet of record.session.sendMany("schema", payload, {
         reliable: false,
         ordered: false,
@@ -5831,6 +6134,11 @@ export class CultMesh {
               closeSession(record);
               continue;
             }
+            if (record.endingDeadlineMs !== undefined
+              && (record.session.outstandingReliablePacketCount === 0 || nowMs >= record.endingDeadlineMs)) {
+              endRefusedSession(key, record);
+              continue;
+            }
             for (const packet of record.session.dueResends(nowMs)) {
               sendPacket(record, packet);
             }
@@ -5908,25 +6216,88 @@ export class CultMesh {
     recordKey: string,
     value: CultCacheDocumentValue<TDefinition>,
     options: CultMeshRudpDocumentPublishOptions = {},
-  ): Promise<void> {
+  ): Promise<"admitted" | "sent"> {
     requireNonEmpty(runtimeId, "runtimeId");
     requireNonEmpty(recordKey, "recordKey");
+    if (options.sendOnly && options.writeReceipts) throw new TypeError("sendOnly and writeReceipts cannot be combined.");
     const registry = new CultNetDocumentRegistry([binding]);
+    const messageId = options.messageId ?? `${runtimeId}:${binding.definition.type}:${recordKey}`;
+    // Built before any connection and outside every try: a put that cannot be built is the caller's error, with its cause.
+    const put = registry.createRawDocumentPutMessage(
+      binding,
+      messageId,
+      recordKey,
+      value,
+      {
+        sourceRuntimeId: options.sourceRuntimeId ?? runtimeId,
+        sourceAgentId: options.sourceAgentId,
+        sourceRole: options.sourceRole,
+        tags: options.tags,
+      },
+    );
     const peer = await CultMesh.createRudpPeer(runtimeId, connectionId, endpoint, options);
     try {
-      peer.send(registry.createRawDocumentPutMessage(
-        binding,
-        options.messageId ?? `${runtimeId}:${binding.definition.type}:${recordKey}`,
-        recordKey,
-        value,
-        {
-          sourceRuntimeId: options.sourceRuntimeId ?? runtimeId,
-          sourceAgentId: options.sourceAgentId,
-          sourceRole: options.sourceRole,
-          tags: options.tags,
-        },
-      ));
-      await peer.flush(options.flushTimeoutMs ?? 30_000);
+      if (options.sendOnly) {
+        try {
+          peer.send(put);
+          await peer.flush(options.flushTimeoutMs ?? 30_000);
+        } catch {
+          throw new CultMeshRudpWriteUnconfirmedError(messageId, "local_send_failed");
+        }
+        return "sent";
+      }
+      // A transport ack is not admission: the put completes on its result frame, and the WriteTracker alone decides
+      // how it settles (write-receipt.md, "Client rules"). This function only maps the settlement to resolve/throw.
+      let receiptCapable = false;
+      let tracker: WriteTracker | undefined;
+      let settlement: WriteSettlement | undefined;
+      let wake: (() => void) | undefined;
+      let serverHello: (() => void) | undefined;
+      peer.on("message", (message: CultNetMessage) => {
+        if (message.schemaVersion === "cultnet.hello.v0") {
+          receiptCapable = helloAdvertisesWriteReceipts(message);
+          serverHello?.();
+        } else {
+          tracker?.frame(message, Date.now());
+        }
+      });
+      peer.on("close", () => tracker?.sessionEnd(Date.now()));
+      if (options.writeReceipts) {
+        const answered = new Promise<void>((resolve) => { serverHello = resolve; });
+        peer.sendHello({
+          schemaVersion: "cultnet.hello.v0", runtimeId, runtimeKind: "cultmesh-ts",
+          supportedMessageVersions: [...CULTNET_WRITE_RECEIPT_MESSAGE_VERSIONS],
+        });
+        let helloTimer: NodeJS.Timeout | undefined;
+        await Promise.race([answered, new Promise<void>((resolve) => { helloTimer = setTimeout(resolve, options.helloWaitMs ?? 500); })]);
+        clearTimeout(helloTimer);
+      }
+      const writeTracker = new WriteTracker({
+        windowMs: options.resultWindowMs ?? resultWindowMs(receiptCapable),
+        onSettle: (_id, result) => { settlement = result; wake?.(); },
+      });
+      tracker = writeTracker;
+      writeTracker.send(messageId, Date.now());
+      try {
+        peer.send(put);
+        // The flush may not outlast the result window: a send nobody acknowledged by then is a local send failure.
+        const windowRemaining = writeTracker.nextDeadlineMs(Date.now()) ?? 0;
+        await peer.flush(Math.min(options.flushTimeoutMs ?? 30_000, Math.max(windowRemaining, 1)));
+      } catch {
+        // Our own send failed or was never acknowledged: the put may or may not have left. Never a refusal.
+        writeTracker.sendFailed(messageId, Date.now());
+      }
+      while (!settlement) {
+        const remaining = writeTracker.nextDeadlineMs(Date.now()) ?? 0;
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, remaining);
+          wake = () => { clearTimeout(timer); resolve(); };
+        });
+        writeTracker.tick(Date.now());
+      }
+      if (settlement.outcome === "refused") throw new CultMeshRudpWriteRefusedError(settlement.response);
+      if (settlement.outcome === "unconfirmed") throw new CultMeshRudpWriteUnconfirmedError(messageId, settlement.reason);
+      return "admitted";
     } finally {
       peer.close();
     }
@@ -5945,6 +6316,7 @@ export class CultMesh {
       const receipt = new Promise<CultCacheDocumentValue<TReceiptDefinition>>((resolve, reject) => {
         const timeout = setTimeout(() => { cleanup(); reject(new Error(`Timed out waiting for RUDP application receipt for ${recordKey}.`)); }, options.receiptTimeoutMs ?? 5_000);
         const onMessage = (message: CultNetMessage): void => {
+          if (message.schemaVersion === "cultnet.error.v0") { cleanup(); reject(new CultMeshRudpWriteRefusedError(message)); return; }
           if (message.schemaVersion !== "cultnet.document_put_raw.v0" || message.messageId !== messageId || message.document.schemaId !== receiptBinding.definition.schemaId) return;
           try {
             const decoded = decodeDocumentPayload(receiptBinding.definition, message.document.payload);

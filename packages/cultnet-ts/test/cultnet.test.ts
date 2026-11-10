@@ -3059,3 +3059,34 @@ test("RUDP operation service admits a restarted client on the same address", asy
     await server.close();
   }
 });
+
+// MessagePack encodes undefined as nil, and a peer rejects a document whose optional source fields are nil.
+test("document put message omits unset optional keys so the encoded wire has no nil", () => {
+  const definition = defineDocumentType({ type: "putnil.doc", schema: z.object({ body: z.string() }) });
+  const binding = defineCultNetDocumentBinding({ definition });
+  const registry = new CultNetDocumentRegistry([binding]);
+
+  const bare = registry.createDocumentPutMessage(binding, "m", "k", { body: "x" });
+  assert.deepEqual(Object.keys(bare.document).sort(), ["payload", "recordKey", "schemaId", "storedAt"]);
+  const decodedBare = decodeMsgpack(encode(bare)) as { document: Record<string, unknown> };
+  assert.ok(Object.values(decodedBare.document).every(value => value !== null), "no nil values on the wire");
+  assert.ok(!("sourceRuntimeId" in decodedBare.document));
+
+  const stamped = registry.createDocumentPutMessage(binding, "m", "k", { body: "x" },
+    { sourceRuntimeId: "r", sourceAgentId: "a", sourceRole: "role", tags: ["t"] });
+  assert.deepEqual(decodeMsgpack(encode(stamped)), stamped);
+  assert.equal(stamped.document.sourceRuntimeId, "r");
+  assert.deepEqual(stamped.document.tags, ["t"]);
+});
+
+test("CultNet registry names the canonical schema id of a compatible alias, and none for an unknown or conflicted id", () => {
+  const shape = z.object({ body: z.string() });
+  const owner = defineDocumentType({ type: "p3.owner", schemaId: "p3.owner.v2", compatibleSchemaIds: ["p3.owner.v1"], schema: shape });
+  const first = defineDocumentType({ type: "p3.first", schemaId: "p3.first", compatibleSchemaIds: ["p3.shared"], schema: shape });
+  const second = defineDocumentType({ type: "p3.second", schemaId: "p3.second", compatibleSchemaIds: ["p3.shared"], schema: shape });
+  const registry = new CultNetDocumentRegistry([owner, first, second].map(definition => defineCultNetDocumentBinding({ definition })));
+  assert.equal(registry.canonicalSchemaId("p3.owner.v1"), "p3.owner.v2");
+  assert.equal(registry.canonicalSchemaId("p3.owner.v2"), "p3.owner.v2");
+  assert.equal(registry.canonicalSchemaId("p3.nobody"), undefined);
+  assert.equal(registry.canonicalSchemaId("p3.shared"), undefined, "an id several bindings claim resolves to none");
+});

@@ -14,8 +14,9 @@ namespace GameCult.Networking.Tests
 {
     /// <summary>
     /// A schema server's poll serves every peer whatever one peer sends. A message that cannot be
-    /// decoded or handled is that peer's failure: its session ends, the drop is counted and logged,
-    /// and the drain goes on to the other peers.
+    /// decoded is answered message_invalid and its session kept until MaxConsecutiveRefusedFrames in a
+    /// row end it; one that cannot be handled ends that peer's session. The fault is logged, and the
+    /// drain goes on to the other peers.
     /// </summary>
     public class CultNetRudpSchemaServerPeerInputTests
     {
@@ -161,30 +162,205 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
-        public async Task APeerWhoseMessageCannotBeDecodedHasItsSessionEnded()
+        public async Task APeerWhoseMessageCannotBeDecodedIsAnsweredAndKept()
         {
             using var scene = await BadThenGood(Malformed());
-            var dropped = scene.Server.Stats.PacketsDropped;
 
             try { await scene.Server.PollAvailableAsync(16); }
             catch (MessagePackSerializationException) { Assert.Fail("the poll threw for a peer's input"); }
 
-            // The frame was already acknowledged, so the session cannot be kept: the peer is told,
-            // the listener forgets it, and the drop is counted.
-            Assert.That(scene.Ended, Is.EqualTo(new[] { scene.Bad.EndPoint }));
-            Assert.That(scene.Server.Peers.Select(peer => peer.RemoteEndPoint), Is.EqualTo(new[] { scene.Good.EndPoint }));
-            Assert.That(scene.Server.Stats.PacketsDropped, Is.EqualTo(dropped + 1));
-            var goodbye = Drain(scene.Bad.Socket).Single(packet => packet.PacketType == CultNetRudpPacketType.Disconnect);
-            Assert.That(scene.Bad.Session.Receive(goodbye, 1).Disconnected, Is.True);
+            Assert.That(scene.Ended, Is.Empty);
+            Assert.That(scene.Server.Peers, Has.Count.EqualTo(2));
+            var refusal = ErrorsReceivedBy(scene.Bad).Single();
+            Assert.That(refusal.Code, Is.EqualTo("message_invalid"));
+            Assert.That(refusal.Details!.Field, Is.EqualTo("message"));
             Assert.That(Drain(scene.Good.Socket).Select(packet => packet.PacketType), Has.None.EqualTo(CultNetRudpPacketType.Disconnect));
             Assert.That(scene.Logger.Errors, Has.Count.EqualTo(1));
         }
 
-        // The peer's malformed message and a well-formed one after it arrive in one datagram's
-        // delivery: the second is held for order, and both are released together. The session ends
-        // on the first, so the second belongs to no session and is never handled.
+        // The RUDP schema server implements no receipt rules, so it must not advertise them (write-receipt.md, Capability and the
+        // conformance table): whatever hello it sends lists neither frame.
         [Test]
-        public async Task ARefusedPeersFramesStillQueuedAreNotHandled()
+        public async Task TheRudpSchemaServerNeverAdvertisesTheReceiptFrames()
+        {
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "csharp-rudp-no-receipts",
+                ConnectionId = ConnectionId
+            });
+            var client = await Connect(server);
+            try
+            {
+                SendSchema(server, client, CultNetSchemaMessageSerialization.Serialize(new CultNetHelloMessage
+                {
+                    RuntimeId = "receipt-client",
+                    RuntimeKind = "test",
+                    SupportedMessageVersions = [CultNetSchemaVersions.WriteAdmitted, CultNetSchemaVersions.ErrorV1]
+                }));
+                await server.PollAvailableAsync(16);
+
+                var hellos = new List<CultNetHelloMessage>();
+                foreach (var packet in Drain(client.Socket))
+                    foreach (var frame in client.Session.Receive(packet, 1).Delivered)
+                        if (CultNetSchemaMessageSerialization.Deserialize(frame.Payload) is CultNetHelloMessage hello)
+                            hellos.Add(hello);
+
+                foreach (var hello in hellos)
+                {
+                    var listed = hello.SupportedMessageVersions ?? Array.Empty<string>();
+                    Assert.That(listed, Has.None.EqualTo(CultNetSchemaVersions.WriteAdmitted));
+                    Assert.That(listed, Has.None.EqualTo(CultNetSchemaVersions.ErrorV1));
+                }
+            }
+            finally
+            {
+                client.Socket.Dispose();
+            }
+        }
+
+        private static List<CultNetErrorMessage> ErrorsReceivedBy(Client client)
+        {
+            var errors = new List<CultNetErrorMessage>();
+            foreach (var packet in Drain(client.Socket))
+            {
+                var received = client.Session.Receive(packet, 1);
+                foreach (var frame in received.Delivered)
+                    if (CultNetSchemaMessageSerialization.Deserialize(frame.Payload) is CultNetErrorMessage error)
+                        errors.Add(error);
+            }
+            return errors;
+        }
+
+        // The bad peer acknowledges what it received and the server polls on.
+        private static async Task Acknowledge(Scene scene)
+        {
+            scene.Bad.Socket.SendTo(CultNetRudpPacketCodec.Encode(scene.Bad.Session.CreateAck()), scene.Server.LocalEndPoint);
+            await scene.Server.PollAvailableAsync(16);
+        }
+
+        // The bad peer has sent seven undecodable frames (BadThenGood sent the first), each answered.
+        private static async Task<Scene> AtTheCap()
+        {
+            var scene = await BadThenGood(Malformed());
+            await scene.Server.PollAvailableAsync(16);
+            ErrorsReceivedBy(scene.Bad);
+            for (var i = 0; i < 6; i++)
+            {
+                SendSchema(scene.Server, scene.Bad, Malformed());
+                await scene.Server.PollAvailableAsync(16);
+                ErrorsReceivedBy(scene.Bad);
+            }
+            Assert.That(scene.Ended, Is.Empty);
+            return scene;
+        }
+
+        // The capped frame's answer is lost on the wire: the server resends it, and the goodbye follows only
+        // once the peer has acknowledged it.
+        [Test]
+        public async Task ALostCappedAnswerIsResentAndTheGoodbyeWaitsForItsAcknowledgement()
+        {
+            using var scene = await AtTheCap();
+            SendSchema(scene.Server, scene.Bad, Malformed());
+            await scene.Server.PollAvailableAsync(16);
+
+            var lost = Drain(scene.Bad.Socket);
+            Assert.That(lost.Where(p => p.PacketType == CultNetRudpPacketType.Data), Is.Not.Empty, "fixture: the answer was sent and is lost here");
+            Assert.That(lost.Select(p => p.PacketType), Has.None.EqualTo(CultNetRudpPacketType.Disconnect), "no goodbye before the answer is acknowledged");
+            Assert.That(scene.Ended, Is.Empty);
+
+            var resent = new List<CultNetRudpPacket>();
+            for (var attempt = 0; attempt < 40 && resent.Count == 0; attempt++)
+            {
+                await Task.Delay(50);
+                scene.Server.PollResends();
+                resent = Drain(scene.Bad.Socket);
+            }
+            Assert.That(resent.Select(p => p.PacketType), Has.None.EqualTo(CultNetRudpPacketType.Disconnect), "still no goodbye");
+            var answers = new List<CultNetErrorMessage>();
+            foreach (var packet in resent)
+                foreach (var frame in scene.Bad.Session.Receive(packet, 1).Delivered)
+                    if (CultNetSchemaMessageSerialization.Deserialize(frame.Payload) is CultNetErrorMessage error)
+                        answers.Add(error);
+            Assert.That(answers.Select(e => e.Code), Is.EqualTo(new[] { "message_invalid" }), "the lost answer arrived by resend");
+            Assert.That(scene.Ended, Is.Empty);
+
+            await Acknowledge(scene);
+            Assert.That(scene.Ended, Is.EqualTo(new[] { scene.Bad.EndPoint }), "acknowledged: the session ends");
+            Assert.That(Drain(scene.Bad.Socket).Select(p => p.PacketType), Has.Some.EqualTo(CultNetRudpPacketType.Disconnect));
+        }
+
+        // A peer that never acknowledges the answer is not kept for ever: the session ends after the grace.
+        [Test]
+        public async Task ACappedSessionWhoseAnswerIsNeverAcknowledgedEndsAfterTheGrace()
+        {
+            using var scene = await AtTheCap();
+            SendSchema(scene.Server, scene.Bad, Malformed());
+            await scene.Server.PollAvailableAsync(16);
+            Drain(scene.Bad.Socket);
+
+            await Task.Delay(1500); // the grace is two seconds
+            scene.Server.PollResends();
+            Assert.That(scene.Ended, Is.Empty, "inside the grace");
+            await Task.Delay(700);
+            scene.Server.PollResends();
+            Assert.That(scene.Ended, Is.EqualTo(new[] { scene.Bad.EndPoint }), "the grace ran out");
+        }
+
+        // Nothing behind the capped frame is served while its answer is delivered.
+        [Test]
+        public async Task NothingBehindTheCappedFrameIsServed()
+        {
+            using var scene = await AtTheCap();
+            SendSchema(scene.Server, scene.Bad, Malformed());
+            SendSchema(scene.Server, scene.Bad, CultNetSchemaMessageSerialization.Serialize(
+                new CultNetShardCatalogRequestMessage { MessageId = "behind-the-cap" }));
+            await scene.Server.PollAvailableAsync(16);
+            await scene.Server.PollAvailableAsync(16);
+
+            Assert.That(scene.Served.Select(s => s.MessageId), Does.Not.Contain("behind-the-cap"));
+        }
+
+        // The numbers are the shared cross-runtime cap, spelled out so changing the constant fails here.
+        [Test]
+        public async Task EightConsecutiveUndecodableFramesEndTheSessionAfterTheEighthIsAnswered()
+        {
+            Assert.That(RudpCultNetSchemaServer.MaxConsecutiveRefusedFrames, Is.EqualTo(8));
+            using var scene = await BadThenGood(Malformed());
+            await scene.Server.PollAvailableAsync(16);
+            ErrorsReceivedBy(scene.Bad);
+            async Task Refuse(int count)
+            {
+                for (var i = 0; i < count; i++)
+                {
+                    SendSchema(scene.Server, scene.Bad, Malformed());
+                    await scene.Server.PollAvailableAsync(16);
+                }
+            }
+
+            await Refuse(6); // with the first, seven in a row
+            Assert.That(ErrorsReceivedBy(scene.Bad), Has.Count.EqualTo(6));
+            Assert.That(scene.Ended, Is.Empty);
+            SendSchema(scene.Server, scene.Bad, CultNetSchemaMessageSerialization.Serialize(
+                new CultNetShardCatalogRequestMessage { MessageId = "resets-the-run" }));
+            await scene.Server.PollAvailableAsync(16);
+            Assert.That(scene.Served.Select(s => s.MessageId), Does.Contain("resets-the-run"));
+            await Refuse(7);
+            Assert.That(ErrorsReceivedBy(scene.Bad), Has.Count.EqualTo(7));
+            Assert.That(scene.Ended, Is.Empty, "a decoded frame reset the run");
+
+            await Refuse(1);
+            Assert.That(ErrorsReceivedBy(scene.Bad).Select(e => e.Code), Is.EqualTo(new[] { "message_invalid" }), "the eighth is answered too");
+            Assert.That(scene.Ended, Is.Empty, "the session ends once the answer is acknowledged");
+            await Acknowledge(scene);
+            Assert.That(scene.Ended, Is.EqualTo(new[] { scene.Bad.EndPoint }));
+            Assert.That(scene.Server.Peers.Select(peer => peer.RemoteEndPoint), Is.EqualTo(new[] { scene.Good.EndPoint }));
+        }
+
+        // The peer's malformed message and a well-formed one after it arrive in one datagram's
+        // delivery: the second is held for order, and both are released together. The session is
+        // kept through the first, so the second is handled.
+        [Test]
+        public async Task AFrameQueuedBehindAnUndecodableOneIsStillHandled()
         {
             var logger = new CapturingLogger();
             using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
@@ -205,8 +381,8 @@ namespace GameCult.Networking.Tests
 
             await server.PollAvailableAsync(16);
 
-            Assert.That(served, Is.Empty);
-            Assert.That(server.Peers, Is.Empty);
+            Assert.That(served, Is.EqualTo(new[] { "after-the-refused-one" }));
+            Assert.That(server.Peers, Has.Count.EqualTo(1));
             Assert.That(logger.Errors, Has.Count.EqualTo(1));
             bad.Socket.Dispose();
         }

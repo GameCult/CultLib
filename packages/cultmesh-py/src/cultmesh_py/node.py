@@ -650,6 +650,29 @@ class CultMeshDatabase:
         self._append_shard_log_delete(message)
         return message
 
+    def raw_put_target(self, message: dict[str, Any]) -> tuple[str, str] | None:
+        """The canonical schema id and record key a raw put would write, or None when it would not apply."""
+        document_record = message.get("document")
+        # Only a document of the wire shape is resolved, so an ungranted peer's payload is never
+        # converted or allocated here: a malformed one is the store's refusal, after the authority.
+        if (
+            not isinstance(document_record, dict)
+            or not isinstance(document_record.get("recordKey"), str)
+            or not isinstance(document_record.get("payload"), (bytes, bytearray, memoryview))
+        ):
+            return None
+        try:
+            prepared = self._raw_put_envelope(message)
+        except Exception:  # noqa: BLE001 - any other malformed shape
+            return None
+        return None if prepared is None else (prepared[0].catalog_entry().schema_id, prepared[1].key)
+
+    def raw_delete_target(self, message: dict[str, Any]) -> tuple[str, str] | None:
+        """The canonical schema id and record key a raw delete names, or None when its schema is not registered."""
+        document = self._document_for_schema(str(message.get("schemaId") or ""))
+        record_key = str(message.get("recordKey") or "")
+        return None if document is None or not record_key else (document.catalog_entry().schema_id, record_key)
+
     def apply_raw_put_message(self, message: dict[str, Any]) -> CultMeshDatabaseChange | None:
         prepared = self._raw_put_envelope(message)
         if prepared is None:

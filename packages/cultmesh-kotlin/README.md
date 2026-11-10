@@ -474,3 +474,14 @@ powershell -ExecutionPolicy Bypass -File .\packages\cultmesh-kotlin\build.ps1
 The build writes `artifacts/cultmesh-kotlin/cultmesh-kotlin.jar`.
 It also runs the built-in RUDP packet fixture and localhost UDP socket
 self-test.
+
+## Write Receipt
+
+`WriteReceipt.kt` decodes `cultnet.write_admitted.v0` and `cultnet.error.v1` (and `error.v0`) strictly against their
+closed schemas (`decodeWriteAdmitted`, `decodeErrorFrame`), computes the dedupe `writeContentHash`, tests a hello with
+`helloAdvertisesWriteReceipts`, and settles sent writes as admitted, refused or unconfirmed in `WriteTracker`
+(pure state machine, abstract clock; the caller owns transport and timers). Kotlin has no write client yet, so nothing
+sends a put and waits on this. `WriteReceiptVectors.kt` replays
+`contracts/cultnet/interop/write-receipt-vectors.json` (constants, contentHash, wire, schemaInvalid, scenarios; the
+server-side `dedupe` and `blankFields` sections are not run); `build.ps1` runs it after the self-test, or run
+`CultMeshKt write-receipt-vectors <path>`.

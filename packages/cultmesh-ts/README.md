@@ -1,6 +1,6 @@
 # CultMesh TS
 
-`cultmesh-ts` is the TypeScript projection of CultMesh contracts for local
+`@gamecult/cultmesh-ts` is the TypeScript projection of CultMesh contracts for local
 tools and browser-adjacent runtimes. The C# `GameCult.Mesh` package owns the
 native CultMesh stream implementation used by Mimir and Fensalir; this package
 mirrors the typed declaration and negotiation shapes without owning the hot
@@ -21,7 +21,7 @@ WASM route. Runtime code can ask for a whole XY rect, then adapt it to the
 current wire schema at the edge:
 
 ```ts
-import { CultMesh } from "cultmesh-ts";
+import { CultMesh } from "@gamecult/cultmesh-ts";
 
 const viewport = CultMesh.rectFromBounds(-500, -300, 500, 300);
 const request = CultMesh.viewportRequest(viewport, [3, 8]);
@@ -215,7 +215,7 @@ const stopFeed = viewportFeed.watch(request, "browser-starfire", render);
 ```
 
 ```ts
-import { CultMesh } from "cultmesh-ts";
+import { CultMesh } from "@gamecult/cultmesh-ts";
 
 const verses = CultMesh.createVerseCatalog<{ verseId: string; label: string }>();
 const stopWatching = verses.watch((verse) => {
@@ -274,7 +274,7 @@ const noteShards = shards.list({
 });
 ```
 
-Schema and shard catalog factories delegate to `cultnet-ts`; the branded
+Schema and shard catalog factories delegate to `@gamecult/cultnet-ts`; the branded
 `CultMesh` entrypoint does not create a second owner for schema discovery or
 topology truth.
 
@@ -290,7 +290,7 @@ command transactions; the injected transport owns CultNet wire details.
 import {
   CultMeshProviderRudpTransport,
   CultMeshProviderSession,
-} from "cultmesh-ts";
+} from "@gamecult/cultmesh-ts";
 
 const odinTransport = new CultMeshProviderRudpTransport({
   endpoint: "rudp://127.0.0.1:17871",
@@ -345,9 +345,11 @@ evidence for the requested provider identity.
 
 ## RUDP Helpers
 
+`createRudpDocumentServer` refuses every peer put and delete unless given a `writeAuthority` (`new CultMeshGrantAllWrites()` accepts all). The authority is asked before a write's payload is sized or decoded and before any handler runs, and a refusal is the typed `write_not_authorized`. Residual: ungranted peers can still distinguish registered from unregistered schemas by timing.
+
 Node runtimes can build the shared CultNet reliable-UDP transport from the
 branded CultMesh entrypoint while the transport semantics stay owned by
-`cultnet-ts`:
+`@gamecult/cultnet-ts`:
 
 ```ts
 const server = await CultMesh.createRudpServer("ts-server", 0x1020_3040);
@@ -472,7 +474,7 @@ The split is deliberate:
 The mirrored API shape is `CultMeshStreamCatalog`:
 
 ```ts
-import { CultMesh } from "cultmesh-ts";
+import { CultMesh } from "@gamecult/cultmesh-ts";
 
 const streams = CultMesh.createStreamCatalog();
 const stopWatchingStreams = streams.watch((stream) => {
@@ -533,7 +535,7 @@ nonlocal fallback.
 
 ## Content Chunks over HTTP(S)
 
-`cultmesh-ts/content` answers the C# HTTPS connector's request, `GET` or `HEAD`
+`@gamecult/cultmesh-ts/content` answers the C# HTTPS connector's request, `GET` or `HEAD`
 `<mount>?chunkHash=<hex>&recordKey=<key>`. The mount path is the host's; the
 handler reads only the query. Every chunk is hashed against its name before a
 byte is sent, so a corrupt or swapped file answers 500 and never leaves the
@@ -550,7 +552,7 @@ host store may reuse its buffer). `onServerFault` reports every 500 (`hash-misma
 ```ts
 import { readFileSync } from "node:fs";
 import { createServer } from "node:https";
-import { createContentChunkHandler, createDirectoryChunkStore, toNodeListener } from "cultmesh-ts/content";
+import { createContentChunkHandler, createDirectoryChunkStore, toNodeListener } from "@gamecult/cultmesh-ts/content";
 
 const handler = createContentChunkHandler(createDirectoryChunkStore("/srv/content"), {
   onServerFault: fault => console.error("chunk fault", fault.kind, fault.chunkHash),

@@ -29,6 +29,9 @@ class CultNetTransportStats:
     # transport: malformed frames, another session's connection id, a sender
     # that is not the peer, or a packet the session refuses.
     packets_dropped: int = 0
+    # Datagrams a multi-peer server could not send to one peer and lost: each is
+    # a transient failure, never a reason to end a session.
+    send_failures: int = 0
 
 
 @dataclass(frozen=True)
@@ -437,6 +440,7 @@ def create_rudp_transport_profile(
 
 
 UNSENDABLE_PACKET_REASON = "packet could not be sent"
+REFUSED_PACKET_REASON = b"session refused a packet"
 
 # The fixed name of each permanent send failure, keyed by errno, Winsock equivalents included.
 _PERMANENT_SEND_ERROR_CODES = {
@@ -599,6 +603,28 @@ class CultNetRudpSession:
         self._ordered_held.clear()
         self._fragment_buffers.clear()
         self._fragment_sets_evicted = 0
+
+    @property
+    def next_sequence(self) -> int:
+        return self._next_sequence
+
+    def withdraw_send(self, first_sequence: int) -> None:
+        """Undoes a send that never reached the wire: every packet it created at or after
+        `first_sequence`, pending or queued, leaves no trace and its sequences are reissued,
+        so the peer never sees a gap. Only valid while nothing else has been sent since."""
+        for sequence in [s for s in self._pending_reliable if s >= first_sequence]:
+            del self._pending_reliable[sequence]
+        kept = [p for p in self._queued_reliable if p.sequence < first_sequence]
+        self._queued_reliable.clear()
+        self._queued_reliable.extend(kept)
+        self._next_sequence = first_sequence
+
+    def end_with(self, reason: bytes) -> CultNetRudpPacket:
+        """Ends a session whose peer's frame was refused or failed after the session acknowledged
+        it. The peer's sequences are forgotten before the goodbye is built, or its ack field would
+        acknowledge the very frame that was refused."""
+        self.reset_peer_state()
+        return self.create_disconnect(reason)
 
     def create_connect(self, now_ms: int = 0, payload: bytes = b"") -> CultNetRudpPacket:
         # A session that has had a peer starts a new generation: nothing it
@@ -1230,6 +1256,7 @@ class CultNetRudpSocketTransportConnection:
         self._send_packet(self.session.create_connect(_now_ms(), payload))
 
     def send(self, channel_id: str, payload: bytes) -> None:
+        """Fire-and-forget: an ack or a return is not admission; read the result frame."""
         packets = self.session.send_many(
             channel_id,
             payload,
@@ -1397,11 +1424,8 @@ class CultNetRudpSocketTransportConnection:
         self.socket.close()
 
     def _end_refused_session(self) -> None:
-        reason = b"session refused a packet"
-        # The goodbye is built after the reset, or its ack field would acknowledge
-        # the very frame the session refused.
-        self.session.reset_peer_state()
-        goodbye = self.session.create_disconnect(reason)
+        reason = REFUSED_PACKET_REASON
+        goodbye = self.session.end_with(reason)
         self.disconnect_reason = reason
         try:
             self._send_packet(goodbye)
@@ -1544,6 +1568,7 @@ class TcpFramedTransportConnection:
         )
 
     def send(self, channel_id: str, payload: bytes) -> None:
+        """Fire-and-forget: an ack or a return is not admission; read the result frame."""
         if channel_id != "schema":
             raise ValueError(f"tcp_framed transport only supports the schema channel, got {channel_id!r}")
         before = len(payload) + 4

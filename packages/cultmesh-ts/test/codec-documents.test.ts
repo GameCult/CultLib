@@ -19,8 +19,8 @@ import {
   CultNetDocumentRegistry,
   defineCultNetDocumentBinding,
   type CultNetPeer,
-} from "cultnet-ts";
-import { CultMesh, cultMeshDocumentFromSingleFile, type CultMeshRudpDocumentPut } from "../src/index";
+} from "@gamecult/cultnet-ts";
+import { CultMesh, CultMeshGrantAllWrites, cultMeshDocumentFromSingleFile, type CultMeshRudpDocumentPut } from "../src/index";
 
 // A document written in the reference's positional shape, and a plain map document beside it. Every mesh reader of a
 // payload reads it the way the cache does, so both read through the mesh.
@@ -77,6 +77,7 @@ test("the mesh syncs a codec document from a peer snapshot and returns a codec r
   const receiptBinding = defineCultNetDocumentBinding({ definition: codecReceipt });
   const puts: unknown[] = [];
   const server = CultMesh.createRudpDocumentServer("cultmesh-ts-codec-server", connectionId, {
+    writeAuthority: new CultMeshGrantAllWrites(),
     documents: new CultNetDocumentRegistry([commandBinding, plainBinding, receiptBinding]),
     getCache: () => source.cache,
     bindHost: "127.0.0.1", bindPort: 0, resendDelayMs: 25, resendPollMs: 5,
@@ -131,6 +132,7 @@ test("a RUDP put naming a schema the server has no definition for reaches the ha
   const errors: Error[] = [];
   const puts: CultMeshRudpDocumentPut[] = [];
   const server = CultMesh.createRudpDocumentServer("cultmesh-ts-unregistered-server", connectionId, {
+    writeAuthority: new CultMeshGrantAllWrites(),
     documents: new CultNetDocumentRegistry([known]),
     bindHost: "127.0.0.1", bindPort: 0, resendDelayMs: 25, resendPollMs: 5,
     onError: (error) => errors.push(error),
@@ -171,6 +173,7 @@ test("a payload past the nesting limit is refused at the network doors: a RUDP p
   const errors: unknown[] = [];
   const puts: CultMeshRudpDocumentPut[] = [];
   const server = CultMesh.createRudpDocumentServer("cultmesh-ts-depth-server", connectionId, {
+    writeAuthority: new CultMeshGrantAllWrites(),
     documents: registry,
     bindHost: "127.0.0.1", bindPort: 0, resendDelayMs: 25, resendPollMs: 5,
     onError: (error) => errors.push(error),

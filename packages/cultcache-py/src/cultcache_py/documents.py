@@ -6,6 +6,9 @@ from collections.abc import Mapping, Sequence, Set
 from itertools import chain
 from typing import Any, Callable, Generic, Iterable, TypeVar
 
+import msgpack
+from msgpack.exceptions import StackError as _MsgpackStackError
+
 from .backing_store import CultCacheSchemaCatalogEntry, CultCacheSchemaCatalogMember
 from .leaves import Float32, SlotCodec
 from .leaves import any as _any_leaf
@@ -24,12 +27,7 @@ or skipped, the outermost one is depth 1; depth 256 is accepted and 257 refused,
 MAX_SLOT_KEY = 65535
 """The largest slot key a record may define: the largest MessagePack array16 length."""
 
-try:
-    from msgpack.exceptions import StackError as _MsgpackStackError
-
-    _STACK_FAULTS: tuple[type[BaseException], ...] = (_MsgpackStackError,)
-except ModuleNotFoundError:
-    _STACK_FAULTS = ()
+_STACK_FAULTS: tuple[type[BaseException], ...] = (_MsgpackStackError,)
 
 
 _CONTAINERS = (Mapping, Sequence, Set)
@@ -85,22 +83,10 @@ def _json_payload_decoder(payload: bytes) -> Any:
     return json.loads(payload.decode("utf-8"))
 
 
-def _msgpack() -> Any:
-    try:
-        import msgpack  # type: ignore
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "MessagePack payload encoding requires the optional 'msgpack' dependency. "
-            "Install with: python -m pip install cultcache-py[msgpack]"
-        ) from exc
-    return msgpack
-
-
 def _pack_tree(tree: Any) -> bytes:
     """The bytes of the tree the leaves produced. `packb` writes everything but a `Float32`, which it refuses with a
     TypeError; only then does an iterative walk pack each array and map header and each value, a `Float32` through a
     single-float packer."""
-    msgpack = _msgpack()
     try:
         return msgpack.packb(tree, use_bin_type=True)  # type: ignore[no-any-return]
     except TypeError:
@@ -125,13 +111,6 @@ def _pack_tree(tree: Any) -> bytes:
 
 
 def _messagepack_payload_decoder(payload: bytes) -> Any:
-    try:
-        import msgpack  # type: ignore
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "MessagePack payload decoding requires the optional 'msgpack' dependency. "
-            "Install with: python -m pip install cultcache-py[msgpack]"
-        ) from exc
     return msgpack.unpackb(payload, raw=False)
 
 

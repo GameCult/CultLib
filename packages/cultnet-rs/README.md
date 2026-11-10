@@ -1,6 +1,6 @@
 # CultNet RS
 
-`cultnet-rs` is the Rust sibling of `cultnet-ts`: typed MessagePack messages,
+`cultnet-rs` is the Rust sibling of `@gamecult/cultnet-ts`: typed MessagePack messages,
 4-byte length-prefixed direct-pipe framing, CultLib-shaped security helpers, and
 CultCache replication without making callers paw through raw envelopes like we
 lost a bet.
@@ -100,7 +100,7 @@ game-session authority remain separate responsibilities.
 
 ## Local Fast Lane
 
-`cultnet-rs` now mirrors the raw replication seam from `cultnet-ts`:
+`cultnet-rs` now mirrors the raw replication seam from `@gamecult/cultnet-ts`:
 
 - `cultnet.document_put_raw.v0`
 - `cultnet.snapshot_response_raw.v0`

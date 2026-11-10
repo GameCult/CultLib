@@ -24,7 +24,9 @@ from cultcache_py import (
     define_document_type,
 )
 from cultcache_py.interop import INTEROP_SCHEMA_VERSION, interop_note_document
+from cultmesh_py.server import MAX_CONSECUTIVE_REFUSED_FRAMES
 from cultmesh_py.verify import verify
+from cultmesh_py.write_authority import CultMeshRemoteWriteDecision
 from cultnet_py import (
     compute_simulation_claim_hash,
     CultNetClientAuthorityScope,
@@ -68,7 +70,7 @@ from cultnet_py import (
     snapshot_request,
 )
 from cultnet_py.cultmesh_contracts import VERSE_CATALOG_REQUEST
-from cultmesh_py import create_node
+from cultmesh_py import CultMeshGrantAllWrites, create_node
 from cultmesh_py import (
     CultMesh,
     CultMeshDatabase,
@@ -1631,7 +1633,7 @@ class CultMeshTests(unittest.TestCase):
         )
         primary = CultMesh.create_node(runtime_id="forward-primary")
         primary.database.register_document(document)
-        server = CultMesh.serve_node(primary)
+        server = CultMesh.serve_node(primary, write_authority=CultMeshGrantAllWrites())
         try:
             shard = CultNetShardDescriptor(
                 shard_id="forward",
@@ -3015,7 +3017,7 @@ class CultMeshTests(unittest.TestCase):
         source.database.put_raw_message(document, "note:live", CanonicalNote("initial"))
         target = CultMesh.create_node(runtime_id="subscription-alias-target")
         target.database.register_document(document)
-        server = CultMesh.serve_node(source)
+        server = CultMesh.serve_node(source, write_authority=CultMeshGrantAllWrites())
         try:
             raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
             with CultMesh.subscribe_document(target, raw_client, alias, "note:live") as subscription:
@@ -3533,6 +3535,7 @@ class CultMeshTests(unittest.TestCase):
                     sys.executable,
                     "-m",
                     "cultmesh_py.daemon",
+                    "--allow-peer-writes",
                     "--runtime-id",
                     "live-daemon-peer",
                     "--port",
@@ -3723,6 +3726,7 @@ class CultMeshTests(unittest.TestCase):
                     sys.executable,
                     "-m",
                     "cultmesh_py.daemon",
+                    "--allow-peer-writes",
                     "--runtime-id",
                     "forwarder-daemon-peer",
                     "--port",
@@ -3998,6 +4002,7 @@ class CultMeshTests(unittest.TestCase):
         server = CultMesh.serve_node(
             node,
             verse_catalog=verses,
+            write_authority=CultMeshGrantAllWrites(),
             peer_catalog=peers,
             observation_hub=observation_hub,
             display_name="Mesh Server",
@@ -4274,7 +4279,7 @@ class CultMeshTests(unittest.TestCase):
         node = CultMesh.create_node(runtime_id="mesh-alias-sub-server")
         node.database.register_document(document)
 
-        server = CultMesh.serve_node(node)
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
         try:
             raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
             with raw_client.subscribe_database(
@@ -4323,7 +4328,7 @@ class CultMeshTests(unittest.TestCase):
             shard_epoch=1,
         )
 
-        server = CultMesh.serve_node(node)
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
         try:
             raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
             with raw_client.subscribe_database(
@@ -4420,7 +4425,7 @@ class CultMeshTests(unittest.TestCase):
         def served_alone_bytes(key: str, body_length: int) -> int:
             node = CultMesh.create_node(runtime_id="mesh-served-bound-probe")
             node.database.register_document(document)
-            server = CultMesh.serve_node(node, enable_rudp=False)
+            server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites(), enable_rudp=False)
             try:
                 response, payload = exchange(server, put("probe", key, body_length), empty_id_snapshot)
             finally:
@@ -4434,7 +4439,7 @@ class CultMeshTests(unittest.TestCase):
 
         node = CultMesh.create_node(runtime_id="mesh-served-bound")
         node.database.register_document(document)
-        server = CultMesh.serve_node(node, max_snapshot_bytes=limit, enable_rudp=False)
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites(), max_snapshot_bytes=limit, enable_rudp=False)
         try:
             refused, _ = exchange(server, put("put-over", "note:over", 101))
             stored_after_refusal = node.database.get(document, "note:over")
@@ -4498,7 +4503,7 @@ class CultMeshTests(unittest.TestCase):
         document = self._rudp_bound_note()
         node = CultMesh.create_node(runtime_id="mesh-rudp-large")
         node.database.register_document(document)
-        server = CultMesh.serve_node(node)
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
         try:
             served, payload = self._rudp_exchange(
                 server,
@@ -4524,7 +4529,7 @@ class CultMeshTests(unittest.TestCase):
         def served_alone_bytes(body_length: int) -> int:
             node = CultMesh.create_node(runtime_id="mesh-rudp-bound-probe")
             node.database.register_document(document)
-            server = CultMesh.serve_node(node)
+            server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
             try:
                 _, payload = self._rudp_exchange(
                     server, self._rudp_note_put(document, "probe", key, body_length),
@@ -4554,7 +4559,7 @@ class CultMeshTests(unittest.TestCase):
 
         node = CultMesh.create_node(runtime_id="mesh-rudp-bound")
         node.database.register_document(document)
-        server = CultMesh.serve_node(node, rudp_max_fragment_bytes=100, rudp_max_pending_reliable_packets=8)
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites(), rudp_max_fragment_bytes=100, rudp_max_pending_reliable_packets=8)
         try:
             refusals = [
                 self._rudp_exchange(server, self._rudp_note_put(document, f"put-{served}", "note:q", body_for(served)))[0]
@@ -4792,7 +4797,7 @@ class CultMeshTests(unittest.TestCase):
         body_for = self._rudp_body_for(document, "note:w")
         node = CultMesh.create_node(runtime_id="mesh-rudp-wide")
         node.database.register_document(document)
-        server = CultMesh.serve_node(node, rudp_max_fragment_bytes=1)
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites(), rudp_max_fragment_bytes=1)
         try:
             transport = create_rudp_schema_transport(
                 host="127.0.0.1", port=server.port, connection_id=server.rudp_connection_id,
@@ -4857,7 +4862,7 @@ class CultMeshTests(unittest.TestCase):
         document = self._rudp_bound_note()
         node = CultMesh.create_node(runtime_id="mesh-rudp-malformed")
         node.database.register_document(document)
-        server = CultMesh.serve_node(node)
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
         try:
             refusals = []
             for field_name, value in (
@@ -4880,10 +4885,145 @@ class CultMeshTests(unittest.TestCase):
         for message_id, refusal in refusals:
             self.assertEqual(refusal["schemaVersion"], "cultnet.error.v0", message_id)
             self.assertEqual(refusal["messageId"], message_id)
-            self.assertEqual(refusal["code"], "malformed_document_put", message_id)
+            self.assertEqual(refusal["code"], "message_invalid", message_id)
+            self.assertEqual(refusal["details"]["field"], "document", message_id)
         self.assertEqual(after["messageId"], "after")
         self.assertEqual(after["documents"], [])
         self.assertTrue(alive)
+
+    def _rudp_open(self, server: Any) -> Any:
+        return create_rudp_schema_transport(
+            host="127.0.0.1",
+            port=server.port,
+            connection_id=server.rudp_connection_id,
+            timeout_seconds=4.0,
+            max_fragment_bytes=1200,
+        )
+
+    def _rudp_answer(self, transport: Any, payload: bytes) -> dict[str, Any]:
+        transport.send("schema", payload)
+        return msgpack.unpackb(transport.receive(timeout_seconds=4.0).payload, raw=False)
+
+    def _assert_rudp_session_ended(self, transport: Any, server: Any) -> None:
+        transport.send("schema", msgpack.packb(snapshot_request(message_id="after-cap").to_wire(), use_bin_type=True))
+        with self.assertRaises(Exception):
+            transport.receive(timeout_seconds=1.0)
+        self.assertTrue(server._rudp_thread.is_alive())
+
+    def test_cultmesh_local_server_answers_unreadable_frames_and_ends_the_session_at_eight_in_a_row(self) -> None:
+        # An undecodable frame (not a msgpack map) is answered message_invalid and the session kept;
+        # eight in a row end it (the eighth is answered too); any decoded frame resets the run.
+        self.assertEqual(MAX_CONSECUTIVE_REFUSED_FRAMES, 8)
+        node = CultMesh.create_node(runtime_id="mesh-rudp-unreadable")
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
+        garbage = b"\xc1"
+        snapshot = msgpack.packb(snapshot_request(message_id="ok").to_wire(), use_bin_type=True)
+        transport = self._rudp_open(server)
+        try:
+            for _ in range(2):
+                for _ in range(MAX_CONSECUTIVE_REFUSED_FRAMES - 1):
+                    reply = self._rudp_answer(transport, garbage)
+                    self.assertEqual(reply["code"], "message_invalid")
+                    self.assertEqual(reply["details"]["field"], "message")
+                self.assertEqual(self._rudp_answer(transport, snapshot)["messageId"], "ok")
+            for _ in range(MAX_CONSECUTIVE_REFUSED_FRAMES - 1):
+                self._rudp_answer(transport, garbage)
+            transport.send("schema", garbage)
+            eighth = msgpack.unpackb(transport.receive(timeout_seconds=4.0).payload, raw=False)
+            self.assertEqual(eighth["code"], "message_invalid")
+            self._assert_rudp_session_ended(transport, server)
+        finally:
+            transport.close()
+            server.stop()
+
+    def test_cultmesh_local_server_resends_a_lost_capped_answer_before_it_ends_the_session(self) -> None:
+        # The eighth refusal is answered reliably: the datagram carrying it is lost on the wire, and the
+        # peer still gets the answer (by resend) before the goodbye. An unreliable final answer, or a
+        # goodbye sent at once, would leave the peer without it.
+        node = CultMesh.create_node(runtime_id="mesh-rudp-lost-answer")
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
+        send = server._send_rudp_packet
+        dropped: list[Any] = []
+        armed = threading.Event()
+
+        def lossy(rudp_socket: Any, remote_addr: Any, packet: Any) -> Any:
+            if armed.is_set() and not dropped and packet.packet_type == CultNetRudpPacketType.DATA and b"message_invalid" in (packet.payload or b""):
+                dropped.append(packet)
+                return None
+            return send(rudp_socket, remote_addr, packet)
+
+        server._send_rudp_packet = lossy
+        transport = self._rudp_open(server)
+        try:
+            for _ in range(MAX_CONSECUTIVE_REFUSED_FRAMES - 1):
+                self._rudp_answer(transport, b"\xc1")
+            armed.set()
+            reply = self._rudp_answer(transport, b"\xc1")
+            self.assertEqual(len(dropped), 1, "fixture: the first transmission of the last answer was lost")
+            self.assertEqual(reply["code"], "message_invalid")
+            self._assert_rudp_session_ended(transport, server)
+        finally:
+            transport.close()
+            server.stop()
+
+    def test_cultmesh_local_server_serves_nothing_after_the_capped_frame(self) -> None:
+        node = CultMesh.create_node(runtime_id="mesh-rudp-after-cap")
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
+        transport = self._rudp_open(server)
+        try:
+            for _ in range(MAX_CONSECUTIVE_REFUSED_FRAMES - 1):
+                self._rudp_answer(transport, b"\xc1")
+            transport.send("schema", b"\xc1")
+            transport.send("schema", msgpack.packb(snapshot_request(message_id="behind-the-cap").to_wire(), use_bin_type=True))
+            first = msgpack.unpackb(transport.receive(timeout_seconds=4.0).payload, raw=False)
+            self.assertEqual(first["code"], "message_invalid")
+            with self.assertRaises(Exception):
+                transport.receive(timeout_seconds=1.0)
+        finally:
+            transport.close()
+            server.stop()
+
+    def test_cultmesh_local_server_ends_the_session_at_eight_refused_deletes_in_a_row(self) -> None:
+        class GrantOnlyKeyB:
+            def decide(self, request: Any) -> Any:
+                return CultMeshRemoteWriteDecision.grant() if request.record_key == "note:b" else CultMeshRemoteWriteDecision.refuse("no")
+
+        document = self._rudp_bound_note()
+        node = CultMesh.create_node(runtime_id="mesh-rudp-deletes")
+        node.database.register_document(document)
+        server = CultMesh.serve_node(node, write_authority=GrantOnlyKeyB())
+
+        def delete(key: str) -> bytes:
+            return msgpack.packb({
+                "schemaVersion": "cultnet.document_delete.v0",
+                "messageId": f"del-{key}",
+                "schemaId": document.schema_id,
+                "recordKey": key,
+            }, use_bin_type=True)
+
+        snapshot = msgpack.packb(snapshot_request(message_id="ok").to_wire(), use_bin_type=True)
+        transport = self._rudp_open(server)
+        try:
+            def refused_run(count: int) -> None:
+                for _ in range(count):
+                    reply = self._rudp_answer(transport, delete("note:a"))
+                    self.assertEqual(reply["code"], "write_not_authorized")
+                    self.assertEqual(reply["details"]["value"], "note:a")
+
+            refused_run(MAX_CONSECUTIVE_REFUSED_FRAMES - 1)
+            # A granted delete resets the run (nothing is stored under it, so the store answers that).
+            self.assertEqual(self._rudp_answer(transport, delete("note:b"))["code"], "unregistered_document_delete")
+            refused_run(MAX_CONSECUTIVE_REFUSED_FRAMES - 1)
+            # So does any decoded non-delete frame.
+            self.assertEqual(self._rudp_answer(transport, snapshot)["messageId"], "ok")
+            refused_run(MAX_CONSECUTIVE_REFUSED_FRAMES - 1)
+            transport.send("schema", delete("note:a"))
+            eighth = msgpack.unpackb(transport.receive(timeout_seconds=4.0).payload, raw=False)
+            self.assertEqual(eighth["code"], "write_not_authorized")
+            self._assert_rudp_session_ended(transport, server)
+        finally:
+            transport.close()
+            server.stop()
 
     def test_cultmesh_local_server_refuses_a_put_its_store_cannot_take_and_serves_on(self) -> None:
         # Well-formed puts the store refuses: a blank key, a payload that is not MessagePack, a
@@ -4917,7 +5057,7 @@ class CultMeshTests(unittest.TestCase):
         node = CultMesh.create_node(runtime_id="mesh-unstorable-put")
         node.database.register_document(document)
         node.database.register_document(global_document)
-        server = CultMesh.serve_node(node)
+        server = CultMesh.serve_node(node, write_authority=CultMeshGrantAllWrites())
         try:
             rudp_refusals = [(put["messageId"], self._rudp_exchange(server, put)[0]) for put in cases()]
             rudp_after, _ = self._rudp_exchange(server, hello(runtime_id="rudp-after").to_wire())
@@ -4939,7 +5079,8 @@ class CultMeshTests(unittest.TestCase):
         for message_id, refusal in rudp_refusals + tcp_refusals:
             self.assertEqual(refusal["schemaVersion"], "cultnet.error.v0", message_id)
             self.assertEqual(refusal["messageId"], message_id)
-            self.assertEqual(refusal["code"], "malformed_document_put", message_id)
+            self.assertEqual(refusal["code"], "message_invalid", message_id)
+            self.assertEqual(refusal["details"]["field"], "document", message_id)
             self.assertNotIn("note:ok", refusal["error"], message_id)
         self.assertEqual(len(tcp_refusals), 5)
         self.assertEqual(rudp_after["schemaVersion"], "cultnet.hello.v0")
@@ -5048,17 +5189,18 @@ class CultMeshTests(unittest.TestCase):
         finally:
             server.stop()
 
-        self.assertEqual(unsupported["messageId"], "bad-schema")
         self.assertEqual(unsupported["code"], "unsupported_schema_version")
-        self.assertEqual(unsupported["details"]["schemaVersion"], "cultnet.nope.v0")
-        self.assertIn("Unsupported CultNet message schema", unsupported["error"])
+        self.assertEqual(unsupported["details"]["field"], "schemaVersion")
+        self.assertEqual(unsupported["details"]["value"], "cultnet.nope.v0")
+        self.assertIn("unsupported_schema_version", unsupported["error"])
         self.assertEqual(malformed_put["messageId"], "bad-put")
-        self.assertEqual(malformed_put["code"], "malformed_document_put")
+        self.assertEqual(malformed_put["code"], "message_invalid")
+        self.assertEqual(malformed_put["details"]["field"], "document")
         self.assertEqual(malformed_delete["messageId"], "bad-delete")
-        self.assertEqual(malformed_delete["code"], "malformed_document_delete")
-        self.assertEqual(unsupported_v1["messageId"], "bad-v1-selection")
+        self.assertEqual(malformed_delete["code"], "message_invalid")
+        self.assertEqual(malformed_delete["details"]["field"], "recordKey")
         self.assertEqual(unsupported_v1["code"], "unsupported_schema_version")
-        self.assertEqual(unsupported_v1["details"]["schemaVersion"], "cultnet.snapshot_request.v1")
+        self.assertEqual(unsupported_v1["details"]["value"], "cultnet.snapshot_request.v1")
 
     def test_cultmesh_authority_lease_requires_live_matching_lease(self) -> None:
         peer = CultMeshPeerCard(

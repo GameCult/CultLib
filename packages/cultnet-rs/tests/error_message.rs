@@ -173,6 +173,36 @@ fn cases() -> Vec<Case> {
                 }),
             },
         },
+        Case {
+            name: "unsupported_schema_version",
+            // C#: ForUnsupportedSchemaVersion("cultnet.hello.v1")
+            csharp_hex: "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D92C756E737570706F727465645F736368656D615F76657273696F6E3A2063756C746E65742E68656C6C6F2E7631AB726F7574696E6748696E74C0A4636F6465BA756E737570706F727465645F736368656D615F76657273696F6EA764657461696C7384A56669656C64AD736368656D6156657273696F6EA576616C7565B063756C746E65742E68656C6C6F2E7631A461734F66C0A763757272656E74C0",
+            message: || CultNetMessage::Error {
+                error: "unsupported_schema_version: cultnet.hello.v1".to_string(),
+                code: Some(CultNetErrorCode::UnsupportedSchemaVersion),
+                details: Some(CultNetErrorDetails {
+                    field: Some("schemaVersion".to_string()),
+                    value: Some("cultnet.hello.v1".to_string()),
+                    as_of: None,
+                    current: None,
+                }),
+            },
+        },
+        Case {
+            name: "message_invalid",
+            // C#: ForMessageInvalid("document", "Raw put messages must contain a document map.")
+            csharp_hex: "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D93E6D6573736167655F696E76616C69643A2052617720707574206D65737361676573206D75737420636F6E7461696E206120646F63756D656E74206D61702EAB726F7574696E6748696E74C0A4636F6465AF6D6573736167655F696E76616C6964A764657461696C7384A56669656C64A8646F63756D656E74A576616C7565C0A461734F66C0A763757272656E74C0",
+            message: || CultNetMessage::Error {
+                error: "message_invalid: Raw put messages must contain a document map.".to_string(),
+                code: Some(CultNetErrorCode::MessageInvalid),
+                details: Some(CultNetErrorDetails {
+                    field: Some("document".to_string()),
+                    value: None,
+                    as_of: None,
+                    current: None,
+                }),
+            },
+        },
     ]
 }
 
@@ -209,5 +239,24 @@ fn round_trip_is_stable() {
         let decoded = decode_cultnet_message_from_slice(&encoded, CultNetWireContract::CultNetSchemaV0)
             .unwrap_or_else(|err| panic!("{}: decode failed: {err}", case.name));
         assert_eq!(decoded, message, "{}: round trip mismatch", case.name);
+    }
+}
+
+/// `contracts/cultnet/interop/error-vectors.json` is the file the TypeScript and Python runtimes
+/// decode; it must stay byte-identical to the inline C# captures above, or those runtimes would be
+/// pinned to bytes this crate no longer pins.
+#[test]
+fn error_vectors_file_matches_the_inline_csharp_captures() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../contracts/cultnet/interop/error-vectors.json");
+    let file: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("read error-vectors.json"))
+            .expect("parse error-vectors.json");
+    let vectors = file["vectors"].as_array().expect("vectors array");
+    let all = cases();
+    assert_eq!(vectors.len(), all.len(), "vector count differs from the inline cases");
+    for (vector, case) in vectors.iter().zip(all.iter()) {
+        assert_eq!(vector["name"].as_str(), Some(case.name));
+        assert_eq!(vector["messagePackHex"].as_str(), Some(case.csharp_hex), "{}", case.name);
     }
 }

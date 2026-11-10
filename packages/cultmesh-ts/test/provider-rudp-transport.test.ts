@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createSocket } from "node:dgram";
 import { documentPayloadBytes } from "@gamecult/cultcache-ts";
-import { decodeWireValue } from "cultnet-ts/wire";
+import { decodeWireValue } from "@gamecult/cultnet-ts/wire";
 import {
   CultNetDocumentRegistry,
   CultNetRudpSession,
@@ -10,10 +10,11 @@ import {
   encodeRudpPacket,
   type CultNetOperationRequestMessage,
   type CultNetRudpPacket,
-} from "cultnet-ts";
+} from "@gamecult/cultnet-ts";
 
 import {
   CultMesh,
+  CultMeshGrantAllWrites,
   CultMeshProviderRudpTransport,
   CultMeshProviderSessionBroker,
   CULTMESH_PROVIDER_SESSION_SERVICE_ID,
@@ -64,6 +65,7 @@ test("RUDP provider transport requires broker acceptance for the full lifecycle"
     },
   });
   const server = CultMesh.createRudpDocumentServer("odin-test", 0x43554c54, {
+    writeAuthority: new CultMeshGrantAllWrites(),
     bindPort: 0,
     documents: new CultNetDocumentRegistry(),
     onOperationRequest: (request, session) => broker.handle(request, session),
@@ -256,6 +258,7 @@ test("a replaced RUDP generation drops operations queued behind an active handle
   let handlerCalls = 0;
   let closedSessions = 0;
   const server = CultMesh.createRudpDocumentServer("odin-queue-test", connectionId, {
+    writeAuthority: new CultMeshGrantAllWrites(),
     bindPort: 0,
     documents: new CultNetDocumentRegistry(),
     onOperationRequest: async request => {
@@ -284,18 +287,21 @@ test("a replaced RUDP generation drops operations queued behind an active handle
     runtimeId: identity.serviceInstanceId,
     connectionId,
     sessionToken: "signed-provider-token",
-    operationTimeoutMs: 100,
+    operationTimeoutMs: 1, // expires long before the test ends: the settle-by-timeout path is always exercised
     socketFactory: () => socket,
   }).connect(identity, new AbortController().signal);
   try {
+    // The handler is held open and the closed generation never answers, so these two settle only by the
+    // client's operation timeout or by connection.close(). Observe them from the start: whichever fires
+    // first is a legitimate end of the call, and this test asserts on server-side handler calls, not on it.
     const first = connection.register(
       { identity, requestedLeaseDurationMs: 10_000 },
       new AbortController().signal,
-    );
+    ).then(() => undefined, () => undefined);
     const second = connection.register(
       { identity, requestedLeaseDurationMs: 10_000 },
       new AbortController().signal,
-    );
+    ).then(() => undefined, () => undefined);
     await waitFor(() => handlerCalls === 1, "first queued provider operation");
 
     const replacement = new CultNetRudpSession({ connectionId });
@@ -315,7 +321,7 @@ test("a replaced RUDP generation drops operations queued behind an active handle
     assert.equal(handlerCalls, 1, "transport-queued work from the closed generation must be dropped");
 
     connection.close();
-    await Promise.allSettled([first, second]);
+    await Promise.all([first, second]);
   } finally {
     connection.close();
     server.close();
@@ -326,6 +332,7 @@ test("a client restarted on the same address with the same Connect payload repla
   const connectionId = 0x43554c54;
   let closedSessions = 0;
   const server = CultMesh.createRudpDocumentServer("odin-restart-test", connectionId, {
+    writeAuthority: new CultMeshGrantAllWrites(),
     bindPort: 0,
     documents: new CultNetDocumentRegistry(),
     onSessionClosed: () => { closedSessions += 1; },
@@ -364,6 +371,7 @@ test("a client restarted on the same address with the same Connect payload repla
 test("the RUDP document server does not acknowledge by name a reliable packet its session did not receive", async () => {
   const connectionId = 0x43554c55;
   const server = CultMesh.createRudpDocumentServer("odin-ack-test", connectionId, {
+    writeAuthority: new CultMeshGrantAllWrites(),
     bindPort: 0,
     documents: new CultNetDocumentRegistry(),
     onError: () => undefined,

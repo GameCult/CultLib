@@ -352,6 +352,7 @@ namespace GameCult.Mesh
         internal long PhysicalGeneration => Interlocked.Read(ref _physicalGeneration);
         public Observable<CultMeshSessionState> WatchState() => _states;
         public ICultNetSchemaClient OpenSchemaClient() => new SessionSchemaClient(this);
+        /// <summary>Fire-and-forget: an ack or a return is not admission; read the result frame.</summary>
         public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage => Channel.SendCultNet(message);
         public IDisposable OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
         {

@@ -26,4 +26,7 @@ $sources = Get-ChildItem $src -Recurse -Filter *.kt | Select-Object -ExpandPrope
 if ($LASTEXITCODE -ne 0) { throw "kotlinc failed with exit code $LASTEXITCODE" }
 & $java -cp "$jarPath;$kotlinStdlib" org.gamecult.cultmesh.CultMeshKt
 if ($LASTEXITCODE -ne 0) { throw "cultmesh-kotlin self-test failed with exit code $LASTEXITCODE" }
+$vectors = Join-Path $repoRoot "contracts\cultnet\interop\write-receipt-vectors.json"
+& $java -cp "$jarPath;$kotlinStdlib" org.gamecult.cultmesh.CultMeshKt write-receipt-vectors $vectors
+if ($LASTEXITCODE -ne 0) { throw "write-receipt vector replay failed with exit code $LASTEXITCODE" }
 Write-Host "Built $jarPath"

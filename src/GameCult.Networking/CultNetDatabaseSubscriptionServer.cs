@@ -145,7 +145,7 @@ namespace GameCult.Networking
                 : request.SubscriptionId;
             if (string.IsNullOrWhiteSpace(subscriptionId))
             {
-                peer.SendCultNet(new CultNetErrorMessage { Error = "Database subscription requires a subscriptionId or messageId." });
+                peer.SendCultNet(CultNetErrorMessage.ForMessageInvalid("subscriptionId", "Database subscription requires a subscriptionId or messageId."));
                 return Task.CompletedTask;
             }
 

@@ -1,6 +1,6 @@
 # CultNet TS
 
-`cultnet-ts` is the TypeScript port of the useful shape of GameCult's
+`@gamecult/cultnet-ts` is the TypeScript port of the useful shape of GameCult's
 networking layer: typed MessagePack messages, direct-pipe framing, CultLib-style
 security/session helpers, and state replication that hands typed values into a
 `CultCache` instead of making consumer code paw raw database envelopes.
@@ -42,7 +42,7 @@ We want:
 So the split is:
 
 - `cultcache-ts`: typed local persistence
-- `cultnet-ts`: typed transport, auth, and state replication
+- `@gamecult/cultnet-ts`: typed transport, auth, and state replication
 
 Same family. Different organs. Nobody needs a second spine growing out of the
 transport layer.
@@ -65,6 +65,7 @@ Current message families:
 - `cultnet.snapshot_request.v0`
 - `cultnet.snapshot_response.v0`
 - `cultnet.snapshot_response_raw.v0`
+- `cultnet.snapshot_request.v1`, `cultnet.database_subscribe.v1`, `cultnet.snapshot_response_raw.v1` (typed-selection carriers; no selection engine yet)
 - `cultnet.sample.change_name.v0`
 - `cultnet.sample.chat.v0`
 
@@ -79,7 +80,7 @@ CultNet without inventing a second ontology first.
 
 ## Generated Swarm Contracts
 
-`cultnet-ts` can consume canonical JSON Schema files and generate:
+`@gamecult/cultnet-ts` can consume canonical JSON Schema files and generate:
 
 - TypeScript contract classes/interfaces
 - runtime schema verifiers
@@ -110,7 +111,7 @@ which exports:
 
 ## Wire Contracts
 
-`cultnet-ts` does not sniff random payloads and pretend that counts as rigor.
+`@gamecult/cultnet-ts` does not sniff random payloads and pretend that counts as rigor.
 You choose the contract explicitly.
 
 Current wire-contract options:
@@ -128,7 +129,7 @@ away from the C# lineage.
 
 ## Content
 
-`cultnet-ts/content` owns the TypeScript shapes of the CultMesh CDN
+`@gamecult/cultnet-ts/content` owns the TypeScript shapes of the CultMesh CDN
 (`src/content.ts`, the twin of `CultMeshCdn.cs`): the artifact manifest and chunk
 reference, their MessagePack form, hash normalization, both record-key grammars,
 SHA-256 hashing through WebCrypto, and `packContent`. It is browser-safe: it
@@ -159,7 +160,7 @@ imports no `node:` module, so a browser bundle can take it.
 ## Local Fast Lane
 
 For direct-pipe neighbors that already share the same CultCache formatter
-contract, `cultnet-ts` now has a raw replication lane:
+contract, `@gamecult/cultnet-ts` now has a raw replication lane:
 
 - `cultnet.document_put_raw.v0`
 - `cultnet.snapshot_response_raw.v0`
@@ -184,7 +185,7 @@ cuts out the dumbest part of the trip.
 Apps sharing a CultNet space should be able to ask each other what they can
 exchange without resorting to folklore.
 
-`cultnet-ts` now includes:
+`@gamecult/cultnet-ts` now includes:
 
 - `cultnet.schema_catalog_request.v0`
 - `cultnet.schema_catalog_response.v0`
@@ -231,7 +232,7 @@ import {
   createTcpFramedCultNetPeer,
   defineCultNetDocumentBinding,
   ghostlightAgentStateGeneratedContract,
-} from "cultnet-ts";
+} from "@gamecult/cultnet-ts";
 
 const ghostlightStateDefinition = defineDocumentType({
   type: "ghostlight.agent-state",
@@ -269,7 +270,7 @@ That means a TypeScript runtime can follow the same cryptographic and session
 story as the C# version instead of inventing one more house religion around
 "trust me, this pipe is probably fine."
 
-For the legacy `gamecult.networking.v0` contract, `cultnet-ts` normalizes the
+For the legacy `gamecult.networking.v0` contract, `@gamecult/cultnet-ts` normalizes the
 encrypted binary fields as base64url strings in the ergonomic TS surface and
 maps them back to the exact C# union payload shape at the wire boundary.
 
@@ -287,6 +288,33 @@ maps them back to the exact C# union payload shape at the wire boundary.
 - The interop peer still keeps the TCP-framed lane for compatibility, but its
   serve and dial commands also exercise schema-v0 over the shared RUDP socket
   transport and advertise both transport profiles.
+
+## Write receipt replay runner
+
+`WriteTracker` is the client half of `contracts/cultnet/interop/write-receipt.md`: a pure state machine on an abstract
+clock that owns one decision, how each sent write settles. `tools/replay-write-receipt-vectors.mjs` replays
+`write-receipt-vectors.json` against it (build first, then `node tools/replay-write-receipt-vectors.mjs`): it prints
+`PASS`/`FAIL` per case and exits nonzero on any failure. Rust and C# port the same runner by implementing this interface
+and replaying the same file.
+
+Tracker interface (times are integer milliseconds on the vector's clock; the constructor takes the window):
+
+| Call | Meaning |
+| --- | --- |
+| `new WriteTracker({ windowMs, onSettle })` | `windowMs` = 5000 when the server's hello lists both `cultnet.write_admitted.v0` and `cultnet.error.v1`, else 500. `onSettle(id, settlement)` fires once per write. |
+| `send(id, atMs)` | A write with that `messageId` was sent. Its window runs from here, not from any transport ack. |
+| `frame(message, atMs)` | A decoded frame arrived. `write_admitted` and `error.v1` settle the write they name; `error.v0`, or `error.v1` with nil `messageId`, refuses a write only when exactly one is unanswered; an id not in flight settles nothing. |
+| `tick(atMs)` | Advance the clock. Every unanswered write with `atMs - sentAt >= windowMs` settles `unconfirmed(window_elapsed)`. `send`, `frame` and `sessionEnd` tick first. |
+| `sessionEnd(atMs)` | Every unanswered write settles `unconfirmed(session_ended)`. |
+| `state(id)` | `pending`, or the settlement plus `recorded`: `admitted_late` / `refused_late`, set by the first answer that arrives after `unconfirmed`. A settlement never changes. |
+
+Runner, per case in `scenarios.cases` (the transport ack is not an input: delivery is not an answer):
+
+1. The fake server states its capability the only way a real one does, in a hello (`server: "receipt"` lists both frames, `"legacy"` lists none); the window comes from that hello and must equal `constants[case.window]`.
+2. Events run in `atMs` order: `send` -> `send(id)`, `frame` -> encode the frame to MessagePack, decode and validate it as the client would, then `frame(message)`, `tick` -> `tick`, `sessionEnd` -> `sessionEnd`, `transportAck` -> nothing.
+3. For each id in `expect`, the settlement given to the caller has the expected `outcome` (and `code` or `reason` when given), `state(id).recorded` equals the expected `recorded` (absent when absent), and nothing settled twice or outside `expect`.
+
+The runner also decodes each `wire[].messagePackHex` and compares the fields and the re-encoded bytes to the vector, and requires every `schemaInvalid[]` frame to be refused by the decoder. `dedupe.cases` and `contentHash` are server vectors and not replayed here.
 
 ## Development
 

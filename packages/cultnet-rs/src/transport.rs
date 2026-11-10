@@ -252,6 +252,7 @@ impl<TStream> TcpFramedTransportConnection<TStream>
 where
     TStream: Write,
 {
+    /// Fire-and-forget: an ack or a return is not admission; read the result frame.
     pub fn send(&mut self, channel_id: &str, payload: &[u8]) -> Result<()> {
         if channel_id != "schema" {
             return Err(anyhow!(

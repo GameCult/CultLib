@@ -2759,6 +2759,11 @@ namespace GameCult.Networking
         // under SessionGate by whichever thread's send found the failure; the polling thread reads
         // it when it retires the peer.
         internal byte[]? UnsendableReason { get; set; }
+
+        // Set once the peer's capped frame has been answered: the session ends with this reason when the
+        // peer has acknowledged every answer, or at the deadline. Under SessionGate.
+        internal byte[]? EndingReason { get; set; }
+        internal long EndingDeadlineMs { get; set; }
     }
 
     /// <summary>
@@ -2928,6 +2933,7 @@ namespace GameCult.Networking
         public bool TryReceiveOnce(out CultNetRudpSocketServerFrame? delivered)
         {
             RetireUnsendablePeers();
+            EndAnsweredPeers();
             if (_deliveredFrames.Count > 0)
             {
                 delivered = _deliveredFrames.Dequeue();
@@ -3146,6 +3152,7 @@ namespace GameCult.Networking
         public void PollResends()
         {
             RetireUnsendablePeers();
+            EndAnsweredPeers();
             if (_socket.Poll(0, SelectMode.SelectRead))
                 return;
             foreach (var peer in _peers.Values.ToArray())
@@ -3242,6 +3249,44 @@ namespace GameCult.Networking
             peer.DisconnectReason = reason;
             PeerDisconnected?.Invoke(peer);
             return true;
+        }
+
+        // Polling thread only. The application answered a peer's capped frame: the answer is reliable, so a
+        // lost datagram is resent, and the session ends with `reason` once the peer has acknowledged every
+        // answer or `graceMs` have passed (EndAnsweredPeers). Frames of the peer still queued are not delivered.
+        internal void EndPeerSessionWhenAnswered(CultNetRudpSocketServerPeer peer, byte[] reason, long graceMs)
+        {
+            if (peer == null) throw new ArgumentNullException(nameof(peer));
+            if (reason == null) throw new ArgumentNullException(nameof(reason));
+            lock (peer.SessionGate)
+            {
+                if (peer.Session.Ended || peer.EndingReason != null)
+                    return;
+                peer.EndingReason = reason;
+                peer.EndingDeadlineMs = NowMs() + graceMs;
+            }
+            var kept = _deliveredFrames.Where(frame => !ReferenceEquals(frame.Peer, peer)).ToArray();
+            _deliveredFrames.Clear();
+            foreach (var frame in kept)
+                _deliveredFrames.Enqueue(frame);
+        }
+
+        // Polling thread only.
+        private void EndAnsweredPeers()
+        {
+            foreach (var peer in _peers.Values.ToArray())
+            {
+                byte[]? reason;
+                lock (peer.SessionGate)
+                {
+                    reason = peer.EndingReason != null
+                        && (peer.Session.OutstandingReliablePacketCount == 0 || NowMs() >= peer.EndingDeadlineMs)
+                        ? peer.EndingReason
+                        : null;
+                }
+                if (reason != null)
+                    EndPeerSession(peer, reason);
+            }
         }
 
         // Polling thread only. A peer a new Connect already replaced was reported then, and its key now
@@ -3488,7 +3533,8 @@ namespace GameCult.Networking
     /// </summary>
     public sealed class LiteNetLibTransportConnection
     {
-        private readonly NetPeer? _peer;
+        private readonly Action<byte[]>? _deliver;
+        private readonly Action? _end;
         private readonly CultNetTransportStats _stats = new CultNetTransportStats();
 
         /// <summary>
@@ -3496,8 +3542,97 @@ namespace GameCult.Networking
         /// </summary>
         public LiteNetLibTransportConnection(NetPeer peer, CultNetTransportProfile? profile = null)
         {
-            _peer = peer ?? throw new ArgumentNullException(nameof(peer));
+            if (peer == null) throw new ArgumentNullException(nameof(peer));
+            _deliver = payload => peer.Send(payload, DeliveryMethod.ReliableOrdered);
+            _end = peer.Disconnect;
             Profile = profile ?? CultNetTransportProfiles.CreateLiteNetLib("csharp-litenetlib-peer");
+        }
+
+        // The mock point for what leaves the connection: the peer's reliable ordered send.
+        internal LiteNetLibTransportConnection(Action<byte[]> deliver, Action? end = null)
+        {
+            _deliver = deliver ?? throw new ArgumentNullException(nameof(deliver));
+            _end = end;
+            Profile = CultNetTransportProfiles.CreateLiteNetLib("csharp-litenetlib-peer");
+        }
+
+        /// <summary>
+        /// Ends the connection. A write that can be neither answered nor refused is answered by this goodbye: the peer sees
+        /// its session end and settles the write as unconfirmed (<c>session_ended</c>), never as silence.
+        /// </summary>
+        internal void End() => _end?.Invoke();
+
+        /// <summary>
+        /// Answers a schema frame that did not decode with a <c>message_invalid</c> error.v1 naming its id when it holds one;
+        /// when that answer cannot be sent the connection ends instead.
+        /// </summary>
+        internal void AnswerUnreadableSchemaFrame(byte[] payload)
+        {
+            try
+            {
+                SendSchema(CultNetErrorV1Message.From(
+                    CultNetErrorMessage.ForUnreadableMessage(),
+                    CultNetReadableMessageId.From(payload)));
+            }
+            catch (Exception)
+            {
+                End();
+            }
+        }
+
+        /// <summary>
+        /// A put or delete that arrived on an unreliable or sequenced channel of a receipt session (write-receipt.md, Reliable channel only):
+        /// answered <c>message_invalid</c>, details <c>channel</c>, fixed text, carrying the write's id, and not applied. True when
+        /// the frame was such a write and has been answered here.
+        /// </summary>
+        internal bool RefuseUnreliableWrite(ICultNetSchemaMessage message, DeliveryMethod method)
+        {
+            if (WriteReceipts == null) return false;
+            if (method is DeliveryMethod.ReliableOrdered or DeliveryMethod.ReliableUnordered) return false;
+            var messageId = message switch
+            {
+                CultNetDocumentPutRawMessage put => put.MessageId,
+                CultNetDocumentDeleteMessage delete => delete.MessageId,
+                _ => null
+            };
+            if (messageId == null && message is not (CultNetDocumentPutRawMessage or CultNetDocumentDeleteMessage)) return false;
+            try
+            {
+                SendSchema(CultNetErrorV1Message.From(
+                    CultNetErrorMessage.ForMessageInvalid("channel", "receipt sessions require the reliable channel"), messageId));
+            }
+            catch (Exception)
+            {
+                End();
+            }
+
+            return true;
+        }
+
+        private readonly object _writeFramingGate = new();
+        private bool _writeFramingSettled;
+
+        /// <summary>
+        /// The write-receipt state of a connection that opted in (write-receipt.md); null for every other connection, which is
+        /// answered exactly as before.
+        /// </summary>
+        internal CultNetWriteReceiptSession? WriteReceipts { get; private set; }
+
+        /// <summary>
+        /// Decides this connection's write framing once: by its first hello, or by its first write if no hello came first. A
+        /// later hello changes nothing. The capability changes framing only; it never authorizes. Returns true when this call
+        /// opted the connection in.
+        /// </summary>
+        internal bool SettleWriteFraming(CultNetHelloMessage? hello)
+        {
+            lock (_writeFramingGate)
+            {
+                if (_writeFramingSettled) return false;
+                _writeFramingSettled = true;
+                if (hello == null || !CultNetWriteReceiptCapability.Declares(hello)) return false;
+                WriteReceipts = new CultNetWriteReceiptSession();
+                return true;
+            }
         }
 
         /// <summary>
@@ -3535,14 +3670,14 @@ namespace GameCult.Networking
         public void Send(string channelId, byte[] payload)
         {
             if (payload == null) throw new ArgumentNullException(nameof(payload));
-            if (_peer == null) throw new InvalidOperationException("A LiteNetLib peer is required to send through this transport.");
+            if (_deliver == null) throw new InvalidOperationException("A LiteNetLib peer is required to send through this transport.");
             if (!string.Equals(channelId, "schema", StringComparison.Ordinal)
                 && !string.Equals(channelId, "legacy", StringComparison.Ordinal))
             {
                 throw new InvalidOperationException($"litenetlib transport only supports schema and legacy channels, got \"{channelId}\".");
             }
 
-            _peer.Send(payload, DeliveryMethod.ReliableOrdered);
+            _deliver(payload);
             _stats.BytesSent += payload.Length;
             _stats.FramesSent++;
         }

@@ -1,3 +1,4 @@
+import { isNullOrWhiteSpaceCSharp } from "./cultmesh-authority";
 import type { DocumentPayload } from "@gamecult/cultcache-ts/document";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 
@@ -8,6 +9,9 @@ import registerSchema from "../contracts/cultnet/cultnet.register.schema.json";
 import verifySchema from "../contracts/cultnet/cultnet.verify.schema.json";
 import loginSuccessSchema from "../contracts/cultnet/cultnet.login-success.schema.json";
 import errorSchema from "../contracts/cultnet/cultnet.error.schema.json";
+import errorV1Schema from "../contracts/cultnet/interop/cultnet.error.v1.schema.json";
+import { DEFAULT_IGNORABLE, LETTER_OR_NUMBER } from "./unicode-messageid-tables";
+import writeAdmittedSchema from "../contracts/cultnet/interop/cultnet.write-admitted.schema.json";
 import sampleChangeNameSchema from "../contracts/cultnet/cultnet.sample-change-name.schema.json";
 import sampleChatSchema from "../contracts/cultnet/cultnet.sample-chat.schema.json";
 import documentPutSchema from "../contracts/cultnet/cultnet.document-put.schema.json";
@@ -33,7 +37,24 @@ import verseCatalogRequestSchema from "../contracts/cultnet/cultmesh.verse-catal
 import verseCatalogResponseSchema from "../contracts/cultnet/cultmesh.verse-catalog-response.schema.json";
 import sessionOpenSchema from "../contracts/cultnet/cultmesh.session-open.schema.json";
 import sessionAcceptedSchema from "../contracts/cultnet/cultmesh.session-accepted.schema.json";
+import selectionSchema from "../contracts/cultnet/cultnet.selection.schema.json";
+import rawDocumentHeaderSchema from "../contracts/cultnet/cultnet.raw-document-header.schema.json";
+import snapshotRequestV1Schema from "../contracts/cultnet/cultnet.snapshot-request.v1.schema.json";
+import snapshotResponseRawV1Schema from "../contracts/cultnet/cultnet.snapshot-response-raw.v1.schema.json";
+import databaseSubscribeV1Schema from "../contracts/cultnet/cultnet.database-subscribe.v1.schema.json";
 import ghostlightAgentStateSchema from "../contracts/cultnet/ghostlight.agent-state.schema.json";
+
+import {
+  encodeSelectionCarrierForWire,
+  normalizeSelectionCarrierNulls,
+  type CultNetSelectionCarrier,
+} from "./selection-carriers";
+import {
+  validateSelectionShape,
+  type CultNetEdge,
+  type CultNetRawDocumentHeader,
+  type CultNetSelection,
+} from "./selection";
 
 export type CultNetWireContract = "cultnet.schema.v0" | "gamecult.networking.v0";
 
@@ -44,6 +65,8 @@ export type CultNetSchemaVersion =
   | "cultnet.verify.v0"
   | "cultnet.login_success.v0"
   | "cultnet.error.v0"
+  | "cultnet.error.v1"
+  | "cultnet.write_admitted.v0"
   | "cultnet.sample.change_name.v0"
   | "cultnet.sample.chat.v0"
   | "cultnet.document_put.v0"
@@ -53,6 +76,9 @@ export type CultNetSchemaVersion =
   | "cultnet.snapshot_response.v0"
   | "cultnet.snapshot_response_raw.v0"
   | "cultnet.database_subscribe.v0"
+  | "cultnet.snapshot_request.v1"
+  | "cultnet.snapshot_response_raw.v1"
+  | "cultnet.database_subscribe.v1"
   | "cultnet.database_unsubscribe.v0"
   | "cultnet.database_change_raw.v0"
   | "cultnet.schema_catalog_request.v0"
@@ -165,9 +191,106 @@ export interface CultNetLoginSuccessMessage {
   session: string;
 }
 
+/** The closed refusal-code set of cultnet.error.v0 (contracts/cultnet/cultnet.error.schema.json). */
+export const CULTNET_ERROR_CODES = [
+  "selection_invalid",
+  "cursor_stale",
+  "cursor_invalid",
+  "reference_outside_target",
+  "variant_unsupported",
+  "unowned_schema",
+  "write_not_authorized",
+  "unsupported_schema_version",
+  "message_invalid",
+] as const;
+
+export type CultNetErrorCode = (typeof CULTNET_ERROR_CODES)[number];
+
+/** The closed refusal-code set of cultnet.error.v1 (contracts/cultnet/interop/cultnet.error.v1.schema.json): v0's codes plus `limit_reached`. */
+export const CULTNET_ERROR_V1_CODES = [...CULTNET_ERROR_CODES, "limit_reached"] as const;
+
+export type CultNetErrorV1Code = (typeof CULTNET_ERROR_V1_CODES)[number];
+
+/** A refusal that carries text only: `routingHint`, `code` and `details` are written as null, as the reference writes an absent member. */
+export function cultNetTextError(error: string): CultNetErrorMessage {
+  return { schemaVersion: "cultnet.error.v0", error, routingHint: null, code: null, details: null };
+}
+
+/**
+ * The refusal for a peer write its server's authority did not grant (C# `CultNetErrorMessage.ForRemoteWriteRefused`):
+ * code `write_not_authorized`, `details` naming the record in `recordKey`. A blank `reason` leaves the text bare.
+ */
+export function cultNetWriteNotAuthorizedError(recordKey: string, reason?: string | null): CultNetErrorMessage {
+  return {
+    schemaVersion: "cultnet.error.v0",
+    error: typeof reason === "string" && !isNullOrWhiteSpaceCSharp(reason) ? `write_not_authorized: ${reason}` : "write_not_authorized",
+    routingHint: null,
+    code: "write_not_authorized",
+    details: { field: "recordKey", value: recordKey, asOf: null, current: null },
+  };
+}
+
+/**
+ * The refusal for a request that lacks a required field or carries an ill-typed one (C# `CultNetErrorMessage.ForMessageInvalid`):
+ * code `message_invalid`, `details.field` naming that request field.
+ */
+export function cultNetMessageInvalidError(field: string, reason: string): CultNetErrorMessage {
+  return {
+    schemaVersion: "cultnet.error.v0",
+    error: `message_invalid: ${reason}`,
+    routingHint: null,
+    code: "message_invalid",
+    details: { field, value: null, asOf: null, current: null },
+  };
+}
+
+export interface CultNetErrorRoutingHint {
+  shard: Record<string, unknown> | null;
+  reason: string;
+}
+
+export interface CultNetErrorDetails {
+  field: string | null;
+  value: string | null;
+  asOf: number | null;
+  current: number | null;
+}
+
+/** Every key is written on the wire, null included (the C# map formatter never omits a key). */
 export interface CultNetErrorMessage {
   schemaVersion: "cultnet.error.v0";
   error: string;
+  routingHint: CultNetErrorRoutingHint | null;
+  code: CultNetErrorCode | null;
+  details: CultNetErrorDetails | null;
+}
+
+/**
+ * cultnet.error.v0 plus the `messageId` of the request it answers (nil when no id could be read). Sent only to a
+ * connection whose hello listed both receipt frames (contracts/cultnet/interop/write-receipt.md).
+ */
+export interface CultNetErrorV1Message extends Omit<CultNetErrorMessage, "schemaVersion" | "code"> {
+  schemaVersion: "cultnet.error.v1";
+  code: CultNetErrorV1Code | null;
+  messageId: string | null;
+}
+
+/** The receipt for one admitted put or delete: every key written, the write's `messageId` echoed byte for byte. */
+export interface CultNetWriteAdmittedMessage {
+  schemaVersion: "cultnet.write_admitted.v0";
+  messageId: string;
+  operation: "put" | "delete";
+  schemaId: string;
+  recordKey: string;
+}
+
+/** The two frames a receipt-capable hello lists in `supportedMessageVersions`; a peer lists both or neither. */
+export const CULTNET_WRITE_RECEIPT_MESSAGE_VERSIONS = ["cultnet.write_admitted.v0", "cultnet.error.v1"] as const;
+
+/** True when a hello lists both receipt frames: the only thing that makes a connection receipt-capable. */
+export function helloAdvertisesWriteReceipts(hello: Pick<CultNetHelloMessage, "supportedMessageVersions">): boolean {
+  const listed = hello.supportedMessageVersions ?? [];
+  return CULTNET_WRITE_RECEIPT_MESSAGE_VERSIONS.every((version) => listed.includes(version));
 }
 
 export interface CultNetSampleChangeNameMessage {
@@ -245,6 +368,46 @@ export interface CultNetDatabaseSubscribeMessage {
   consumerRuntimeId?: string;
   bodyIds?: string[];
   supportedBodyTransports?: string[];
+}
+
+/** A document snapshot through a typed selection (docs/cultnet-selection-cut.md). */
+export interface CultNetSnapshotRequestV1Message {
+  schemaVersion: "cultnet.snapshot_request.v1";
+  messageId: string;
+  selection: CultNetSelection;
+  shardId?: string;
+  shardEpoch?: number;
+}
+
+/** A live subscription through a typed selection. */
+export interface CultNetDatabaseSubscribeV1Message {
+  schemaVersion: "cultnet.database_subscribe.v1";
+  messageId: string;
+  subscriptionId: string;
+  selection: CultNetSelection;
+  /** Default true. */
+  includeSnapshot?: boolean;
+  consumerRuntimeId?: string;
+  bodyIds?: string[];
+  supportedBodyTransports?: string[];
+}
+
+/** One selection page: exactly one of `headers` / `documents` is present, by projection. */
+export interface CultNetSnapshotResponseRawV1Message {
+  schemaVersion: "cultnet.snapshot_response_raw.v1";
+  messageId: string;
+  /** Rows on this page. */
+  matched: number;
+  /** The snapshot this page is exact as of. */
+  asOf: number;
+  /** Cursor for the next page, absent on the last page. */
+  next?: string;
+  headers?: CultNetRawDocumentHeader[];
+  documents?: CultNetRawDocumentRecord[];
+  edges?: CultNetEdge[];
+  shardId?: string;
+  shardEpoch?: number;
+  shardLogSequence?: number;
 }
 
 export interface CultNetDatabaseUnsubscribeMessage {
@@ -645,6 +808,8 @@ export interface GhostlightAgentStateDocument {
 
 export type CultNetMessage =
   | CultNetHelloMessage
+  | CultNetErrorV1Message
+  | CultNetWriteAdmittedMessage
   | CultNetLoginMessage
   | CultNetRegisterMessage
   | CultNetVerifyMessage
@@ -659,6 +824,9 @@ export type CultNetMessage =
   | CultNetSnapshotResponseMessage
   | CultNetSnapshotResponseRawMessage
   | CultNetDatabaseSubscribeMessage
+  | CultNetSnapshotRequestV1Message
+  | CultNetSnapshotResponseRawV1Message
+  | CultNetDatabaseSubscribeV1Message
   | CultNetDatabaseUnsubscribeMessage
   | CultNetDatabaseChangeRawMessage
   | CultNetSchemaCatalogRequestMessage
@@ -684,6 +852,8 @@ const CULTNET_MESSAGE_SCHEMAS = [
   verifySchema,
   loginSuccessSchema,
   errorSchema,
+  errorV1Schema,
+  writeAdmittedSchema,
   sampleChangeNameSchema,
   sampleChatSchema,
   documentPutSchema,
@@ -693,6 +863,9 @@ const CULTNET_MESSAGE_SCHEMAS = [
   snapshotResponseSchema,
   snapshotResponseRawSchema,
   databaseSubscribeSchema,
+  snapshotRequestV1Schema,
+  snapshotResponseRawV1Schema,
+  databaseSubscribeV1Schema,
   databaseUnsubscribeSchema,
   databaseChangeRawSchema,
   schemaCatalogRequestSchema,
@@ -711,6 +884,8 @@ const cultNetValidators = new Map<CultNetSchemaVersion, ValidateFunction>();
 for (const schema of [
   documentRecordSchema,
   rawDocumentRecordSchema,
+  rawDocumentHeaderSchema,
+  selectionSchema,
   documentMutationContractSchema,
   transportProfileSchema,
   schemaDescriptorSchema,
@@ -757,9 +932,27 @@ export function parseCultNetMessage(input: unknown, wireContract: CultNetWireCon
     return input as CultNetSnapshotResponseRawMessage;
   }
 
+  if (schemaVersion === "cultnet.snapshot_response_raw.v1") {
+    validateSnapshotResponseRawV1Message(input);
+    return input as CultNetSnapshotResponseRawV1Message;
+  }
+
+  if (schemaVersion === "cultnet.snapshot_request.v1" || schemaVersion === "cultnet.database_subscribe.v1") {
+    // The door first, so an empty or blank schemas/keys entry is a typed refusal naming its field
+    // rather than a generic schema-validation failure.
+    const selection = (input as { selection?: unknown }).selection;
+    if (selection && typeof selection === "object") {
+      validateSelectionShape(selection as CultNetSelection);
+    }
+  }
+
   if (schemaVersion === "cultnet.database_change_raw.v0") {
     validateDatabaseChangeRawMessage(input);
     return input as CultNetDatabaseChangeRawMessage;
+  }
+
+  if (schemaVersion === "cultnet.write_admitted.v0" && !isValidAdmittedMessageId((input as { messageId?: unknown }).messageId)) {
+    throw new Error("Validation failed for cultnet.write_admitted.v0: /messageId: must contain a letter or number and no Default_Ignorable code point");
   }
 
   if (!validator(input)) {
@@ -778,7 +971,14 @@ export function encodeCultNetMessageForWire(
     return encodeGameCultNetworkingMessage(message);
   }
 
-  return message;
+  switch (message.schemaVersion) {
+    case "cultnet.snapshot_request.v1":
+    case "cultnet.database_subscribe.v1":
+    case "cultnet.snapshot_response_raw.v1":
+      return encodeSelectionCarrierForWire(message as CultNetSelectionCarrier);
+    default:
+      return message;
+  }
 }
 
 export function validateGhostlightAgentState(input: unknown): GhostlightAgentStateDocument {
@@ -839,10 +1039,8 @@ function parseGameCultNetworkingMessage(input: unknown): CultNetMessage {
         session: requireLegacyBytes(payload[1], "LoginSuccessMessage.Session"),
       };
     case 4:
-      return {
-        schemaVersion: "cultnet.error.v0",
-        error: requireLegacyString(payload[0], "ErrorMessage.Error"),
-      };
+      // The legacy union ErrorMessage carries only Error; the R-N fields exist on cultnet.schema.v0 alone.
+      return cultNetTextError(requireLegacyString(payload[0], "ErrorMessage.Error"));
     case 5:
       return {
         schemaVersion: "cultnet.sample.change_name.v0",
@@ -898,6 +1096,7 @@ function encodeGameCultNetworkingMessage(message: CultNetMessage): [number, unkn
         decodeBase64Url(message.session, "LoginSuccessMessage.Session"),
       ]];
     case "cultnet.error.v0":
+      // The gamecult.networking.v0 union's ErrorMessage carries only the text.
       return [4, [message.error]];
     case "cultnet.sample.change_name.v0":
       return [5, [message.name]];
@@ -1102,6 +1301,89 @@ function validateSnapshotResponseRawMessage(
   });
 }
 
+function validateSnapshotResponseRawV1Message(
+  input: unknown,
+): asserts input is CultNetSnapshotResponseRawV1Message {
+  const candidate = validateBinaryMessageRoot(input, "cultnet.snapshot_response_raw.v1");
+  const fail = (path: string, problem: string): never => {
+    throw new Error(`Validation failed for cultnet.snapshot_response_raw.v1: ${path}: ${problem}`);
+  };
+  for (const counter of ["matched", "asOf"] as const) {
+    const value = candidate[counter];
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      fail(`/${counter}`, "must be a non-negative integer");
+    }
+  }
+  if (typeof candidate.next !== "undefined" && typeof candidate.next !== "string") {
+    fail("/next", "must be a string");
+  }
+  const hasHeaders = typeof candidate.headers !== "undefined";
+  const hasDocuments = typeof candidate.documents !== "undefined";
+  if (hasHeaders === hasDocuments) {
+    fail("/", "exactly one of headers and documents must be present");
+  }
+  if (hasHeaders) {
+    if (!Array.isArray(candidate.headers)) fail("/headers", "must be an array");
+    (candidate.headers as unknown[]).forEach((header, index) => validateRawDocumentHeader(header, `/headers/${index}`));
+  } else {
+    if (!Array.isArray(candidate.documents)) fail("/documents", "must be an array");
+    (candidate.documents as unknown[]).forEach((document, index) => validateRawDocumentRecord(document, `/documents/${index}`));
+  }
+  if (typeof candidate.edges !== "undefined") {
+    if (!Array.isArray(candidate.edges)) fail("/edges", "must be an array");
+    (candidate.edges as unknown[]).forEach((edge, index) => validateEdge(edge, `/edges/${index}`));
+  }
+  requireOptionalNonEmptyString(candidate.shardId, "/shardId");
+  for (const counter of ["shardEpoch", "shardLogSequence"] as const) {
+    const value = candidate[counter];
+    if (typeof value !== "undefined" && (typeof value !== "number" || !Number.isSafeInteger(value))) {
+      fail(`/${counter}`, "must be an integer");
+    }
+  }
+}
+
+function validateRawDocumentHeader(input: unknown, instancePath: string): void {
+  if (!input || typeof input !== "object") {
+    throw new Error(`Validation failed for raw CultNet document header: ${instancePath}: must be an object`);
+  }
+  const candidate = input as Record<string, unknown>;
+  requireNonEmptyString(candidate.schemaId, `${instancePath}/schemaId`);
+  requireOptionalNonEmptyString(candidate.schemaName, `${instancePath}/schemaName`);
+  requireOptionalNonEmptyString(candidate.schemaVersion, `${instancePath}/schemaVersion`);
+  requireOptionalNonEmptyString(candidate.schemaContentHash, `${instancePath}/schemaContentHash`);
+  requireNonEmptyString(candidate.recordKey, `${instancePath}/recordKey`);
+  requireNonEmptyString(candidate.storedAt, `${instancePath}/storedAt`);
+  requireOptionalNonEmptyString(candidate.sourceRuntimeId, `${instancePath}/sourceRuntimeId`);
+  requireOptionalNonEmptyString(candidate.sourceAgentId, `${instancePath}/sourceAgentId`);
+  requireOptionalNonEmptyString(candidate.sourceRole, `${instancePath}/sourceRole`);
+  requireOptionalStringArray(candidate.tags, `${instancePath}/tags`);
+}
+
+function validateEdge(input: unknown, instancePath: string): void {
+  const fail = (path: string, problem: string): never => {
+    throw new Error(`Validation failed for cultnet.snapshot_response_raw.v1: ${path}: ${problem}`);
+  };
+  if (!input || typeof input !== "object") {
+    fail(instancePath, "must be an object");
+  }
+  const candidate = input as Record<string, unknown>;
+  for (const end of ["from", "to"] as const) {
+    const ref = candidate[end] as Record<string, unknown> | undefined;
+    if (!ref || typeof ref !== "object") {
+      fail(`${instancePath}/${end}`, "must be an object");
+    }
+    requireNonEmptyString(ref!.schemaId, `${instancePath}/${end}/schemaId`);
+    requireNonEmptyString(ref!.recordKey, `${instancePath}/${end}/recordKey`);
+  }
+  requireNonEmptyString(candidate.role, `${instancePath}/role`);
+  if (typeof candidate.payloadEncoding !== "undefined" && candidate.payloadEncoding !== "messagepack") {
+    fail(`${instancePath}/payloadEncoding`, "must equal messagepack");
+  }
+  if (typeof candidate.payload !== "undefined" && !(candidate.payload instanceof Uint8Array)) {
+    fail(`${instancePath}/payload`, "must be a Uint8Array");
+  }
+}
+
 function validateDatabaseChangeRawMessage(
   input: unknown,
 ): asserts input is CultNetDatabaseChangeRawMessage {
@@ -1134,6 +1416,7 @@ function validateBinaryMessageRoot(
   schemaVersion:
     | "cultnet.document_put_raw.v0"
     | "cultnet.snapshot_response_raw.v0"
+    | "cultnet.snapshot_response_raw.v1"
     | "cultnet.database_change_raw.v0",
 ): Record<string, unknown> {
   if (!input || typeof input !== "object") {
@@ -1144,7 +1427,7 @@ function validateBinaryMessageRoot(
   if (candidate.schemaVersion !== schemaVersion) {
     throw new Error(`Validation failed for ${schemaVersion}: /schemaVersion: must equal ${schemaVersion}`);
   }
-  if (typeof candidate.messageId !== "string" || candidate.messageId.trim().length === 0) {
+  if (typeof candidate.messageId !== "string" || isBlank(candidate.messageId)) {
     throw new Error(`Validation failed for ${schemaVersion}: /messageId: must be a non-empty string`);
   }
 
@@ -1182,8 +1465,52 @@ function validateRawDocumentRecord(
   requireOptionalStringArray(candidate.tags, `${instancePath}/tags`);
 }
 
+/**
+ * A write_admitted messageId is valid iff it holds a Unicode letter (Lu Ll Lt Lm Lo) or number (Nd Nl No) and no
+ * Default_Ignorable_Code_Point, as of Unicode 16.0, compared raw (write-receipt.md; the id is echoed byte for byte, so nothing
+ * is trimmed). The tables are embedded (unicode-messageid-tables.ts, generated by scripts/gen-unicode-messageid-tables.py), not
+ * the regex engine's, so the running Node's Unicode version changes no result; the other four runtimes embed the same tables.
+ */
+function isValidAdmittedMessageId(value: unknown): boolean {
+  if (typeof value !== "string") {
+    return false;
+  }
+  let hasLetterOrNumber = false;
+  for (const ch of value) {
+    const point = ch.codePointAt(0) as number;
+    // The decoded string must be well-formed Unicode: @msgpack/msgpack turns invalid UTF-8 (ED A0 80) into a lone surrogate.
+    if ((point >= 0xd800 && point <= 0xdfff) || inRanges(DEFAULT_IGNORABLE, point)) {
+      return false;
+    }
+    hasLetterOrNumber = hasLetterOrNumber || inRanges(LETTER_OR_NUMBER, point);
+  }
+  return hasLetterOrNumber;
+}
+
+/** Whether [point] lies in the flattened, sorted [low, high] pairs. */
+function inRanges(ranges: readonly number[], point: number): boolean {
+  let low = 0;
+  let high = ranges.length / 2 - 1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (point < ranges[2 * mid]) {
+      high = mid - 1;
+    } else if (point > ranges[2 * mid + 1]) {
+      low = mid + 1;
+    } else {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Blank is empty or only Unicode White_Space (write-receipt.md, rule 5), not `trim()`: JS trims U+FEFF and keeps U+0085. */
+function isBlank(value: string): boolean {
+  return /^\p{White_Space}*$/u.test(value);
+}
+
 function requireNonEmptyString(input: unknown, instancePath: string): void {
-  if (typeof input !== "string" || input.trim().length === 0) {
+  if (typeof input !== "string" || isBlank(input)) {
     throw new Error(`Validation failed for raw CultNet document record: ${instancePath}: must be a non-empty string`);
   }
 }
@@ -1199,7 +1526,7 @@ function requireOptionalStringArray(input: unknown, instancePath: string): void 
   if (typeof input === "undefined" || input === null) {
     return;
   }
-  if (!Array.isArray(input) || input.some((item) => typeof item !== "string" || item.trim().length === 0)) {
+  if (!Array.isArray(input) || input.some((item) => typeof item !== "string" || isBlank(item))) {
     throw new Error(`Validation failed for raw CultNet document record: ${instancePath}: must be an array of non-empty strings`);
   }
 }
@@ -1235,6 +1562,11 @@ function normalizeCultNetOptionalNulls(
         "bodyIds",
         "supportedBodyTransports",
       ]);
+      return;
+    case "cultnet.snapshot_request.v1":
+    case "cultnet.database_subscribe.v1":
+    case "cultnet.snapshot_response_raw.v1":
+      normalizeSelectionCarrierNulls(schemaVersion, candidate);
       return;
     case "cultnet.operation_request.v0":
       stripNullProperties(candidate, ["payloadEncoding", "sourceRuntimeId", "targetRuntimeId"]);
@@ -1293,6 +1625,8 @@ export const cultNetSchemas = {
   verifySchema,
   loginSuccessSchema,
   errorSchema,
+  errorV1Schema,
+  writeAdmittedSchema,
   sampleChangeNameSchema,
   sampleChatSchema,
   documentPutSchema,
@@ -1305,6 +1639,11 @@ export const cultNetSchemas = {
   snapshotResponseSchema,
   snapshotResponseRawSchema,
   databaseSubscribeSchema,
+  selectionSchema,
+  rawDocumentHeaderSchema,
+  snapshotRequestV1Schema,
+  snapshotResponseRawV1Schema,
+  databaseSubscribeV1Schema,
   databaseUnsubscribeSchema,
   databaseChangeRawSchema,
   schemaDescriptorSchema,

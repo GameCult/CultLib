@@ -19,6 +19,7 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.URI
 import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.security.SecureRandom
 import java.security.MessageDigest
@@ -808,6 +809,7 @@ interface CultNetSchemaMessageTransport : AutoCloseable {
     val profile: CultNetTransportProfile
     val stats: CultNetTransportStats
 
+    /** Fire-and-forget: an ack or a return is not admission; read the result frame. */
     fun sendSchemaMessage(message: CultNetMessage)
 
     fun receiveSchemaMessage(timeoutMs: Long = 1_000, pollIntervalMs: Long = 5): CultNetMessage?
@@ -1099,9 +1101,9 @@ data class CultNetRawDocumentRecord(
             "payloadEncoding" to payloadEncoding,
             "payload" to payload.copyOf(),
         )
-        if (!sourceRuntimeId.isNullOrBlank()) wire["sourceRuntimeId"] = sourceRuntimeId
-        if (!sourceAgentId.isNullOrBlank()) wire["sourceAgentId"] = sourceAgentId
-        if (!sourceRole.isNullOrBlank()) wire["sourceRole"] = sourceRole
+        if (!isBlankText(sourceRuntimeId)) wire["sourceRuntimeId"] = sourceRuntimeId
+        if (!isBlankText(sourceAgentId)) wire["sourceAgentId"] = sourceAgentId
+        if (!isBlankText(sourceRole)) wire["sourceRole"] = sourceRole
         if (tags.isNotEmpty()) wire["tags"] = tags
         return wire
     }
@@ -2363,6 +2365,9 @@ fun parseCultNetMessage(payload: ByteArray): CultNetMessage {
     if (schemaVersion !is String || schemaVersion.isBlank()) {
         throw IOException("CultNet schema-v0 messages must declare schemaVersion")
     }
+    // A write_admitted id is echoed byte for byte, so that frame alone is read again with invalid UTF-8 refused; document payload
+    // strings elsewhere keep decoding as before.
+    if (schemaVersion == WRITE_ADMITTED_VERSION) MessagePackReader(payload, strictUtf8 = true).readAny()
     val body = linkedMapOf<String, Any?>()
     for ((key, value) in decoded) {
         if (key !is String) throw IOException("CultNet schema-v0 message keys must be strings")
@@ -3167,13 +3172,16 @@ class CultNetRudpSocketTransportConnection(
         return connected
     }
 
+    /** Fire-and-forget: an ack or a return is not admission; read the result frame. */
     fun send(channelId: String, payload: ByteArray) {
         session.sendMany(channelId, payload, channelSendOptions(channelId, nowMs()), maxFragmentBytes).forEach { sendPacket(it) }
         framesSent += 1
     }
 
+    /** Fire-and-forget: an ack or a return is not admission; read the result frame. */
     fun send(channelId: String, payload: String) = send(channelId, payload.toByteArray(StandardCharsets.UTF_8))
 
+    /** Fire-and-forget: an ack or a return is not admission; read the result frame. */
     fun sendSchema(payload: ByteArray) = send("schema", payload)
 
     fun sendSchema(payload: String) = sendSchema(payload.toByteArray(StandardCharsets.UTF_8))
@@ -3409,6 +3417,7 @@ fun main(args: Array<String>) {
         rudpClientBindsLoopbackOnlyForALoopbackEndpoint()
         rudpSocketTransportHandshakesAndCarriesReliableOrderedSchemaFrames()
         rudpSocketTransportCarriesFragmentedReliableOrderedSchemaFrames()
+        rawDocumentRecordDropsOnlyWhiteSpaceSourceIds()
         return
     }
 
@@ -3420,6 +3429,7 @@ fun main(args: Array<String>) {
         "rudp-dial-message-once" -> rudpDialSchemaMessageOnce(options)
         "serve" -> interopServe(options)
         "dial" -> interopDial(options)
+        "write-receipt-vectors" -> if (!replayWriteReceiptVectors(args.getOrNull(1) ?: error("usage: write-receipt-vectors <vectors.json>"))) kotlin.system.exitProcess(1)
         else -> error("Unknown mode ${args[0]}")
     }
 }
@@ -6145,7 +6155,8 @@ private fun requireSchemaResponse(message: CultNetMessage?, expectedSchemaVersio
     return response
 }
 
-class MessagePackReader(payload: ByteArray) {
+/** [strictUtf8] makes a str whose bytes are not UTF-8 throw instead of becoming U+FFFD; only the write_admitted frame asks for it. */
+class MessagePackReader(payload: ByteArray, private val strictUtf8: Boolean = false) {
     private val input = DataInputStream(ByteArrayInputStream(payload))
     private var pushed = -1
 
@@ -6300,7 +6311,10 @@ class MessagePackReader(payload: ByteArray) {
             code == 0xdb -> input.readInt()
             else -> throw IOException("expected string")
         }
-        return String(readPayload(length), StandardCharsets.UTF_8)
+        val bytes = readPayload(length)
+        if (!strictUtf8) return String(bytes, StandardCharsets.UTF_8)
+        return StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes)).toString()
     }
 
     private fun readBinaryAfterCode(code: Int): ByteArray {

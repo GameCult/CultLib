@@ -38,6 +38,7 @@ from .cultmesh_contracts import (
     simulation_fact_document,
 )
 
+from .messages import unsupported_schema_version_error as _unsupported_schema_version_error
 from .schema_catalog import INTEROP_WIRE_CONTRACT, wire_message_schema_descriptors
 from .client import create_rudp_schema_transport
 from .transport import (
@@ -407,14 +408,7 @@ def is_unsupported_cultnet_version(schema_version: Any) -> bool:
 
 
 def unsupported_schema_version_error(message: dict[str, Any]) -> dict[str, Any]:
-    schema_version = message.get("schemaVersion")
-    return {
-        "schemaVersion": "cultnet.error.v0",
-        "messageId": str(message.get("messageId") or ""),
-        "error": f"Unsupported CultNet message schema: {schema_version!r}.",
-        "code": "unsupported_schema_version",
-        "details": {"schemaVersion": schema_version},
-    }
+    return _unsupported_schema_version_error(message.get("schemaVersion")).to_wire()
 
 
 def handle_database_subscribe(state: PeerState, message: dict[str, Any], subscriptions: dict[str, DatabaseSubscription]) -> list[dict[str, Any]]:

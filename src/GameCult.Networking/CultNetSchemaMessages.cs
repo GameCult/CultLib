@@ -48,6 +48,14 @@ namespace GameCult.Networking
         /// </summary>
         public const string Error = "cultnet.error.v0";
         /// <summary>
+        /// error v1 contract identifier: error v0 plus the id of the request it answers (write-receipt.md).
+        /// </summary>
+        public const string ErrorV1 = "cultnet.error.v1";
+        /// <summary>
+        /// write admitted receipt contract identifier (write-receipt.md).
+        /// </summary>
+        public const string WriteAdmitted = "cultnet.write_admitted.v0";
+        /// <summary>
         /// sample change name contract identifier.
         /// </summary>
         public const string SampleChangeName = "cultnet.sample.change_name.v0";
@@ -511,7 +519,7 @@ namespace GameCult.Networking
         [Key("routingHint")] public CultNetShardRoutingHint? RoutingHint { get; set; }
         /// <summary>
         /// Gets or sets the machine-readable refusal code (R-N), e.g. <c>selection_invalid</c>,
-        /// <c>cursor_stale</c>, <c>cursor_invalid</c>, <c>reference_outside_target</c>, <c>unowned_schema</c>, <c>write_not_authorized</c>. Additive to
+        /// <c>cursor_stale</c>, <c>cursor_invalid</c>, <c>reference_outside_target</c>, <c>unowned_schema</c>, <c>write_not_authorized</c>, <c>unsupported_schema_version</c>, <c>message_invalid</c>. Additive to
         /// <c>cultnet.error.v0</c>; a v0 peer that does not know this field ignores it.
         /// </summary>
         [Key("code")] public string? Code { get; set; }
@@ -538,7 +546,7 @@ namespace GameCult.Networking
         public static CultNetErrorMessage ForUnownedSchema(CultNetUnownedSchemaException ex) =>
             new CultNetErrorMessage
             {
-                Error = $"unowned_schema: {ex.Message}",
+                Error = "unowned_schema: no shard owns the schema and key",
                 Code = "unowned_schema",
                 Details = new CultNetErrorDetails { Field = "schemaId", Value = ex.SchemaId }
             };
@@ -554,6 +562,37 @@ namespace GameCult.Networking
                 Code = "write_not_authorized",
                 Details = new CultNetErrorDetails { Field = "recordKey", Value = request.RecordKey.Value }
             };
+
+        /// <summary>
+        /// Builds the wire error for a message whose <c>schemaVersion</c> this peer does not speak: code
+        /// <c>unsupported_schema_version</c>, details <c>{ field: "schemaVersion", value }</c>.
+        /// </summary>
+        public static CultNetErrorMessage ForUnsupportedSchemaVersion(string? schemaVersion) =>
+            new CultNetErrorMessage
+            {
+                Error = $"unsupported_schema_version: {schemaVersion}",
+                Code = "unsupported_schema_version",
+                Details = new CultNetErrorDetails { Field = "schemaVersion", Value = schemaVersion }
+            };
+
+        /// <summary>
+        /// Builds the wire error for a request that lacks a required field or carries an ill-typed one: code
+        /// <c>message_invalid</c>, details <c>{ field }</c> naming that request field.
+        /// </summary>
+        public static CultNetErrorMessage ForMessageInvalid(string field, string reason) =>
+            new CultNetErrorMessage
+            {
+                Error = $"message_invalid: {reason}",
+                Code = "message_invalid",
+                Details = new CultNetErrorDetails { Field = field }
+            };
+
+        /// <summary>
+        /// The refusal of a frame that does not read, or whose write names nothing (write-receipt.md, Fixed texts):
+        /// <c>message_invalid</c>, details <c>{ field: "message" }</c>, and the one fixed text. A decoder's own text never reaches the wire.
+        /// </summary>
+        public static CultNetErrorMessage ForUnreadableMessage() =>
+            ForMessageInvalid("message", "the message could not be read");
 
         /// <summary>
         /// Builds the wire error for a cursor refusal (R-N): code <c>cursor_stale</c> with details
@@ -595,6 +634,80 @@ namespace GameCult.Networking
                 Error = ex.Message,
                 Code = "reference_outside_target"
             };
+    }
+
+    /// <summary>
+    /// <c>cultnet.error.v1</c> (contracts/cultnet/interop/write-receipt.md): the v0 error plus <see cref="MessageId"/>,
+    /// the id of the request it answers. Sent only to a connection that declared the write-receipt capability.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetErrorV1Message : ICultNetSchemaMessage
+    {
+        /// <summary>Gets or sets the schema version.</summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.ErrorV1;
+        /// <summary>Gets or sets the error.</summary>
+        [Key("error")] public string Error { get; set; } = string.Empty;
+        /// <summary>Gets or sets optional shard routing details for authority failures.</summary>
+        [Key("routingHint")] public CultNetShardRoutingHint? RoutingHint { get; set; }
+        /// <summary>Gets or sets the machine-readable refusal code (the v0 enum).</summary>
+        [Key("code")] public string? Code { get; set; }
+        /// <summary>Gets or sets the code-specific structured detail.</summary>
+        [Key("details")] public CultNetErrorDetails? Details { get; set; }
+        /// <summary>Gets or sets the id of the request this answers; null only when no id could be read.</summary>
+        [Key("messageId")] public string? MessageId { get; set; }
+
+        /// <summary>Builds the v1 form of <paramref name="error"/> answering <paramref name="messageId"/>.</summary>
+        public static CultNetErrorV1Message From(CultNetErrorMessage error, string? messageId)
+        {
+            if (error == null) throw new ArgumentNullException(nameof(error));
+            return new CultNetErrorV1Message
+            {
+                Error = error.Error,
+                RoutingHint = error.RoutingHint,
+                Code = error.Code,
+                Details = error.Details,
+                MessageId = string.IsNullOrEmpty(messageId) ? null : messageId
+            };
+        }
+
+        /// <summary>
+        /// The refusal of a write a session has no room to remember (write-receipt.md, rule 5): code <c>limit_reached</c>,
+        /// details present and all nil. Exists only as error.v1; v0 has no such code.
+        /// </summary>
+        public static CultNetErrorV1Message LimitReached(string? messageId) => new CultNetErrorV1Message
+        {
+            Error = "limit_reached: the session's remembered-write limit is full",
+            Code = "limit_reached",
+            Details = new CultNetErrorDetails(),
+            MessageId = string.IsNullOrEmpty(messageId) ? null : messageId
+        };
+
+        /// <summary>Gets the v0 form, dropping the id.</summary>
+        public CultNetErrorMessage ToV0() => new CultNetErrorMessage
+        {
+            Error = Error,
+            RoutingHint = RoutingHint,
+            Code = Code,
+            Details = Details
+        };
+    }
+
+    /// <summary>
+    /// <c>cultnet.write_admitted.v0</c>: the receipt for one admitted put or delete, sent after its commit point.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetWriteAdmittedMessage : ICultNetSchemaMessage
+    {
+        /// <summary>Gets or sets the schema version.</summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.WriteAdmitted;
+        /// <summary>Gets or sets the messageId of the admitted write, echoed.</summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>Gets or sets <c>put</c> or <c>delete</c>.</summary>
+        [Key("operation")] public string Operation { get; set; } = string.Empty;
+        /// <summary>Gets or sets the schemaId of the admitted write, echoed.</summary>
+        [Key("schemaId")] public string SchemaId { get; set; } = string.Empty;
+        /// <summary>Gets or sets the recordKey of the admitted write, echoed.</summary>
+        [Key("recordKey")] public string RecordKey { get; set; } = string.Empty;
     }
 
     /// <summary>

@@ -11,7 +11,7 @@ import { gzipSync } from "node:zlib";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { EMPTY_SHA256, packContent, sha256Hex, type CultMeshCdnArtifactManifest } from "cultnet-ts/content";
+import { EMPTY_SHA256, packContent, sha256Hex, type CultMeshCdnArtifactManifest } from "@gamecult/cultnet-ts/content";
 
 import { CultMeshContentError, fetchVerifiedChunk, fetchVerifiedContent, type CultMeshContentErrorCode } from "../src/content.js";
 

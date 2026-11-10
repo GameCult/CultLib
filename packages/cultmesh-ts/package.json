@@ -1,5 +1,5 @@
 {
-  "name": "cultmesh-ts",
+  "name": "@gamecult/cultmesh-ts",
   "version": "0.2.0",
   "description": "CultMesh local typed state and mesh catalog primitives for TypeScript runtimes.",
   "main": "dist/index.js",
@@ -24,7 +24,8 @@
     "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
     "prepack": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
     "typecheck": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json --pretty false",
-    "test": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json && node ../../node_modules/typescript/bin/tsc -p tsconfig.test.json && node --expose-gc --test dist-test/test/*.test.js"
+    "test": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json && node ../../node_modules/typescript/bin/tsc -p tsconfig.test.json && node --expose-gc --test dist-test/test/*.test.js",
+    "test:interop": "npm --prefix ../.. run build --workspace @gamecult/cultcache-ts --workspace @gamecult/cultnet-ts && node ../../node_modules/typescript/bin/tsc -p tsconfig.json && node ../../node_modules/typescript/bin/tsc -p tsconfig.test.json && node --test --test-force-exit dist-test/test/interop/write-receipt-interop.test.js"
   },
   "keywords": [
     "cultmesh",
@@ -48,8 +49,8 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@gamecult/cultcache-ts": "^0.14.0",
-    "cultnet-ts": "^0.3.0",
+    "@gamecult/cultcache-ts": "^0.15.0",
+    "@gamecult/cultnet-ts": "^0.3.0",
     "koffi": "3.3.0"
   },
   "devDependencies": {

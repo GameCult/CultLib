@@ -21,8 +21,8 @@ import {
   type CultMeshAuthorityRouteView,
   type CultMeshAuthorityTrustPolicy,
   type CultMeshP256PublicKey,
-} from "cultnet-ts";
-import type { CultMeshAuthorityRouteMessage, CultMeshVerseDescriptorMessage } from "cultnet-ts/contracts";
+} from "@gamecult/cultnet-ts";
+import type { CultMeshAuthorityRouteMessage, CultMeshVerseDescriptorMessage } from "@gamecult/cultnet-ts/contracts";
 
 import {
   CultMeshQuicNativeRuntime,

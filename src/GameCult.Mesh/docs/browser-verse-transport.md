@@ -12,19 +12,21 @@ over binary loopback CultNet WebSocket routes under an explicit
 `local-development` trust policy. It proves one canonical
 command effect, idempotent retry, shared observation, provider restart on a new
 physical route, browser rediscovery, retained lease resubscription, and a second
-canonical command after reconnection.
+canonical command after reconnection. Running the sample needs a sibling Eve
+checkout (`--eve-root`); it is not part of `CultLib.sln` and does not build
+standalone.
 
 The current substrate has a browser client boundary and local live proof, but
 not a complete public Verse proof:
 
-- `cultmesh-ts` is a Node package and imports `node:dgram` at its root;
-- `cultnet-ts/contracts` is the browser-safe contract entrypoint; the package
+- `@gamecult/cultmesh-ts` is a Node package and imports `node:dgram` at its root;
+- `@gamecult/cultnet-ts/contracts` is the browser-safe contract entrypoint; the package
   root still includes Node transport, filesystem, crypto, stream, and UDP
   modules and must not enter browser bundles;
 - C# and TypeScript now share `cultnet.database_subscribe.v0`,
   `cultnet.database_unsubscribe.v0`, and `cultnet.database_change_raw.v0`;
-  `cultmesh-browser` consumes those messages as explicit document leases;
-- `cultmesh-browser` owns stable identity, route refresh, resubscription, and
+  `@gamecult/cultmesh-browser` consumes those messages as explicit document leases;
+- `@gamecult/cultmesh-browser` owns stable identity, route refresh, resubscription, and
   typed operation correlation without exposing direct document writes;
 - `CultMeshBrowserOdinRendezvous` resolves stable Verse/provider identity with
   `cultmesh.verse_catalog_request.v0` and
@@ -110,8 +112,8 @@ Shared paths:
 Deletion line:
 
 - the jsdom checkpoint remains labeled as a Node-hosted DOM proof;
-- browser applications import `cultmesh-browser` and
-  `cultnet-ts/contracts`, never the Node-only package roots;
+- browser applications import `@gamecult/cultmesh-browser` and
+  `@gamecult/cultnet-ts/contracts`, never the Node-only package roots;
 - subscription messages remain one shared schema contract across the C# and
   TypeScript catalogs;
 - the real provider adapter must consume the canonical WebSocket message lane;

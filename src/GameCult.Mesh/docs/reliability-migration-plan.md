@@ -574,7 +574,7 @@ registration, renewal, stable publication order, reconnect and replay,
 duplicate receipt reuse, explicit withdrawal, and the negative stop-during-
 registration timeline, durable receipt replay, observer isolation, conflicting
 command IDs, and exception-safe shutdown. The empty-consumer tarball smoke proves the session is
-present in the installable `cultmesh-ts` package. A live Odin transport adapter
+present in the installable `@gamecult/cultmesh-ts` package. A live Odin transport adapter
 and the VoidBot migration remain required for the production proof.
 
 ## Phase 3: Authority as a Mandatory Boundary

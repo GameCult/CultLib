@@ -1,7 +1,13 @@
 # Changelog
 
-All notable changes to `cultmesh-browser` are recorded here, following
+All notable changes to `@gamecult/cultmesh-browser` are recorded here, following
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## Unreleased
+
+### Breaking
+
+- The package is renamed `cultmesh-browser` to `@gamecult/cultmesh-browser` (the repo already scopes `@gamecult/cultcache-ts`), so the unscoped name cannot be claimed by someone else. Import from `@gamecult/cultmesh-browser` and its subpaths; the API is unchanged. Depends on `@gamecult/cultnet-ts`; the interop test uses `@gamecult/cultmesh-ts`.
 
 ## [0.4.0]
 
