@@ -82,6 +82,17 @@ public struct quaternion : IEquatable<quaternion>
         }
     }
 
+    /// <summary>
+    /// Rotation of <paramref name="radians"/> about <paramref name="unitAxis"/>, right-handed:
+    /// (axis sin(r/2), cos(r/2)). The axis must be unit; it is not normalised here.
+    /// </summary>
+    public static quaternion AxisAngle(float3 unitAxis, float radians)
+    {
+        var half = 0.5f * radians;
+        var s = math.sin(half);
+        return new quaternion(unitAxis.x * s, unitAxis.y * s, unitAxis.z * s, math.cos(half));
+    }
+
     public static implicit operator quaternion(float4 value) => new(value.x, value.y, value.z, value.w);
     public static implicit operator float4(quaternion value) => new(value.x, value.y, value.z, value.w);
 

@@ -519,6 +519,12 @@ helpers that HLSL lacks (`float2x2.Rotate`, `float3x3.Euler`, `quaternion`,
 `snoise`) enter only when a consumer needs them, with their semantics stated in
 code.
 
+`quaternion` now carries rotation algebra for GameCult.Animation (ruling
+`aetheria-release:ruling:solver-in-gamecult-animation`) in `math.Quaternion.cs`:
+Hamilton product, xyzw, radians, `mul(a, b)` applies `b` first, and
+`q == mul(swing, twist)`. HLSL's vector `mul(v, v)` (the inner product) is defined so that
+`mul(float4, float4)` cannot bind to the quaternion product.
+
 Known C# friction: under `using static CultMath.math;` the constructor
 functions (`float3(...)`, `float3x3(...)`) hide the type names in member access,
 so static members need a qualified type (`CultMath.float3x3.Euler(...)`).
