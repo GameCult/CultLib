@@ -8,7 +8,7 @@ using MessagePack.Formatters;
 namespace GameCult.Caching.MessagePack;
 
 /// <summary>
-/// The one place an unknown union arm or an unnamed subtype is decided. A union is an abstract class or interface carrying
+/// The one sensor of an unknown union arm, an unnamed subtype and a slot past the reader's declared slots. A union is an abstract class or interface carrying
 /// its own [Union] attributes (never inherited: a union whose arms are also a union has its own key set). MessagePack-CSharp
 /// still encodes the [key, armSlots] shape; this wraps its formatter so that a key the union does not declare is refused on
 /// read, and a value whose runtime type is not a declared arm is refused on write, where MessagePack alone yields null and nil.
@@ -18,7 +18,58 @@ internal sealed class CultUnionGuard(IFormatterResolver inner) : IFormatterResol
     public IMessagePackFormatter<T>? GetFormatter<T>()
     {
         var arms = typeof(T).GetCustomAttributes<UnionAttribute>(inherit: false).ToArray();
-        return arms.Length == 0 || inner.GetFormatter<T>() is not { } formatter ? null : new Formatter<T>(formatter, arms);
+        if (arms.Length == 0)
+            return DeclaredSlots(typeof(T)) is { } declared && inner.GetFormatter<T>() is { } objectFormatter
+                ? new SlotFormatter<T>(objectFormatter, declared)
+                : null;
+        return inner.GetFormatter<T>() is not { } formatter ? null : new Formatter<T>(formatter, arms);
+    }
+
+    // The slots a concrete int-keyed [MessagePackObject] type declares (highest [Key] plus one), by MessagePack's member rule: public
+    // instance properties and fields, base keys included, [IgnoreMember] excluded. Null for any other type, which the guard leaves alone.
+    private static int? DeclaredSlots(Type type)
+    {
+        if (type.IsAbstract || type.IsInterface || type.IsGenericTypeDefinition) return null;
+        if (type.GetCustomAttribute<MessagePackObjectAttribute>(inherit: true) is not { KeyAsPropertyName: false }) return null;
+        var highest = -1;
+        const BindingFlags members = BindingFlags.Public | BindingFlags.Instance;
+        foreach (var member in type.GetFields(members).Cast<MemberInfo>().Concat(type.GetProperties(members)))
+        {
+            if (member.GetCustomAttribute<IgnoreMemberAttribute>(inherit: true) != null) continue;
+            if (member.GetCustomAttribute<KeyAttribute>(inherit: true)?.IntKey is { } key) highest = Math.Max(highest, key);
+        }
+
+        return highest + 1;
+    }
+
+    // Counts a concrete object's array header against its declared slots and notes the excess into the open CultSlotScope, then lets the
+    // inner formatter read it unchanged: no byte scan, no second decode. With no scope open it is a depth-free pass-through.
+    private sealed class SlotFormatter<T>(IMessagePackFormatter<T> inner, int declared) : IMessagePackFormatter<T>
+    {
+        public void Serialize(ref MessagePackWriter writer, T value, MessagePackSerializerOptions options) =>
+            inner.Serialize(ref writer, value, options);
+
+        public T Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+        {
+            var scope = CultSlotScope.Current;
+            if (scope == null) return inner.Deserialize(ref reader, options);
+            var peek = reader.CreatePeekReader();
+            if (!peek.TryReadNil() && peek.NextMessagePackType == MessagePackType.Array)
+            {
+                var count = peek.ReadArrayHeader();
+                if (count > declared) scope.Note(typeof(T).Name, count, declared);
+            }
+
+            scope.Depth++;
+            try
+            {
+                return inner.Deserialize(ref reader, options);
+            }
+            finally
+            {
+                scope.Depth--;
+            }
+        }
     }
 
     private sealed class Formatter<T>(IMessagePackFormatter<T> inner, UnionAttribute[] arms) : IMessagePackFormatter<T>

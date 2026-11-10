@@ -1039,7 +1039,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void AnOverrideOfASlotTheTypeNeverHadIsReportedOnEveryLoadAndStaysStoredUntilTheVariantIsWritten()
+        public void AnOverrideOfASlotTheTypeNeverHadIsReportedOnEveryLoadAndHoldsTheVariantReadOnly()
         {
             var path = WriteStore(PlainGear("hand-base"), OverridingRecord("hand-variant", "hand-base",
                 CultVariantOverride.Set(99, new byte[] { 0x01 }),
@@ -1059,14 +1059,22 @@ namespace GameCult.Caching.Tests
             {
                 Assert.That(reopened.BackingStores[0].LastSchemaMigrationReports.SelectMany(report => report.IgnoredExtraSlots), Is.EqualTo(new[] { 99 }));
                 Assert.That(reopened.Get<VariantGear>(new CultRecordKey("hand-variant"))!.Name, Is.EqualTo("hand variant"));
-                reopened.Commit(batch => batch.UpsertVariant(new CultRecordKey("hand-variant"), new CultRecordKey("hand-base"), new[]
+                var variant = new CultRecordKey("hand-variant");
+                Assert.That(reopened.IsWritable(variant), Is.False, "an override of a slot the type lacks, which the catalog did not report, is a mark nothing explains");
+                var overrides = new[]
                 {
                     reopened.Override<VariantGear>(nameof(VariantGear.Name), "hand variant"),
                     reopened.Override<VariantGear>(nameof(VariantGear.Code), "hand-code")
-                }));
+                };
+                var rewrite = Assert.Throws<CultSchemaConflictException>(() => reopened.Commit(batch => batch.UpsertVariant(variant, new CultRecordKey("hand-base"), overrides)))!;
+                Assert.That(rewrite.UnreadSlots, Is.Not.Null);
+                Assert.That(rewrite.UnreadSlots!.TypeName, Is.EqualTo(nameof(VariantGear)));
+                Assert.That(rewrite.UnreadSlots.SlotCount, Is.EqualTo(100));
+                Assert.Throws<CultSchemaConflictException>(() => reopened.Commit(batch => batch.Flatten(variant)));
+                Assert.Throws<CultSchemaConflictException>(() => reopened.Commit(batch => batch.Remove(variant)));
             }
 
-            Assert.That(OverriddenSlotsOn(path, "hand-variant").OrderBy(slot => slot), Is.EqualTo(new[] { 0, 2 }), "a write of the variant stores only what it was given");
+            Assert.That(OverriddenSlotsOn(path, "hand-variant").OrderBy(slot => slot), Is.EqualTo(new[] { 0, 2, 99 }), "the refused writes left the variant as stored");
         }
 
         private static int[] OverriddenSlotsOn(string path, string key) =>

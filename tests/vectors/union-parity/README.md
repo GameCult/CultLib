@@ -58,9 +58,19 @@ of it refused). A reader decodes the value of `union-surface.msgpack` from each;
 | `extra-slot-nested-record.msgpack` | nested-record | Composition `comp` |
 | `extra-slot-arm.msgpack` | arm | the Root Box arm |
 | `extra-slot-list-element.msgpack` | list-element | Text `s1`, an element of Use.Slots |
+| `extra-slot-unit-arm.msgpack` | unit-arm | not a UnionSurface: a bare UnitOutcome arm `[2, [extra]]` where Denied2 declares no slot (union `UnitOutcome`, key 2) |
 
-The C# reference reads these today and its slot-tolerance cut is what makes them read-only; this cut asserts only
-that the value is read.
+`depth-skipped-at-limit.msgpack` (bounds file) is also `read-only`: its extra slot is a deeply nested value at depth 0.
+Five rows of `outcomes.msgpack` are `read-only` (record, nested-record, arm, list-element, unit-arm).
+
+`extra-slot-store.cc` is a single-file store holding two records of `tests.union_surface`: `marked` (the
+`extra-slot-nested-record.msgpack` payload) and `clean` (the ordinary value); the store's clock is pinned to
+2026-01-01T00:00:00Z as `union-surface.cc`'s.
+
+Every runtime asserts the same for a `read-only` payload loaded as a store record: the value is read past the extra
+slot, the record reports the unread slots (the first type read with them, the slots it carried and the slots the
+reader declares) and is not writable, and a write or removal of it is refused before anything is staged. Opening
+`extra-slot-store.cc` and writing `clean` leaves `marked` byte for byte, with its schema id and its catalog entry.
 
 ## Bounds (`bounds-outcomes.msgpack`)
 

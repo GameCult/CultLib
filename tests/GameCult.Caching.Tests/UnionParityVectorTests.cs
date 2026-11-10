@@ -58,7 +58,7 @@ namespace GameCult.Caching.Tests
             Assert.That(Convert.ToHexString(reference), Is.EqualTo(Convert.ToHexString(File.ReadAllBytes(path))), $"vector {name}");
         }
 
-        private static byte[] Committed(string name)
+        internal static byte[] Committed(string name)
         {
             var path = VectorPath(name);
             Assert.That(File.Exists(path), Is.True, $"vector {name} is committed");
@@ -297,6 +297,9 @@ namespace GameCult.Caching.Tests
                 Surface(extra: new Extra(RootArm: true))),
             new Case("extra-slot-list-element.msgpack", "read-only", "Node", 1, "list-element",
                 Surface(extra: new Extra(ListElement: true))),
+            // A bare UnitOutcome arm (the fixture's unit-arm union), not a UnionSurface payload: [2, [extra]] where Denied2 declares no slot.
+            new Case("extra-slot-unit-arm.msgpack", "read-only", "UnitOutcome", 2, "unit-arm",
+                Raw(ArmOf(2, ExtraSlot))),
         };
 
         private static byte[] OutcomesFile() => Raw((ref MessagePackWriter w) =>
@@ -317,6 +320,7 @@ namespace GameCult.Caching.Tests
             "Node" => typeof(Node).FullName!,
             "Outcome" => typeof(Outcome).FullName!,
             "CraftedItem" => typeof(CraftedItem).FullName!,
+            "UnitOutcome" => typeof(UnitOutcome).FullName!,
             "UnionSurface" => typeof(UnionSurface).FullName!,
             _ => throw new ArgumentOutOfRangeException(nameof(logical), logical, null)
         };
@@ -413,6 +417,34 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        // The store the slot-readonly tests open and the other runtimes read: the extra-slot-nested-record payload as the record "marked"
+        // beside the ordinary value as "clean". The store's clock is pinned as union-surface.cc's.
+        [Test]
+        public void ExtraSlotStoreVectorHoldsAMarkedAndACleanRecord()
+        {
+            var work = Path.Combine(Path.GetTempPath(), $"cultlib-unionparity-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(work);
+            try
+            {
+                var scratch = Path.Combine(work, "extra-slot-store.cc");
+                using (var cache = CultCacheMessagePack.Create(scratch, new CultCacheOpenOptions { Registry = Registry, StoreFlushOnDispose = true }))
+                {
+                    cache.Clock = () => StoredAt;
+                    cache.UpsertAsync(typeof(UnionSurface), Constructed(), new CultRecordKey("marked")).GetAwaiter().GetResult();
+                    cache.UpsertAsync(typeof(UnionSurface), Constructed(), new CultRecordKey("clean")).GetAwaiter().GetResult();
+                    cache.FlushAsync().GetAwaiter().GetResult();
+                }
+
+                var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(scratch));
+                snapshot.Records.Single(record => record.Key == "marked").Payload = Committed("extra-slot-nested-record.msgpack");
+                Check("extra-slot-store.cc", CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            }
+            finally
+            {
+                Directory.Delete(work, recursive: true);
+            }
+        }
+
         // The value names every arm shape the vectors exist to hold other runtimes to.
         [Test]
         public void ConstructedValueExercisesEveryArmShape()
@@ -475,8 +507,11 @@ namespace GameCult.Caching.Tests
                 else
                 {
                     Assert.That(outcome, Is.EqualTo("read-only"), file);
-                    // The record is read whole; what makes it read-only is the slot rule of the slot-tolerance cut, not asserted here.
-                    Assert.That(Describe(Decode(payload)), Is.EqualTo(golden), $"{file}: the extra slot is read past");
+                    // The extra slot is read past; that the record then loads read-only is asserted in SlotReadOnlyTests, store by store.
+                    if (union == "UnitOutcome")
+                        Assert.That(MessagePackSerializer.Deserialize<UnitOutcome>(payload, UnitOptions), Is.TypeOf<Denied2>(), $"{file}: the extra slot is read past");
+                    else
+                        Assert.That(Describe(Decode(payload)), Is.EqualTo(golden), $"{file}: the extra slot is read past");
                 }
             }
         }
