@@ -208,6 +208,49 @@ namespace GameCult.Caching.Tests
             Assert.That(cache.Commit(batch => batch.Upsert(new SurfaceDeclaring { Id = "new" }, new CultRecordHandle<SurfaceDeclaring>(Clean))), Is.True);
         }
 
+        // The record stored under a listed compatible id whose catalog entry has one more member than the reader (slot 7), the payload
+        // carrying that slot at depth 0: the loss a declaration consents to. With a nested mark beside it, nothing is consented to.
+        [TestCase("union-surface.msgpack", true, TestName = "ADepthZeroSlotTheCatalogReportsUnderAListedIdIsConsentedTo")]
+        [TestCase("extra-slot-nested-record.msgpack", false, TestName = "ANestedMarkBesideACatalogReportedSlotIsNotConsentedTo")]
+        public void ACompatibleIdConsentsOnlyToTheDepthZeroSlotTheCatalogReports(string vector, bool consented)
+        {
+            var original = UnionParityVectorTests.Committed(vector);
+            var path = Seed(SurfaceRegistry, typeof(Surface), () => new Surface { Id = "x" }, AppendRootSlot(original, "wider writer"));
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var entry = snapshot.SchemaCatalog.Single();
+            var last = entry.Members.OrderBy(member => member.Slot).Last();
+            entry.Members = entry.Members.Append(new CultSchemaMemberCatalogEntry { Slot = 7, MemberName = "Wider", TypeName = last.TypeName }).ToArray();
+            entry.SchemaId = OldId;
+            foreach (var record in snapshot.Records) record.SchemaId = OldId;
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+
+            using var cache = Open(path, DeclaringRegistry);
+            var unread = Stored(cache, Marked).UnreadSlots;
+            Assert.That(unread, Is.Not.Null);
+            Assert.That(unread!.Explained, Is.EqualTo(consented));
+            Assert.That(cache.IsWritable(Marked), Is.EqualTo(consented));
+            if (consented)
+                Assert.That(cache.Commit(batch => batch.Upsert(new SurfaceDeclaring { Id = "new" }, new CultRecordHandle<SurfaceDeclaring>(Marked))), Is.True);
+            else
+                Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.Remove(Marked)));
+        }
+
+        // The payload's root array with one string slot appended.
+        private static byte[] AppendRootSlot(byte[] payload, string value)
+        {
+            var reader = new MessagePackReader(payload);
+            var count = reader.ReadArrayHeader();
+            var start = (int)reader.Consumed;
+            for (var i = 0; i < count; i++) reader.Skip();
+            var end = (int)reader.Consumed;
+            return Emit((ref MessagePackWriter w) =>
+            {
+                w.WriteArrayHeader(count + 1);
+                w.WriteRaw(payload.AsSpan(start, end - start));
+                w.Write(value);
+            });
+        }
+
         private static void Relabel(string path, string id)
         {
             var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
