@@ -150,6 +150,8 @@ test("fork card: the body digest is SHA-256 of the compact JSON in the stated ke
   }
   assert.ok(byName.get("plain_answer_choice_A").sha256.startsWith("8a4d5b2e"));
   assert.ok(byName.get("legal_retraction").sha256.startsWith("9f807538"));
+  assert.ok(byName.get("legal_retraction_door_form").sha256.startsWith("84576840"));
+  assert.ok(byName.get("legal_retraction_door_form").input.retracts.endsWith(".n1"), "the door's form: the wire n<seq> converted to the full key");
   assert.ok(byName.get("illegal_i_retraction_with_an_answer_retracted_true").sha256.startsWith("935cab1a"));
   assert.ok(byName.get("illegal_iii_plain_answer_with_a_target_retracted_false").sha256.startsWith("82b24ccc"));
   assert.ok(byName.get("illegal_ii_no_answer_no_target_retracted_true").sha256.startsWith("34ef86ed"));
