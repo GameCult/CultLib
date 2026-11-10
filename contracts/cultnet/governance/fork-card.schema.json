@@ -567,8 +567,7 @@
             "fork_closed",
             "choice_invalid",
             "bad_retraction",
-            "already_retracted",
-            "ruled"
+            "already_retracted"
           ]
         },
         "options_hash": {

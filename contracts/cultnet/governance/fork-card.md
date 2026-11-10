@@ -25,9 +25,9 @@ All documents are CultNet map-mode: every key written, nil where absent, closed 
 
 - `fork_id`: the mind's `question` key, `<campaign>:question:<label>`.
 - **Hashed (the shown members):** `title`, `context`, `options` (each `{id, text}`, in shown order), `recommendation` (an option id, **never nil**: the stored `question` requires `recommended`), `depends` (strings, each the `campaign:kind:label` rendering of a stored reference, in shown order, empty when none).
-- **Not hashed:** `fork_id` (bound beside the hash), `leans` (an option id or nil), `flag`, `raised_in`, `deciders`, `status` (`open` or `closed`), `ruling` (the ruling id when closed), `ruled_from` (answer ids a ruling has been admitted from), `order`, and `options_hash` itself.
+- **Not hashed:** `fork_id` (bound beside the hash), `leans` (an option id or nil), `flag`, `raised_in`, `deciders`, `status` (`open` or `closed`), `ruling` (the ruling id when closed), `ruled_from` (answer ids a ruling has been admitted from; non-empty only on a closed card), `order`, and `options_hash` itself.
 - **`deciders` is read-only data.** The list is set outside the Mind, through Bifrost's admin path; the Mind reads it and the card projection copies it. A question's own `audience` may only narrow it. A Mind never writes it, so a Mind cannot add itself and answer its own fork.
-- Rules a schema cannot say, each with a negative vector: option ids are unique; `recommendation` and `leans` name an option; deciders are unique; a closed card names its `ruling`; `options_hash` equals the hash of the shown members.
+- Rules a schema cannot say, each with a negative vector: option ids are unique; `recommendation` and `leans` name an option; deciders are unique; a closed card names its `ruling`; an open card's `ruled_from` is empty (a ruling that answers a fork closes it); `options_hash` equals the hash of the shown members.
 
 ### Options hash (canonical bytes)
 
@@ -45,18 +45,20 @@ Vectors `optionsHash`: the seven of the binding file (`heimdall_A..G`), computed
 
 ### answer_request
 
-`{schemaVersion, fork_id, options_hash, answer, retracted, retracts, answered_at}`. `answer` is `{choice, note}` (at least one non-nil) or nil on a retraction. `choice` is an option id; `note` is the person's words, verbatim, 1 to 4000 characters, not blank. `answered_at` is the client's claim. **A request never carries `answerer` or `authority`**: both are stamped by Huginn (`answerer` from the verified subject the receiver passes; `authority` from the door's configuration). A body that names either key at any depth is refused whole, never stripped (`body_forbidden_field`); any other unknown key is `body_unknown_field`. The request type Bifrost sends over the second door is this document; it has no field for either key, so a client cannot supply them by construction, and Bifrost's scan is the first line, not the only one. How Huginn receives the verified subject is the door's authenticated context, not a body field (open choice 3). In map-mode `retracted` is always written (the binding file's optional `retracted` becomes `false`).
+`{schemaVersion, fork_id, options_hash, answer, retracted, retracts, answered_at}`. `answer` is `{choice, note}` (at least one non-nil) or nil on a retraction. `choice` is an option id; `note` is the person's words, verbatim, 1 to 4000 characters (code points, as JSON Schema counts them), not blank. `answered_at` is the client's claim. **A request never carries `answerer` or `authority`**: both are stamped by Huginn (`answerer` from the verified subject the receiver passes; `authority` from the door's configuration). A body that names either key at any depth is refused whole, never stripped (`body_forbidden_field`); any other unknown key is `body_unknown_field`. The request type Bifrost sends over the second door is this document; it has no field for either key, so a client cannot supply them by construction, and Bifrost's scan is the first line, not the only one. How Huginn receives the verified subject is the door's authenticated context, not a body field (open choice 3). In map-mode `retracted` is always written (the binding file's optional `retracted` becomes `false`).
 
 ### desk_answer (the stored kind)
 
-`{schemaVersion, answer_id, fork_id, outcome, of, retracts, code, options_hash, choice, note, answered_at, received_at, claim_in_future, answerer, authority}`, key `<campaign>:desk_answer:<question-label>.n<seq>`; `answer_id` is `n<seq>`, assigned by Huginn per question, and **an answer is named by its answer id** everywhere (`retracts`, `of`, `ruled_from`). One tagged `outcome`, each variant carrying only its own link:
+`{schemaVersion, answer_id, fork_id, outcome, of, retracts, code, options_hash, choice, note, answered_at, received_at, claim_in_future, answerer, authority}`, key `<campaign>:desk_answer:<question-label>.n<seq>`; `answer_id` is `n<seq>`, assigned by Huginn per question, and **an answer is named by its answer id** everywhere (`retracts`, `of`, `ruled_from`).
+
+The stamped `authority` field of a stored answer is an **attribution**: the role the verified account holds (`Operator`, `Steward`, `Member`), copied from Bifrost's state. A stored answer confers no authority. Authority exists only where a ruling cites a counted answer ("Operator authority" below); the field keeps the binding file's spelling (open choice 8). One tagged `outcome`, each variant carrying only its own link:
 
 - `Counted`: the answer that counts. `of`, `retracts`, `code` nil.
 - `Revision`: a later passing answer, kept, not counted while the first stands. `of` names the counted answer at the time.
 - `Retraction`: the stored form of `retracted: true` plus `retracts`. `retracts` names the answer retracted; `choice` and `note` nil. The illegal pair (a retraction with no target, or a target with no retraction) cannot be written.
-- `Refused`: any refusal from steps 3 to 7 or R1 to R3, with its `code`, stored too. `choice` and `note` keep what the body carried.
+- `Refused`: any refusal from steps 4 to 7 or R1 and R2, with its `code`, stored too. `choice` and `note` keep what the body carried.
 
-`received_at` is Huginn's admission time; "first" means first by admission order (the `n<seq>` ordinal), never by `answered_at`. `claim_in_future` is true when `answered_at` is more than five minutes after `received_at`: accepted but flagged. A body refused for its shape (steps 1 and 2, and an unknown fork, which has no question to key a record under) never reaches Huginn and is not stored; it gets a `refusal` and no answer id.
+`received_at` is Huginn's admission time; "first" means first by admission order (the `n<seq>` ordinal), never by `answered_at`. `claim_in_future` is true when `answered_at` is more than five minutes after `received_at`: accepted but flagged. **Not stored, and no answer id:** a body refused at step 1 or 2 (Bifrost; it never reaches Huginn), and a body naming an unknown fork (step 3; Huginn answers it from its stored forks, but with no question there is nothing to key a record under). Each gets a `refusal` and is dropped. A malformed body is therefore never stored, and neither is an unknown fork. Every refusal from step 4 on is stored.
 
 ### Counting rules (in order; the first failure refuses with that code)
 
@@ -76,14 +78,14 @@ Vectors `optionsHash`: the seven of the binding file (`heimdall_A..G`), computed
 
 - R1 form: it carries no `answer`, it names a `Counted` or `Revision` answer of this fork under this `options_hash`; else `bad_retraction` (400). A retraction naming an answer already retracted is `already_retracted` (409). `retracts` on a body that is not a retraction is `bad_retraction`.
 - R2 who: the original answerer or any other decider; step 5 already requires a decider.
-- R3 until ruled: refused `ruled` (409) when the card's `ruled_from` names the answer. A ruling counts from the Mind admitting it; the fork may stay open after a ruling that only illustrates or sketches, which is the case `ruled` exists for. A closed fork refuses at step 6 as `fork_closed`.
+- R3 is dropped and its label stays vacant, so R4 keeps its name in the binding file. A ruling that answers a fork closes it (Eureka and Heimdall, 2026-11-10), so a ruling cannot cite an answer on an open fork (that is the stale-click gap, and a card with `ruled_from` set and `status: open` is invalid), and a retraction after a ruling meets step 6: refused `fork_closed`, stored. There is no `ruled` code (vector `V10a_a_ruling_that_closed_the_fork_makes_a_retraction_fork_closed`).
 - R4 counted answer: retracting the counted answer removes it from the count and the next passing answer in admission order counts again. Retracting an answer that was not counted changes nothing. After every answer is retracted, a fresh answer is `Counted`. Records stay append-only.
 
 **The counted answer is derived**, not stored: the first `Counted` or `Revision` answer under the card's current `options_hash` that no `Retraction` names. When the card changes, answers under the old hash stop counting and the next answer under the new hash is `Counted` (vectors `a_changed_card_...`). The `record` projection carries it as `counted_answer_id`.
 
 ### Operator authority
 
-A ruling may carry `authority: Operator` only if it cites (`ruling_cite.answer_id`) a stored `desk_answer` whose outcome is `Counted` and whose stamped `authority` is `Operator` (or a stamped relay of her words from a mapped door, which this contract does not model). The citation makes R3 checkable: `ruled_from` is a field, not an inference. Negative vectors (`rulingCites`): no citation, a `Revision`, a `Refused` answer, a Counted answer by a non-operator, an answer that does not exist. Other authorities need no citation.
+A ruling may carry `authority: Operator` only if it cites (`ruling_cite.answer_id`) a stored `desk_answer` whose outcome is `Counted` and whose stamped attribution (the answer's `authority` field) is `Operator` (or a stamped relay of her words from a mapped door, which this contract does not model). The citation is what gives a ruling authority: an attribution on an answer is a fact about the account, and authority exists only where a ruling cites a counted answer. The cited answer id is what `ruled_from` lists on the closed card. Negative vectors (`rulingCites`): no citation, a `Revision`, a `Refused` answer, a Counted answer by a non-operator, an answer that does not exist. Other authorities need no citation.
 
 ## Old format, the mind's record, and what maps to what
 
@@ -108,7 +110,7 @@ The old desk (`index.html`) read `questions/<id>` and wrote `answers/<id>` in a 
 | answer `{choice: key or null, note, question, updatedAt}`, one mutable document per question | none | `answer_request` then an append-only `desk_answer` |
 | `note`: her words verbatim | | `answer.note`, verbatim |
 | "Clear pick": `choice` back to null so the note stands alone | | an `answer` with `choice` nil and `note` set, as the first answer or as a `Revision` |
-| "Changing an answer is fine until it's admitted as a ruling" | | a later answer is a `Revision`; `Retraction` withdraws one; neither changes who counted first, and `ruled` stops a retraction once a ruling is admitted |
+| "Changing an answer is fine until it's admitted as a ruling" | | a later answer is a `Revision`; `Retraction` withdraws one; neither changes who counted first, and a ruling that answers the fork closes it, after which no answer or retraction is taken (`fork_closed`) |
 
 Differences that need Void's choice: the old page **overwrites** one answer per question and the new store **appends**, so the booth cannot show "your answer" as one mutable field (it shows the latest answer by the person, plus its history); the old page needs no identity and the new one stamps `answerer` from a verified session; the old `label` has nowhere to live unless the card's `text` carries it.
 
@@ -126,8 +128,9 @@ Option B, **Bifrost receives the answer and Huginn stores it** (the design in th
 
 - Spelling: every field is as the binding file names it (`fork_id`, `options_hash`, `answered_at`, `retracted`, `retracts`, `answer.choice`, `answer.note`, `recommendation`, `depends`, option `id`), except that `schemaVersion` keeps CultNet's camelCase and `answer_id` replaces the earlier `receipt id` (Persona brief).
 - Map-mode writes every key: `retracted` is always present; nothing is "optional".
-- `Refused` stores every refusal from steps 3 to 7 and R1 to R3 (his section 1.3b); only steps 1 and 2 and `fork_unknown` are door-only. The binding file does not say whether `fork_unknown` is stored; it cannot be keyed without a question, so it is not (open choice 4).
+- `Refused` stores every refusal from steps 4 to 7 and R1 and R2 (his section 1.3b); only steps 1 and 2 and `fork_unknown` are not stored. The binding file does not say whether `fork_unknown` is stored; it cannot be keyed without a question, so it is not (open choice 4).
 - The binding file's `choice_valid` has no named refusal code; this page names it `choice_invalid`. `fork_known` is `fork_unknown`. A type-invalid body is `body_invalid`.
+- `ruled` (his R3 and V10) is dropped: a ruling that answers a fork closes it, so the case is `fork_closed` (V4, V10a). His file drops it too.
 - The recommendation is never nil. The binding file's earlier vectors D and E used a nil recommendation; its updated D and E use `"a"`, as here.
 - Hash vectors: A, B, C, D, E, F and G of the binding file are reproduced digest for digest by the Python generator, the C# suite and the TypeScript suite (the generator prints `same` for each; none differs).
 
@@ -140,3 +143,5 @@ Option B, **Bifrost receives the answer and Huginn stores it** (the design in th
 5. Whether `leans` and `flag`, which the booth shows, should join the hash. The binding file's five members do not include them; a changed lean would not make an answer stale.
 6. What the person sees of a retracted counted answer when the next answer counts: this contract only says the count moves.
 7. `received_at` is not in the binding file's stored fields; it is kept for `claim_in_future` and could be dropped if the ordinal alone decides order.
+8. The stamped `authority` field is an attribution, not an authority (above); renaming it `attribution` would say so, at the price of a new key the door must also refuse in a body.
+9. Which scope and audience a fork answer needs from Bifrost PR #37: its scopes (`votes.read`, `votes.cast`) and audience (`bifrost-votes`) name votes, and this page says only "verified session or bearer".
