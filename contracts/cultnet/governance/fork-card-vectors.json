@@ -431,7 +431,7 @@
     },
     {
       "name": "illegal_i_retraction_with_an_answer_retracted_true",
-      "status": "pending_eureka_merge_huginn_30_cut-desk-digest-retracted.r2",
+      "status": "reproduced_on_huginn_main_f0ca504_reported_by_eureka_not_rerun_here",
       "why": "(i) answer present, retracted true, target Q1.n1",
       "input": {
         "fork": "eureka-state:question:Q1",
@@ -448,7 +448,7 @@
     },
     {
       "name": "illegal_iii_plain_answer_with_a_target_retracted_false",
-      "status": "pending_eureka_merge_huginn_30_cut-desk-digest-retracted.r2",
+      "status": "reproduced_on_huginn_main_f0ca504_reported_by_eureka_not_rerun_here",
       "why": "(iii) the same bytes as (i) with retracted false: another body, so request_id_conflict",
       "input": {
         "fork": "eureka-state:question:Q1",
@@ -465,8 +465,8 @@
     },
     {
       "name": "illegal_i_retraction_with_an_answer_and_no_target_retracted_true",
-      "status": "pending_eureka_merge_huginn_30_cut-desk-digest-retracted.r2",
-      "why": "(i) with the target null (the order doc: retracts set or null); Eureka re-derived it with sha256sum (order doc addendum); the fix branch's pinned test does not yet carry it",
+      "status": "reproduced_on_huginn_main_f0ca504_reported_by_eureka_not_rerun_here",
+      "why": "(i) with the target null (the order doc: retracts set or null); Eureka re-derived it with sha256sum (order doc addendum)",
       "input": {
         "fork": "eureka-state:question:Q1",
         "options_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -482,7 +482,7 @@
     },
     {
       "name": "illegal_ii_no_answer_no_target_retracted_true",
-      "status": "pending_eureka_merge_huginn_30_cut-desk-digest-retracted.r2",
+      "status": "reproduced_on_huginn_main_f0ca504_reported_by_eureka_not_rerun_here",
       "why": "(ii) no answer, no target, retracted true",
       "input": {
         "fork": "eureka-state:question:Q1",
