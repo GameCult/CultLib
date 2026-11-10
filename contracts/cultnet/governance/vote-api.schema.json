@@ -99,7 +99,8 @@
         "round",
         "phase",
         "commitClosesAtUtc",
-        "closesAtUtc"
+        "closesAtUtc",
+        "highStakes"
       ],
       "properties": {
         "id": {
@@ -125,6 +126,10 @@
         },
         "closesAtUtc": {
           "$ref": "#/$defs/instant"
+        },
+        "highStakes": {
+          "type": "boolean",
+          "description": "Fixed when the motion opens and never changed after: a high-stakes sealed motion needs a fresh sign-in at commit (Bifrost PR #37, D2)."
         }
       }
     },
@@ -215,6 +220,7 @@
         "candidates",
         "commitClosesAtUtc",
         "closesAtUtc",
+        "highStakes",
         "yourVoterId",
         "yourCommitment",
         "announcement"
@@ -269,6 +275,10 @@
         },
         "closesAtUtc": {
           "$ref": "#/$defs/instant"
+        },
+        "highStakes": {
+          "type": "boolean",
+          "description": "Fixed when the motion opens and never changed after: a high-stakes sealed motion needs a fresh sign-in at commit (Bifrost PR #37, D2)."
         },
         "yourVoterId": {
           "$ref": "#/$defs/uuid"
@@ -378,13 +388,15 @@
           "enum": [
             "unauthenticated",
             "forbidden",
+            "reauthentication_required",
             "not_found",
             "wrong_phase",
             "contended",
             "invalid",
             "commitment_mismatch",
             "payload_too_large",
-            "rate_limited"
+            "rate_limited",
+            "held"
           ]
         },
         "error": {
