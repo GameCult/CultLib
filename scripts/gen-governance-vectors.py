@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+"""Writes contracts/cultnet/governance/{vote-api,fork-card}-vectors.json.
+
+The bytes are spec-authored with msgpack-python (minimal ints, str8 only past 31 bytes, map keys in the order written here);
+each runtime's conformance test re-encodes the `message` and must produce the same hex. Run: python3 scripts/gen-governance-vectors.py
+Needs: pip install msgpack.
+"""
+import hashlib, json, pathlib, unicodedata
+import msgpack
+
+OUT = pathlib.Path(__file__).resolve().parent.parent / "contracts" / "cultnet" / "governance"
+def hx(m): return msgpack.packb(m, use_bin_type=True).hex().upper()
+def sha(b): return hashlib.sha256(b).hexdigest()
+
+M1 = "5b1c2e9a-3f4d-4c8e-9a61-0d7e2f4b8c13"
+M2 = "a7d3f0c2-6b15-4e29-8f3a-91c4d5e6f708"
+V1 = "0c9f6a4e-7d2b-4a35-b8e1-3f5a6c7d8e90"
+T0 = "2026-11-12T18:00:00Z"; T1 = "2026-11-15T18:00:00Z"; T2 = "2026-11-18T18:00:00Z"
+SALT = "d41d8cd98f00b204e9800998ecf8427e5f1c0a7b3e92d6a48b15c7f0e3a9d2b6"
+
+# ---------- vote API ----------
+def commitment_bytes(motion, voter, persona, rnd, candidate, reason, salt):
+    return f"gamecult.sealed_ballot.v0\n{motion}\n{voter}\n{persona}\n{rnd}\n{candidate}\n{reason}\n{salt}".encode("utf-8")
+
+def ballot(motion=M1, rnd=1, candidate="Adopt the ledger", reason="It keeps the books honest.", salt=SALT, persona=""):
+    return {"schema": "gamecult.sealed_ballot.v0", "motionId": motion, "round": rnd, "candidate": candidate,
+            "reason": reason, "salt": salt, "persona": persona}
+def digest(b, voter=V1):
+    return sha(commitment_bytes(b["motionId"], voter, b["persona"], b["round"], b["candidate"], b["reason"], b["salt"]))
+
+B_MEMBER = ballot()
+B_PERSONA = ballot(persona="libby", candidate="Defer to round two", reason="The sealed window is too short to weigh both.")
+C_MEMBER = digest(B_MEMBER); C_PERSONA = digest(B_PERSONA)
+
+def receipt(commitment, revision=1, revealed=False, motion=M1):
+    return {"schemaVersion": "gamecult.vote.receipt.v0", "motionId": motion, "voterUserAccountId": V1,
+            "commitment": commitment, "revision": revision, "committedAtUtc": "2026-11-12T19:04:11.1234567Z", "revealed": revealed}
+def motion(phase, your=None, mid=M1):
+    return {"schemaVersion": "gamecult.vote.motion.v0", "id": mid, "title": "Ledger or lantern", "summary": "Pick one.",
+            "round": 1, "priorMotionId": None, "ballotSchema": "gamecult.sealed_ballot.v0", "phase": phase,
+            "candidates": ["Adopt the ledger", "Defer to round two"], "commitClosesAtUtc": T0, "closesAtUtc": T1,
+            "yourVoterId": V1, "yourCommitment": your, "announcement": None}
+def cast_commit(c, motion=M1): return {"schemaVersion": "gamecult.vote.cast.v0", "motionId": motion, "verb": "commit", "commitment": c, "ballot": None}
+def cast_reveal(b): return {"schemaVersion": "gamecult.vote.cast.v0", "motionId": b["motionId"], "verb": "reveal", "commitment": None, "ballot": b}
+def refusal(code, error, retry=None): return {"schemaVersion": "gamecult.vote.refusal.v0", "code": code, "error": error, "retryAfterSeconds": retry}
+def item(i, title, phase): return {"id": i, "title": title, "round": 1, "phase": phase, "commitClosesAtUtc": T0, "closesAtUtc": T1}
+
+valid = [
+ ("motion_list_request_all", "motionListRequest", {"schemaVersion": "gamecult.vote.motion_list_request.v0", "phase": None}),
+ ("motion_list_request_reveal", "motionListRequest", {"schemaVersion": "gamecult.vote.motion_list_request.v0", "phase": "Reveal"}),
+ ("motion_list_two", "motionList", {"schemaVersion": "gamecult.vote.motion_list.v0", "motions": [item(M1, "Ledger or lantern", "Commit"), item(M2, "Second thoughts", "Closed")]}),
+ ("motion_list_empty", "motionList", {"schemaVersion": "gamecult.vote.motion_list.v0", "motions": []}),
+ ("motion_read_request", "motionReadRequest", {"schemaVersion": "gamecult.vote.motion_read_request.v0", "motionId": M1}),
+ ("motion_commit_phase_no_receipt", "motion", motion("Commit")),
+ ("motion_reveal_phase_committed", "motion", motion("Reveal", receipt(C_MEMBER))),
+ ("motion_closed_revealed", "motion", motion("Closed", receipt(C_MEMBER, 2, True))),
+ ("cast_commit", "cast", cast_commit(C_MEMBER)),
+ ("cast_reveal_member", "cast", cast_reveal(B_MEMBER)),
+ ("cast_reveal_persona", "cast", cast_reveal(B_PERSONA)),
+ ("receipt_committed", "receipt", receipt(C_MEMBER)),
+ ("receipt_revealed_echoes_no_ballot", "receipt", receipt(C_MEMBER, 2, True)),
+]
+refusals = [
+ ("unauthenticated", 401, "no bearer, or one Heimdall does not know", refusal("unauthenticated", "A bearer token is required.")),
+ ("forbidden", 403, "authenticated, not an Active member, or a Mind key used on a motion route it may not call", refusal("forbidden", "Only Active members may vote.")),
+ ("not_found", 404, "unknown motion id, a standard (non-sealed) motion id, or reveal without a prior commit", refusal("not_found", "No such sealed-ballot motion.")),
+ ("wrong_phase", 409, "commit outside Commit, reveal outside Reveal", refusal("wrong_phase", "The commit window is not open.")),
+ ("contended", 409, "reveal raced the close fence; send it again", refusal("contended", "The reveal is contended; send it again.")),
+ ("invalid", 400, "body fails vote-api.schema.json or an in-document rule (untrimmed candidate or reason, candidate not in the motion, round or motionId mismatch, persona wrong for the credential)", refusal("invalid", "The cast does not satisfy gamecult.vote.cast.v0.")),
+ ("commitment_mismatch", 400, "reveal whose canonical bytes do not hash to the stored commitment", refusal("commitment_mismatch", "The ballot does not match the stored commitment.")),
+ ("payload_too_large", 413, "body over 4096 bytes", refusal("payload_too_large", "The body exceeds 4096 bytes.")),
+ ("rate_limited", 429, "more than the per-credential cast rate; Retry-After mirrors retryAfterSeconds", refusal("rate_limited", "Too many casts.", 30)),
+]
+def tweak(d, **kw):
+    d = json.loads(json.dumps(d)); 
+    for k, v in kw.items():
+        if k.startswith("b_"): d["ballot"][k[2:]] = v
+        else: d[k] = v
+    return d
+rev = cast_reveal(B_MEMBER)
+invalid = [
+ ("cast_commit_carries_a_ballot", "cast", tweak(cast_commit(C_MEMBER), ballot=B_MEMBER), "a commit names exactly the commitment; a ballot beside it would put content on the wire before the reveal"),
+ ("cast_reveal_carries_a_commitment", "cast", tweak(rev, commitment=C_MEMBER), "a reveal names exactly the ballot"),
+ ("cast_commit_without_commitment", "cast", tweak(cast_commit(C_MEMBER), commitment=None), "commit needs its hash"),
+ ("cast_verb_unknown", "cast", tweak(rev, verb="recast"), "verb is commit or reveal"),
+ ("cast_commitment_uppercase", "cast", cast_commit(C_MEMBER.upper()), "commitment is lowercase hex"),
+ ("cast_commitment_63_chars", "cast", cast_commit(C_MEMBER[:63]), "commitment is 64 hex characters"),
+ ("cast_unknown_key", "cast", tweak(cast_commit(C_MEMBER), note="hi"), "closed document"),
+ ("cast_motion_id_uppercase", "cast", cast_commit(C_MEMBER, M1.upper()), "ids are lowercase D-format uuids"),
+ ("ballot_reason_empty", "cast", tweak(rev, b_reason=""), "reason is 1 to 280 characters"),
+ ("ballot_reason_281", "cast", tweak(rev, b_reason="x" * 281), "reason is at most 280 characters"),
+ ("ballot_reason_multiline", "cast", tweak(rev, b_reason="one\ntwo"), "reason is a single line"),
+ ("ballot_reason_leading_space", "cast", tweak(rev, b_reason=" because"), "the contract refuses untrimmed text; it never trims for the sender, so the hashed bytes are the sent bytes"),
+ ("ballot_candidate_trailing_nbsp", "cast", tweak(rev, b_candidate="Adopt the ledger "), "NO-BREAK SPACE is White_Space; trimming is judged by the same list as write-receipt Required fields"),
+ ("ballot_salt_31_hex", "cast", tweak(rev, b_salt=SALT[:31]), "salt is 32 to 128 lowercase hex characters"),
+ ("ballot_salt_uppercase", "cast", tweak(rev, b_salt=SALT.upper()), "salt is lowercase hex"),
+ ("ballot_schema_wrong", "cast", tweak(rev, b_schema="gamecult.sealed_ballot.v1"), "ballot schema is gamecult.sealed_ballot.v0"),
+ ("ballot_persona_with_space", "cast", tweak(rev, b_persona="my mind"), "persona is printable ASCII without space, at most 64"),
+ ("ballot_round_zero", "cast", tweak(rev, b_round=0), "rounds start at 1"),
+ ("receipt_echoes_candidate", "receipt", dict(receipt(C_MEMBER, 2, True), candidate="Adopt the ledger"), "sealed casts never echo ballot content; the receipt is closed"),
+ ("receipt_echoes_salt", "receipt", dict(receipt(C_MEMBER, 2, True), salt=SALT), "the salt never comes back before close"),
+ ("receipt_revision_zero", "receipt", receipt(C_MEMBER, 0), "revision starts at 1"),
+ ("receipt_time_without_zone", "receipt", dict(receipt(C_MEMBER), committedAtUtc="2026-11-12T19:04:11"), "instants are UTC with a Z"),
+ ("motion_one_candidate", "motion", dict(motion("Commit"), candidates=["Only"]), "a motion has two or more candidates"),
+ ("motion_phase_unknown", "motion", dict(motion("Commit"), phase="Open"), "phase is Commit, Reveal or Closed"),
+ ("motion_leaks_tally", "motion", dict(motion("Reveal"), tally=[]), "mid-vote a client sees no tallies; the document is closed"),
+ ("motion_list_item_without_phase", "motionList", {"schemaVersion": "gamecult.vote.motion_list.v0", "motions": [{k: v for k, v in item(M1, "x", "Commit").items() if k != "phase"}]}, "every item names its phase"),
+ ("refusal_code_unknown", "refusal", refusal("teapot", "no"), "the code set is closed"),
+ ("refusal_without_error", "refusal", dict(refusal("invalid", "x"), error=""), "error is non-empty"),
+]
+pairs = [
+ {"name": "member_commit_matches_reveal", "voterUserAccountId": V1, "commit": cast_commit(C_MEMBER), "reveal": cast_reveal(B_MEMBER), "matches": True},
+ {"name": "persona_commit_matches_reveal", "voterUserAccountId": V1, "commit": cast_commit(C_PERSONA), "reveal": cast_reveal(B_PERSONA), "matches": True},
+ {"name": "reveal_with_changed_reason_does_not_match", "voterUserAccountId": V1, "commit": cast_commit(C_MEMBER), "reveal": cast_reveal(ballot(reason="It keeps the books honest!")), "matches": False, "refusal": "commitment_mismatch"},
+ {"name": "reveal_under_another_voter_does_not_match", "voterUserAccountId": M2, "commit": cast_commit(C_MEMBER), "reveal": cast_reveal(B_MEMBER), "matches": False, "refusal": "commitment_mismatch"},
+ {"name": "persona_dropped_does_not_match", "voterUserAccountId": V1, "commit": cast_commit(C_PERSONA), "reveal": cast_reveal(ballot(persona="", candidate=B_PERSONA["candidate"], reason=B_PERSONA["reason"])), "matches": False, "refusal": "commitment_mismatch"},
+]
+commitments = []
+for name, b, voter in [("member", B_MEMBER, V1), ("persona", B_PERSONA, V1), ("non_ascii", ballot(candidate="Café ☕", reason="naïve – but fine"), V1),
+                       ("decomposed_e_is_another_ballot", ballot(candidate="Café ☕", reason="naïve – but fine"), V1)]:
+    cb = commitment_bytes(b["motionId"], voter, b["persona"], b["round"], b["candidate"], b["reason"], b["salt"])
+    commitments.append({"name": name, "voterUserAccountId": voter, "ballot": b, "canonicalHex": cb.hex().upper(), "sha256": sha(cb)})
+
+vote = {
+  "provenance": "Spec-authored with msgpack-python (scripts/gen-governance-vectors.py); every runtime re-encodes `message` and must match messagePackHex. Commitment hashes follow vote-api.md 'Commitment'.",
+  "commitment": commitments,
+  "valid": [{"name": n, "def": d, "message": m, "messagePackHex": hx(m)} for n, d, m in valid],
+  "invalid": [{"name": n, "def": d, "message": m, "why": w, "messagePackHex": hx(m)} for n, d, m, w in invalid],
+  "pairs": pairs,
+  "refusals": [{"name": n, "httpStatus": s, "trigger": t, "message": m, "messagePackHex": hx(m)} for n, s, t, m in refusals],
+}
+(OUT / "vote-api-vectors.json").write_text(json.dumps(vote, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+# ---------- fork card ----------
+# Rule source: /opt/commons/handoff/fork-desk-answer-binding-20261110.md (Heimdall), sections 1.1 to 1.5 and 1.3a. The seven hash
+# vectors A to G below are that file's, with its expected digests asserted.
+def jstr(x):
+    out = ['"']
+    for ch in x:
+        o = ord(ch)
+        if ch == '"': out.append('\\"')
+        elif ch == "\\": out.append("\\\\")
+        elif ch == "\b": out.append("\\b")
+        elif ch == "\t": out.append("\\t")
+        elif ch == "\n": out.append("\\n")
+        elif ch == "\f": out.append("\\f")
+        elif ch == "\r": out.append("\\r")
+        elif o < 0x20: out.append("\\u%04x" % o)
+        else: out.append(ch)
+    out.append('"')
+    return "".join(out)
+def nfc(x): return unicodedata.normalize("NFC", x)
+def canonical_json(title, context, options, recommendation, depends):
+    """RFC 8785 over {context, depends, options:[{id,text}], recommendation, title} after NFC on every string; keys sorted; no numbers. (None is accepted only to check Heimdall's null digests.)"""
+    opts = ",".join('{"id":%s,"text":%s}' % (jstr(nfc(o["id"])), jstr(nfc(o["text"]))) for o in options)
+    dep = ",".join(jstr(nfc(d)) for d in depends)
+    rec = "null" if recommendation is None else jstr(nfc(recommendation))
+    return ('{"context":%s,"depends":[%s],"options":[%s],"recommendation":%s,"title":%s}' % (jstr(nfc(context)), dep, opts, rec, jstr(nfc(title)))).encode("utf-8")
+
+OP = "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"; ST = "11111111-2222-4333-8444-555555555555"; HM = "9f8e7d6c-5b4a-4392-8170-0f1e2d3c4b5a"
+FID = "gamecult-chat:question:slot-mark-consent"
+OPT = [{"id": "yes", "text": "Share it."}, {"id": "no", "text": "Keep it local."}]
+DEP = ["gamecult-chat:question:file-zone-audience"]
+def chash(c): return sha(canonical_json(c["title"], c["context"], c["options"], c["recommendation"], c["depends"]))
+def card(**kw):
+    c = {"schemaVersion": "gamecult.fork.card.v0", "fork_id": FID, "title": "Slot mark consent", "context": "Should a slot mark be shared?",
+         "options": OPT, "recommendation": "no", "depends": DEP, "leans": None, "flag": None,
+         "raised_in": {"kind": "CutSpec", "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"}, "deciders": [OP],
+         "status": "open", "ruling": None, "ruled_from": [], "order": 3, "options_hash": ""}
+    c.update(kw); c["options_hash"] = chash(c); return c
+CARD = card(); H = CARD["options_hash"]
+
+hashes = []
+CLAIMED = {"A": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48", "B": "14b8ffbdb61106dbc06f69f3fc8e2072af7a205d766e4cc040e89733013d54dc",
+           "C": "ac67b41539f869f6203ac0908819df046e4328b27795743a919bd4ab390596b5", "D": "71d5c413478ad06aaa1cbdd9e91c53f0cb4cef1dbd4c51bf3d473bccc6a5a272",
+           "E": "71d5c413478ad06aaa1cbdd9e91c53f0cb4cef1dbd4c51bf3d473bccc6a5a272", "F": "fb53aa3a9f7e74029f755d774064eedd240ab90d8fc64723f97c31b3d2846d40",
+           "G": "f856edce121db4121b5f1af400b1c471ebbfa6579a042aca9a34ae31c15f5c86"}
+def hv(name, c, heimdall=None):
+    b = canonical_json(c["title"], c["context"], c["options"], c["recommendation"], c["depends"])
+    if heimdall: print("heimdall", heimdall, "same" if CLAIMED[heimdall] == sha(b) else f"DIFFERS mine={sha(b)} his={CLAIMED[heimdall]}")
+    hashes.append({"name": name, "heimdall": heimdall, "title": c["title"], "context": c["context"], "options": c["options"],
+                   "recommendation": c["recommendation"], "depends": c["depends"], "canonical": b.decode("utf-8"),
+                   "canonicalHex": b.hex().upper(), "sha256": sha(b)})
+CD = dict(title="Caf\u00e9 \u201cdesk\u201d", context="Line one\nLine two \u2014 \U0001F600", options=[{"id": "a", "text": "x"}, {"id": "b", "text": "y"}], recommendation="a", depends=[])
+hv("heimdall_A_five_members", CARD, "A")
+hv("heimdall_B_recommendation_changed", card(recommendation="yes"), "B")
+hv("heimdall_C_option_order_changed", card(options=[OPT[1], OPT[0]]), "C")
+hv("heimdall_D_nfc_escapes_astral", card(**CD), "D")
+hv("heimdall_E_decomposed_equals_D", card(**dict(CD, title="Cafe\u0301 \u201cdesk\u201d")), "E")
+hv("heimdall_F_option_id_changed", card(options=[{"id": "share", "text": "Share it."}, OPT[1]]), "F")
+hv("heimdall_G_depends_emptied", card(depends=[]), "G")
+hv("option_text_changed", card(options=[dict(OPT[0], text="Share it!"), OPT[1]]))
+hv("title_changed", card(title="Slot mark consent?"))
+hv("context_changed", card(context="Should slot marks be shared?"))
+hv("depends_order_changed", card(depends=DEP + ["x:question:y"]))
+hv("depends_order_changed_reversed", card(depends=["x:question:y"] + DEP))
+hv("hidden_members_do_not_move_it", card(leans="yes", flag="provisional", deciders=[OP, HM], status="closed", ruling="r:1", ruled_from=["rc-1"], order=9, raised_in=None, fork_id="other:question:id"))
+hv("control_characters_and_markup_are_escaped_minimally", card(title='q " b \\ t \t n \n bell \u0007 del \u007f', context="</script> \u2028 &"))
+hv("astral_option_id_and_text", card(options=[{"id": "\U0001F600", "text": "\U0001D11E"}, OPT[1]]))
+assert [h["sha256"] for h in hashes if h["heimdall"] == "D"] == [h["sha256"] for h in hashes if h["heimdall"] == "E"]
+assert len({h["sha256"] for h in hashes if h["name"] in ("heimdall_A_five_members", "hidden_members_do_not_move_it")}) == 1
+
+def body(choice=None, note=None, h=None, at="2026-11-12T19:02:00Z", fork=FID, retracts=None, answer="auto"):
+    a = {"choice": choice, "note": note} if answer == "auto" else answer
+    if answer == "auto" and choice is None and note is None: a = None
+    return {"schemaVersion": "gamecult.fork.answer_request.v0", "fork_id": fork, "options_hash": h or H, "answer": a,
+            "retracted": retracts is not None, "retracts": retracts, "answered_at": at}
+def retraction(target, **kw): return body(retracts=target, **kw)
+NOTE = "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+def srv(aid, who, at, auth="Operator"): return {"answer_id": aid, "answerer": who, "authority": auth, "received_at": at}
+TAIL = {"unauthenticated": "a verified session is required", "body_forbidden_field": "answerer and authority are set by the receiver", "body_unknown_field": "the body is a closed shape",
+        "body_invalid": "the body does not satisfy gamecult.fork.answer_request.v0", "fork_unknown": "no such fork"}
+DOOR = set(TAIL)
+def refusal_doc(code): return {"schemaVersion": "gamecult.fork.refusal.v0", "code": code, "error": f"{code}: {TAIL[code]}"}
+def future(a, r):
+    import datetime as dt
+    p = lambda x: dt.datetime.strptime(x, "%Y-%m-%dT%H:%M:%SZ")
+    return (p(a) - p(r)).total_seconds() > 300
+def da(outcome, link, code, b, server):
+    a = b["answer"] or {"choice": None, "note": None}
+    return {"schemaVersion": "gamecult.desk_answer.v0", "answer_id": server["answer_id"], "fork_id": b["fork_id"], "outcome": outcome,
+            "of": link if outcome == "Revision" else None, "retracts": link if outcome == "Retraction" else None, "code": code if outcome == "Refused" else None,
+            "options_hash": b["options_hash"], "choice": a["choice"], "note": a["note"], "answered_at": b["answered_at"], "received_at": server["received_at"],
+            "claim_in_future": future(b["answered_at"], server["received_at"]), "answerer": server["answerer"], "authority": server["authority"]}
+def result(answer, c=None): return {"schemaVersion": "gamecult.fork.answer_result.v0", "answer": answer, "card": c}
+def record(counted, answers, h=H, fork=FID): return {"schemaVersion": "gamecult.fork.record.v0", "fork_id": fork, "options_hash": h, "counted_answer_id": counted, "answers": answers}
+T = lambda m, sec=5: f"2026-11-12T19:{m:02d}:{sec:02d}Z"
+def step(kind, body_=None, server=None, response=None, **kw):
+    d = {"kind": kind, "body": body_, "server": server, "response": response}; d.update(kw); return d
+def ok(b, server, outcome, of):
+    a = da(outcome, of, None, b, server); return step("answer", b, server, result(a)), a
+def rf(b, server, code, c=None):
+    a = da("Refused", None, code, b, server); return step("answer", b, server, result(a, c)), a
+def door(b, server, code): return step("answer", b, server, refusal_doc(code)), None
+def sc(name, c, items, counted, h=None):
+    steps = [i[0] if isinstance(i, tuple) else i for i in items]
+    answers = [i[1] for i in items if isinstance(i, tuple) and i[1] is not None]
+    return (name, c, steps, record(counted, answers, h or c["options_hash"]))
+
+x1 = body("no", NOTE); sx1 = srv("n1", OP, T(2))
+x2 = body("yes", "On reflection, share it.", at="2026-11-12T19:06:00Z"); sx2 = srv("n2", OP, T(6))
+y1 = body("yes", "Share it, the audience is settled.", at="2026-11-12T19:05:00Z"); sy1 = srv("n3", HM, T(5), auth="Steward")
+z1 = body("yes", "Share, please."); sz = srv("n4", ST, T(3), auth="Member")
+pick = body("no", None); words = body(None, NOTE)
+STALE_H = chash(card(recommendation="yes"))
+def stale_body(**kw): return body("no", NOTE, h=STALE_H, **kw)
+FORKC = card(status="closed", ruling="cultlib-gaps:resolution:question.slot-mark-consent.n1")
+Y_CARD = card(deciders=[OP, HM])
+fork_edit = card(title="Slot mark consent (revised)"); H2 = fork_edit["options_hash"]
+RET = lambda t: retraction(t, at="2026-11-12T19:09:00Z")
+def sr(aid, who=OP, m=9, auth="Operator"): return srv(aid, who, T(m), auth)
+MATRIX = [step("matrix_event", None, None, None, matrix_kind=k, choice=c) for k, c in (("m.replace", "yes"), ("m.redaction", None), ("m.reaction", "yes"))]
+X1 = ok(x1, sx1, "Counted", None)
+scen = [
+ sc("operator_answers_and_is_counted", CARD, [X1], "n1"),
+ sc("choice_alone_is_counted", CARD, [ok(pick, sx1, "Counted", None)], "n1"),
+ sc("note_alone_is_counted_a_clear_pick", CARD, [ok(words, sx1, "Counted", None)], "n1"),
+ sc("V1_answerer_in_the_body_is_refused_at_the_door_and_stores_nothing", CARD, [door(dict(x1, answerer="x"), sx1, "body_forbidden_field")], None),
+ sc("V1_authority_nested_in_answer_is_refused", CARD, [door(dict(x1, answer={"choice": "no", "note": None, "authority": "Operator"}), sx1, "body_forbidden_field")], None),
+ sc("V1_both_are_refused_not_stripped", CARD, [door(dict(x1, answerer=OP, authority="Operator"), sx1, "body_forbidden_field")], None),
+ sc("an_unknown_key_is_refused_the_body_is_closed", CARD, [door(dict(x1, mood="happy"), sx1, "body_unknown_field")], None),
+ sc("an_answer_with_neither_choice_nor_note_is_invalid", CARD, [door(body(answer={"choice": None, "note": None}), sx1, "body_invalid")], None),
+ sc("a_non_retraction_without_an_answer_is_invalid", CARD, [door(body(answer=None), sx1, "body_invalid")], None),
+ sc("no_session_is_unauthenticated", CARD, [door(x1, srv("n1", None, T(2), None), "unauthenticated")], None),
+ sc("an_unknown_fork_is_refused_at_the_door", CARD, [door(body("no", NOTE, fork="gamecult-chat:question:nope"), sx1, "fork_unknown")], None),
+ sc("V2_stale_hash_is_refused_not_counted_and_stored_as_Refused", CARD, [rf(stale_body(), sx1, "stale_fork", c=CARD)], None),
+ sc("V2_a_stale_answer_then_a_fresh_one_the_fresh_one_is_counted", CARD, [rf(stale_body(), sx1, "stale_fork", c=CARD), ok(x1, sx2, "Counted", None)], "n2"),
+ sc("V3_an_answer_off_the_decider_list_is_Refused_not_a_decider_and_stored", CARD, [rf(z1, sz, "not_a_decider")], None),
+ sc("a_non_decider_with_a_stale_hash_is_stale_first", CARD, [rf(dict(z1, options_hash=STALE_H), sz, "stale_fork", c=CARD)], None),
+ sc("V4_a_closed_fork_refuses_and_stores_the_refusal", FORKC, [rf(x1, sx1, "fork_closed")], None),
+ sc("V5_second_answer_from_one_decider_is_a_Revision_the_first_stays_counted", CARD, [X1, ok(x2, sx2, "Revision", "n1")], "n1"),
+ sc("V5_receiver_order_decides_not_answered_at", CARD, [ok(x2, srv("n1", OP, T(2)), "Counted", None), ok(x1, srv("n2", OP, T(3)), "Revision", "n1")], "n1"),
+ sc("V5_reversed_arrival_reverses_the_result", CARD, [ok(x1, srv("n1", OP, T(2)), "Counted", None), ok(x2, srv("n2", OP, T(3)), "Revision", "n1")], "n1"),
+ sc("a_second_decider_answer_is_recorded_as_a_Revision", Y_CARD, [X1, ok(y1, sy1, "Revision", "n1")], "n1"),
+ sc("a_claim_more_than_five_minutes_ahead_is_accepted_and_flagged", CARD, [ok(body("no", NOTE, at="2026-11-12T19:09:00Z"), sx1, "Counted", None)], "n1"),
+ sc("V6_a_matrix_edit_redaction_or_reaction_changes_nothing", CARD, [X1] + MATRIX, "n1"),
+ sc("V7_a_choice_that_is_not_an_option_is_Refused_choice_invalid", CARD, [rf(body("maybe", None), sx1, "choice_invalid")], None),
+ sc("a_changed_card_stops_the_old_answers_counting_and_a_new_answer_is_counted", CARD,
+    [X1, step("card", None, None, None, card=fork_edit), ok(body("no", NOTE, h=H2), sx2, "Counted", None)], "n2", H2),
+ sc("a_changed_card_leaves_no_counted_answer_until_one_arrives", CARD, [X1, step("card", None, None, None, card=fork_edit)], None, H2),
+ sc("V8_retraction_with_an_answer_is_bad", CARD, [X1, rf(dict(retraction("n1"), answer={"choice": "no", "note": None}), sr("n9"), "bad_retraction")], "n1"),
+ sc("V8_retraction_without_retracts_is_bad", CARD, [X1, rf(dict(retraction("n1"), retracts=None), sr("n9"), "bad_retraction")], "n1"),
+ sc("V8_retracts_on_a_plain_answer_is_bad", CARD, [X1, rf(dict(x2, retracts="n1"), sr("n9"), "bad_retraction")], "n1"),
+ sc("V8_retraction_naming_an_unknown_answer_is_bad", CARD, [X1, rf(retraction("n99"), sr("n9"), "bad_retraction")], "n1"),
+ sc("V8_retraction_naming_a_Refused_answer_is_bad", CARD, [rf(stale_body(), sx1, "stale_fork", c=CARD), rf(retraction("n1"), sr("n9"), "bad_retraction")], None),
+ sc("V8_retracting_twice_is_already_retracted", CARD, [X1, ok(RET("n1"), sr("n8"), "Retraction", "n1"), rf(RET("n1"), sr("n9", m=10), "already_retracted")], None),
+ sc("V8_retraction_under_a_stale_hash_is_stale_fork", CARD, [X1, rf(retraction("n1", h=STALE_H), sr("n9"), "stale_fork", c=CARD)], "n1"),
+ sc("V9_another_decider_retracts_and_the_answer_stops_counting", Y_CARD, [X1, ok(RET("n1"), sr("n7", HM, 9, "Steward"), "Retraction", "n1")], None),
+ sc("V9_an_account_off_the_list_cannot_retract", CARD, [X1, rf(RET("n1"), sr("n6", ST, 9, "Member"), "not_a_decider")], "n1"),
+ sc("V10_after_a_ruling_from_the_answer_retraction_is_ruled", card(ruled_from=["n1"]), [X1, rf(RET("n1"), sr("n9"), "ruled")], "n1"),
+ sc("V11_retracting_the_counted_answer_makes_the_next_decider_answer_counted", Y_CARD, [X1, ok(y1, sy1, "Revision", "n1"), ok(RET("n1"), sr("n8"), "Retraction", "n1")], "n3"),
+ sc("V11_retracting_an_answer_that_was_not_counted_changes_nothing", Y_CARD, [X1, ok(y1, sy1, "Revision", "n1"), ok(RET("n3"), sr("n8"), "Retraction", "n3")], "n1"),
+ sc("after_every_answer_is_retracted_a_fresh_answer_is_Counted_again", CARD, [X1, ok(RET("n1"), sr("n8"), "Retraction", "n1"), ok(x2, sx2, "Counted", None)], "n2"),
+]
+for n, c, steps, r in scen:
+    if n.startswith("V10"): assert c["status"] == "open"
+REASON_CODES = ["stale_fork", "not_a_decider", "fork_closed", "choice_invalid", "bad_retraction", "already_retracted", "ruled"]
+HTTP = {"unauthenticated": 401, "body_forbidden_field": 400, "body_unknown_field": 400, "body_invalid": 400, "fork_unknown": 404,
+        "stale_fork": 409, "not_a_decider": 403, "fork_closed": 409, "choice_invalid": 400, "bad_retraction": 400, "already_retracted": 409, "ruled": 409}
+STORED_REFUSALS = []
+for reason in REASON_CODES:
+    a = da("Refused", None, reason, x1, sx1)
+    STORED_REFUSALS.append({"name": reason, "httpStatus": HTTP[reason], "message": result(a, CARD if reason == "stale_fork" else None)})
+# ruling citation: authority Operator must cite a Counted answer record whose answerer holds Operator authority
+CNT = da("Counted", None, None, x1, sx1); REV = da("Revision", "n1", None, x2, sx2)
+REF = da("Refused", None, "fork_closed", x1, srv("n5", OP, T(7))); NONOP = da("Counted", None, None, z1, sz)
+def cite(authority, ans, ruling="cultlib-gaps:resolution:question.slot-mark-consent.n1"):
+    return {"schemaVersion": "gamecult.fork.ruling_cite.v0", "ruling_id": ruling, "authority": authority, "answer_id": ans}
+cites = [
+ {"name": "operator_cites_a_counted_operator_answer", "answers": [CNT], "message": cite("Operator", "n1"), "admit": True},
+ {"name": "operator_cites_nothing", "answers": [CNT], "message": cite("Operator", None), "admit": False},
+ {"name": "operator_cites_a_revision", "answers": [CNT, REV], "message": cite("Operator", "n2"), "admit": False},
+ {"name": "operator_cites_a_refused_answer", "answers": [REF], "message": cite("Operator", "n5"), "admit": False},
+ {"name": "operator_cites_a_counted_answer_by_a_non_operator", "answers": [NONOP], "message": cite("Operator", "n4"), "admit": False},
+ {"name": "operator_cites_an_answer_that_does_not_exist", "answers": [CNT], "message": cite("Operator", "n99"), "admit": False},
+ {"name": "steward_needs_no_citation", "answers": [], "message": cite("Steward", None), "admit": True},
+]
+for cz in cites: cz["messagePackHex"] = hx(cz["message"])
+def bad(name, why, m, **kw): return dict({"name": name, "why": why, "message": m}, **kw)
+fork = {
+  "provenance": "Rule source: /opt/commons/handoff/fork-desk-answer-binding-20261110.md (Heimdall), amended by the Persona briefs of 2026-11-10 (Eureka's fit check). Bytes spec-authored with msgpack-python (scripts/gen-governance-vectors.py); every runtime re-encodes `message` and must match messagePackHex. options_hash follows fork-card.md 'Options hash'; the vectors named heimdall_* are that file's, with its digests.",
+  "optionsHash": hashes,
+  "card": {"valid": [{"name": "operator_fork", "message": CARD, "messagePackHex": hx(CARD)},
+                     {"name": "leans_flag_closed_two_deciders", "message": card(leans="yes", flag="provisional: Self expects this to move", deciders=[OP, HM], depends=[], raised_in=None, status="closed", ruling="x:resolution:y", ruled_from=["n1"], order=0),
+                      "messagePackHex": hx(card(leans="yes", flag="provisional: Self expects this to move", deciders=[OP, HM], depends=[], raised_in=None, status="closed", ruling="x:resolution:y", ruled_from=["n1"], order=0))}],
+           "invalid": [bad(n, w, m) for n, w, m in [
+               ("one_option", "two or more options", card(options=[OPT[0]], recommendation="yes")),
+               ("no_deciders", "a fork with no decider cannot be answered", card(deciders=[])),
+               ("null_recommendation", "every card recommends an option", dict(card(), recommendation=None)),
+               ("unknown_key", "closed document", dict(card(), note="x")),
+               ("option_with_a_label", "options are {id,text}; the old format's display label is not a member (fork-card.md, Old format)", card(options=[dict(OPT[0], label="Yes"), OPT[1]])),
+               ("status_unknown", "status is open or closed", card(status="provisional")),
+               ("options_hash_not_hex", "options_hash is 64 lowercase hex", dict(card(), options_hash="XYZ")),
+               ("duplicate_option_ids", "rule: option ids are unique (not expressible in the schema)", card(options=[OPT[0], dict(OPT[1], id=OPT[0]["id"])])),
+               ("recommendation_not_an_option", "rule: recommendation is an option id (not expressible in the schema)", card(recommendation="maybe")),
+               ("leans_not_an_option", "rule: leans is nil or an option id (not expressible in the schema)", card(leans="maybe")),
+               ("duplicate_deciders", "rule: deciders are unique (not expressible in the schema)", card(deciders=[OP, OP])),
+               ("closed_without_ruling", "rule: a closed card names its ruling (not expressible in the schema)", card(status="closed")),
+               ("options_hash_of_another_card", "rule: options_hash equals the hash of the shown members (not expressible in the schema)", dict(card(), options_hash=STALE_H)),
+           ]]},
+  "request": {"valid": [{"name": n, "message": m, "messagePackHex": hx(m)} for n, m in
+                       [("choice_and_note", x1), ("choice_alone", pick), ("note_alone_clear_pick", words), ("retraction", retraction("n1"))]],
+             "invalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
+               ("answer_with_neither", "an answer object holds a choice, a note, or both", body(answer={"choice": None, "note": None})),
+               ("blank_note", "a blank note is no answer", body(None, "  \u00a0 ")),
+               ("note_over_4000", "notes are at most 4000 characters", body(None, "x" * 4001)),
+               ("options_hash_uppercase", "hash is lowercase hex", body("no", None, h=H.upper())),
+               ("answerer_key", "answerer is server-set; the door answers body_forbidden_field", dict(x1, answerer=OP)),
+               ("authority_key", "authority is server-set; the door answers body_forbidden_field", dict(x1, authority="Operator")),
+               ("answer_object_with_a_key", "the answer object is closed", body(answer={"choice": "no", "note": None, "weight": 1})),
+               ("answered_at_without_zone", "instants are UTC with a Z", body("no", None, at="2026-11-12T19:02:00")),
+               ("retracted_not_a_boolean", "retracted is a boolean", dict(x1, retracted="no")),
+               ("fork_id_empty", "fork_id names a fork", body("no", None, fork="")),
+           ]]},
+  "deskAnswer": {"valid": [{"name": n, "message": m, "messagePackHex": hx(m)} for n, m in
+                           [("counted", CNT), ("revision", REV), ("retraction", da("Retraction", "n1", None, retraction("n1"), sr("n8"))),
+                            ("refused_stale", da("Refused", None, "stale_fork", stale_body(), sx1)),
+                            ("refused_ruled_retraction_keeps_no_target", da("Refused", None, "ruled", retraction("n1"), sr("n9")))]],
+                 "invalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
+                   ("counted_with_a_code", "only Refused carries a code", dict(CNT, code="ruled")),
+                   ("refused_without_a_code", "Refused carries a reason code", dict(REF, code=None)),
+                   ("refused_with_an_unknown_code", "the code set is closed", dict(REF, code="because")),
+                   ("counted_naming_another_answer", "Counted names none", dict(CNT, of="n0")),
+                   ("revision_naming_none", "a Revision names the counted answer", dict(REV, of=None)),
+                   ("revision_that_also_retracts", "a variant carries only its own link (a retraction with no target, or a target with no retraction, cannot exist)", dict(REV, retracts="n1")),
+                   ("retraction_naming_no_target", "a Retraction names the answer it retracts", dict(da("Retraction", "n1", None, retraction("n1"), sr("n8")), retracts=None)),
+                   ("refused_naming_a_target", "Refused carries only its code", dict(REF, retracts="n1")),
+                   ("retraction_carrying_a_choice", "a Retraction carries no choice or note", dict(da("Retraction", "n1", None, retraction("n1"), sr("n8")), choice="no")),
+                   ("outcome_lower_case", "outcome tags are Counted, Revision, Retraction, Refused", dict(CNT, outcome="counted")),
+                   ("no_answerer", "answerer is stamped on every stored answer", dict(CNT, answerer="")),
+                 ]]},
+  "results": [{"name": r["name"], "httpStatus": r["httpStatus"], "message": r["message"], "messagePackHex": hx(r["message"])} for r in STORED_REFUSALS],
+  "doorRefusals": [{"name": c, "httpStatus": HTTP[c], "message": refusal_doc(c), "messagePackHex": hx(refusal_doc(c))} for c in TAIL],
+  "rulingCites": cites,
+  "scenarios": [{"name": n, "card": c, "optionsHash": c["options_hash"], "steps": steps, "record": r, "recordHex": hx(r)} for n, c, steps, r in scen],
+}
+(OUT / "fork-card-vectors.json").write_text(json.dumps(fork, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+print("ok", len(vote["valid"]), len(vote["invalid"]), len(fork["scenarios"]))

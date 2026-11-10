@@ -1,0 +1,408 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/CultLib/contracts/cultnet/governance/vote-api.schema.json",
+  "title": "CultNet vote API v0 (sealed-ballot motions)",
+  "description": "Typed documents for listing, reading and casting on sealed-ballot motions, and the receipt a cast returns. Map-mode: every key is written, nil where absent. Spec: vote-api.md. Vectors: vote-api-vectors.json.",
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "instant": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,7})?Z$"
+    },
+    "hex64": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "trimmedLine": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?![\\t-\\r \\u0085   -     　])[^\\n\\r\\u0085  ]+(?<![\\t-\\r \\u0085   -     　])$"
+    },
+    "ballot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "motionId",
+        "round",
+        "candidate",
+        "reason",
+        "salt",
+        "persona"
+      ],
+      "properties": {
+        "schema": {
+          "const": "gamecult.sealed_ballot.v0"
+        },
+        "motionId": {
+          "$ref": "#/$defs/uuid"
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "candidate": {
+          "$ref": "#/$defs/trimmedLine"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 280,
+          "pattern": "^(?![\\t-\\r \\u0085   -     　])[^\\n\\r\\u0085  ]+(?<![\\t-\\r \\u0085   -     　])$"
+        },
+        "salt": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32,128}$"
+        },
+        "persona": {
+          "type": "string",
+          "pattern": "^[!-~]{0,64}$"
+        }
+      }
+    },
+    "motionListRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "phase"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.vote.motion_list_request.v0"
+        },
+        "phase": {
+          "oneOf": [
+            {
+              "enum": [
+                "Commit",
+                "Reveal",
+                "Closed"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "motionListItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "round",
+        "phase",
+        "commitClosesAtUtc",
+        "closesAtUtc"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "phase": {
+          "enum": [
+            "Commit",
+            "Reveal",
+            "Closed"
+          ]
+        },
+        "commitClosesAtUtc": {
+          "$ref": "#/$defs/instant"
+        },
+        "closesAtUtc": {
+          "$ref": "#/$defs/instant"
+        }
+      }
+    },
+    "motionList": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "motions"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.vote.motion_list.v0"
+        },
+        "motions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/motionListItem"
+          }
+        }
+      }
+    },
+    "motionReadRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "motionId"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.vote.motion_read_request.v0"
+        },
+        "motionId": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "motionId",
+        "voterUserAccountId",
+        "commitment",
+        "revision",
+        "committedAtUtc",
+        "revealed"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.vote.receipt.v0"
+        },
+        "motionId": {
+          "$ref": "#/$defs/uuid"
+        },
+        "voterUserAccountId": {
+          "$ref": "#/$defs/uuid"
+        },
+        "commitment": {
+          "$ref": "#/$defs/hex64"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "committedAtUtc": {
+          "$ref": "#/$defs/instant"
+        },
+        "revealed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "motion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "id",
+        "title",
+        "summary",
+        "round",
+        "priorMotionId",
+        "ballotSchema",
+        "phase",
+        "candidates",
+        "commitClosesAtUtc",
+        "closesAtUtc",
+        "yourVoterId",
+        "yourCommitment",
+        "announcement"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.vote.motion.v0"
+        },
+        "id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "summary": {
+          "type": "string"
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "priorMotionId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ballotSchema": {
+          "const": "gamecult.sealed_ballot.v0"
+        },
+        "phase": {
+          "enum": [
+            "Commit",
+            "Reveal",
+            "Closed"
+          ]
+        },
+        "candidates": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "$ref": "#/$defs/trimmedLine"
+          }
+        },
+        "commitClosesAtUtc": {
+          "$ref": "#/$defs/instant"
+        },
+        "closesAtUtc": {
+          "$ref": "#/$defs/instant"
+        },
+        "yourVoterId": {
+          "$ref": "#/$defs/uuid"
+        },
+        "yourCommitment": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/receipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "announcement": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "commitCast": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "motionId",
+        "verb",
+        "commitment",
+        "ballot"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.vote.cast.v0"
+        },
+        "motionId": {
+          "$ref": "#/$defs/uuid"
+        },
+        "verb": {
+          "const": "commit"
+        },
+        "commitment": {
+          "$ref": "#/$defs/hex64"
+        },
+        "ballot": {
+          "type": "null"
+        }
+      }
+    },
+    "revealCast": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "motionId",
+        "verb",
+        "commitment",
+        "ballot"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.vote.cast.v0"
+        },
+        "motionId": {
+          "$ref": "#/$defs/uuid"
+        },
+        "verb": {
+          "const": "reveal"
+        },
+        "commitment": {
+          "type": "null"
+        },
+        "ballot": {
+          "$ref": "#/$defs/ballot"
+        }
+      }
+    },
+    "cast": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/commitCast"
+        },
+        {
+          "$ref": "#/$defs/revealCast"
+        }
+      ]
+    },
+    "refusal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "code",
+        "error",
+        "retryAfterSeconds"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.vote.refusal.v0"
+        },
+        "code": {
+          "enum": [
+            "unauthenticated",
+            "forbidden",
+            "not_found",
+            "wrong_phase",
+            "contended",
+            "invalid",
+            "commitment_mismatch",
+            "payload_too_large",
+            "rate_limited"
+          ]
+        },
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retryAfterSeconds": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
