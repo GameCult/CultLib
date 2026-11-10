@@ -454,8 +454,12 @@ fork = {
   "card": {"valid": [{"name": "operator_fork", "message": CARD, "messagePackHex": hx(CARD)},
                      {"name": "leans_flag_closed_two_deciders", "message": card(leans="yes", flag="provisional: Self expects this to move", deciders=[OP, HM], depends=[], raised_in=None, status="closed", ruling="x:resolution:y", ruled_from=["n1"], order=0),
                       "messagePackHex": hx(card(leans="yes", flag="provisional: Self expects this to move", deciders=[OP, HM], depends=[], raised_in=None, status="closed", ruling="x:resolution:y", ruled_from=["n1"], order=0))},
+                     {"name": "depends_at_both_caps", "message": card(depends=["a"] * 7 + ["\u00e9" * 500]), "messagePackHex": hx(card(depends=["a"] * 7 + ["\u00e9" * 500]))},
                      {"name": "closed_without_a_ruling_the_question_was_withdrawn", "message": card(status="closed"), "messagePackHex": hx(card(status="closed"))}],
            "invalid": [bad(n, w, m) for n, w, m in [
+               ("depends_nine_lines", "depends holds at most 8 lines (the stored question's limit)", card(depends=["a"] * 9)),
+               ("depends_line_1001_code_points", "a depends line is at most 1000 characters", card(depends=["a" * 1001])),
+               ("depends_line_over_1000_bytes", "rule: a depends line is at most 1000 UTF-8 bytes (the stored Line limit; not expressible in the schema)", card(depends=["\u00e9" * 501])),
                ("one_option", "two or more options", card(options=[OPT[0]], recommendation="yes")),
                ("no_deciders", "a fork with no decider cannot be answered", card(deciders=[])),
                ("null_recommendation", "every card recommends an option", dict(card(), recommendation=None)),
