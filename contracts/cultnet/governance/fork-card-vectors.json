@@ -420,6 +420,51 @@
         "messagePackHex": "DE0010AD736368656D6156657273696F6EB567616D6563756C742E666F726B2E636172642E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74A57469746C65B1536C6F74206D61726B20636F6E73656E74A7636F6E74657874BD53686F756C64206120736C6F74206D61726B206265207368617265643FA76F7074696F6E739282A26964A3796573A474657874A953686172652069742E82A26964A26E6FA474657874AE4B656570206974206C6F63616C2EAE7265636F6D6D656E646174696F6EA26E6FA7646570656E647390A56C65616E73A3796573A4666C6167D92670726F766973696F6E616C3A2053656C662065787065637473207468697320746F206D6F7665A97261697365645F696EC0A8646563696465727392D92465306431633262332D613439352D343638372D383837392D366135623463336432653166D92439663865376436632D356234612D343339322D383137302D306631653264336334623561A6737461747573A6636C6F736564A672756C696E67AE783A7265736F6C7574696F6E3A79AA72756C65645F66726F6D91A26E31A56F7264657200AC6F7074696F6E735F68617368D94066383536656463653132316462343132316235663161663430306231633437316562626661363537396130343261636139613334616533316331356635633836"
       },
       {
+        "name": "depends_at_both_caps",
+        "message": {
+          "schemaVersion": "gamecult.fork.card.v0",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "title": "Slot mark consent",
+          "context": "Should a slot mark be shared?",
+          "options": [
+            {
+              "id": "yes",
+              "text": "Share it."
+            },
+            {
+              "id": "no",
+              "text": "Keep it local."
+            }
+          ],
+          "recommendation": "no",
+          "depends": [
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+          ],
+          "leans": null,
+          "flag": null,
+          "raised_in": {
+            "kind": "CutSpec",
+            "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+          },
+          "deciders": [
+            "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+          ],
+          "status": "open",
+          "ruling": null,
+          "ruled_from": [],
+          "order": 3,
+          "options_hash": "52163c7ae8a2c15d4380e7854505bedb5b3c84976ed301d86afc99a7bd0e03c8"
+        },
+        "messagePackHex": "DE0010AD736368656D6156657273696F6EB567616D6563756C742E666F726B2E636172642E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74A57469746C65B1536C6F74206D61726B20636F6E73656E74A7636F6E74657874BD53686F756C64206120736C6F74206D61726B206265207368617265643FA76F7074696F6E739282A26964A3796573A474657874A953686172652069742E82A26964A26E6FA474657874AE4B656570206974206C6F63616C2EAE7265636F6D6D656E646174696F6EA26E6FA7646570656E647398A161A161A161A161A161A161A161DA03E8C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9C3A9A56C65616E73C0A4666C6167C0A97261697365645F696E82A46B696E64A743757453706563A26964D92B63756C746C69622D676170733A6375745F737065633A6375742D736C6F742D746F6C6572616E63652E7234A8646563696465727391D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A6737461747573A46F70656EA672756C696E67C0AA72756C65645F66726F6D90A56F7264657203AC6F7074696F6E735F68617368D94035323136336337616538613263313564343338306537383534353035626564623562336338343937366564333031643836616663393961376264306530336338"
+      },
+      {
         "name": "closed_without_a_ruling_the_question_was_withdrawn",
         "message": {
           "schemaVersion": "gamecult.fork.card.v0",
@@ -459,6 +504,166 @@
       }
     ],
     "invalid": [
+      {
+        "name": "depends_nine_lines",
+        "why": "depends holds at most 8 lines (the stored question's limit)",
+        "message": {
+          "schemaVersion": "gamecult.fork.card.v0",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "title": "Slot mark consent",
+          "context": "Should a slot mark be shared?",
+          "options": [
+            {
+              "id": "yes",
+              "text": "Share it."
+            },
+            {
+              "id": "no",
+              "text": "Keep it local."
+            }
+          ],
+          "recommendation": "no",
+          "depends": [
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a"
+          ],
+          "leans": null,
+          "flag": null,
+          "raised_in": {
+            "kind": "CutSpec",
+            "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+          },
+          "deciders": [
+            "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+          ],
+          "status": "open",
+          "ruling": null,
+          "ruled_from": [],
+          "order": 3,
+          "options_hash": "d0f895ec9cf7e17f4e053e3065b41b3ad34a808b5a5a2912dce4fd6a0a0a890f"
+        }
+      },
+      {
+        "name": "depends_line_1001_code_points",
+        "why": "a depends line is at most 1000 characters",
+        "message": {
+          "schemaVersion": "gamecult.fork.card.v0",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "title": "Slot mark consent",
+          "context": "Should a slot mark be shared?",
+          "options": [
+            {
+              "id": "yes",
+              "text": "Share it."
+            },
+            {
+              "id": "no",
+              "text": "Keep it local."
+            }
+          ],
+          "recommendation": "no",
+          "depends": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "leans": null,
+          "flag": null,
+          "raised_in": {
+            "kind": "CutSpec",
+            "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+          },
+          "deciders": [
+            "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+          ],
+          "status": "open",
+          "ruling": null,
+          "ruled_from": [],
+          "order": 3,
+          "options_hash": "47d1a35dffaa09893998b3110ebe9c0fa4dab410b3f08a4c6ab78ed609072c99"
+        }
+      },
+      {
+        "name": "depends_line_1001_bytes",
+        "why": "rule: one byte over the limit (500 two-byte characters and one more; not expressible in the schema)",
+        "message": {
+          "schemaVersion": "gamecult.fork.card.v0",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "title": "Slot mark consent",
+          "context": "Should a slot mark be shared?",
+          "options": [
+            {
+              "id": "yes",
+              "text": "Share it."
+            },
+            {
+              "id": "no",
+              "text": "Keep it local."
+            }
+          ],
+          "recommendation": "no",
+          "depends": [
+            "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééa"
+          ],
+          "leans": null,
+          "flag": null,
+          "raised_in": {
+            "kind": "CutSpec",
+            "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+          },
+          "deciders": [
+            "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+          ],
+          "status": "open",
+          "ruling": null,
+          "ruled_from": [],
+          "order": 3,
+          "options_hash": "63d01e8c6dfcfddda061522e3c4bab7d54d1f1b3edf384a74725f034e8dc1f88"
+        }
+      },
+      {
+        "name": "depends_line_over_1000_bytes",
+        "why": "rule: a depends line is at most 1000 UTF-8 bytes (the stored Line limit; not expressible in the schema)",
+        "message": {
+          "schemaVersion": "gamecult.fork.card.v0",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "title": "Slot mark consent",
+          "context": "Should a slot mark be shared?",
+          "options": [
+            {
+              "id": "yes",
+              "text": "Share it."
+            },
+            {
+              "id": "no",
+              "text": "Keep it local."
+            }
+          ],
+          "recommendation": "no",
+          "depends": [
+            "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+          ],
+          "leans": null,
+          "flag": null,
+          "raised_in": {
+            "kind": "CutSpec",
+            "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+          },
+          "deciders": [
+            "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+          ],
+          "status": "open",
+          "ruling": null,
+          "ruled_from": [],
+          "order": 3,
+          "options_hash": "e9459375267b29ebaacd409b005b6b2e4901fe8ff67b80163fba3573a804974e"
+        }
+      },
       {
         "name": "one_option",
         "why": "two or more options",
