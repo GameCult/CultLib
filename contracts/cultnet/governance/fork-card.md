@@ -162,6 +162,7 @@ Option B, **Bifrost receives the answer and Huginn stores it** (the design in th
 - `Refused` stores every refusal from steps 4 to 7 and R1 and R2 (his section 1.3b); only steps 1 and 2 and `fork_unknown` are not stored. The binding file does not say whether `fork_unknown` is stored; it cannot be keyed without a question, so it is not (open choice 4).
 - The binding file's `choice_valid` has no named refusal code; this page names it `choice_invalid`. `fork_known` is `fork_unknown`. A type-invalid body is `body_invalid`.
 - `ruled` (his R3 and V10) is dropped: a ruling that answers a fork closes it, so the case is `fork_closed` (V4, V10a). His file drops it too.
+- `request_id` (on the request and the stored `desk_answer`) and `request_id_conflict` are this page's: his file has no idempotency key, and a retry after `unavailable` needs one. Eureka's `desk_answer` kind and Huginn's request type must carry it.
 - Transport (routes, scopes, list, read, `unavailable`) is this page's; his file has none yet. The note limit is 4000 UTF-8 bytes here, as his 1.1 leaves the unit unsaid.
 - The recommendation is never nil. The binding file's earlier vectors D and E used a nil recommendation; its updated D and E use `"a"`, as here.
 - Hash vectors: A, B, C, D, E, F and G of the binding file are reproduced digest for digest by the Python generator, the C# suite and the TypeScript suite (the generator prints `same` for each; none differs).
