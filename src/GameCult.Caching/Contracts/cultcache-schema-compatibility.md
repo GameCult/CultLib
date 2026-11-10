@@ -107,9 +107,20 @@ persisted slots honestly:
 
 - persisted schema id differs, but the embedded catalog points to a compatible
   local schema id
-- persisted slot is missing locally and can be ignored
+- persisted slot is missing locally and the record is read-only until its id is declared compatible
+  (see Extra slots are read-only, below)
 - local slot is missing in persisted data and can fall back to the local
   default value
+
+Extra slots are read-only. A record whose payload carries a slot past the slots its reader declares, at any
+depth (the record, a nested object, a list element, a union arm, a unit arm), is loaded read-only: it is
+served, `CultStoredDocument.UnreadSlots` names the first type read with extra slots and both counts, and
+`CultCache.IsWritable(key)` is false. A staged write or removal of it is refused with
+`CultSchemaConflictException` (`UnreadSlots` set; the message names the type and the counts, never a slot
+value). A missing trailing slot keeps its default and stays writable; a non-nil value in a retired gap below
+the highest key is not extra. Declaring an id compatible consents only to depth-0 slots the schema comparison
+reports ignored under that id; any other mark (nested, list element, arm, unit arm, or depth 0 under the
+reader's own id) keeps the record read-only whatever is declared.
 
 The cache emits a typed migration report with:
 

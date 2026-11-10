@@ -202,6 +202,12 @@ flatten, remove, commit) is refused with the typed schema conflict before anythi
 Declaring its id compatible on any registered type makes it writable and is the consent to the loss:
 the next write stores it under the writing type's own id and sheds the slots.
 
+A record whose payload carries a slot past the slots its reader declares, at any depth (nested object, list
+element, union arm, unit arm), is read-only the same way, whatever id it is stored under. The one consent
+is the declaration above, and it reaches only depth-0 slots the schema comparison reports ignored under a
+listed compatible id: a mark anywhere else, or at depth 0 under the reader's own id, is not consented to.
+`CultCache.IsWritable(key)` answers the same question the staging refusal asks.
+
 The rule is checked again where the write lands, under the store's lock: a write or removal at a key
 whose durable record is not owned, because another writer rewrote it after this cache
 loaded, is refused typed, and the record is reloaded as the store holds it, read-only when a type can
@@ -535,15 +541,14 @@ Read directly when:
 Allowed when:
 
 - persisted schema has missing slots that the local schema can default
-- persisted schema has extra slots the local reader can safely ignore or preserve
 - slot meanings remain compatible
 
-Soft migration should emit warnings, not silent shrugs.
+A persisted schema with extra slots the local reader lacks is not soft: the record is read-only (see the ownership
+rule above). Soft migration should emit warnings, not silent shrugs.
 
 Typical warnings:
 
 - missing slot defaulted
-- unknown extra slot ignored
 - nullable/default behavior widened
 - field preserved but not surfaced natively
 
