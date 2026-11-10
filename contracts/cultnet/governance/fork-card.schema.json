@@ -1,0 +1,965 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/CultLib/contracts/cultnet/governance/fork-card.schema.json",
+  "title": "CultNet fork-desk contract v0",
+  "description": "A fork card, the answer request a decider sends, the stored desk_answer with its tagged outcome, the result and door refusals returned to the sender, the record a fork keeps, and the ruling citation. Map-mode: every key is written, nil where absent. A request never carries answerer or authority: Huginn stamps both. Rule source: /opt/commons/handoff/fork-desk-answer-binding-20261110.md. Spec: fork-card.md. Vectors: fork-card-vectors.json.",
+  "$defs": {
+    "hex64": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "instant": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,7})?Z$"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "answerId": {
+      "type": "string",
+      "pattern": "^n[1-9][0-9]*$"
+    },
+    "option": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "text"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "card": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "fork_id",
+        "title",
+        "context",
+        "options",
+        "recommendation",
+        "depends",
+        "leans",
+        "flag",
+        "raised_in",
+        "deciders",
+        "status",
+        "ruling",
+        "ruled_from",
+        "order",
+        "options_hash"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.fork.card.v0"
+        },
+        "fork_id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "context": {
+          "type": "string"
+        },
+        "options": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "$ref": "#/$defs/option"
+          }
+        },
+        "recommendation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "depends": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "leans": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "flag": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "raised_in": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deciders": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "status": {
+          "enum": [
+            "open",
+            "closed"
+          ]
+        },
+        "ruling": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ruled_from": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/answerId"
+          }
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "options_hash": {
+          "$ref": "#/$defs/hex64"
+        }
+      }
+    },
+    "words": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000,
+      "pattern": "^(?![\\t-\\r \\u0085   -     　]+$)[\\s\\S]+$",
+      "description": "At most 4000 UTF-8 bytes, which a schema cannot say: maxLength here counts code points and is only the looser bound (a code point is at least one byte). The byte limit is a rule both suites enforce (fork-card.md, answer_request)."
+    },
+    "answerObject": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "choice",
+            "note"
+          ],
+          "properties": {
+            "choice": {
+              "$ref": "#/$defs/id"
+            },
+            "note": {
+              "$ref": "#/$defs/words"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "choice",
+            "note"
+          ],
+          "properties": {
+            "choice": {
+              "$ref": "#/$defs/id"
+            },
+            "note": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "choice",
+            "note"
+          ],
+          "properties": {
+            "choice": {
+              "type": "null"
+            },
+            "note": {
+              "$ref": "#/$defs/words"
+            }
+          }
+        }
+      ]
+    },
+    "answerRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "fork_id",
+        "options_hash",
+        "answer",
+        "retracted",
+        "retracts",
+        "answered_at",
+        "request_id"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.fork.answer_request.v0"
+        },
+        "fork_id": {
+          "$ref": "#/$defs/id"
+        },
+        "options_hash": {
+          "$ref": "#/$defs/hex64"
+        },
+        "answer": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/answerObject"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retracted": {
+          "type": "boolean"
+        },
+        "retracts": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/answerId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "answered_at": {
+          "$ref": "#/$defs/instant"
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        }
+      }
+    },
+    "deskAnswerCounted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "answer_id",
+        "fork_id",
+        "outcome",
+        "of",
+        "retracts",
+        "code",
+        "options_hash",
+        "choice",
+        "note",
+        "answered_at",
+        "received_at",
+        "claim_in_future",
+        "answerer",
+        "authority",
+        "request_id"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.desk_answer.v0"
+        },
+        "answer_id": {
+          "$ref": "#/$defs/answerId"
+        },
+        "fork_id": {
+          "$ref": "#/$defs/id"
+        },
+        "outcome": {
+          "const": "Counted"
+        },
+        "of": {
+          "type": "null"
+        },
+        "retracts": {
+          "type": "null"
+        },
+        "code": {
+          "type": "null"
+        },
+        "options_hash": {
+          "$ref": "#/$defs/hex64"
+        },
+        "choice": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "note": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/words"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "answered_at": {
+          "$ref": "#/$defs/instant"
+        },
+        "received_at": {
+          "$ref": "#/$defs/instant"
+        },
+        "claim_in_future": {
+          "type": "boolean"
+        },
+        "answerer": {
+          "$ref": "#/$defs/id"
+        },
+        "authority": {
+          "$ref": "#/$defs/id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        }
+      }
+    },
+    "deskAnswerRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "answer_id",
+        "fork_id",
+        "outcome",
+        "of",
+        "retracts",
+        "code",
+        "options_hash",
+        "choice",
+        "note",
+        "answered_at",
+        "received_at",
+        "claim_in_future",
+        "answerer",
+        "authority",
+        "request_id"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.desk_answer.v0"
+        },
+        "answer_id": {
+          "$ref": "#/$defs/answerId"
+        },
+        "fork_id": {
+          "$ref": "#/$defs/id"
+        },
+        "outcome": {
+          "const": "Revision"
+        },
+        "of": {
+          "$ref": "#/$defs/answerId"
+        },
+        "retracts": {
+          "type": "null"
+        },
+        "code": {
+          "type": "null"
+        },
+        "options_hash": {
+          "$ref": "#/$defs/hex64"
+        },
+        "choice": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "note": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/words"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "answered_at": {
+          "$ref": "#/$defs/instant"
+        },
+        "received_at": {
+          "$ref": "#/$defs/instant"
+        },
+        "claim_in_future": {
+          "type": "boolean"
+        },
+        "answerer": {
+          "$ref": "#/$defs/id"
+        },
+        "authority": {
+          "$ref": "#/$defs/id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        }
+      }
+    },
+    "deskAnswerRetraction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "answer_id",
+        "fork_id",
+        "outcome",
+        "of",
+        "retracts",
+        "code",
+        "options_hash",
+        "choice",
+        "note",
+        "answered_at",
+        "received_at",
+        "claim_in_future",
+        "answerer",
+        "authority",
+        "request_id"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.desk_answer.v0"
+        },
+        "answer_id": {
+          "$ref": "#/$defs/answerId"
+        },
+        "fork_id": {
+          "$ref": "#/$defs/id"
+        },
+        "outcome": {
+          "const": "Retraction"
+        },
+        "of": {
+          "type": "null"
+        },
+        "retracts": {
+          "$ref": "#/$defs/answerId"
+        },
+        "code": {
+          "type": "null"
+        },
+        "options_hash": {
+          "$ref": "#/$defs/hex64"
+        },
+        "choice": {
+          "type": "null"
+        },
+        "note": {
+          "type": "null"
+        },
+        "answered_at": {
+          "$ref": "#/$defs/instant"
+        },
+        "received_at": {
+          "$ref": "#/$defs/instant"
+        },
+        "claim_in_future": {
+          "type": "boolean"
+        },
+        "answerer": {
+          "$ref": "#/$defs/id"
+        },
+        "authority": {
+          "$ref": "#/$defs/id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        }
+      }
+    },
+    "deskAnswerRefused": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "answer_id",
+        "fork_id",
+        "outcome",
+        "of",
+        "retracts",
+        "code",
+        "options_hash",
+        "choice",
+        "note",
+        "answered_at",
+        "received_at",
+        "claim_in_future",
+        "answerer",
+        "authority",
+        "request_id"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.desk_answer.v0"
+        },
+        "answer_id": {
+          "$ref": "#/$defs/answerId"
+        },
+        "fork_id": {
+          "$ref": "#/$defs/id"
+        },
+        "outcome": {
+          "const": "Refused"
+        },
+        "of": {
+          "type": "null"
+        },
+        "retracts": {
+          "type": "null"
+        },
+        "code": {
+          "enum": [
+            "stale_fork",
+            "not_a_decider",
+            "fork_closed",
+            "choice_invalid",
+            "bad_retraction",
+            "already_retracted"
+          ]
+        },
+        "options_hash": {
+          "$ref": "#/$defs/hex64"
+        },
+        "choice": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "note": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/words"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "answered_at": {
+          "$ref": "#/$defs/instant"
+        },
+        "received_at": {
+          "$ref": "#/$defs/instant"
+        },
+        "claim_in_future": {
+          "type": "boolean"
+        },
+        "answerer": {
+          "$ref": "#/$defs/id"
+        },
+        "authority": {
+          "$ref": "#/$defs/id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        }
+      }
+    },
+    "deskAnswer": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/deskAnswerCounted"
+        },
+        {
+          "$ref": "#/$defs/deskAnswerRevision"
+        },
+        {
+          "$ref": "#/$defs/deskAnswerRetraction"
+        },
+        {
+          "$ref": "#/$defs/deskAnswerRefused"
+        }
+      ]
+    },
+    "answerResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "answer",
+        "card"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.fork.answer_result.v0"
+        },
+        "answer": {
+          "$ref": "#/$defs/deskAnswer"
+        },
+        "card": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/card"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "refusal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "code",
+        "error"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.fork.refusal.v0"
+        },
+        "code": {
+          "enum": [
+            "unauthenticated",
+            "body_forbidden_field",
+            "body_unknown_field",
+            "body_invalid",
+            "fork_unknown",
+            "insufficient_scope",
+            "forbidden",
+            "request_invalid",
+            "request_id_conflict"
+          ]
+        },
+        "error": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "fork_id",
+        "options_hash",
+        "counted_answer_id",
+        "answers"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.fork.record.v0"
+        },
+        "fork_id": {
+          "$ref": "#/$defs/id"
+        },
+        "options_hash": {
+          "$ref": "#/$defs/hex64"
+        },
+        "counted_answer_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/answerId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "answers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/deskAnswer"
+          }
+        }
+      }
+    },
+    "rulingCite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "ruling_id",
+        "authority",
+        "answer_id"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.fork.ruling_cite.v0"
+        },
+        "ruling_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "authority": {
+          "type": "string",
+          "minLength": 1
+        },
+        "answer_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/answerId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "cursor": {
+      "type": "string",
+      "pattern": "^c[1-9][0-9]*$",
+      "description": "Opaque to a client. c<N> means: the cards whose order is below N."
+    },
+    "stamp": {
+      "type": "string",
+      "pattern": "^s[0-9]+$",
+      "description": "s<N>, N the receiver's last-seen Huginn admission ordinal for the Mind's desk documents. Two lists with the same stamp are the same state."
+    },
+    "listRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "mind",
+        "status",
+        "cursor",
+        "limit"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.fork.list_request.v0"
+        },
+        "mind": {
+          "$ref": "#/$defs/id"
+        },
+        "status": {
+          "oneOf": [
+            {
+              "enum": [
+                "open",
+                "recorded"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cursor": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50
+        }
+      }
+    },
+    "readRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "mind",
+        "fork_id"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.fork.read_request.v0"
+        },
+        "mind": {
+          "$ref": "#/$defs/id"
+        },
+        "fork_id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "card",
+        "record"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.fork.entry.v0"
+        },
+        "card": {
+          "$ref": "#/$defs/card"
+        },
+        "record": {
+          "$ref": "#/$defs/record"
+        }
+      }
+    },
+    "list": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "mind",
+        "stamp",
+        "open_count",
+        "recorded_count",
+        "forks",
+        "next_cursor"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.fork.list.v0"
+        },
+        "mind": {
+          "$ref": "#/$defs/id"
+        },
+        "stamp": {
+          "$ref": "#/$defs/stamp"
+        },
+        "open_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "recorded_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "forks": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/$defs/entry"
+          }
+        },
+        "next_cursor": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "unavailable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "code",
+        "error",
+        "retryAfterSeconds"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.fork.unavailable.v0"
+        },
+        "code": {
+          "const": "unavailable"
+        },
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retryAfterSeconds": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "The outcome is NOT CONFIRMED: the request may have reached Huginn and been stored before the reply was lost. Retry with the same request_id to learn the outcome."
+    },
+    "requestId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "Set by the client, a lowercase D-format UUID. Bound to the stamped answerer by the first stored answer that carries it."
+    }
+  }
+}

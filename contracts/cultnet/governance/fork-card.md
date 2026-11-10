@@ -1,0 +1,193 @@
+# CultNet fork-desk contract v0 (specification)
+
+Status: specification, drafted for Heimdall (Bifrost receiver), Huginn (the second door) and Void (Ratatoskr desk). No runtime implements it yet.
+Rule source: `/opt/commons/handoff/fork-desk-answer-binding-20261110.md` (Heimdall; sections 1.1 to 1.5, 1.3a to 1.3d), amended by the Persona briefs of 2026-11-10 (Eureka's fit check). Where this page differs from that file it says so under "Differences from the binding file".
+Format source: the fork desk artifact in `/opt/commons/handoff/fork-desk-original/` (ruling `eureka-substrate:ruling:fork-desk-nibu-format`).
+Files here: `fork-card.schema.json` (one schema, a `$defs` entry per document), `fork-card-vectors.json`. Conformance: `tests/GameCult.Networking.Tests/GovernanceVectorTests.cs` (C#) and `packages/cultnet-ts/test/governance-vectors.test.ts` (TypeScript), both generated against vectors written by `scripts/gen-governance-vectors.py`. Each suite computes every hash with its own code and replays every scenario through a reference judge written from this page.
+
+All documents are CultNet map-mode: every key written, nil where absent, closed schemas. Field names are snake_case as in the binding file and the mind's records; `schemaVersion` keeps CultNet's spelling (open choice 1). The bytes of every document are pinned in the vectors as `messagePackHex`.
+
+## Documents
+
+| schema id | what | who writes it |
+|---|---|---|
+| `gamecult.fork.card.v0` | the fork as shown | the publisher (a Mind's card projection) |
+| `gamecult.fork.answer_request.v0` | the answer a decider sends | the client; Bifrost forwards it unchanged to Huginn's second door |
+| `gamecult.desk_answer.v0` | the stored answer with one tagged outcome | Huginn only |
+| `gamecult.fork.answer_result.v0` | what the sender gets back for a stored answer | Bifrost, from the stored `desk_answer` |
+| `gamecult.fork.refusal.v0` | a body refused at the door; nothing stored | Bifrost |
+| `gamecult.fork.record.v0` | a fork's answers plus the derived counted answer | a projection of the stored `desk_answer`s |
+| `gamecult.fork.ruling_cite.v0` | the citation a ruling carries | the Mind admitting the ruling |
+| `gamecult.fork.list_request.v0` | list a Mind's forks (Transport) | the desk |
+| `gamecult.fork.list.v0` | a page of entries, counts and a stamp | Bifrost, projected from Huginn |
+| `gamecult.fork.read_request.v0` | read one fork (Transport) | the desk |
+| `gamecult.fork.entry.v0` | one card with its record | Bifrost, projected from Huginn |
+| `gamecult.fork.unavailable.v0` | the outcome is not confirmed (the second door or Huginn did not answer); retry with the same `request_id` | Bifrost |
+
+### card
+
+`{schemaVersion, fork_id, title, context, options[{id, text}], recommendation, depends[], leans, flag, raised_in, deciders[], status, ruling, ruled_from[], order, options_hash}`.
+
+- `fork_id`: the mind's `question` key, `<campaign>:question:<label>`.
+- **Hashed (the shown members):** `title`, `context`, `options` (each `{id, text}`, in shown order), `recommendation` (an option id, **never nil**: the stored `question` requires `recommended`), `depends` (strings, each one of the stored question's `depends` lines verbatim, at most 8, in shown order, empty when none; the stored kind holds prose lines, so a line may read like a reference such as `campaign:kind:label` but is hashed as the text it is).
+- **Not hashed:** `fork_id` (bound beside the hash), `leans` (an option id or nil), `flag`, `raised_in`, `deciders`, `status` (`open` or `closed`), `ruling` (the ruling id when a ruling closed the fork; nil when the card is open, and nil on a closed card whose question was withdrawn or otherwise resolved with no ruling), `ruled_from` (answer ids a ruling has been admitted from; non-empty only on a closed card), `order`, and `options_hash` itself.
+- **`deciders` is read-only data.** The list is set outside the Mind, through Bifrost's admin path; the Mind reads it and the card projection copies it. A question's own `audience` may only narrow it. A Mind never writes it, so a Mind cannot add itself and answer its own fork.
+- Rules a schema cannot say, each with a negative vector: option ids are unique; `recommendation` and `leans` name an option; deciders are unique; an open card names no `ruling` and its `ruled_from` is empty (a ruling that answers a fork closes it); `ruled_from` is non-empty only when `ruling` is set; a closed card may name no ruling (the question was withdrawn, superseded or deferred: step 6 reads `status`, not the ruling); `options_hash` equals the hash of the shown members.
+
+### Options hash (canonical bytes)
+
+`options_hash` = lowercase hex SHA-256 of the UTF-8 bytes of the following, byte for byte:
+
+1. Build an object with exactly the five members `title`, `context`, `options`, `recommendation`, `depends`. Each option is an object with exactly `id` and `text`.
+2. **NFC-normalise every string, object keys included.** No trimming, no newline rewriting, no case folding. A string with a lone surrogate is not a card (it has no UTF-8). Normalisation stability makes NFC stable across Unicode versions for already-assigned code points; a runtime's own normaliser is trusted and the vectors include a decomposed pair and astral code points (open choice 2).
+3. Serialise as RFC 8785 (JCS): no whitespace; object keys sorted by UTF-16 code unit, which for these ASCII keys is `context, depends, options, recommendation, title` and, inside an option, `id, text`; array order is as shown (option order and `depends` order are part of the hash).
+4. Strings are written in double quotes; only `"` and `\` are backslash-escaped, U+0008, U+0009, U+000A, U+000C, U+000D as `\b \t \n \f \r`, every other code point below U+0020 as `\u00xx` in lowercase hex; everything else is written raw as UTF-8 (U+007F, U+2028, `<`, `&` and astral code points included).
+5. **Numbers and nulls:** the member set contains none. There is no number to canonicalise (a number anywhere in the five members is a defect) and `recommendation` is never nil, so no nil is hashed.
+
+`fork_id` is not in the hash and is bound beside it in its own field, so one hash cannot be replayed under another fork. The publisher computes the hash and stores it in the card; the client recomputes it from what it rendered and refuses to send on a mismatch; the receiver recomputes from its stored fork, never from the client.
+
+Vectors `optionsHash`: the seven of the binding file (`heimdall_A..G`), computed by the Python generator, by the C# suite and by the TypeScript suite independently, plus text, title, context and `depends`-order mutations, a case showing the unshown members do not move the hash, escapes and markup, and astral ids. Each suite also mutates every shown member, an option id included, and asserts the hash changes.
+
+### answer_request
+
+`{schemaVersion, fork_id, options_hash, answer, retracted, retracts, answered_at, request_id}`. **`request_id`** is set by the client, a lowercase D-format UUID, one per intended answer, kept across retries; the first stored answer that carries it binds it to the stamped `answerer`. "Same body" means every field equal, `answered_at` included, so a client resends identical bytes. A **retry with the same `request_id` and the same body returns the stored outcome unchanged** (a `Refused` one included; a replayed `stale_fork` carries the **current** card, because a stored `desk_answer` has no card field and no storage is added for one) and **never adds a Revision**; the same `request_id` with a different body is `request_id_conflict` (409, a refusal, nothing stored). The same id from another account is another request, judged on its own: Y reusing X's `request_id` with a body identical to X's gets **Y's own new answer, with its own answer id, stamped Y**; X's stored outcome (a `Refused` one included) is never returned in its place, and Y's request neither conflicts with it nor replays it. An `of` that names the counted answer is allowed, because answer ids are not secret between deciders (vectors V14: an off-list X's `Refused`, then a decider Y's identical body is its own `Counted`; X's `Counted`, then Y's identical body is its own `Revision` whose `of` names X's answer, and X's later retry still returns X's answer). Both suites assert it on every scenario: a response's `answerer` is the step's account, and an id first bound by another account never yields that account's answer id or document. A body refused at step 1 or 2 binds nothing, so its id is free to reuse. The lookup comes after steps 1 and 2 and before the fork is looked up, so a retry gets its stored outcome even if the card has since changed. `answer` is `{choice, note}` (at least one non-nil) or nil on a retraction. `choice` is an option id; `note` is the person's words, verbatim, 1 to 4000 **UTF-8 bytes**, not blank. A schema counts characters, not bytes, so its `maxLength: 4000` (code points) is only the looser bound and both suites enforce the byte limit as a rule: 4000 ASCII bytes pass; 1000 astral characters (4000 bytes) pass and 1001 (4004) fail; `e` plus a combining acute is 3 bytes, so 1333 of them and an `x` pass and 1334 fail; 1999 two-byte characters plus three ASCII (4001 bytes) fail. A note over the limit is `body_invalid`. `answered_at` is the client's claim. **A request never carries `answerer` or `authority`**: both are stamped by Huginn (`answerer` from the verified subject the receiver passes; `authority` from the door's configuration). A body that names either key at any depth is refused whole, never stripped (`body_forbidden_field`); any other unknown key is `body_unknown_field`. The request type Bifrost sends over the second door is this document; it has no field for either key, so a client cannot supply them by construction, and Bifrost's scan is the first line, not the only one. How Huginn receives the verified subject is the door's authenticated context, not a body field (open choice 3). In map-mode `retracted` is always written (the binding file's optional `retracted` becomes `false`).
+
+### desk_answer (the stored kind)
+
+`{schemaVersion, answer_id, fork_id, outcome, of, retracts, code, options_hash, choice, note, answered_at, received_at, claim_in_future, answerer, authority, request_id}`, key `<campaign>:desk_answer:<question-label>.n<seq>`; `answer_id` is `n<seq>`, assigned by Huginn per question, and **an answer is named by its answer id** everywhere (`retracts`, `of`, `ruled_from`).
+
+The stamped `authority` field of a stored answer is an **attribution**: the role the verified account holds (`Operator`, `Steward`, `Member`), copied from Bifrost's state. A stored answer confers no authority. Authority exists only where a ruling cites a counted answer ("Operator authority" below); the field keeps the binding file's spelling (open choice 8). One tagged `outcome`, each variant carrying only its own link:
+
+- `Counted`: the answer that counts. `of`, `retracts`, `code` nil.
+- `Revision`: a later passing answer, kept, not counted while the first stands. `of` names the counted answer at the time.
+- `Retraction`: the stored form of `retracted: true` plus `retracts`. `retracts` names the answer retracted; `choice` and `note` nil. The illegal pair (a retraction with no target, or a target with no retraction) cannot be written.
+- `Refused`: any refusal from steps 4 to 7 or R1 and R2, with its `code`, stored too. `choice` and `note` keep what the body carried.
+
+`received_at` is Huginn's admission time; "first" means first by admission order (the `n<seq>` ordinal), never by `answered_at`. `claim_in_future` is true when `answered_at` is more than five minutes after `received_at`: accepted but flagged. It is a function of the two stored values, so the writer compares against the `received_at` it stores, at the precision it stores it (a flag decided against an unrounded clock and a stored second-truncated `received_at` disagrees with the document it sits in). **Not stored, and no answer id:** a body refused at step 1 or 2 (Bifrost; it never reaches Huginn), and a body naming an unknown fork (step 3; Huginn answers it from its stored forks, but with no question there is nothing to key a record under). Each gets a `refusal` and is dropped. A malformed body is therefore never stored, and neither is an unknown fork. Every refusal from step 4 on is stored. **`unavailable`** (503) is not a refusal and not in the refusal set: Bifrost answers it when the second door or Huginn did not answer after the auth steps and the body shape passed (a bad body is still refused first). **It says the outcome is NOT CONFIRMED, never that nothing was stored**: a timeout after the request reached Huginn may have stored it. It carries no answer id. The desk retries the same request with the same `request_id` and learns the outcome: the stored one if Huginn had it, a fresh one if not. It covers **calls 1 and 2 as well as the answer POST** when Huginn cannot be reached (Transport; a read has no outcome to confirm, so a retry is plain). `retryAfterSeconds` is nil when Bifrost has no hint.
+
+**The mind's record and this document.** Huginn keeps the answer as its own record kind (`epiphany.pipeline.desk_answer.v2`, key `<campaign>:desk_answer:<question-label>.n<seq>`, the outcome as one externally tagged value, the fork as `fork`). The second door projects it to this document and nothing else crosses: `answer_id` is the key's `n<seq>` part, `fork_id` is the stored `fork`, the tagged outcome flattens into `outcome`, `of`, `retracts` and `code`, and the six refusal codes are spelt as in the schema (snake_case; the record's enum spells them in the mind's own PascalCase). On the wire an answer is named by its `n<seq>` alone, always inside the fork whose `fork_id` the document carries; a runtime that holds the full record key converts at the door, in one place. `body_sha256` and any other digest Huginn keeps to decide "same body" stay in the record: Huginn alone decides a replay or a `request_id_conflict` and Bifrost never compares bodies, so no digest is a field of this document. A digest is a valid way to decide it only if it covers `fork_id`, `options_hash`, `answer.choice`, `answer.note`, `retracted`, `retracts` and `answered_at` (every field of the request but `request_id`), is computed by Huginn and never read from a client.
+
+### Counting rules (in order; the first failure refuses with that code)
+
+| step | rule | refusal | stored |
+|---|---|---|---|
+| 1 | verified session or bearer | `unauthenticated` (401) | no |
+| 2 | closed body; no `answerer`/`authority` at any depth; type-correct; not (no `answer` and not a retraction) | `body_forbidden_field`, `body_unknown_field`, `body_invalid` (400) | no |
+| 3 | `fork_id` is a stored fork | `fork_unknown` (404) | no |
+| 4 | `options_hash` equals the stored fork's hash | `stale_fork` (409) | **yes**; the result carries the current card |
+| 5 | the stamped `answerer` is on `deciders` | `not_a_decider` (403) | yes |
+| 6 | the fork is open (`status: open`) | `fork_closed` (409) | yes |
+| 7 | `choice`, if present, is an option id | `choice_invalid` (400) | yes |
+| 8 | first passing answer for `(fork_id, options_hash)` is `Counted`; later passing answers are `Revision`s naming the counted one | | yes |
+| 9 | a Matrix edit, redaction or reaction changes nothing | | no event is an answer |
+
+**Retraction** (`retracted: true`, `retracts: <answer id>`, `answer: nil`, `options_hash` still carried, so step 4 applies) passes steps 1 to 6, then:
+
+- R1 form: it carries no `answer`, it names a `Counted` or `Revision` answer of this fork under this `options_hash`; else `bad_retraction` (400). A retraction naming an answer already retracted is `already_retracted` (409). `retracts` on a body that is not a retraction is `bad_retraction`.
+- R2 who: the original answerer or any other decider; step 5 already requires a decider.
+- R3 is dropped and its label stays vacant, so R4 keeps its name in the binding file. A ruling that answers a fork closes it (Eureka and Heimdall, 2026-11-10), so a ruling cannot cite an answer on an open fork (that is the stale-click gap, and a card with `ruled_from` set and `status: open` is invalid), and a retraction after a ruling meets step 6: refused `fork_closed`, stored. There is no `ruled` code (vector `V10a_a_ruling_that_closed_the_fork_makes_a_retraction_fork_closed`).
+- R4 counted answer: retracting the counted answer removes it from the count and the next passing answer in admission order counts again. Retracting an answer that was not counted changes nothing. After every answer is retracted, a fresh answer is `Counted`. Records stay append-only.
+
+**The counted answer is derived**, not stored: the first `Counted` or `Revision` answer under the card's current `options_hash` that no `Retraction` names. When the card changes, answers under the old hash stop counting and the next answer under the new hash is `Counted` (vectors `a_changed_card_...`). The `record` projection carries it as `counted_answer_id`.
+
+### Operator authority
+
+A ruling may carry `authority: Operator` only if it cites (`ruling_cite.answer_id`) a stored `desk_answer` whose outcome is `Counted` and whose stamped attribution (the answer's `authority` field) is `Operator` (or a stamped relay of her words from a mapped door, which this contract does not model). The citation is what gives a ruling authority: an attribution on an answer is a fact about the account, and authority exists only where a ruling cites a counted answer. The cited answer id is what `ruled_from` lists on the closed card. Negative vectors (`rulingCites`): no citation, a `Revision`, a `Refused` answer, a Counted answer by a non-operator, an answer that does not exist. Other authorities need no citation.
+
+## Transport
+
+Source: the desk's client needs (Ratatoskr PR #24 section 12, `ratatoskr-desk-spec-20261110.md`) and Heimdall's binding file, `/opt/commons/handoff/fork-desk-answer-binding-20261110.md`, section 1.3c, which is the source for the second door. **Everything in this section is spec text for Bifrost to build; no route, scope or audience below exists in Bifrost today.** The routes (with the `{mind}` segment), the scope names `desk.read` and `desk.answer`, the audience `bifrost-desk` and the auth order are Heimdall's rulings (his file, sections 4.1 to 4.3a); this page writes them as documents and vectors.
+
+**Authorities.** Cards are projected **read-only from Huginn**: Bifrost never authors a card, a ruling or a status, and the desk never writes one. Bifrost verifies the bearer, resolves the actor from its `sub` (a `UserAccount.Id`), and for an answer forwards a typed `DeskAnswer` on the peer-checked second door to Huginn, then returns **Huginn's outcome unchanged**: the stored `desk_answer` in an `answer_result`, or its refusal. The wire of the second door is **pending**: Eureka's cut spec follows her record PR, so this page defines the documents the desk sees and not the bytes between Bifrost and Huginn (open choice 3).
+
+| call | route (proposal) | request | response | token |
+|---|---|---|---|---|
+| 1 list | `GET /api/desk/{mind}/forks?status=&cursor=&limit=` | `list_request`: `mind` from the path, the rest from the query string | `list` | audience `bifrost-desk`, scope `desk.read` |
+| 2 read | `GET /api/desk/{mind}/forks/{fork_id}` (the id percent-encoded) | `read_request`, its `mind` and `fork_id` from the path | `entry`, or `refusal` `fork_unknown` (404) | `desk.read` |
+| 3 answer | `POST /api/desk/{mind}/answers` | `answer_request` as the body; `fork_id` stays in the body, the Mind is the route's and is no body field | `answer_result` (200 for a stored outcome of any kind, `Refused` included; the desk reads `outcome` and `code`, not the status), or a `refusal`, or `unavailable` | audience `bifrost-desk`, scope `desk.answer` |
+
+**The `{mind}` segment** (Heimdall's rulings M1 to M5; vectors `transport.mindRoutes`).
+
+- **M1.** `{mind}` is looked up in a **fixed configured list** of Mind ids, each mapped in configuration to that Mind's socket on the peer-checked door. The segment is percent-decoded once and compared, ordinally, with the list's ids: no case folding, trimming or Unicode normalisation, and a decoding failure is a miss. It is **never joined into a path, a socket name or a query**, so a value off the list opens nothing (`../x`, `a/b`, `a%2fb`, `eureka%00`, a 4 KB string, `GAMECULT-CHAT` for `gamecult-chat`, a trailing space, bytes that are not UTF-8: all unknown, 404, no socket opened).
+- **M2.** An unknown Mind gets **the same refusal as an unknown fork**: `fork_unknown`, 404, the same bytes (the document's `error` names neither the Mind nor the fork). The list of Minds is not probeable. Auth is judged first, so a caller without a valid token, scope or Active membership learns nothing about which Minds exist.
+- **M3.** On the POST the route's Mind must hold `fork_id`: step 3 is judged against **that Mind's** stored forks, so a `fork_id` the route's Mind does not hold is `fork_unknown` and nothing is stored, in either Mind. A fork cannot be answered through another Mind's route. A body that names `mind` is `body_unknown_field`: the Mind is the route's.
+- **M4.** Scopes are **not per Mind**: `desk.read` and `desk.answer` open the routes of every configured Mind; which forks a caller may see or answer is the card's audience and decider list.
+- **M5. The decider list reaches Huginn as a typed request on the same peer-checked door, sent only by Bifrost, from the admin-set list.** It is never taken from a Mind and never from a request body: no HTTP field, header or query parameter on any desk route sets or extends it, and a body naming `deciders` is `body_unknown_field` (scenario `M5_...`). A request carrying it from a Mind's own door or session is refused. **This is Bifrost and Huginn work and no vector here can test it** (the document and the door's wire are pending, open choice 3); the rule is stated so that the cut that builds the request has it.
+
+Calls 1 and 2 are enough for a read-only desk. Every response is the pinned MessagePack document or its JSON form with the same keys (open choice 1 of `vote-api.md`: the media type is unsettled).
+
+**Auth, in order, per route.** (1) A bearer, else `unauthenticated` (401). (2) The token's audience is `bifrost-desk`: **the Matrix Authentication Service token chat holds today is refused, and so is any `votes.*` token** (audience `bifrost-votes`), both as `unauthenticated`. (3) The scope the route needs, else `insufficient_scope` (403): `desk.read` for calls 1 and 2, `desk.answer` for call 3, and neither implies the other. (4) The account behind `sub` is an Active member, else `forbidden` (403), as in the vote API; scope is judged first. (5) For call 3 the body is then shaped (steps 1 and 2 above), so **a non-Active member who sends a bad body, including one naming `answerer` or `authority`, gets `forbidden`, not a body refusal**; a body naming either key at any depth is `body_forbidden_field` only for an Active member. (6) Only then is Huginn asked, so `unavailable` never hides an auth or body refusal. A `votes.*` token touches none of the three. Heimdall's file leaves the audience and the claims check open; `insufficient_scope`, `forbidden`, `request_invalid` (400, a list or read request that fails its document) and `request_id_conflict` are added to the door refusals.
+
+**List.** `list_request`: `{mind, status, cursor, limit}`. `mind` is the route's `{mind}`, a Mind id from the configured list. `status` is `open`, `recorded` or nil for both; `recorded` means a closed card. Cards come **newest first by `order`** (the admission ordinal). `limit` is 0 to 50; **`limit` 0 returns no entries, only the counts and the stamp**, which is what "N open" on the Mind's header needs. `cursor` is nil or `c<N>`: the cards whose `order` is below N; a client treats it as opaque and sends back the `next_cursor` it was given. `list`: `{mind, stamp, open_count, recorded_count, forks[entry], next_cursor}`. The counts cover every card the viewer may see, whatever `status` and `cursor` asked for. `stamp` is `s<N>`, N the receiver's last-seen Huginn admission ordinal for the Mind's desk documents: the same stamp means the same state, so a desk polls `limit` 0 and fetches bodies only when the stamp moves. `next_cursor` is nil on the last page. An `entry` is `{card, record}`: the card and its `record` (the answers with their outcomes and the derived `counted_answer_id`).
+
+**Read.** `read_request` is `{mind, fork_id}`; the response is the `entry` for one fork of that Mind. Its `card.options_hash` is **computed by the server** from the five shown members as in "Options hash" and the client recomputes it from what it rendered; a card whose hash is not the hash of its members is no card (negative vector `card_hash_wrong`). The record's `fork_id` and `options_hash` are the card's, and `counted_answer_id` is derived, not copied (negative vectors for each). Which cards and answers a viewer may see follows the card's audience (PR #24 section 5); a fork the viewer may not see is `fork_unknown`, not a different refusal.
+
+**Answer.** The body is the `answer_request` and nothing else a client may set: `fork_id`, `options_hash`, `answer`, `answered_at`, `request_id` (plus `retracted` and `retracts`, written `false` and nil unless the call retracts). The response is the stored outcome: `Counted`, `Revision`, `Retraction`, or `Refused` with its code. **A `stale_fork` refusal carries the current card** in `answer_result.card`, so the desk can show the new fork without another read. Nothing is stored for a step 1 or 2 refusal, an unknown fork (or an unknown Mind, or a fork another Mind holds) or a `request_id_conflict`. `unavailable` promises nothing either way.
+
+**Vectors (`transport` in `fork-card-vectors.json`).** `listRequest`, `readRequest` and `entry` (valid and invalid, with bytes); `listInvalid`; `listScenarios` (five scenarios over one Mind's five cards: paged open-only, recorded-only, all, `limit` 0, an empty Mind, each response with its bytes, the cursor of page two being page one's `next_cursor`); `authCases` (twenty-two cases: the MAS token, three `votes.*` tokens, a desk token with the other route's scope, a non-Active member on each route, and Huginn down on each route, with auth and membership judged first). Both suites replay the list requests through a reference judge and the auth cases through another. `mindRoutes` (a configured list of two Minds with their sockets and forks; 57 cases over the three routes: bad and percent-encoded segments, unknown Mind against unknown fork with `sameResponse` pairs of equal bytes, the POST on a Mind that does not hold the fork, scopes that are not per Mind, and auth judged before the Mind lookup) is replayed by both suites through a reference judge that reports the refusal, the socket it would open and the Mind that stored an answer. Top-level `unavailable` pins the 503 document. Scenarios pin: an `unavailable` where Huginn never had the request, retried into a `Counted` answer; an `unavailable` where Huginn had stored it, whose retry returns the stored outcome and adds no Revision; a replayed `Refused` with its card; `request_id_conflict`; the same id from another account; and a non-Active member with a bad body, with the door down, getting `forbidden` first. A bad body is refused before the door is asked.
+
+**Bifrost must still build:** all three routes; the `bifrost-desk` audience and the `desk.read` and `desk.answer` scopes on the OIDC token it issues to chat; the configured Mind list and its sockets (M1); the projection of cards and records from Huginn, the stamp, the cursor and the counts; the `DeskAnswer` call on the second door and the pass-through of its outcome; the decider-list request, sent from the admin-set list only (M5); the `unavailable` answer. **Huginn must still build** the second door's wire, the decider-list request it receives (M5) and the read side the projection uses (Eureka's cut spec, after her record PR). **The desk may build today** against the vectors: nothing in them needs a live service.
+
+## Old format, the mind's record, and what maps to what
+
+The old desk (`index.html`) read `questions/<id>` and wrote `answers/<id>` in a shared store. The mind's `question` record is the source in the new design; the card is its projection.
+
+| old desk | mind `question` record | card |
+|---|---|---|
+| `qid`, `id` | key `campaign:question:label` | `fork_id` |
+| `title` | `title` | `title` |
+| `body` | `question` (the long text) | `context` |
+| `depends`: a free string | `depends`: up to 8 prose lines (`huginn schema question`) | `depends`: the lines verbatim |
+| `options[{key, label, text}]` | `options[{label, text}]` | `options[{id, text}]` |
+| option `key` | option `label` (a slug, the id) | option `id` |
+| option `label` (a human title) | none | **dropped**: not stored, not hashed; shown text is `text` |
+| `rec` (a key) | `recommended` (a label) | `recommendation` (an id), never nil |
+| `lean` ("Self leans" mark) | none | `leans` (an id or nil), not hashed |
+| `flag` (the provisional line) | none | `flag` (a string or nil), not hashed |
+| `status` open or closed, `ruling` | derived from the resolution (status is never written): any resolution of the question closes it; the ruling is the one that answered it | `status`, `ruling`, both a projection (`ruling` is nil on an open card and on a card closed with no ruling) |
+| `order` | none (admission ordinal) | `order` |
+| none | `raised_in`, `asked_on` | `raised_in`; `asked_on` is not carried |
+| none | none | `deciders` (outside the Mind), `ruled_from`, `options_hash` |
+| answer `{choice: key or null, note, question, updatedAt}`, one mutable document per question | none | `answer_request` then an append-only `desk_answer` |
+| `note`: her words verbatim | | `answer.note`, verbatim |
+| "Clear pick": `choice` back to null so the note stands alone | | an `answer` with `choice` nil and `note` set, as the first answer or as a `Revision` |
+| "Changing an answer is fine until it's admitted as a ruling" | | a later answer is a `Revision`; `Retraction` withdraws one; neither changes who counted first, and a ruling that answers the fork closes it, after which no answer or retraction is taken (`fork_closed`) |
+
+Differences that need Void's choice: the old page **overwrites** one answer per question and the new store **appends**, so the booth cannot show "your answer" as one mutable field (it shows the latest answer by the person, plus its history); the old page needs no identity and the new one stamps `answerer` from a verified session; the old `label` has nowhere to live unless the card's `text` carries it.
+
+## Transport note for Void: Matrix event versus how the mind carries questions
+
+How a mind carries a question today: a typed `question` record in Huginn (`huginn view`, `huginn query`); the Persona relays it to the operator in chat, and the operator's reply comes back as chat text that Self reads and admits as a `ruling` in her words. Identity is whoever the chat attributes the message to; nothing binds an answer to the question text she saw.
+
+Option A, **a Matrix event in the Mind's room with the answer as a reply.** Gains: it sits where people already are, needs no sign-in beyond Matrix, and the thread shows the exchange. Loses: the sender is an mxid, not a Bifrost account, so `answerer` and `authority` have no verified source; an edit or redaction changes the visible message but not the decision (binding rule 9), so the thread and the record can disagree; there is nowhere to carry `options_hash`, so a stale card cannot be refused; and a reply is free text, so `choice` is lost.
+
+Option B, **Bifrost receives the answer and Huginn stores it** (the design in this page; Ratatoskr PR #24 also withdraws the Matrix carrier). Gains: a verified account, a bound hash, refusals that are stored and visible, one counted answer, retractions. Loses: the booth needs Bifrost sign-in, which does not reach chat yet (Bifrost PR #9 and #37 design it), so until then the desk is read-only; and the exchange is no longer in the room.
+
+**Recommendation: B, with Matrix as presentation only.** The Mind may post a card as a listing and a link into the desk; no Matrix event is ever an answer (rule 9). Confidence: high on the rule (it is Heimdall's and Eureka's already), moderate on the interim, where read-only until sign-in is a real cost; if the operator needs to answer before sign-in reaches chat, the honest stopgap is the old path (chat text, Self admits a ruling in her words) rather than a Matrix reply the record cannot bind.
+
+## Differences from the binding file
+
+- Spelling: every field is as the binding file names it (`fork_id`, `options_hash`, `answered_at`, `retracted`, `retracts`, `answer.choice`, `answer.note`, `recommendation`, `depends`, option `id`), except that `schemaVersion` keeps CultNet's camelCase and `answer_id` replaces the earlier `receipt id` (Persona brief).
+- Map-mode writes every key: `retracted` is always present; nothing is "optional".
+- `Refused` stores every refusal from steps 4 to 7 and R1 and R2 (his section 1.3b); only steps 1 and 2 and `fork_unknown` are not stored. The binding file does not say whether `fork_unknown` is stored; it cannot be keyed without a question, so it is not (open choice 4).
+- The binding file's `choice_valid` has no named refusal code; this page names it `choice_invalid`. `fork_known` is `fork_unknown`. A type-invalid body is `body_invalid`.
+- `ruled` (his R3 and V10) is dropped: a ruling that answers a fork closes it, so the case is `fork_closed` (V4, V10a). His file drops it too.
+- Heimdall's section 1.3e (Q1 to Q6, V12 to V18) is the source for `request_id`; this page matches it, with two notes. Q1's open item is settled by his ruling: a replayed `stale_fork` returns the current card. In V14 a decider's identical body is a `Revision` whose `of` necessarily names the first account's counted answer id (the record shows it to every decider), so "never contains X's answer_id" holds for Y's answer id and document, not for `of` (Heimdall: `of` naming the counted answer is allowed); the vector with an off-list first account pins the case with a `Counted`, which has no `of`.
+- `request_id` (on the request and the stored `desk_answer`) and `request_id_conflict` are this page's: his file has no idempotency key, and a retry after `unavailable` needs one. Eureka's `desk_answer` kind and Huginn's request type must carry it.
+- Transport: the routes, the `{mind}` segment, the scopes, the audience and the auth order are his rulings (4.1 to 4.3a); the documents (list, read, `unavailable`) are this page's. The note limit is 4000 UTF-8 bytes here, as his 1.1 leaves the unit unsaid.
+- The recommendation is never nil. The binding file's earlier vectors D and E used a nil recommendation; its updated D and E use `"a"`, as here.
+- Hash vectors: A, B, C, D, E, F and G of the binding file are reproduced digest for digest by the Python generator, the C# suite and the TypeScript suite (the generator prints `same` for each; none differs).
+
+## Open choices
+
+1. Case of field names: snake_case for the fork documents (as the binding file) beside camelCase for the vote documents (as Bifrost's serializer). One convention would be tidier.
+2. NFC across runtimes relies on each runtime's normaliser; a pinned table, as `write-receipt.md` does for letters, would remove the reliance. The risk is only for code points assigned after a runtime's Unicode version.
+3. How Huginn learns the verified subject: the second door's authenticated context (the peer credential names Bifrost the service, not the member), so the subject must travel beside the request. This contract has no envelope for it.
+4. Whether `fork_unknown` and shape refusals should leave an audit record somewhere other than a `desk_answer`.
+5. Whether `leans` and `flag`, which the booth shows, should join the hash. The binding file's five members do not include them; a changed lean would not make an answer stale.
+6. What the person sees of a retracted counted answer when the next answer counts: this contract only says the count moves.
+7. `received_at` is not in the binding file's stored fields; it is kept for `claim_in_future` and could be dropped if the ordinal alone decides order.
+8. The stamped `authority` field is an attribution, not an authority (above); renaming it `attribution` would say so, at the price of a new key the door must also refuse in a body.
+9. The claims Bifrost verifies are PR #24's open item 5. (The audience `bifrost-desk`, the three routes and the scope names are ruled by Heimdall.)
+10. The second door's wire between Bifrost and Huginn (pending Eureka's cut spec). `unavailable` is a document of its own, outside the refusal set, so a desk can retry it; calls 1 and 2 use it too when Huginn is down (vectors `huginn_down_*`).
+11. While a known Mind's door is down its routes answer `unavailable` (503) and an unknown Mind answers `fork_unknown` (404), so the two are distinguishable for that period. M2 makes them identical only when every door is up; making them identical when one is down means answering `unavailable` for any `{mind}` not on the list, which tells a client nothing about which Minds exist but also hides a typo. Heimdall's to rule; the vectors do not pin it.

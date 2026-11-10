@@ -180,9 +180,10 @@ namespace GameCult.Networking.Tests
             if (instance.ValueKind == JsonValueKind.String)
             {
                 var value = instance.GetString()!;
-                if (schema.TryGetProperty("minLength", out var minLength) && value.Length < minLength.GetInt32())
+                var length = value.EnumerateRunes().Count();   // JSON Schema counts characters as code points, as Ajv does, not UTF-16 units
+                if (schema.TryGetProperty("minLength", out var minLength) && length < minLength.GetInt32())
                     errors.Add($"{path}: string shorter than minLength {minLength.GetInt32()}");
-                if (schema.TryGetProperty("maxLength", out var maxLength) && value.Length > maxLength.GetInt32())
+                if (schema.TryGetProperty("maxLength", out var maxLength) && length > maxLength.GetInt32())
                     errors.Add($"{path}: string longer than maxLength {maxLength.GetInt32()}");
                 if (schema.TryGetProperty("pattern", out var pattern))
                 {
