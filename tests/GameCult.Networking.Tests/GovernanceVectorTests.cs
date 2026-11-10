@@ -396,6 +396,30 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void ForkCard_ARequestIdBelongsToItsAccount_AnotherAccountsIdenticalBodyGetsItsOwnAnswerNeverTheFirstOutcome()
+        {
+            var crossed = 0;
+            foreach (var sc in Fork["scenarios"]!.AsArray())
+            {
+                var first = new Dictionary<string, (string Answerer, JsonNode Result)>();   // request_id -> the account that first got a stored result and what it got
+                foreach (var step in sc!["steps"]!.AsArray())
+                {
+                    if (S(step!["kind"]) != "answer" || step["response"]?["answer"] is null) continue;
+                    var who = S(step["server"]!["answerer"]);
+                    var result = step["response"]!;
+                    Assert.That(S(result["answer"]!["answerer"]), Is.EqualTo(who), $"{S(sc["name"])}: a result is stamped with the account that asked");
+                    var rid = S(step["body"]!["request_id"]);
+                    if (!first.TryGetValue(rid, out var prior)) { first[rid] = (who, result); continue; }
+                    if (prior.Answerer == who) continue;
+                    crossed++;
+                    Assert.That(S(result["answer"]!["answer_id"]), Is.Not.EqualTo(S(prior.Result["answer"]!["answer_id"])), $"{S(sc["name"])}: its own answer id");
+                    Assert.That(JsonNode.DeepEquals(result, prior.Result), Is.False, $"{S(sc["name"])}: the first account's outcome is never returned");
+                }
+            }
+            Assert.That(crossed, Is.GreaterThanOrEqualTo(3), "the vectors carry the cross-account cases");
+        }
+
+        [Test]
         public void ForkCard_EveryScenario_ReplaysToTheVectorsResponsesAndRecord_BytesIncluded()
         {
             var seen = new HashSet<string>();
@@ -498,6 +522,50 @@ namespace GameCult.Networking.Tests
             if (!token["scopes"]!.AsArray().Any(x => S(x) == need)) return "insufficient_scope";
             if (!token["active"]!.GetValue<bool>()) return "forbidden";
             return huginnDown ? "unavailable" : "ok";
+        }
+
+        // The {mind} segment is decoded once and compared, ordinally, only with the configured list; nothing is opened from it (fork-card.md, "The {mind} segment").
+        private static (string Code, string? Opened, string? StoredIn) MindRoute(JsonNode config, string route, string segment, string? fork, JsonNode? token)
+        {
+            var auth = AuthJudge(route, token, false);
+            if (auth != "ok") return (auth, null, null);
+            string mind;
+            try { mind = Uri.UnescapeDataString(segment); } catch (UriFormatException) { return ("fork_unknown", null, null); }
+            var minds = config["minds"]!.AsObject();
+            if (!minds.TryGetPropertyValue(mind, out var socket)) return ("fork_unknown", null, null);
+            if (route != "list" && !config["forks"]![mind]!.AsArray().Any(f => S(f) == fork)) return ("fork_unknown", S(socket), null);
+            return ("ok", S(socket), route == "answer" ? mind : null);
+        }
+
+        [Test]
+        public void ForkTransport_MindSegment_IsOnlyComparedWithTheConfiguredList_AnUnknownMindIsTheUnknownForkRefusal()
+        {
+            var config = Fork["transport"]!["mindRoutes"]!;
+            var refusals = Fork["doorRefusals"]!.AsArray().ToDictionary(r => S(r!["name"]), r => r!);
+            var byName = new Dictionary<string, (string Code, string? Opened, string? StoredIn)>();
+            foreach (var c in config["cases"]!.AsArray())
+            {
+                var got = MindRoute(config, S(c!["route"]), S(c["mind"]), c["fork_id"] is null ? null : S(c["fork_id"]), c["token"]);
+                byName[S(c["name"])] = got;
+                Assert.That(got.Code, Is.EqualTo(S(c["expect"])), S(c["name"]));
+                Assert.That(got.Opened, Is.EqualTo(c["opened"] is null ? null : S(c["opened"])), $"{S(c["name"])}: the socket opened");
+                Assert.That(got.StoredIn, Is.EqualTo(c["stored_in"] is null ? null : S(c["stored_in"])), $"{S(c["name"])}: where an answer was stored");
+                Assert.That(c["httpStatus"]!.GetValue<int>(), Is.EqualTo(got.Code == "ok" ? 200 : refusals[got.Code]["httpStatus"]!.GetValue<int>()), S(c["name"]));
+                if (got.Code == "fork_unknown")
+                {
+                    var error = S(refusals["fork_unknown"]["message"]!["error"]);
+                    Assert.That(error.Contains(S(c["mind"])), Is.False, $"{S(c["name"])}: the refusal does not name the Mind");
+                    Assert.That(c["fork_id"] is not null && error.Contains(S(c["fork_id"])), Is.False, $"{S(c["name"])}: the refusal does not name the fork");
+                }
+            }
+            foreach (var pair in config["sameResponse"]!.AsArray())
+            {
+                var a = byName[S(pair![0])]; var b = byName[S(pair[1])];
+                Assert.That(a.Code, Is.EqualTo(b.Code));
+                Assert.That(S(refusals[a.Code]["messagePackHex"]), Is.EqualTo(S(refusals[b.Code]["messagePackHex"])), $"{S(pair[0])} and {S(pair[1])} answer with the same bytes");
+            }
+            Assert.That(byName.Values.Count(v => v.Code == "fork_unknown" && v.Opened is null), Is.GreaterThanOrEqualTo(27), "every bad segment opens nothing");
+            Assert.That(byName.Values.Where(v => v.StoredIn is not null).Select(v => v.StoredIn).Distinct().Count(), Is.EqualTo(2), "an answer is stored in the route's Mind only, and both Minds take one");
         }
 
         [Test]

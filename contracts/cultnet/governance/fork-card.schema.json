@@ -838,11 +838,15 @@
       "additionalProperties": false,
       "required": [
         "schemaVersion",
+        "mind",
         "fork_id"
       ],
       "properties": {
         "schemaVersion": {
           "const": "gamecult.fork.read_request.v0"
+        },
+        "mind": {
+          "$ref": "#/$defs/id"
         },
         "fork_id": {
           "$ref": "#/$defs/id"

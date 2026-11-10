@@ -285,6 +285,24 @@ test("fork card: every scenario replays to the vector's responses and record, by
   }
 });
 
+test("fork card: a request id belongs to its account; another account's identical body gets its own answer, never the first account's outcome", () => {
+  let crossed = 0;
+  for (const sc of fork.scenarios) {
+    const first = new Map<string, { answerer: string; result: any }>();   // request_id -> the account that first got a stored result and what it got
+    for (const s of sc.steps) {
+      if (s.kind !== "answer" || !s.response?.answer) continue;
+      assert.equal(s.response.answer.answerer, s.server.answerer, `${sc.name}: a result is stamped with the account that asked`);
+      const prior = first.get(s.body.request_id);
+      if (!prior) { first.set(s.body.request_id, { answerer: s.server.answerer, result: s.response }); continue; }
+      if (prior.answerer === s.server.answerer) continue;
+      crossed++;
+      assert.notEqual(s.response.answer.answer_id, prior.result.answer.answer_id, `${sc.name}: its own answer id`);
+      assert.notDeepEqual(s.response, prior.result, `${sc.name}: the first account's outcome is never returned`);
+    }
+  }
+  assert.ok(crossed >= 3, "the vectors carry the cross-account cases");
+});
+
 test("fork card: a body refused at the door or naming an unknown fork is never stored", () => {
   const door = new Set(["unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown", "forbidden", "request_id_conflict"]);
   let doorRefusals = 0;
@@ -357,6 +375,45 @@ const authJudge = (route: string, token: { audience: string; scopes: string[]; a
   if (!token.active) return "forbidden";
   return huginnDown ? "unavailable" : "ok";
 };
+
+// The {mind} segment is decoded once and compared, exactly, only with the configured list; nothing is opened from it (fork-card.md, "The {mind} segment").
+type MindResult = { code: string; opened: string | null; storedIn: string | null };
+const mindRoute = (config: any, route: string, segment: string, fork: string | null, token: any): MindResult => {
+  const auth = authJudge(route, token, false);
+  if (auth !== "ok") return { code: auth, opened: null, storedIn: null };
+  let mind: string;
+  try { mind = decodeURIComponent(segment); } catch { return { code: "fork_unknown", opened: null, storedIn: null }; }
+  if (!Object.prototype.hasOwnProperty.call(config.minds, mind)) return { code: "fork_unknown", opened: null, storedIn: null };
+  const opened: string = config.minds[mind];
+  if (route !== "list" && !config.forks[mind].includes(fork)) return { code: "fork_unknown", opened, storedIn: null };
+  return { code: "ok", opened, storedIn: route === "answer" ? mind : null };
+};
+
+test("fork transport: the mind segment is only compared with the configured list; an unknown mind is the unknown fork refusal", () => {
+  const config = fork.transport.mindRoutes;
+  const refusals = new Map<string, any>(fork.doorRefusals.map((r: { name: string }) => [r.name, r]));
+  const byName = new Map<string, MindResult>();
+  for (const c of config.cases) {
+    const got = mindRoute(config, c.route, c.mind, c.fork_id, c.token);
+    byName.set(c.name, got);
+    assert.equal(got.code, c.expect, c.name);
+    assert.equal(got.opened, c.opened, `${c.name}: the socket opened`);
+    assert.equal(got.storedIn, c.stored_in, `${c.name}: where an answer was stored`);
+    assert.equal(c.httpStatus, got.code === "ok" ? 200 : refusals.get(got.code).httpStatus, c.name);
+    if (got.code === "fork_unknown") {
+      const error: string = refusals.get("fork_unknown").message.error;
+      assert.ok(!error.includes(c.mind) && !(c.fork_id !== null && error.includes(c.fork_id)), `${c.name}: the refusal names neither the Mind nor the fork`);
+    }
+  }
+  for (const [a, b] of config.sameResponse) {
+    const x = byName.get(a)!, y = byName.get(b)!;
+    assert.equal(x.code, y.code);
+    assert.equal(refusals.get(x.code).messagePackHex, refusals.get(y.code).messagePackHex, `${a} and ${b} answer with the same bytes`);
+  }
+  const all = [...byName.values()];
+  assert.ok(all.filter((v) => v.code === "fork_unknown" && v.opened === null).length >= 27, "every bad segment opens nothing");
+  assert.equal(new Set(all.filter((v) => v.storedIn !== null).map((v) => v.storedIn)).size, 2, "an answer is stored in the route's Mind only, and both Minds take one");
+});
 
 test("fork transport: requests and entries validate and encode to the vector bytes, and every negative is refused", () => {
   const t = fork.transport;

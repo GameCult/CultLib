@@ -2475,9 +2475,10 @@
           "name": "read_one",
           "message": {
             "schemaVersion": "gamecult.fork.read_request.v0",
+            "mind": "gamecult-chat",
             "fork_id": "gamecult-chat:question:slot-mark-consent"
           },
-          "messagePackHex": "82AD736368656D6156657273696F6EBD67616D6563756C742E666F726B2E726561645F726571756573742E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74"
+          "messagePackHex": "83AD736368656D6156657273696F6EBD67616D6563756C742E666F726B2E726561645F726571756573742E7630A46D696E64AD67616D6563756C742D63686174A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74"
         }
       ],
       "invalid": [
@@ -2486,9 +2487,29 @@
           "why": "a read names a fork",
           "message": {
             "schemaVersion": "gamecult.fork.read_request.v0",
+            "mind": "gamecult-chat",
             "fork_id": ""
           },
-          "messagePackHex": "82AD736368656D6156657273696F6EBD67616D6563756C742E666F726B2E726561645F726571756573742E7630A7666F726B5F6964A0"
+          "messagePackHex": "83AD736368656D6156657273696F6EBD67616D6563756C742E666F726B2E726561645F726571756573742E7630A46D696E64AD67616D6563756C742D63686174A7666F726B5F6964A0"
+        },
+        {
+          "name": "mind_empty",
+          "why": "a read names a Mind",
+          "message": {
+            "schemaVersion": "gamecult.fork.read_request.v0",
+            "mind": "",
+            "fork_id": "gamecult-chat:question:slot-mark-consent"
+          },
+          "messagePackHex": "83AD736368656D6156657273696F6EBD67616D6563756C742E666F726B2E726561645F726571756573742E7630A46D696E64A0A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74"
+        },
+        {
+          "name": "mind_missing",
+          "why": "map-mode writes every key; the Mind is the route's",
+          "message": {
+            "schemaVersion": "gamecult.fork.read_request.v0",
+            "fork_id": "gamecult-chat:question:slot-mark-consent"
+          },
+          "messagePackHex": "82AD736368656D6156657273696F6EBD67616D6563756C742E666F726B2E726561645F726571756573742E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74"
         }
       ]
     },
@@ -5210,6 +5231,835 @@
         ]
       }
     ],
+    "mindRoutes": {
+      "minds": {
+        "gamecult-chat": "huginn-gamecult-chat.sock",
+        "nibu": "huginn-nibu.sock"
+      },
+      "forks": {
+        "gamecult-chat": [
+          "gamecult-chat:question:q1",
+          "gamecult-chat:question:q2",
+          "gamecult-chat:question:slot-mark-consent"
+        ],
+        "nibu": [
+          "nibu:question:glow-order"
+        ]
+      },
+      "cases": [
+        {
+          "name": "list_a_configured_mind",
+          "route": "list",
+          "mind": "gamecult-chat",
+          "fork_id": null,
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "ok",
+          "httpStatus": 200,
+          "opened": "huginn-gamecult-chat.sock",
+          "stored_in": null
+        },
+        {
+          "name": "list_another_configured_mind",
+          "route": "list",
+          "mind": "nibu",
+          "fork_id": null,
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "ok",
+          "httpStatus": 200,
+          "opened": "huginn-nibu.sock",
+          "stored_in": null
+        },
+        {
+          "name": "read_a_fork_the_mind_holds",
+          "route": "read",
+          "mind": "gamecult-chat",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "ok",
+          "httpStatus": 200,
+          "opened": "huginn-gamecult-chat.sock",
+          "stored_in": null
+        },
+        {
+          "name": "answer_a_fork_the_mind_holds_is_stored_in_that_mind",
+          "route": "answer",
+          "mind": "gamecult-chat",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.answer"
+            ],
+            "active": true
+          },
+          "expect": "ok",
+          "httpStatus": 200,
+          "opened": "huginn-gamecult-chat.sock",
+          "stored_in": "gamecult-chat"
+        },
+        {
+          "name": "answer_on_the_other_mind",
+          "route": "answer",
+          "mind": "nibu",
+          "fork_id": "nibu:question:glow-order",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.answer"
+            ],
+            "active": true
+          },
+          "expect": "ok",
+          "httpStatus": 200,
+          "opened": "huginn-nibu.sock",
+          "stored_in": "nibu"
+        },
+        {
+          "name": "M1_list_dot_dot_is_unknown_and_opens_nothing",
+          "route": "list",
+          "mind": "../x",
+          "fork_id": null,
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_list_slash_is_unknown_and_opens_nothing",
+          "route": "list",
+          "mind": "a/b",
+          "fork_id": null,
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_list_encoded_slash_is_unknown_and_opens_nothing",
+          "route": "list",
+          "mind": "a%2fb",
+          "fork_id": null,
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_list_encoded_dot_dot_is_unknown_and_opens_nothing",
+          "route": "list",
+          "mind": "%2e%2e%2fx",
+          "fork_id": null,
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_list_nul_is_unknown_and_opens_nothing",
+          "route": "list",
+          "mind": "eureka%00",
+          "fork_id": null,
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_list_four_kb_is_unknown_and_opens_nothing",
+          "route": "list",
+          "mind": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "fork_id": null,
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_list_other_case_is_unknown_and_opens_nothing",
+          "route": "list",
+          "mind": "GAMECULT-CHAT",
+          "fork_id": null,
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_list_trailing_space_is_unknown_and_opens_nothing",
+          "route": "list",
+          "mind": "nibu%20",
+          "fork_id": null,
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_list_invalid_utf8_is_unknown_and_opens_nothing",
+          "route": "list",
+          "mind": "%ff",
+          "fork_id": null,
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_read_dot_dot_is_unknown_and_opens_nothing",
+          "route": "read",
+          "mind": "../x",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_read_slash_is_unknown_and_opens_nothing",
+          "route": "read",
+          "mind": "a/b",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_read_encoded_slash_is_unknown_and_opens_nothing",
+          "route": "read",
+          "mind": "a%2fb",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_read_encoded_dot_dot_is_unknown_and_opens_nothing",
+          "route": "read",
+          "mind": "%2e%2e%2fx",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_read_nul_is_unknown_and_opens_nothing",
+          "route": "read",
+          "mind": "eureka%00",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_read_four_kb_is_unknown_and_opens_nothing",
+          "route": "read",
+          "mind": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_read_other_case_is_unknown_and_opens_nothing",
+          "route": "read",
+          "mind": "GAMECULT-CHAT",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_read_trailing_space_is_unknown_and_opens_nothing",
+          "route": "read",
+          "mind": "nibu%20",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_read_invalid_utf8_is_unknown_and_opens_nothing",
+          "route": "read",
+          "mind": "%ff",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_answer_dot_dot_is_unknown_and_opens_nothing",
+          "route": "answer",
+          "mind": "../x",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.answer"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_answer_slash_is_unknown_and_opens_nothing",
+          "route": "answer",
+          "mind": "a/b",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.answer"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_answer_encoded_slash_is_unknown_and_opens_nothing",
+          "route": "answer",
+          "mind": "a%2fb",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.answer"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_answer_encoded_dot_dot_is_unknown_and_opens_nothing",
+          "route": "answer",
+          "mind": "%2e%2e%2fx",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.answer"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_answer_nul_is_unknown_and_opens_nothing",
+          "route": "answer",
+          "mind": "eureka%00",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.answer"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_answer_four_kb_is_unknown_and_opens_nothing",
+          "route": "answer",
+          "mind": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.answer"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_answer_other_case_is_unknown_and_opens_nothing",
+          "route": "answer",
+          "mind": "GAMECULT-CHAT",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.answer"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_answer_trailing_space_is_unknown_and_opens_nothing",
+          "route": "answer",
+          "mind": "nibu%20",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.answer"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M1_answer_invalid_utf8_is_unknown_and_opens_nothing",
+          "route": "answer",
+          "mind": "%ff",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.answer"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M2_read_unknown_mind_known_fork",
+          "route": "read",
+          "mind": "ghost",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M2_read_known_mind_unknown_fork",
+          "route": "read",
+          "mind": "gamecult-chat",
+          "fork_id": "gamecult-chat:question:ghost",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": "huginn-gamecult-chat.sock",
+          "stored_in": null
+        },
+        {
+          "name": "M2_answer_unknown_mind_known_fork",
+          "route": "answer",
+          "mind": "ghost",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.answer"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M2_answer_known_mind_unknown_fork",
+          "route": "answer",
+          "mind": "gamecult-chat",
+          "fork_id": "gamecult-chat:question:ghost",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.answer"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": "huginn-gamecult-chat.sock",
+          "stored_in": null
+        },
+        {
+          "name": "M2_list_unknown_mind",
+          "route": "list",
+          "mind": "ghost",
+          "fork_id": null,
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M3_answer_on_nibu_with_a_fork_gamecult_chat_holds",
+          "route": "answer",
+          "mind": "nibu",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.answer"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": "huginn-nibu.sock",
+          "stored_in": null
+        },
+        {
+          "name": "M3_answer_on_gamecult_chat_with_a_fork_nibu_holds",
+          "route": "answer",
+          "mind": "gamecult-chat",
+          "fork_id": "nibu:question:glow-order",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.answer"
+            ],
+            "active": true
+          },
+          "expect": "fork_unknown",
+          "httpStatus": 404,
+          "opened": "huginn-gamecult-chat.sock",
+          "stored_in": null
+        },
+        {
+          "name": "M4_desk_read_lists_every_mind",
+          "route": "list",
+          "mind": "nibu",
+          "fork_id": null,
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "ok",
+          "httpStatus": 200,
+          "opened": "huginn-nibu.sock",
+          "stored_in": null
+        },
+        {
+          "name": "M4_desk_read_reads_every_mind",
+          "route": "read",
+          "mind": "nibu",
+          "fork_id": "nibu:question:glow-order",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "ok",
+          "httpStatus": 200,
+          "opened": "huginn-nibu.sock",
+          "stored_in": null
+        },
+        {
+          "name": "M4_desk_answer_cannot_list_any_mind",
+          "route": "list",
+          "mind": "gamecult-chat",
+          "fork_id": null,
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.answer"
+            ],
+            "active": true
+          },
+          "expect": "insufficient_scope",
+          "httpStatus": 403,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M4_desk_answer_cannot_list_the_other_mind",
+          "route": "list",
+          "mind": "nibu",
+          "fork_id": null,
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.answer"
+            ],
+            "active": true
+          },
+          "expect": "insufficient_scope",
+          "httpStatus": 403,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "M4_desk_read_cannot_answer_on_any_mind",
+          "route": "answer",
+          "mind": "nibu",
+          "fork_id": "nibu:question:glow-order",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "insufficient_scope",
+          "httpStatus": 403,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "auth_comes_before_the_mind_lookup_no_bearer",
+          "route": "list",
+          "mind": "ghost",
+          "fork_id": null,
+          "token": null,
+          "expect": "unauthenticated",
+          "httpStatus": 401,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "auth_comes_before_the_mind_lookup_scope",
+          "route": "answer",
+          "mind": "ghost",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": true
+          },
+          "expect": "insufficient_scope",
+          "httpStatus": 403,
+          "opened": null,
+          "stored_in": null
+        },
+        {
+          "name": "auth_comes_before_the_mind_lookup_non_active",
+          "route": "read",
+          "mind": "ghost",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "token": {
+            "audience": "bifrost-desk",
+            "scopes": [
+              "desk.read"
+            ],
+            "active": false
+          },
+          "expect": "forbidden",
+          "httpStatus": 403,
+          "opened": null,
+          "stored_in": null
+        }
+      ],
+      "sameResponse": [
+        [
+          "M2_read_unknown_mind_known_fork",
+          "M2_read_known_mind_unknown_fork"
+        ],
+        [
+          "M2_answer_unknown_mind_known_fork",
+          "M2_answer_known_mind_unknown_fork"
+        ],
+        [
+          "M2_list_unknown_mind",
+          "M2_read_known_mind_unknown_fork"
+        ],
+        [
+          "M3_answer_on_nibu_with_a_fork_gamecult_chat_holds",
+          "M2_answer_known_mind_unknown_fork"
+        ]
+      ]
+    },
     "authCases": [
       {
         "name": "list_with_desk_read",
@@ -6034,6 +6884,160 @@
             "schemaVersion": "gamecult.fork.refusal.v0",
             "code": "body_forbidden_field",
             "error": "body_forbidden_field: answerer and authority are set by the receiver"
+          }
+        }
+      ],
+      "record": {
+        "schemaVersion": "gamecult.fork.record.v0",
+        "fork_id": "gamecult-chat:question:slot-mark-consent",
+        "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+        "counted_answer_id": null,
+        "answers": []
+      },
+      "recordHex": "85AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438B1636F756E7465645F616E737765725F6964C0A7616E737765727390"
+    },
+    {
+      "name": "M5_a_body_naming_deciders_is_an_unknown_key_the_decider_list_is_never_the_bodys",
+      "card": {
+        "schemaVersion": "gamecult.fork.card.v0",
+        "fork_id": "gamecult-chat:question:slot-mark-consent",
+        "title": "Slot mark consent",
+        "context": "Should a slot mark be shared?",
+        "options": [
+          {
+            "id": "yes",
+            "text": "Share it."
+          },
+          {
+            "id": "no",
+            "text": "Keep it local."
+          }
+        ],
+        "recommendation": "no",
+        "depends": [
+          "gamecult-chat:question:file-zone-audience"
+        ],
+        "leans": null,
+        "flag": null,
+        "raised_in": {
+          "kind": "CutSpec",
+          "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+        },
+        "deciders": [
+          "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+        ],
+        "status": "open",
+        "ruling": null,
+        "ruled_from": [],
+        "order": 3,
+        "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48"
+      },
+      "optionsHash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+      "steps": [
+        {
+          "kind": "answer",
+          "body": {
+            "schemaVersion": "gamecult.fork.answer_request.v0",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "answer": {
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+            },
+            "retracted": false,
+            "retracts": null,
+            "answered_at": "2026-11-12T19:02:00Z",
+            "request_id": "00000001-0000-4000-8000-000000000001",
+            "deciders": [
+              "11111111-2222-4333-8444-555555555555"
+            ]
+          },
+          "server": {
+            "answer_id": "n1",
+            "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+            "authority": "Operator",
+            "received_at": "2026-11-12T19:02:05Z"
+          },
+          "response": {
+            "schemaVersion": "gamecult.fork.refusal.v0",
+            "code": "body_unknown_field",
+            "error": "body_unknown_field: the body is a closed shape"
+          }
+        }
+      ],
+      "record": {
+        "schemaVersion": "gamecult.fork.record.v0",
+        "fork_id": "gamecult-chat:question:slot-mark-consent",
+        "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+        "counted_answer_id": null,
+        "answers": []
+      },
+      "recordHex": "85AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438B1636F756E7465645F616E737765725F6964C0A7616E737765727390"
+    },
+    {
+      "name": "M1_a_body_naming_a_mind_is_an_unknown_key_the_mind_is_the_routes",
+      "card": {
+        "schemaVersion": "gamecult.fork.card.v0",
+        "fork_id": "gamecult-chat:question:slot-mark-consent",
+        "title": "Slot mark consent",
+        "context": "Should a slot mark be shared?",
+        "options": [
+          {
+            "id": "yes",
+            "text": "Share it."
+          },
+          {
+            "id": "no",
+            "text": "Keep it local."
+          }
+        ],
+        "recommendation": "no",
+        "depends": [
+          "gamecult-chat:question:file-zone-audience"
+        ],
+        "leans": null,
+        "flag": null,
+        "raised_in": {
+          "kind": "CutSpec",
+          "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+        },
+        "deciders": [
+          "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+        ],
+        "status": "open",
+        "ruling": null,
+        "ruled_from": [],
+        "order": 3,
+        "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48"
+      },
+      "optionsHash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+      "steps": [
+        {
+          "kind": "answer",
+          "body": {
+            "schemaVersion": "gamecult.fork.answer_request.v0",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "answer": {
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+            },
+            "retracted": false,
+            "retracts": null,
+            "answered_at": "2026-11-12T19:02:00Z",
+            "request_id": "00000001-0000-4000-8000-000000000001",
+            "mind": "nibu"
+          },
+          "server": {
+            "answer_id": "n1",
+            "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+            "authority": "Operator",
+            "received_at": "2026-11-12T19:02:05Z"
+          },
+          "response": {
+            "schemaVersion": "gamecult.fork.refusal.v0",
+            "code": "body_unknown_field",
+            "error": "body_unknown_field: the body is a closed shape"
           }
         }
       ],

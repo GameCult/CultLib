@@ -278,6 +278,8 @@ scen = [
  sc("V1_answerer_in_the_body_is_refused_at_the_door_and_stores_nothing", CARD, [door(dict(x1, answerer="x"), sx1, "body_forbidden_field")], None),
  sc("V1_authority_nested_in_answer_is_refused", CARD, [door(dict(x1, answer={"choice": "no", "note": None, "authority": "Operator"}), sx1, "body_forbidden_field")], None),
  sc("V1_both_are_refused_not_stripped", CARD, [door(dict(x1, answerer=OP, authority="Operator"), sx1, "body_forbidden_field")], None),
+ sc("M5_a_body_naming_deciders_is_an_unknown_key_the_decider_list_is_never_the_bodys", CARD, [door(dict(x1, deciders=[ST]), sx1, "body_unknown_field")], None),
+ sc("M1_a_body_naming_a_mind_is_an_unknown_key_the_mind_is_the_routes", CARD, [door(dict(x1, mind="nibu"), sx1, "body_unknown_field")], None),
  sc("an_unknown_key_is_refused_the_body_is_closed", CARD, [door(dict(x1, mood="happy"), sx1, "body_unknown_field")], None),
  sc("an_answer_with_neither_choice_nor_note_is_invalid", CARD, [door(body(answer={"choice": None, "note": None}), sx1, "body_invalid")], None),
  sc("a_non_retraction_without_an_answer_is_invalid", CARD, [door(body(answer=None), sx1, "body_invalid")], None),
@@ -403,6 +405,46 @@ AUTH = [
  ("auth_is_judged_before_huginn_is_asked", "list", None, "unauthenticated", True),
  ("membership_is_judged_before_huginn_is_asked", "read", TOK("bifrost-desk", "desk.read", active=False), "forbidden", True),
 ]
+# ---------- transport: the {mind} segment (Heimdall's file 4.3a, M1 to M4) ----------
+import urllib.parse
+MINDS = {"gamecult-chat": "huginn-gamecult-chat.sock", "nibu": "huginn-nibu.sock"}
+MIND_FORKS = {"gamecult-chat": ["gamecult-chat:question:q1", "gamecult-chat:question:q2", FID], "nibu": ["nibu:question:glow-order"]}
+def auth_code(route, tok):
+    if tok is None or tok["audience"] != "bifrost-desk": return "unauthenticated"
+    if ("desk.answer" if route == "answer" else "desk.read") not in tok["scopes"]: return "insufficient_scope"
+    return "forbidden" if not tok["active"] else "ok"
+def mind_route(route, seg, fork, tok):
+    code = auth_code(route, tok)
+    if code != "ok": return code, None, None
+    try: mind = urllib.parse.unquote(seg, errors="strict")
+    except UnicodeDecodeError: mind = None
+    if mind not in MINDS: return "fork_unknown", None, None          # never joined into a path; no socket is opened
+    if route != "list" and fork not in MIND_FORKS[mind]: return "fork_unknown", MINDS[mind], None
+    return "ok", MINDS[mind], mind if route == "answer" else None
+DESK_READ, DESK_ANSWER = TOK("bifrost-desk", "desk.read"), TOK("bifrost-desk", "desk.answer")
+def mcase(name, route, seg, fork=None, tok=None):
+    tok = None if tok == "none" else tok or (DESK_ANSWER if route == "answer" else DESK_READ)
+    code, opened, stored = mind_route(route, seg, fork, tok)
+    return {"name": name, "route": route, "mind": seg, "fork_id": fork, "token": tok, "expect": code, "httpStatus": 200 if code == "ok" else HTTP[code], "opened": opened, "stored_in": stored}
+BAD_SEGMENTS = [("dot_dot", "../x"), ("slash", "a/b"), ("encoded_slash", "a%2fb"), ("encoded_dot_dot", "%2e%2e%2fx"), ("nul", "eureka%00"), ("four_kb", "a" * 4096),
+                ("other_case", "GAMECULT-CHAT"), ("trailing_space", "nibu%20"), ("invalid_utf8", "%ff")]
+MINDCASES = [
+  mcase("list_a_configured_mind", "list", "gamecult-chat"), mcase("list_another_configured_mind", "list", "nibu"),
+  mcase("read_a_fork_the_mind_holds", "read", "gamecult-chat", FID), mcase("answer_a_fork_the_mind_holds_is_stored_in_that_mind", "answer", "gamecult-chat", FID),
+  mcase("answer_on_the_other_mind", "answer", "nibu", "nibu:question:glow-order"),
+] + [mcase(f"M1_{route}_{n}_is_unknown_and_opens_nothing", route, seg, FID if route != "list" else None) for route in ("list", "read", "answer") for n, seg in BAD_SEGMENTS] + [
+  mcase("M2_read_unknown_mind_known_fork", "read", "ghost", FID), mcase("M2_read_known_mind_unknown_fork", "read", "gamecult-chat", "gamecult-chat:question:ghost"),
+  mcase("M2_answer_unknown_mind_known_fork", "answer", "ghost", FID), mcase("M2_answer_known_mind_unknown_fork", "answer", "gamecult-chat", "gamecult-chat:question:ghost"),
+  mcase("M2_list_unknown_mind", "list", "ghost"),
+  mcase("M3_answer_on_nibu_with_a_fork_gamecult_chat_holds", "answer", "nibu", FID), mcase("M3_answer_on_gamecult_chat_with_a_fork_nibu_holds", "answer", "gamecult-chat", "nibu:question:glow-order"),
+  mcase("M4_desk_read_lists_every_mind", "list", "nibu", tok=DESK_READ), mcase("M4_desk_read_reads_every_mind", "read", "nibu", "nibu:question:glow-order", tok=DESK_READ),
+  mcase("M4_desk_answer_cannot_list_any_mind", "list", "gamecult-chat", tok=DESK_ANSWER), mcase("M4_desk_answer_cannot_list_the_other_mind", "list", "nibu", tok=DESK_ANSWER),
+  mcase("M4_desk_read_cannot_answer_on_any_mind", "answer", "nibu", "nibu:question:glow-order", tok=DESK_READ),
+  mcase("auth_comes_before_the_mind_lookup_no_bearer", "list", "ghost", tok="none"), mcase("auth_comes_before_the_mind_lookup_scope", "answer", "ghost", FID, tok=DESK_READ),
+  mcase("auth_comes_before_the_mind_lookup_non_active", "read", "ghost", FID, tok=TOK("bifrost-desk", "desk.read", active=False)),
+]
+SAME_RESPONSE = [["M2_read_unknown_mind_known_fork", "M2_read_known_mind_unknown_fork"], ["M2_answer_unknown_mind_known_fork", "M2_answer_known_mind_unknown_fork"],
+                 ["M2_list_unknown_mind", "M2_read_known_mind_unknown_fork"], ["M3_answer_on_nibu_with_a_fork_gamecult_chat_holds", "M2_answer_known_mind_unknown_fork"]]
 def bad(name, why, m, **kw): return dict({"name": name, "why": why, "message": m}, **kw)
 fork = {
   "provenance": "Rule source: /opt/commons/handoff/fork-desk-answer-binding-20261110.md (Heimdall), amended by the Persona briefs of 2026-11-10 (Eureka's fit check). Bytes spec-authored with msgpack-python (scripts/gen-governance-vectors.py); every runtime re-encodes `message` and must match messagePackHex. options_hash follows fork-card.md 'Options hash'; the vectors named heimdall_* are that file's, with its digests.",
@@ -481,9 +523,11 @@ fork = {
                       ("status_all", "status is open, recorded or nil", lreq(status="all")), ("cursor_malformed", "a cursor is c<N>", lreq(cursor="next")),
                       ("cursor_zero", "a cursor names a positive order", lreq(cursor="c0")), ("mind_empty", "a list names a Mind", lreq(mind="")),
                       ("unknown_key", "closed document", dict(lreq(), sort="oldest"))]]},
-    "readRequest": {"valid": [{"name": "read_one", "message": {"schemaVersion": "gamecult.fork.read_request.v0", "fork_id": FID}, "messagePackHex": hx({"schemaVersion": "gamecult.fork.read_request.v0", "fork_id": FID})}],
+    "readRequest": {"valid": [{"name": "read_one", "message": {"schemaVersion": "gamecult.fork.read_request.v0", "mind": "gamecult-chat", "fork_id": FID}, "messagePackHex": hx({"schemaVersion": "gamecult.fork.read_request.v0", "mind": "gamecult-chat", "fork_id": FID})}],
                     "invalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
-                      ("fork_id_empty", "a read names a fork", {"schemaVersion": "gamecult.fork.read_request.v0", "fork_id": ""})]]},
+                      ("fork_id_empty", "a read names a fork", {"schemaVersion": "gamecult.fork.read_request.v0", "mind": "gamecult-chat", "fork_id": ""}),
+                      ("mind_empty", "a read names a Mind", {"schemaVersion": "gamecult.fork.read_request.v0", "mind": "", "fork_id": FID}),
+                      ("mind_missing", "map-mode writes every key; the Mind is the route's", {"schemaVersion": "gamecult.fork.read_request.v0", "fork_id": FID})]]},
     "entry": {"valid": [{"name": n, "message": e, "messagePackHex": hx(e)} for n, e in [("open_no_answers", ENTRIES[1]), ("open_counted", ENTRIES[0]), ("closed_with_ruling_and_a_refusal", ENTRIES[2])]],
               "invalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
                 ("entry_without_record", "an entry holds the card and its record", {k: v for k, v in ENTRIES[0].items() if k != "record"}),
@@ -496,6 +540,7 @@ fork = {
       ("stamp_malformed", "a stamp is s<N>", dict(LISTS[0]["steps"][0]["response"], stamp="412")),
       ("count_negative", "counts are not negative", dict(LISTS[0]["steps"][0]["response"], open_count=-1))]],
     "listScenarios": [{"name": l["name"], "ordinal": l["ordinal"], "entries": l["entries"], "steps": l["steps"]} for l in LISTS],
+    "mindRoutes": {"minds": MINDS, "forks": MIND_FORKS, "cases": MINDCASES, "sameResponse": SAME_RESPONSE},
     "authCases": [{"name": a[0], "route": a[1], "token": a[2], "expect": a[3], "huginn_down": len(a) > 4} for a in AUTH],
   },
   "scenarios": [{"name": n, "card": c, "optionsHash": c["options_hash"], "steps": steps, "record": r, "recordHex": hx(r)} for n, c, steps, r in scen],
