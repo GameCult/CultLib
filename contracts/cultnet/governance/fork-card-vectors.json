@@ -589,6 +589,44 @@
         }
       },
       {
+        "name": "depends_line_1001_bytes",
+        "why": "rule: one byte over the limit (500 two-byte characters and one more; not expressible in the schema)",
+        "message": {
+          "schemaVersion": "gamecult.fork.card.v0",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "title": "Slot mark consent",
+          "context": "Should a slot mark be shared?",
+          "options": [
+            {
+              "id": "yes",
+              "text": "Share it."
+            },
+            {
+              "id": "no",
+              "text": "Keep it local."
+            }
+          ],
+          "recommendation": "no",
+          "depends": [
+            "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééa"
+          ],
+          "leans": null,
+          "flag": null,
+          "raised_in": {
+            "kind": "CutSpec",
+            "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+          },
+          "deciders": [
+            "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+          ],
+          "status": "open",
+          "ruling": null,
+          "ruled_from": [],
+          "order": 3,
+          "options_hash": "63d01e8c6dfcfddda061522e3c4bab7d54d1f1b3edf384a74725f034e8dc1f88"
+        }
+      },
+      {
         "name": "depends_line_over_1000_bytes",
         "why": "rule: a depends line is at most 1000 UTF-8 bytes (the stored Line limit; not expressible in the schema)",
         "message": {

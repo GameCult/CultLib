@@ -459,6 +459,7 @@ fork = {
            "invalid": [bad(n, w, m) for n, w, m in [
                ("depends_nine_lines", "depends holds at most 8 lines (the stored question's limit)", card(depends=["a"] * 9)),
                ("depends_line_1001_code_points", "a depends line is at most 1000 characters", card(depends=["a" * 1001])),
+               ("depends_line_1001_bytes", "rule: one byte over the limit (500 two-byte characters and one more; not expressible in the schema)", card(depends=["\u00e9" * 500 + "a"])),
                ("depends_line_over_1000_bytes", "rule: a depends line is at most 1000 UTF-8 bytes (the stored Line limit; not expressible in the schema)", card(depends=["\u00e9" * 501])),
                ("one_option", "two or more options", card(options=[OPT[0]], recommendation="yes")),
                ("no_deciders", "a fork with no decider cannot be answered", card(deciders=[])),
