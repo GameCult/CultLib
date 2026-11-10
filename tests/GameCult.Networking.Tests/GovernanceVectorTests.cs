@@ -357,6 +357,8 @@ namespace GameCult.Networking.Tests
                 var down = s["door_down"] is not null;          // the second door failed to answer; "stored" says whether Huginn had the request by then
                 var reached = s["stored"] is not null;
                 JsonNode Unavailable() => new JsonObject { ["schemaVersion"] = "gamecult.fork.unavailable.v0", ["code"] = "unavailable", ["error"] = "unavailable: the outcome is not confirmed, try again with the same request_id", ["retryAfterSeconds"] = Clone(s["retry_after_seconds"]) };
+                // a stored desk_answer has no card, so a replayed stale_fork carries the CURRENT card (fork-card.md, request_id)
+                JsonNode Replay(JsonNode stored) { var copy = Clone(stored)!; if (S(copy["answer"]!["code"] ?? "") == "stale_fork") copy["card"] = Clone(card); return copy; }
                 JsonNode response;
                 if (s["answerer"] is null) response = Door("unauthenticated");
                 else if (s["active"] is JsonValue activeValue && !activeValue.GetValue<bool>()) response = Door("forbidden");
@@ -364,7 +366,7 @@ namespace GameCult.Networking.Tests
                 else if (b.Any(kv => !RequestKeys.Contains(kv.Key)) || (b["answer"] is JsonObject ao && ao.Any(kv => kv.Key is not ("choice" or "note")))) response = Door("body_unknown_field");
                 else if (Errors(ForkSchema, "answerRequest", b).Count > 0 || NoteRuleErrors("answerRequest", b).Any() || (!retracted && b["answer"] is null)) response = Door("body_invalid");
                 else if (down && !reached) response = Unavailable();
-                else if (seen.TryGetValue(S(s["answerer"]) + "|" + S(b["request_id"]), out var prior)) response = JsonNode.DeepEquals(prior.Body, b) ? Clone(prior.Response)! : Door("request_id_conflict");
+                else if (seen.TryGetValue(S(s["answerer"]) + "|" + S(b["request_id"]), out var prior)) response = JsonNode.DeepEquals(prior.Body, b) ? Replay(prior.Response) : Door("request_id_conflict");
                 else if (S(b["fork_id"]) != S(card["fork_id"])) response = Door("fork_unknown");
                 else if (S(b["options_hash"]) != HashOf(card)) response = Refuse("stale_fork");
                 else if (!deciders.Contains(S(s["answerer"]))) response = Refuse("not_a_decider");

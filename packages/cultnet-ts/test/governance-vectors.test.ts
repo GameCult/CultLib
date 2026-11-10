@@ -242,6 +242,8 @@ function judge(start: Card, steps: { kind: string; body: Record<string, any> | n
     const refuse = (code: string) => store("Refused", null, code);
     const down = s.door_down === true, reached = s.stored === true;   // the second door failed to answer; "stored" says whether Huginn had the request by then
     const unavailable = () => ({ schemaVersion: "gamecult.fork.unavailable.v0", code: "unavailable", error: "unavailable: the outcome is not confirmed, try again with the same request_id", retryAfterSeconds: s.retry_after_seconds });
+    // a stored desk_answer has no card, so a replayed stale_fork carries the CURRENT card (fork-card.md, request_id)
+    const replay = (stored: any) => { const copy = structuredClone(stored); if (copy.answer.code === "stale_fork") copy.card = structuredClone(card); return copy; };
     let response: unknown;
     if (s.answerer === null) response = door("unauthenticated");
     else if (s.active === false) response = door("forbidden");
@@ -249,7 +251,7 @@ function judge(start: Card, steps: { kind: string; body: Record<string, any> | n
     else if (Object.keys(b).some((k) => !REQUEST_KEYS.includes(k)) || (b.answer && Object.keys(b.answer).some((k) => k !== "choice" && k !== "note"))) response = door("body_unknown_field");
     else if (!check(forkSchema, "answerRequest", b) || noteRuleErrors("answerRequest", b).length > 0 || (!b.retracted && b.answer === null)) response = door("body_invalid");
     else if (down && !reached) response = unavailable();
-    else if (seen.has(`${s.answerer}|${b.request_id}`)) { const prior = seen.get(`${s.answerer}|${b.request_id}`)!; response = isDeepStrictEqual(prior.body, b) ? structuredClone(prior.response) : door("request_id_conflict"); }
+    else if (seen.has(`${s.answerer}|${b.request_id}`)) { const prior = seen.get(`${s.answerer}|${b.request_id}`)!; response = isDeepStrictEqual(prior.body, b) ? replay(prior.response) : door("request_id_conflict"); }
     else if (b.fork_id !== card.fork_id) response = door("fork_unknown");
     else if (b.options_hash !== optionsHash(card)) response = refuse("stale_fork");
     else if (!card.deciders.includes(s.answerer)) response = refuse("not_a_decider");

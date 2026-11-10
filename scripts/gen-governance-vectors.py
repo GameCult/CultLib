@@ -269,6 +269,8 @@ X1 = ok(x1, sx1, "Counted", None)
 REPLAY1 = (step("answer", x1, dict(sx1, answer_id="n9"), X1[0]["response"]), None)
 LOST = [(step("answer", x1, dict(sx1, door_down=True, stored=True, retry_after_seconds=30), unavailable_doc(30)), X1[1])]
 STALE_BODY = stale_body(); STALE_RF = rf(STALE_BODY, sx1, "stale_fork", c=CARD)
+OFFLIST = rf(x1, srv("n1", ST, T(2), "Member"), "not_a_decider")
+OFFLIST_REPLAY = (step("answer", x1, srv("n9", ST, T(4), "Member"), OFFLIST[0]["response"]), None)
 scen = [
  sc("operator_answers_and_is_counted", CARD, [X1], "n1"),
  sc("choice_alone_is_counted", CARD, [ok(pick, sx1, "Counted", None)], "n1"),
@@ -282,7 +284,14 @@ scen = [
  sc("unavailable_before_huginn_stored_nothing_is_retried_into_a_Counted_answer", CARD, [step("answer", x1, dict(sx1, answer_id="n9", door_down=True, retry_after_seconds=30), unavailable_doc(30)), ok(x1, sx1, "Counted", None)], "n1"),
  sc("unavailable_after_huginn_stored_the_retry_with_the_same_request_id_returns_the_stored_outcome", CARD, LOST + [REPLAY1], "n1"),
  sc("a_retry_never_adds_a_Revision", CARD, [X1, REPLAY1], "n1"),
- sc("a_refused_answer_replays_its_refusal_with_the_card_it_carried", CARD, [STALE_RF, (step("answer", STALE_BODY, dict(sx1, answer_id="n9"), STALE_RF[0]["response"]), None)], None),
+ sc("Q1_a_replayed_stale_fork_returns_the_CURRENT_card_and_stores_nothing_new", CARD, [STALE_RF, step("card", None, None, None, card=fork_edit),
+    (step("answer", STALE_BODY, dict(sx1, answer_id="n9"), result(STALE_RF[1], fork_edit)), None)], None, H2),
+ sc("V13_only_answered_at_changed_is_request_id_conflict", CARD, [X1, door(dict(x1, answered_at="2026-11-12T19:03:00Z"), dict(sx1, answer_id="n9"), "request_id_conflict")], "n1"),
+ sc("V14_an_identical_body_from_another_account_gets_its_own_Counted_and_never_the_first_accounts_outcome", Y_CARD, [OFFLIST, ok(x1, srv("n2", HM, T(3), "Steward"), "Counted", None), OFFLIST_REPLAY], "n2"),
+ sc("V14_an_identical_body_from_another_decider_is_its_own_Revision_and_the_first_retry_still_returns_n1", Y_CARD, [X1, ok(x1, sy1, "Revision", "n1"), (step("answer", x1, dict(sx1, answer_id="n9"), X1[0]["response"]), None)], "n1"),
+ sc("V16_Q5_a_forbidden_request_binds_no_request_id", CARD, [door(x1, dict(sx1, answer_id="n9", active=False), "forbidden"), ok(x1, sx1, "Counted", None)], "n1"),
+ sc("V17_Q6_a_body_refused_at_the_door_binds_no_request_id", CARD, [door(dict(x1, mood="happy"), dict(sx1, answer_id="n9"), "body_unknown_field"), ok(x1, sx1, "Counted", None)], "n1"),
+ sc("V17_Q6_an_unknown_fork_binds_no_request_id", CARD, [door(dict(x1, fork_id="gamecult-chat:question:nope"), dict(sx1, answer_id="n9"), "fork_unknown"), ok(x1, sx1, "Counted", None)], "n1"),
  sc("the_same_request_id_with_another_body_is_request_id_conflict", CARD, [X1, door(dict(x1, answer={"choice": "yes", "note": None}), dict(sx1, answer_id="n9"), "request_id_conflict")], "n1"),
  sc("the_same_request_id_from_another_account_is_another_request", Y_CARD, [X1, ok(dict(y1, request_id=x1["request_id"]), sy1, "Revision", "n1")], "n1"),
  sc("a_non_active_member_is_forbidden_before_the_body_is_read", CARD, [door(dict(x1, answerer="x"), dict(sx1, active=False), "forbidden"), door(x1, dict(sx1, active=False), "forbidden"),
@@ -425,6 +434,7 @@ fork = {
                ("answer_with_neither", "an answer object holds a choice, a note, or both", body(answer={"choice": None, "note": None})),
                ("blank_note", "a blank note is no answer", body(None, "  \u00a0 ")),
                ("request_id_missing", "map-mode writes every key; a retry needs the id", {k: v for k, v in x1.items() if k != "request_id"}),
+               ("request_id_uppercase", "request_id is lowercase", dict(x1, request_id="0000000A-0000-4000-8000-00000000000B")),
                ("request_id_not_a_uuid", "request_id is a lowercase D-format UUID", dict(x1, request_id="retry-1")),
                ("note_over_4000", "notes are at most 4000 UTF-8 bytes", body(None, "x" * 4001)),
                ("note_multibyte_4001_bytes", "a note is counted in UTF-8 bytes: 1999 e-acute is 3998 bytes, plus three ASCII is 4001 (rule: not expressible in the schema, 2002 characters)", body(None, "\u00e9" * 1999 + "abc")),

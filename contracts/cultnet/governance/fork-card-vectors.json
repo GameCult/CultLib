@@ -1128,6 +1128,24 @@
         "messagePackHex": "87AD736368656D6156657273696F6EBF67616D6563756C742E666F726B2E616E737765725F726571756573742E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438A6616E7377657282A663686F696365A26E6FA46E6F7465D9524B656570206974206C6F63616C3A206120736C6F74206D61726B2069732074686520617574686F7227732063616C6C2C20616E642073686172696E672069742069732061207365706172617465206163742EA9726574726163746564C2A87265747261637473C0AB616E7377657265645F6174B4323032362D31312D31325431393A30323A30305A"
       },
       {
+        "name": "request_id_uppercase",
+        "why": "request_id is lowercase",
+        "message": {
+          "schemaVersion": "gamecult.fork.answer_request.v0",
+          "fork_id": "gamecult-chat:question:slot-mark-consent",
+          "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+          "answer": {
+            "choice": "no",
+            "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+          },
+          "retracted": false,
+          "retracts": null,
+          "answered_at": "2026-11-12T19:02:00Z",
+          "request_id": "0000000A-0000-4000-8000-00000000000B"
+        },
+        "messagePackHex": "88AD736368656D6156657273696F6EBF67616D6563756C742E666F726B2E616E737765725F726571756573742E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438A6616E7377657282A663686F696365A26E6FA46E6F7465D9524B656570206974206C6F63616C3A206120736C6F74206D61726B2069732074686520617574686F7227732063616C6C2C20616E642073686172696E672069742069732061207365706172617465206163742EA9726574726163746564C2A87265747261637473C0AB616E7377657265645F6174B4323032362D31312D31325431393A30323A30305AAA726571756573745F6964D92430303030303030412D303030302D343030302D383030302D303030303030303030303042"
+      },
+      {
         "name": "request_id_not_a_uuid",
         "why": "request_id is a lowercase D-format UUID",
         "message": {
@@ -6612,7 +6630,7 @@
       "recordHex": "85AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438B1636F756E7465645F616E737765725F6964A26E31A7616E737765727391DE0010AD736368656D6156657273696F6EB767616D6563756C742E6465736B5F616E737765722E7630A9616E737765725F6964A26E31A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74A76F7574636F6D65A7436F756E746564A26F66C0A87265747261637473C0A4636F6465C0AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438A663686F696365A26E6FA46E6F7465D9524B656570206974206C6F63616C3A206120736C6F74206D61726B2069732074686520617574686F7227732063616C6C2C20616E642073686172696E672069742069732061207365706172617465206163742EAB616E7377657265645F6174B4323032362D31312D31325431393A30323A30305AAB72656365697665645F6174B4323032362D31312D31325431393A30323A30355AAF636C61696D5F696E5F667574757265C2A8616E737765726572D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A9617574686F72697479A84F70657261746F72AA726571756573745F6964D92430303030303030312D303030302D343030302D383030302D303030303030303030303031"
     },
     {
-      "name": "a_refused_answer_replays_its_refusal_with_the_card_it_carried",
+      "name": "Q1_a_replayed_stale_fork_returns_the_CURRENT_card_and_stores_nothing_new",
       "card": {
         "schemaVersion": "gamecult.fork.card.v0",
         "fork_id": "gamecult-chat:question:slot-mark-consent",
@@ -6727,6 +6745,46 @@
           }
         },
         {
+          "kind": "card",
+          "body": null,
+          "server": null,
+          "response": null,
+          "card": {
+            "schemaVersion": "gamecult.fork.card.v0",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "title": "Slot mark consent (revised)",
+            "context": "Should a slot mark be shared?",
+            "options": [
+              {
+                "id": "yes",
+                "text": "Share it."
+              },
+              {
+                "id": "no",
+                "text": "Keep it local."
+              }
+            ],
+            "recommendation": "no",
+            "depends": [
+              "gamecult-chat:question:file-zone-audience"
+            ],
+            "leans": null,
+            "flag": null,
+            "raised_in": {
+              "kind": "CutSpec",
+              "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+            },
+            "deciders": [
+              "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+            ],
+            "status": "open",
+            "ruling": null,
+            "ruled_from": [],
+            "order": 3,
+            "options_hash": "e7696ae1d487f78b5dc99fb8ccbd684d6e6f1ea7d7e190c21f3c6b4d8c42aaf7"
+          }
+        },
+        {
           "kind": "answer",
           "body": {
             "schemaVersion": "gamecult.fork.answer_request.v0",
@@ -6770,7 +6828,7 @@
             "card": {
               "schemaVersion": "gamecult.fork.card.v0",
               "fork_id": "gamecult-chat:question:slot-mark-consent",
-              "title": "Slot mark consent",
+              "title": "Slot mark consent (revised)",
               "context": "Should a slot mark be shared?",
               "options": [
                 {
@@ -6799,7 +6857,7 @@
               "ruling": null,
               "ruled_from": [],
               "order": 3,
-              "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48"
+              "options_hash": "e7696ae1d487f78b5dc99fb8ccbd684d6e6f1ea7d7e190c21f3c6b4d8c42aaf7"
             }
           }
         }
@@ -6807,7 +6865,7 @@
       "record": {
         "schemaVersion": "gamecult.fork.record.v0",
         "fork_id": "gamecult-chat:question:slot-mark-consent",
-        "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+        "options_hash": "e7696ae1d487f78b5dc99fb8ccbd684d6e6f1ea7d7e190c21f3c6b4d8c42aaf7",
         "counted_answer_id": null,
         "answers": [
           {
@@ -6830,7 +6888,997 @@
           }
         ]
       },
-      "recordHex": "85AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438B1636F756E7465645F616E737765725F6964C0A7616E737765727391DE0010AD736368656D6156657273696F6EB767616D6563756C742E6465736B5F616E737765722E7630A9616E737765725F6964A26E31A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74A76F7574636F6D65A752656675736564A26F66C0A87265747261637473C0A4636F6465AA7374616C655F666F726BAC6F7074696F6E735F68617368D94031346238666662646236313130366462633036663639663366633865323037326166376132303564373636653463633034306538393733333031336435346463A663686F696365A26E6FA46E6F7465D9524B656570206974206C6F63616C3A206120736C6F74206D61726B2069732074686520617574686F7227732063616C6C2C20616E642073686172696E672069742069732061207365706172617465206163742EAB616E7377657265645F6174B4323032362D31312D31325431393A30323A30305AAB72656365697665645F6174B4323032362D31312D31325431393A30323A30355AAF636C61696D5F696E5F667574757265C2A8616E737765726572D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A9617574686F72697479A84F70657261746F72AA726571756573745F6964D92430303030303030372D303030302D343030302D383030302D303030303030303030303037"
+      "recordHex": "85AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74AC6F7074696F6E735F68617368D94065373639366165316434383766373862356463393966623863636264363834643665366631656137643765313930633231663363366234643863343261616637B1636F756E7465645F616E737765725F6964C0A7616E737765727391DE0010AD736368656D6156657273696F6EB767616D6563756C742E6465736B5F616E737765722E7630A9616E737765725F6964A26E31A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74A76F7574636F6D65A752656675736564A26F66C0A87265747261637473C0A4636F6465AA7374616C655F666F726BAC6F7074696F6E735F68617368D94031346238666662646236313130366462633036663639663366633865323037326166376132303564373636653463633034306538393733333031336435346463A663686F696365A26E6FA46E6F7465D9524B656570206974206C6F63616C3A206120736C6F74206D61726B2069732074686520617574686F7227732063616C6C2C20616E642073686172696E672069742069732061207365706172617465206163742EAB616E7377657265645F6174B4323032362D31312D31325431393A30323A30305AAB72656365697665645F6174B4323032362D31312D31325431393A30323A30355AAF636C61696D5F696E5F667574757265C2A8616E737765726572D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A9617574686F72697479A84F70657261746F72AA726571756573745F6964D92430303030303030372D303030302D343030302D383030302D303030303030303030303037"
+    },
+    {
+      "name": "V13_only_answered_at_changed_is_request_id_conflict",
+      "card": {
+        "schemaVersion": "gamecult.fork.card.v0",
+        "fork_id": "gamecult-chat:question:slot-mark-consent",
+        "title": "Slot mark consent",
+        "context": "Should a slot mark be shared?",
+        "options": [
+          {
+            "id": "yes",
+            "text": "Share it."
+          },
+          {
+            "id": "no",
+            "text": "Keep it local."
+          }
+        ],
+        "recommendation": "no",
+        "depends": [
+          "gamecult-chat:question:file-zone-audience"
+        ],
+        "leans": null,
+        "flag": null,
+        "raised_in": {
+          "kind": "CutSpec",
+          "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+        },
+        "deciders": [
+          "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+        ],
+        "status": "open",
+        "ruling": null,
+        "ruled_from": [],
+        "order": 3,
+        "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48"
+      },
+      "optionsHash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+      "steps": [
+        {
+          "kind": "answer",
+          "body": {
+            "schemaVersion": "gamecult.fork.answer_request.v0",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "answer": {
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+            },
+            "retracted": false,
+            "retracts": null,
+            "answered_at": "2026-11-12T19:02:00Z",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          },
+          "server": {
+            "answer_id": "n1",
+            "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+            "authority": "Operator",
+            "received_at": "2026-11-12T19:02:05Z"
+          },
+          "response": {
+            "schemaVersion": "gamecult.fork.answer_result.v0",
+            "answer": {
+              "schemaVersion": "gamecult.desk_answer.v0",
+              "answer_id": "n1",
+              "fork_id": "gamecult-chat:question:slot-mark-consent",
+              "outcome": "Counted",
+              "of": null,
+              "retracts": null,
+              "code": null,
+              "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+              "answered_at": "2026-11-12T19:02:00Z",
+              "received_at": "2026-11-12T19:02:05Z",
+              "claim_in_future": false,
+              "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+              "authority": "Operator",
+              "request_id": "00000001-0000-4000-8000-000000000001"
+            },
+            "card": null
+          }
+        },
+        {
+          "kind": "answer",
+          "body": {
+            "schemaVersion": "gamecult.fork.answer_request.v0",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "answer": {
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+            },
+            "retracted": false,
+            "retracts": null,
+            "answered_at": "2026-11-12T19:03:00Z",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          },
+          "server": {
+            "answer_id": "n9",
+            "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+            "authority": "Operator",
+            "received_at": "2026-11-12T19:02:05Z"
+          },
+          "response": {
+            "schemaVersion": "gamecult.fork.refusal.v0",
+            "code": "request_id_conflict",
+            "error": "request_id_conflict: this request_id was used for a different body"
+          }
+        }
+      ],
+      "record": {
+        "schemaVersion": "gamecult.fork.record.v0",
+        "fork_id": "gamecult-chat:question:slot-mark-consent",
+        "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+        "counted_answer_id": "n1",
+        "answers": [
+          {
+            "schemaVersion": "gamecult.desk_answer.v0",
+            "answer_id": "n1",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "outcome": "Counted",
+            "of": null,
+            "retracts": null,
+            "code": null,
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "choice": "no",
+            "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+            "answered_at": "2026-11-12T19:02:00Z",
+            "received_at": "2026-11-12T19:02:05Z",
+            "claim_in_future": false,
+            "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+            "authority": "Operator",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          }
+        ]
+      },
+      "recordHex": "85AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438B1636F756E7465645F616E737765725F6964A26E31A7616E737765727391DE0010AD736368656D6156657273696F6EB767616D6563756C742E6465736B5F616E737765722E7630A9616E737765725F6964A26E31A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74A76F7574636F6D65A7436F756E746564A26F66C0A87265747261637473C0A4636F6465C0AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438A663686F696365A26E6FA46E6F7465D9524B656570206974206C6F63616C3A206120736C6F74206D61726B2069732074686520617574686F7227732063616C6C2C20616E642073686172696E672069742069732061207365706172617465206163742EAB616E7377657265645F6174B4323032362D31312D31325431393A30323A30305AAB72656365697665645F6174B4323032362D31312D31325431393A30323A30355AAF636C61696D5F696E5F667574757265C2A8616E737765726572D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A9617574686F72697479A84F70657261746F72AA726571756573745F6964D92430303030303030312D303030302D343030302D383030302D303030303030303030303031"
+    },
+    {
+      "name": "V14_an_identical_body_from_another_account_gets_its_own_Counted_and_never_the_first_accounts_outcome",
+      "card": {
+        "schemaVersion": "gamecult.fork.card.v0",
+        "fork_id": "gamecult-chat:question:slot-mark-consent",
+        "title": "Slot mark consent",
+        "context": "Should a slot mark be shared?",
+        "options": [
+          {
+            "id": "yes",
+            "text": "Share it."
+          },
+          {
+            "id": "no",
+            "text": "Keep it local."
+          }
+        ],
+        "recommendation": "no",
+        "depends": [
+          "gamecult-chat:question:file-zone-audience"
+        ],
+        "leans": null,
+        "flag": null,
+        "raised_in": {
+          "kind": "CutSpec",
+          "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+        },
+        "deciders": [
+          "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+          "9f8e7d6c-5b4a-4392-8170-0f1e2d3c4b5a"
+        ],
+        "status": "open",
+        "ruling": null,
+        "ruled_from": [],
+        "order": 3,
+        "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48"
+      },
+      "optionsHash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+      "steps": [
+        {
+          "kind": "answer",
+          "body": {
+            "schemaVersion": "gamecult.fork.answer_request.v0",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "answer": {
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+            },
+            "retracted": false,
+            "retracts": null,
+            "answered_at": "2026-11-12T19:02:00Z",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          },
+          "server": {
+            "answer_id": "n1",
+            "answerer": "11111111-2222-4333-8444-555555555555",
+            "authority": "Member",
+            "received_at": "2026-11-12T19:02:05Z"
+          },
+          "response": {
+            "schemaVersion": "gamecult.fork.answer_result.v0",
+            "answer": {
+              "schemaVersion": "gamecult.desk_answer.v0",
+              "answer_id": "n1",
+              "fork_id": "gamecult-chat:question:slot-mark-consent",
+              "outcome": "Refused",
+              "of": null,
+              "retracts": null,
+              "code": "not_a_decider",
+              "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+              "answered_at": "2026-11-12T19:02:00Z",
+              "received_at": "2026-11-12T19:02:05Z",
+              "claim_in_future": false,
+              "answerer": "11111111-2222-4333-8444-555555555555",
+              "authority": "Member",
+              "request_id": "00000001-0000-4000-8000-000000000001"
+            },
+            "card": null
+          }
+        },
+        {
+          "kind": "answer",
+          "body": {
+            "schemaVersion": "gamecult.fork.answer_request.v0",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "answer": {
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+            },
+            "retracted": false,
+            "retracts": null,
+            "answered_at": "2026-11-12T19:02:00Z",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          },
+          "server": {
+            "answer_id": "n2",
+            "answerer": "9f8e7d6c-5b4a-4392-8170-0f1e2d3c4b5a",
+            "authority": "Steward",
+            "received_at": "2026-11-12T19:03:05Z"
+          },
+          "response": {
+            "schemaVersion": "gamecult.fork.answer_result.v0",
+            "answer": {
+              "schemaVersion": "gamecult.desk_answer.v0",
+              "answer_id": "n2",
+              "fork_id": "gamecult-chat:question:slot-mark-consent",
+              "outcome": "Counted",
+              "of": null,
+              "retracts": null,
+              "code": null,
+              "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+              "answered_at": "2026-11-12T19:02:00Z",
+              "received_at": "2026-11-12T19:03:05Z",
+              "claim_in_future": false,
+              "answerer": "9f8e7d6c-5b4a-4392-8170-0f1e2d3c4b5a",
+              "authority": "Steward",
+              "request_id": "00000001-0000-4000-8000-000000000001"
+            },
+            "card": null
+          }
+        },
+        {
+          "kind": "answer",
+          "body": {
+            "schemaVersion": "gamecult.fork.answer_request.v0",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "answer": {
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+            },
+            "retracted": false,
+            "retracts": null,
+            "answered_at": "2026-11-12T19:02:00Z",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          },
+          "server": {
+            "answer_id": "n9",
+            "answerer": "11111111-2222-4333-8444-555555555555",
+            "authority": "Member",
+            "received_at": "2026-11-12T19:04:05Z"
+          },
+          "response": {
+            "schemaVersion": "gamecult.fork.answer_result.v0",
+            "answer": {
+              "schemaVersion": "gamecult.desk_answer.v0",
+              "answer_id": "n1",
+              "fork_id": "gamecult-chat:question:slot-mark-consent",
+              "outcome": "Refused",
+              "of": null,
+              "retracts": null,
+              "code": "not_a_decider",
+              "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+              "answered_at": "2026-11-12T19:02:00Z",
+              "received_at": "2026-11-12T19:02:05Z",
+              "claim_in_future": false,
+              "answerer": "11111111-2222-4333-8444-555555555555",
+              "authority": "Member",
+              "request_id": "00000001-0000-4000-8000-000000000001"
+            },
+            "card": null
+          }
+        }
+      ],
+      "record": {
+        "schemaVersion": "gamecult.fork.record.v0",
+        "fork_id": "gamecult-chat:question:slot-mark-consent",
+        "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+        "counted_answer_id": "n2",
+        "answers": [
+          {
+            "schemaVersion": "gamecult.desk_answer.v0",
+            "answer_id": "n1",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "outcome": "Refused",
+            "of": null,
+            "retracts": null,
+            "code": "not_a_decider",
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "choice": "no",
+            "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+            "answered_at": "2026-11-12T19:02:00Z",
+            "received_at": "2026-11-12T19:02:05Z",
+            "claim_in_future": false,
+            "answerer": "11111111-2222-4333-8444-555555555555",
+            "authority": "Member",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          },
+          {
+            "schemaVersion": "gamecult.desk_answer.v0",
+            "answer_id": "n2",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "outcome": "Counted",
+            "of": null,
+            "retracts": null,
+            "code": null,
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "choice": "no",
+            "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+            "answered_at": "2026-11-12T19:02:00Z",
+            "received_at": "2026-11-12T19:03:05Z",
+            "claim_in_future": false,
+            "answerer": "9f8e7d6c-5b4a-4392-8170-0f1e2d3c4b5a",
+            "authority": "Steward",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          }
+        ]
+      },
+      "recordHex": "85AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438B1636F756E7465645F616E737765725F6964A26E32A7616E737765727392DE0010AD736368656D6156657273696F6EB767616D6563756C742E6465736B5F616E737765722E7630A9616E737765725F6964A26E31A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74A76F7574636F6D65A752656675736564A26F66C0A87265747261637473C0A4636F6465AD6E6F745F615F64656369646572AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438A663686F696365A26E6FA46E6F7465D9524B656570206974206C6F63616C3A206120736C6F74206D61726B2069732074686520617574686F7227732063616C6C2C20616E642073686172696E672069742069732061207365706172617465206163742EAB616E7377657265645F6174B4323032362D31312D31325431393A30323A30305AAB72656365697665645F6174B4323032362D31312D31325431393A30323A30355AAF636C61696D5F696E5F667574757265C2A8616E737765726572D92431313131313131312D323232322D343333332D383434342D353535353535353535353535A9617574686F72697479A64D656D626572AA726571756573745F6964D92430303030303030312D303030302D343030302D383030302D303030303030303030303031DE0010AD736368656D6156657273696F6EB767616D6563756C742E6465736B5F616E737765722E7630A9616E737765725F6964A26E32A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74A76F7574636F6D65A7436F756E746564A26F66C0A87265747261637473C0A4636F6465C0AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438A663686F696365A26E6FA46E6F7465D9524B656570206974206C6F63616C3A206120736C6F74206D61726B2069732074686520617574686F7227732063616C6C2C20616E642073686172696E672069742069732061207365706172617465206163742EAB616E7377657265645F6174B4323032362D31312D31325431393A30323A30305AAB72656365697665645F6174B4323032362D31312D31325431393A30333A30355AAF636C61696D5F696E5F667574757265C2A8616E737765726572D92439663865376436632D356234612D343339322D383137302D306631653264336334623561A9617574686F72697479A753746577617264AA726571756573745F6964D92430303030303030312D303030302D343030302D383030302D303030303030303030303031"
+    },
+    {
+      "name": "V14_an_identical_body_from_another_decider_is_its_own_Revision_and_the_first_retry_still_returns_n1",
+      "card": {
+        "schemaVersion": "gamecult.fork.card.v0",
+        "fork_id": "gamecult-chat:question:slot-mark-consent",
+        "title": "Slot mark consent",
+        "context": "Should a slot mark be shared?",
+        "options": [
+          {
+            "id": "yes",
+            "text": "Share it."
+          },
+          {
+            "id": "no",
+            "text": "Keep it local."
+          }
+        ],
+        "recommendation": "no",
+        "depends": [
+          "gamecult-chat:question:file-zone-audience"
+        ],
+        "leans": null,
+        "flag": null,
+        "raised_in": {
+          "kind": "CutSpec",
+          "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+        },
+        "deciders": [
+          "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+          "9f8e7d6c-5b4a-4392-8170-0f1e2d3c4b5a"
+        ],
+        "status": "open",
+        "ruling": null,
+        "ruled_from": [],
+        "order": 3,
+        "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48"
+      },
+      "optionsHash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+      "steps": [
+        {
+          "kind": "answer",
+          "body": {
+            "schemaVersion": "gamecult.fork.answer_request.v0",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "answer": {
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+            },
+            "retracted": false,
+            "retracts": null,
+            "answered_at": "2026-11-12T19:02:00Z",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          },
+          "server": {
+            "answer_id": "n1",
+            "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+            "authority": "Operator",
+            "received_at": "2026-11-12T19:02:05Z"
+          },
+          "response": {
+            "schemaVersion": "gamecult.fork.answer_result.v0",
+            "answer": {
+              "schemaVersion": "gamecult.desk_answer.v0",
+              "answer_id": "n1",
+              "fork_id": "gamecult-chat:question:slot-mark-consent",
+              "outcome": "Counted",
+              "of": null,
+              "retracts": null,
+              "code": null,
+              "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+              "answered_at": "2026-11-12T19:02:00Z",
+              "received_at": "2026-11-12T19:02:05Z",
+              "claim_in_future": false,
+              "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+              "authority": "Operator",
+              "request_id": "00000001-0000-4000-8000-000000000001"
+            },
+            "card": null
+          }
+        },
+        {
+          "kind": "answer",
+          "body": {
+            "schemaVersion": "gamecult.fork.answer_request.v0",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "answer": {
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+            },
+            "retracted": false,
+            "retracts": null,
+            "answered_at": "2026-11-12T19:02:00Z",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          },
+          "server": {
+            "answer_id": "n3",
+            "answerer": "9f8e7d6c-5b4a-4392-8170-0f1e2d3c4b5a",
+            "authority": "Steward",
+            "received_at": "2026-11-12T19:05:05Z"
+          },
+          "response": {
+            "schemaVersion": "gamecult.fork.answer_result.v0",
+            "answer": {
+              "schemaVersion": "gamecult.desk_answer.v0",
+              "answer_id": "n3",
+              "fork_id": "gamecult-chat:question:slot-mark-consent",
+              "outcome": "Revision",
+              "of": "n1",
+              "retracts": null,
+              "code": null,
+              "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+              "answered_at": "2026-11-12T19:02:00Z",
+              "received_at": "2026-11-12T19:05:05Z",
+              "claim_in_future": false,
+              "answerer": "9f8e7d6c-5b4a-4392-8170-0f1e2d3c4b5a",
+              "authority": "Steward",
+              "request_id": "00000001-0000-4000-8000-000000000001"
+            },
+            "card": null
+          }
+        },
+        {
+          "kind": "answer",
+          "body": {
+            "schemaVersion": "gamecult.fork.answer_request.v0",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "answer": {
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+            },
+            "retracted": false,
+            "retracts": null,
+            "answered_at": "2026-11-12T19:02:00Z",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          },
+          "server": {
+            "answer_id": "n9",
+            "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+            "authority": "Operator",
+            "received_at": "2026-11-12T19:02:05Z"
+          },
+          "response": {
+            "schemaVersion": "gamecult.fork.answer_result.v0",
+            "answer": {
+              "schemaVersion": "gamecult.desk_answer.v0",
+              "answer_id": "n1",
+              "fork_id": "gamecult-chat:question:slot-mark-consent",
+              "outcome": "Counted",
+              "of": null,
+              "retracts": null,
+              "code": null,
+              "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+              "answered_at": "2026-11-12T19:02:00Z",
+              "received_at": "2026-11-12T19:02:05Z",
+              "claim_in_future": false,
+              "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+              "authority": "Operator",
+              "request_id": "00000001-0000-4000-8000-000000000001"
+            },
+            "card": null
+          }
+        }
+      ],
+      "record": {
+        "schemaVersion": "gamecult.fork.record.v0",
+        "fork_id": "gamecult-chat:question:slot-mark-consent",
+        "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+        "counted_answer_id": "n1",
+        "answers": [
+          {
+            "schemaVersion": "gamecult.desk_answer.v0",
+            "answer_id": "n1",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "outcome": "Counted",
+            "of": null,
+            "retracts": null,
+            "code": null,
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "choice": "no",
+            "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+            "answered_at": "2026-11-12T19:02:00Z",
+            "received_at": "2026-11-12T19:02:05Z",
+            "claim_in_future": false,
+            "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+            "authority": "Operator",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          },
+          {
+            "schemaVersion": "gamecult.desk_answer.v0",
+            "answer_id": "n3",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "outcome": "Revision",
+            "of": "n1",
+            "retracts": null,
+            "code": null,
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "choice": "no",
+            "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+            "answered_at": "2026-11-12T19:02:00Z",
+            "received_at": "2026-11-12T19:05:05Z",
+            "claim_in_future": false,
+            "answerer": "9f8e7d6c-5b4a-4392-8170-0f1e2d3c4b5a",
+            "authority": "Steward",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          }
+        ]
+      },
+      "recordHex": "85AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438B1636F756E7465645F616E737765725F6964A26E31A7616E737765727392DE0010AD736368656D6156657273696F6EB767616D6563756C742E6465736B5F616E737765722E7630A9616E737765725F6964A26E31A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74A76F7574636F6D65A7436F756E746564A26F66C0A87265747261637473C0A4636F6465C0AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438A663686F696365A26E6FA46E6F7465D9524B656570206974206C6F63616C3A206120736C6F74206D61726B2069732074686520617574686F7227732063616C6C2C20616E642073686172696E672069742069732061207365706172617465206163742EAB616E7377657265645F6174B4323032362D31312D31325431393A30323A30305AAB72656365697665645F6174B4323032362D31312D31325431393A30323A30355AAF636C61696D5F696E5F667574757265C2A8616E737765726572D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A9617574686F72697479A84F70657261746F72AA726571756573745F6964D92430303030303030312D303030302D343030302D383030302D303030303030303030303031DE0010AD736368656D6156657273696F6EB767616D6563756C742E6465736B5F616E737765722E7630A9616E737765725F6964A26E33A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74A76F7574636F6D65A85265766973696F6EA26F66A26E31A87265747261637473C0A4636F6465C0AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438A663686F696365A26E6FA46E6F7465D9524B656570206974206C6F63616C3A206120736C6F74206D61726B2069732074686520617574686F7227732063616C6C2C20616E642073686172696E672069742069732061207365706172617465206163742EAB616E7377657265645F6174B4323032362D31312D31325431393A30323A30305AAB72656365697665645F6174B4323032362D31312D31325431393A30353A30355AAF636C61696D5F696E5F667574757265C2A8616E737765726572D92439663865376436632D356234612D343339322D383137302D306631653264336334623561A9617574686F72697479A753746577617264AA726571756573745F6964D92430303030303030312D303030302D343030302D383030302D303030303030303030303031"
+    },
+    {
+      "name": "V16_Q5_a_forbidden_request_binds_no_request_id",
+      "card": {
+        "schemaVersion": "gamecult.fork.card.v0",
+        "fork_id": "gamecult-chat:question:slot-mark-consent",
+        "title": "Slot mark consent",
+        "context": "Should a slot mark be shared?",
+        "options": [
+          {
+            "id": "yes",
+            "text": "Share it."
+          },
+          {
+            "id": "no",
+            "text": "Keep it local."
+          }
+        ],
+        "recommendation": "no",
+        "depends": [
+          "gamecult-chat:question:file-zone-audience"
+        ],
+        "leans": null,
+        "flag": null,
+        "raised_in": {
+          "kind": "CutSpec",
+          "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+        },
+        "deciders": [
+          "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+        ],
+        "status": "open",
+        "ruling": null,
+        "ruled_from": [],
+        "order": 3,
+        "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48"
+      },
+      "optionsHash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+      "steps": [
+        {
+          "kind": "answer",
+          "body": {
+            "schemaVersion": "gamecult.fork.answer_request.v0",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "answer": {
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+            },
+            "retracted": false,
+            "retracts": null,
+            "answered_at": "2026-11-12T19:02:00Z",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          },
+          "server": {
+            "answer_id": "n9",
+            "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+            "authority": "Operator",
+            "received_at": "2026-11-12T19:02:05Z",
+            "active": false
+          },
+          "response": {
+            "schemaVersion": "gamecult.fork.refusal.v0",
+            "code": "forbidden",
+            "error": "forbidden: only Active members may use the desk"
+          }
+        },
+        {
+          "kind": "answer",
+          "body": {
+            "schemaVersion": "gamecult.fork.answer_request.v0",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "answer": {
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+            },
+            "retracted": false,
+            "retracts": null,
+            "answered_at": "2026-11-12T19:02:00Z",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          },
+          "server": {
+            "answer_id": "n1",
+            "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+            "authority": "Operator",
+            "received_at": "2026-11-12T19:02:05Z"
+          },
+          "response": {
+            "schemaVersion": "gamecult.fork.answer_result.v0",
+            "answer": {
+              "schemaVersion": "gamecult.desk_answer.v0",
+              "answer_id": "n1",
+              "fork_id": "gamecult-chat:question:slot-mark-consent",
+              "outcome": "Counted",
+              "of": null,
+              "retracts": null,
+              "code": null,
+              "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+              "answered_at": "2026-11-12T19:02:00Z",
+              "received_at": "2026-11-12T19:02:05Z",
+              "claim_in_future": false,
+              "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+              "authority": "Operator",
+              "request_id": "00000001-0000-4000-8000-000000000001"
+            },
+            "card": null
+          }
+        }
+      ],
+      "record": {
+        "schemaVersion": "gamecult.fork.record.v0",
+        "fork_id": "gamecult-chat:question:slot-mark-consent",
+        "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+        "counted_answer_id": "n1",
+        "answers": [
+          {
+            "schemaVersion": "gamecult.desk_answer.v0",
+            "answer_id": "n1",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "outcome": "Counted",
+            "of": null,
+            "retracts": null,
+            "code": null,
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "choice": "no",
+            "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+            "answered_at": "2026-11-12T19:02:00Z",
+            "received_at": "2026-11-12T19:02:05Z",
+            "claim_in_future": false,
+            "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+            "authority": "Operator",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          }
+        ]
+      },
+      "recordHex": "85AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438B1636F756E7465645F616E737765725F6964A26E31A7616E737765727391DE0010AD736368656D6156657273696F6EB767616D6563756C742E6465736B5F616E737765722E7630A9616E737765725F6964A26E31A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74A76F7574636F6D65A7436F756E746564A26F66C0A87265747261637473C0A4636F6465C0AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438A663686F696365A26E6FA46E6F7465D9524B656570206974206C6F63616C3A206120736C6F74206D61726B2069732074686520617574686F7227732063616C6C2C20616E642073686172696E672069742069732061207365706172617465206163742EAB616E7377657265645F6174B4323032362D31312D31325431393A30323A30305AAB72656365697665645F6174B4323032362D31312D31325431393A30323A30355AAF636C61696D5F696E5F667574757265C2A8616E737765726572D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A9617574686F72697479A84F70657261746F72AA726571756573745F6964D92430303030303030312D303030302D343030302D383030302D303030303030303030303031"
+    },
+    {
+      "name": "V17_Q6_a_body_refused_at_the_door_binds_no_request_id",
+      "card": {
+        "schemaVersion": "gamecult.fork.card.v0",
+        "fork_id": "gamecult-chat:question:slot-mark-consent",
+        "title": "Slot mark consent",
+        "context": "Should a slot mark be shared?",
+        "options": [
+          {
+            "id": "yes",
+            "text": "Share it."
+          },
+          {
+            "id": "no",
+            "text": "Keep it local."
+          }
+        ],
+        "recommendation": "no",
+        "depends": [
+          "gamecult-chat:question:file-zone-audience"
+        ],
+        "leans": null,
+        "flag": null,
+        "raised_in": {
+          "kind": "CutSpec",
+          "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+        },
+        "deciders": [
+          "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+        ],
+        "status": "open",
+        "ruling": null,
+        "ruled_from": [],
+        "order": 3,
+        "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48"
+      },
+      "optionsHash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+      "steps": [
+        {
+          "kind": "answer",
+          "body": {
+            "schemaVersion": "gamecult.fork.answer_request.v0",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "answer": {
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+            },
+            "retracted": false,
+            "retracts": null,
+            "answered_at": "2026-11-12T19:02:00Z",
+            "request_id": "00000001-0000-4000-8000-000000000001",
+            "mood": "happy"
+          },
+          "server": {
+            "answer_id": "n9",
+            "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+            "authority": "Operator",
+            "received_at": "2026-11-12T19:02:05Z"
+          },
+          "response": {
+            "schemaVersion": "gamecult.fork.refusal.v0",
+            "code": "body_unknown_field",
+            "error": "body_unknown_field: the body is a closed shape"
+          }
+        },
+        {
+          "kind": "answer",
+          "body": {
+            "schemaVersion": "gamecult.fork.answer_request.v0",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "answer": {
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+            },
+            "retracted": false,
+            "retracts": null,
+            "answered_at": "2026-11-12T19:02:00Z",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          },
+          "server": {
+            "answer_id": "n1",
+            "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+            "authority": "Operator",
+            "received_at": "2026-11-12T19:02:05Z"
+          },
+          "response": {
+            "schemaVersion": "gamecult.fork.answer_result.v0",
+            "answer": {
+              "schemaVersion": "gamecult.desk_answer.v0",
+              "answer_id": "n1",
+              "fork_id": "gamecult-chat:question:slot-mark-consent",
+              "outcome": "Counted",
+              "of": null,
+              "retracts": null,
+              "code": null,
+              "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+              "answered_at": "2026-11-12T19:02:00Z",
+              "received_at": "2026-11-12T19:02:05Z",
+              "claim_in_future": false,
+              "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+              "authority": "Operator",
+              "request_id": "00000001-0000-4000-8000-000000000001"
+            },
+            "card": null
+          }
+        }
+      ],
+      "record": {
+        "schemaVersion": "gamecult.fork.record.v0",
+        "fork_id": "gamecult-chat:question:slot-mark-consent",
+        "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+        "counted_answer_id": "n1",
+        "answers": [
+          {
+            "schemaVersion": "gamecult.desk_answer.v0",
+            "answer_id": "n1",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "outcome": "Counted",
+            "of": null,
+            "retracts": null,
+            "code": null,
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "choice": "no",
+            "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+            "answered_at": "2026-11-12T19:02:00Z",
+            "received_at": "2026-11-12T19:02:05Z",
+            "claim_in_future": false,
+            "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+            "authority": "Operator",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          }
+        ]
+      },
+      "recordHex": "85AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438B1636F756E7465645F616E737765725F6964A26E31A7616E737765727391DE0010AD736368656D6156657273696F6EB767616D6563756C742E6465736B5F616E737765722E7630A9616E737765725F6964A26E31A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74A76F7574636F6D65A7436F756E746564A26F66C0A87265747261637473C0A4636F6465C0AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438A663686F696365A26E6FA46E6F7465D9524B656570206974206C6F63616C3A206120736C6F74206D61726B2069732074686520617574686F7227732063616C6C2C20616E642073686172696E672069742069732061207365706172617465206163742EAB616E7377657265645F6174B4323032362D31312D31325431393A30323A30305AAB72656365697665645F6174B4323032362D31312D31325431393A30323A30355AAF636C61696D5F696E5F667574757265C2A8616E737765726572D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A9617574686F72697479A84F70657261746F72AA726571756573745F6964D92430303030303030312D303030302D343030302D383030302D303030303030303030303031"
+    },
+    {
+      "name": "V17_Q6_an_unknown_fork_binds_no_request_id",
+      "card": {
+        "schemaVersion": "gamecult.fork.card.v0",
+        "fork_id": "gamecult-chat:question:slot-mark-consent",
+        "title": "Slot mark consent",
+        "context": "Should a slot mark be shared?",
+        "options": [
+          {
+            "id": "yes",
+            "text": "Share it."
+          },
+          {
+            "id": "no",
+            "text": "Keep it local."
+          }
+        ],
+        "recommendation": "no",
+        "depends": [
+          "gamecult-chat:question:file-zone-audience"
+        ],
+        "leans": null,
+        "flag": null,
+        "raised_in": {
+          "kind": "CutSpec",
+          "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+        },
+        "deciders": [
+          "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+        ],
+        "status": "open",
+        "ruling": null,
+        "ruled_from": [],
+        "order": 3,
+        "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48"
+      },
+      "optionsHash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+      "steps": [
+        {
+          "kind": "answer",
+          "body": {
+            "schemaVersion": "gamecult.fork.answer_request.v0",
+            "fork_id": "gamecult-chat:question:nope",
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "answer": {
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+            },
+            "retracted": false,
+            "retracts": null,
+            "answered_at": "2026-11-12T19:02:00Z",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          },
+          "server": {
+            "answer_id": "n9",
+            "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+            "authority": "Operator",
+            "received_at": "2026-11-12T19:02:05Z"
+          },
+          "response": {
+            "schemaVersion": "gamecult.fork.refusal.v0",
+            "code": "fork_unknown",
+            "error": "fork_unknown: no such fork"
+          }
+        },
+        {
+          "kind": "answer",
+          "body": {
+            "schemaVersion": "gamecult.fork.answer_request.v0",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "answer": {
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
+            },
+            "retracted": false,
+            "retracts": null,
+            "answered_at": "2026-11-12T19:02:00Z",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          },
+          "server": {
+            "answer_id": "n1",
+            "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+            "authority": "Operator",
+            "received_at": "2026-11-12T19:02:05Z"
+          },
+          "response": {
+            "schemaVersion": "gamecult.fork.answer_result.v0",
+            "answer": {
+              "schemaVersion": "gamecult.desk_answer.v0",
+              "answer_id": "n1",
+              "fork_id": "gamecult-chat:question:slot-mark-consent",
+              "outcome": "Counted",
+              "of": null,
+              "retracts": null,
+              "code": null,
+              "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+              "choice": "no",
+              "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+              "answered_at": "2026-11-12T19:02:00Z",
+              "received_at": "2026-11-12T19:02:05Z",
+              "claim_in_future": false,
+              "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+              "authority": "Operator",
+              "request_id": "00000001-0000-4000-8000-000000000001"
+            },
+            "card": null
+          }
+        }
+      ],
+      "record": {
+        "schemaVersion": "gamecult.fork.record.v0",
+        "fork_id": "gamecult-chat:question:slot-mark-consent",
+        "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+        "counted_answer_id": "n1",
+        "answers": [
+          {
+            "schemaVersion": "gamecult.desk_answer.v0",
+            "answer_id": "n1",
+            "fork_id": "gamecult-chat:question:slot-mark-consent",
+            "outcome": "Counted",
+            "of": null,
+            "retracts": null,
+            "code": null,
+            "options_hash": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48",
+            "choice": "no",
+            "note": "Keep it local: a slot mark is the author's call, and sharing it is a separate act.",
+            "answered_at": "2026-11-12T19:02:00Z",
+            "received_at": "2026-11-12T19:02:05Z",
+            "claim_in_future": false,
+            "answerer": "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f",
+            "authority": "Operator",
+            "request_id": "00000001-0000-4000-8000-000000000001"
+          }
+        ]
+      },
+      "recordHex": "85AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438B1636F756E7465645F616E737765725F6964A26E31A7616E737765727391DE0010AD736368656D6156657273696F6EB767616D6563756C742E6465736B5F616E737765722E7630A9616E737765725F6964A26E31A7666F726B5F6964D92867616D6563756C742D636861743A7175657374696F6E3A736C6F742D6D61726B2D636F6E73656E74A76F7574636F6D65A7436F756E746564A26F66C0A87265747261637473C0A4636F6465C0AC6F7074696F6E735F68617368D94037643935666338376435333234323036313166653431356331646566323761333434373631376262363832333566343665336166313330616561333631633438A663686F696365A26E6FA46E6F7465D9524B656570206974206C6F63616C3A206120736C6F74206D61726B2069732074686520617574686F7227732063616C6C2C20616E642073686172696E672069742069732061207365706172617465206163742EAB616E7377657265645F6174B4323032362D31312D31325431393A30323A30305AAB72656365697665645F6174B4323032362D31312D31325431393A30323A30355AAF636C61696D5F696E5F667574757265C2A8616E737765726572D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A9617574686F72697479A84F70657261746F72AA726571756573745F6964D92430303030303030312D303030302D343030302D383030302D303030303030303030303031"
     },
     {
       "name": "the_same_request_id_with_another_body_is_request_id_conflict",
