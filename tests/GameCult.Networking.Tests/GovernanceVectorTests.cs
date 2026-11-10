@@ -296,8 +296,10 @@ namespace GameCult.Networking.Tests
             ["body_unknown_field"] = "the body is a closed shape",
             ["body_invalid"] = "the body does not satisfy gamecult.fork.answer_request.v0",
             ["fork_unknown"] = "no such fork",
+            ["forbidden"] = "only Active members may use the desk",
+            ["request_id_conflict"] = "this request_id was used for a different body",
         };
-        private static readonly string[] RequestKeys = { "schemaVersion", "fork_id", "options_hash", "answer", "retracted", "retracts", "answered_at" };
+        private static readonly string[] RequestKeys = { "schemaVersion", "fork_id", "options_hash", "answer", "retracted", "retracts", "answered_at", "request_id" };
 
         private static bool HasKey(JsonNode? n, params string[] names) => n switch
         {
@@ -312,6 +314,7 @@ namespace GameCult.Networking.Tests
             var card = startCard;
             var answers = new JsonArray();
             var responses = new List<JsonNode?>();
+            var seen = new Dictionary<string, (JsonNode Body, JsonNode Response)>();   // (answerer, request_id) -> the first stored outcome
             string? Counted()
             {
                 var hash = HashOf(card);
@@ -341,20 +344,27 @@ namespace GameCult.Networking.Tests
                         ["options_hash"] = Clone(b["options_hash"]), ["choice"] = Clone(a?["choice"]), ["note"] = Clone(a?["note"]), ["answered_at"] = Clone(b["answered_at"]),
                         ["received_at"] = Clone(s["received_at"]),
                         ["claim_in_future"] = (DateTimeOffset.Parse(S(b["answered_at"])) - DateTimeOffset.Parse(S(s["received_at"]))).TotalSeconds > 300,
-                        ["answerer"] = Clone(s["answerer"]), ["authority"] = Clone(s["authority"])
+                        ["answerer"] = Clone(s["answerer"]), ["authority"] = Clone(s["authority"]), ["request_id"] = Clone(b["request_id"])
                     };
                     answers.Add(Clone(doc));
-                    return new JsonObject { ["schemaVersion"] = "gamecult.fork.answer_result.v0", ["answer"] = doc, ["card"] = code == "stale_fork" ? Clone(card) : null };
+                    var stored = new JsonObject { ["schemaVersion"] = "gamecult.fork.answer_result.v0", ["answer"] = doc, ["card"] = code == "stale_fork" ? Clone(card) : null };
+                    seen[S(s["answerer"]) + "|" + S(b["request_id"])] = (Clone(b)!, Clone(stored)!);
+                    return stored;
                 }
                 JsonNode Refuse(string code) => Store("Refused", null, code);
                 var deciders = card["deciders"]!.AsArray().Select(S).ToList();
                 var retracted = b["retracted"] is JsonValue rv && rv.TryGetValue<bool>(out var rb) && rb;
+                var down = s["door_down"] is not null;          // the second door failed to answer; "stored" says whether Huginn had the request by then
+                var reached = s["stored"] is not null;
+                JsonNode Unavailable() => new JsonObject { ["schemaVersion"] = "gamecult.fork.unavailable.v0", ["code"] = "unavailable", ["error"] = "unavailable: the outcome is not confirmed, try again with the same request_id", ["retryAfterSeconds"] = Clone(s["retry_after_seconds"]) };
                 JsonNode response;
                 if (s["answerer"] is null) response = Door("unauthenticated");
+                else if (s["active"] is JsonValue activeValue && !activeValue.GetValue<bool>()) response = Door("forbidden");
                 else if (HasKey(b, "answerer", "authority")) response = Door("body_forbidden_field");
                 else if (b.Any(kv => !RequestKeys.Contains(kv.Key)) || (b["answer"] is JsonObject ao && ao.Any(kv => kv.Key is not ("choice" or "note")))) response = Door("body_unknown_field");
                 else if (Errors(ForkSchema, "answerRequest", b).Count > 0 || NoteRuleErrors("answerRequest", b).Any() || (!retracted && b["answer"] is null)) response = Door("body_invalid");
-                else if (s["door_down"] is not null) response = new JsonObject { ["schemaVersion"] = "gamecult.fork.unavailable.v0", ["code"] = "unavailable", ["error"] = "unavailable: the answer path is down, try again", ["retryAfterSeconds"] = Clone(s["retry_after_seconds"]) };
+                else if (down && !reached) response = Unavailable();
+                else if (seen.TryGetValue(S(s["answerer"]) + "|" + S(b["request_id"]), out var prior)) response = JsonNode.DeepEquals(prior.Body, b) ? Clone(prior.Response)! : Door("request_id_conflict");
                 else if (S(b["fork_id"]) != S(card["fork_id"])) response = Door("fork_unknown");
                 else if (S(b["options_hash"]) != HashOf(card)) response = Refuse("stale_fork");
                 else if (!deciders.Contains(S(s["answerer"]))) response = Refuse("not_a_decider");
@@ -373,7 +383,7 @@ namespace GameCult.Networking.Tests
                     var first = Counted();
                     response = first is null ? Store("Counted", null, null) : Store("Revision", first, null);
                 }
-                responses.Add(response);
+                responses.Add(down && reached ? Unavailable() : response);
             }
             var record = new JsonObject
             {
@@ -387,7 +397,7 @@ namespace GameCult.Networking.Tests
         {
             var seen = new HashSet<string>();
             var doorRefusals = 0;
-            var door = new HashSet<string> { "unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown", "unavailable" };
+            var door = new HashSet<string> { "unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown", "forbidden", "request_id_conflict" };
             foreach (var sc in Fork["scenarios"]!.AsArray())
             {
                 var name = S(sc!["name"]);
@@ -409,6 +419,9 @@ namespace GameCult.Networking.Tests
                     if (r["code"] is not null)
                     {
                         seen.Add(S(r["code"]));
+                        // unavailable promises nothing: the outcome is not confirmed, so the answer is stored exactly when Huginn had it
+                        if (S(r["code"]) == "unavailable")
+                            Assert.That(sc["record"]!["answers"]!.AsArray().Any(a => S(a!["answer_id"]) == S(step["server"]!["answer_id"])), Is.EqualTo(step["server"]!["stored"] is not null), $"{name} unavailable");
                         if (door.Contains(S(r["code"])))
                         {
                             doorRefusals++;
@@ -420,7 +433,7 @@ namespace GameCult.Networking.Tests
                 foreach (var a in sc["record"]!["answers"]!.AsArray()) seen.Add(S(a!["outcome"]));
             }
             Assert.That(doorRefusals, Is.GreaterThanOrEqualTo(8));
-            foreach (var want in new[] { "Counted", "Revision", "Retraction", "Refused", "unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown", "unavailable", "stale_fork",
+            foreach (var want in new[] { "Counted", "Revision", "Retraction", "Refused", "unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown", "unavailable", "forbidden", "request_id_conflict", "stale_fork",
                                          "not_a_decider", "fork_closed", "choice_invalid", "bad_retraction", "already_retracted" })
                 Assert.That(seen, Does.Contain(want));
         }

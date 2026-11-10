@@ -208,20 +208,24 @@ hv("astral_option_id_and_text", card(options=[{"id": "\U0001F600", "text": "\U00
 assert [h["sha256"] for h in hashes if h["heimdall"] == "D"] == [h["sha256"] for h in hashes if h["heimdall"] == "E"]
 assert len({h["sha256"] for h in hashes if h["name"] in ("heimdall_A_five_members", "hidden_members_do_not_move_it")}) == 1
 
-def body(choice=None, note=None, h=None, at="2026-11-12T19:02:00Z", fork=FID, retracts=None, answer="auto"):
+RID = [0]
+def next_rid():
+    RID[0] += 1; n = RID[0]
+    return f"{n:08x}-0000-4000-8000-{n:012x}"
+def body(choice=None, note=None, h=None, at="2026-11-12T19:02:00Z", fork=FID, retracts=None, answer="auto", rid=None):
     a = {"choice": choice, "note": note} if answer == "auto" else answer
     if answer == "auto" and choice is None and note is None: a = None
     return {"schemaVersion": "gamecult.fork.answer_request.v0", "fork_id": fork, "options_hash": h or H, "answer": a,
-            "retracted": retracts is not None, "retracts": retracts, "answered_at": at}
+            "retracted": retracts is not None, "retracts": retracts, "answered_at": at, "request_id": rid or next_rid()}
 def retraction(target, **kw): return body(retracts=target, **kw)
 NOTE = "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
 def srv(aid, who, at, auth="Operator"): return {"answer_id": aid, "answerer": who, "authority": auth, "received_at": at}
 TAIL = {"unauthenticated": "a verified session is required", "body_forbidden_field": "answerer and authority are set by the receiver", "body_unknown_field": "the body is a closed shape",
         "body_invalid": "the body does not satisfy gamecult.fork.answer_request.v0", "fork_unknown": "no such fork",
-        "insufficient_scope": "the token lacks the scope this route needs", "forbidden": "only Active members may use the desk", "request_invalid": "the request does not satisfy its document"}
+        "insufficient_scope": "the token lacks the scope this route needs", "forbidden": "only Active members may use the desk", "request_id_conflict": "this request_id was used for a different body", "request_invalid": "the request does not satisfy its document"}
 DOOR = set(TAIL)
 def refusal_doc(code): return {"schemaVersion": "gamecult.fork.refusal.v0", "code": code, "error": f"{code}: {TAIL[code]}"}
-def unavailable_doc(retry=30): return {"schemaVersion": "gamecult.fork.unavailable.v0", "code": "unavailable", "error": "unavailable: the answer path is down, try again", "retryAfterSeconds": retry}
+def unavailable_doc(retry=30): return {"schemaVersion": "gamecult.fork.unavailable.v0", "code": "unavailable", "error": "unavailable: the outcome is not confirmed, try again with the same request_id", "retryAfterSeconds": retry}
 def future(a, r):
     import datetime as dt
     p = lambda x: dt.datetime.strptime(x, "%Y-%m-%dT%H:%M:%SZ")
@@ -231,7 +235,7 @@ def da(outcome, link, code, b, server):
     return {"schemaVersion": "gamecult.desk_answer.v0", "answer_id": server["answer_id"], "fork_id": b["fork_id"], "outcome": outcome,
             "of": link if outcome == "Revision" else None, "retracts": link if outcome == "Retraction" else None, "code": code if outcome == "Refused" else None,
             "options_hash": b["options_hash"], "choice": a["choice"], "note": a["note"], "answered_at": b["answered_at"], "received_at": server["received_at"],
-            "claim_in_future": future(b["answered_at"], server["received_at"]), "answerer": server["answerer"], "authority": server["authority"]}
+            "claim_in_future": future(b["answered_at"], server["received_at"]), "answerer": server["answerer"], "authority": server["authority"], "request_id": b["request_id"]}
 def result(answer, c=None): return {"schemaVersion": "gamecult.fork.answer_result.v0", "answer": answer, "card": c}
 def record(counted, answers, h=H, fork=FID): return {"schemaVersion": "gamecult.fork.record.v0", "fork_id": fork, "options_hash": h, "counted_answer_id": counted, "answers": answers}
 T = lambda m, sec=5: f"2026-11-12T19:{m:02d}:{sec:02d}Z"
@@ -262,6 +266,9 @@ RET = lambda t: retraction(t, at="2026-11-12T19:09:00Z")
 def sr(aid, who=OP, m=9, auth="Operator"): return srv(aid, who, T(m), auth)
 MATRIX = [step("matrix_event", None, None, None, matrix_kind=k, choice=c) for k, c in (("m.replace", "yes"), ("m.redaction", None), ("m.reaction", "yes"))]
 X1 = ok(x1, sx1, "Counted", None)
+REPLAY1 = (step("answer", x1, dict(sx1, answer_id="n9"), X1[0]["response"]), None)
+LOST = [(step("answer", x1, dict(sx1, door_down=True, stored=True, retry_after_seconds=30), unavailable_doc(30)), X1[1])]
+STALE_BODY = stale_body(); STALE_RF = rf(STALE_BODY, sx1, "stale_fork", c=CARD)
 scen = [
  sc("operator_answers_and_is_counted", CARD, [X1], "n1"),
  sc("choice_alone_is_counted", CARD, [ok(pick, sx1, "Counted", None)], "n1"),
@@ -272,11 +279,17 @@ scen = [
  sc("an_unknown_key_is_refused_the_body_is_closed", CARD, [door(dict(x1, mood="happy"), sx1, "body_unknown_field")], None),
  sc("an_answer_with_neither_choice_nor_note_is_invalid", CARD, [door(body(answer={"choice": None, "note": None}), sx1, "body_invalid")], None),
  sc("a_non_retraction_without_an_answer_is_invalid", CARD, [door(body(answer=None), sx1, "body_invalid")], None),
- sc("the_second_door_down_is_unavailable_and_stores_nothing", CARD, [step("answer", x1, dict(sx1, door_down=True, retry_after_seconds=30), unavailable_doc(30)), ok(x1, sx2, "Counted", None)], "n2"),
- sc("a_bad_body_is_refused_before_the_door_is_asked", CARD, [door(dict(x1, answerer="x"), dict(sx1, door_down=True, retry_after_seconds=30), "body_forbidden_field")], None),
+ sc("unavailable_before_huginn_stored_nothing_is_retried_into_a_Counted_answer", CARD, [step("answer", x1, dict(sx1, answer_id="n9", door_down=True, retry_after_seconds=30), unavailable_doc(30)), ok(x1, sx1, "Counted", None)], "n1"),
+ sc("unavailable_after_huginn_stored_the_retry_with_the_same_request_id_returns_the_stored_outcome", CARD, LOST + [REPLAY1], "n1"),
+ sc("a_retry_never_adds_a_Revision", CARD, [X1, REPLAY1], "n1"),
+ sc("a_refused_answer_replays_its_refusal_with_the_card_it_carried", CARD, [STALE_RF, (step("answer", STALE_BODY, dict(sx1, answer_id="n9"), STALE_RF[0]["response"]), None)], None),
+ sc("the_same_request_id_with_another_body_is_request_id_conflict", CARD, [X1, door(dict(x1, answer={"choice": "yes", "note": None}), dict(sx1, answer_id="n9"), "request_id_conflict")], "n1"),
+ sc("the_same_request_id_from_another_account_is_another_request", Y_CARD, [X1, ok(dict(y1, request_id=x1["request_id"]), sy1, "Revision", "n1")], "n1"),
+ sc("a_non_active_member_is_forbidden_before_the_body_is_read", CARD, [door(dict(x1, answerer="x"), dict(sx1, active=False), "forbidden"), door(x1, dict(sx1, active=False), "forbidden"),
+                                                                       door(dict(x1, mood="happy"), dict(sx1, active=False, door_down=True, retry_after_seconds=30), "forbidden")], None),
  sc("no_session_is_unauthenticated", CARD, [door(x1, srv("n1", None, T(2), None), "unauthenticated")], None),
  sc("an_unknown_fork_is_refused_at_the_door", CARD, [door(body("no", NOTE, fork="gamecult-chat:question:nope"), sx1, "fork_unknown")], None),
- sc("V2_stale_hash_is_refused_not_counted_and_stored_as_Refused", CARD, [rf(stale_body(), sx1, "stale_fork", c=CARD)], None),
+ sc("V2_stale_hash_is_refused_not_counted_and_stored_as_Refused", CARD, [STALE_RF], None),
  sc("V2_a_stale_answer_then_a_fresh_one_the_fresh_one_is_counted", CARD, [rf(stale_body(), sx1, "stale_fork", c=CARD), ok(x1, sx2, "Counted", None)], "n2"),
  sc("V3_an_answer_off_the_decider_list_is_Refused_not_a_decider_and_stored", CARD, [rf(z1, sz, "not_a_decider")], None),
  sc("a_non_decider_with_a_stale_hash_is_stale_first", CARD, [rf(dict(z1, options_hash=STALE_H), sz, "stale_fork", c=CARD)], None),
@@ -306,7 +319,7 @@ scen = [
  sc("after_every_answer_is_retracted_a_fresh_answer_is_Counted_again", CARD, [X1, ok(RET("n1"), sr("n8"), "Retraction", "n1"), ok(x2, sx2, "Counted", None)], "n2"),
 ]
 REASON_CODES = ["stale_fork", "not_a_decider", "fork_closed", "choice_invalid", "bad_retraction", "already_retracted"]
-HTTP = {"unauthenticated": 401, "body_forbidden_field": 400, "body_unknown_field": 400, "body_invalid": 400, "fork_unknown": 404, "insufficient_scope": 403, "forbidden": 403, "request_invalid": 400,
+HTTP = {"unauthenticated": 401, "body_forbidden_field": 400, "body_unknown_field": 400, "body_invalid": 400, "fork_unknown": 404, "insufficient_scope": 403, "forbidden": 403, "request_id_conflict": 409, "request_invalid": 400,
         "stale_fork": 409, "not_a_decider": 403, "fork_closed": 409, "choice_invalid": 400, "bad_retraction": 400, "already_retracted": 409}
 STORED_REFUSALS = []
 for reason in REASON_CODES:
@@ -411,6 +424,8 @@ fork = {
              "invalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
                ("answer_with_neither", "an answer object holds a choice, a note, or both", body(answer={"choice": None, "note": None})),
                ("blank_note", "a blank note is no answer", body(None, "  \u00a0 ")),
+               ("request_id_missing", "map-mode writes every key; a retry needs the id", {k: v for k, v in x1.items() if k != "request_id"}),
+               ("request_id_not_a_uuid", "request_id is a lowercase D-format UUID", dict(x1, request_id="retry-1")),
                ("note_over_4000", "notes are at most 4000 UTF-8 bytes", body(None, "x" * 4001)),
                ("note_multibyte_4001_bytes", "a note is counted in UTF-8 bytes: 1999 e-acute is 3998 bytes, plus three ASCII is 4001 (rule: not expressible in the schema, 2002 characters)", body(None, "\u00e9" * 1999 + "abc")),
                ("note_astral_4004_bytes", "1001 astral characters are 4004 bytes though only 1001 code points (rule: not expressible in the schema)", body(None, "\U0001F600" * 1001)),

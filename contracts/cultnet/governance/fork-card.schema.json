@@ -250,7 +250,8 @@
         "answer",
         "retracted",
         "retracts",
-        "answered_at"
+        "answered_at",
+        "request_id"
       ],
       "properties": {
         "schemaVersion": {
@@ -287,6 +288,9 @@
         },
         "answered_at": {
           "$ref": "#/$defs/instant"
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
         }
       }
     },
@@ -308,7 +312,8 @@
         "received_at",
         "claim_in_future",
         "answerer",
-        "authority"
+        "authority",
+        "request_id"
       ],
       "properties": {
         "schemaVersion": {
@@ -369,6 +374,9 @@
         },
         "authority": {
           "$ref": "#/$defs/id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
         }
       }
     },
@@ -390,7 +398,8 @@
         "received_at",
         "claim_in_future",
         "answerer",
-        "authority"
+        "authority",
+        "request_id"
       ],
       "properties": {
         "schemaVersion": {
@@ -451,6 +460,9 @@
         },
         "authority": {
           "$ref": "#/$defs/id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
         }
       }
     },
@@ -472,7 +484,8 @@
         "received_at",
         "claim_in_future",
         "answerer",
-        "authority"
+        "authority",
+        "request_id"
       ],
       "properties": {
         "schemaVersion": {
@@ -519,6 +532,9 @@
         },
         "authority": {
           "$ref": "#/$defs/id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
         }
       }
     },
@@ -540,7 +556,8 @@
         "received_at",
         "claim_in_future",
         "answerer",
-        "authority"
+        "authority",
+        "request_id"
       ],
       "properties": {
         "schemaVersion": {
@@ -608,6 +625,9 @@
         },
         "authority": {
           "$ref": "#/$defs/id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
         }
       }
     },
@@ -675,7 +695,8 @@
             "fork_unknown",
             "insufficient_scope",
             "forbidden",
-            "request_invalid"
+            "request_invalid",
+            "request_id_conflict"
           ]
         },
         "error": {
@@ -928,7 +949,13 @@
             }
           ]
         }
-      }
+      },
+      "description": "The outcome is NOT CONFIRMED: the request may have reached Huginn and been stored before the reply was lost. Retry with the same request_id to learn the outcome."
+    },
+    "requestId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "Set by the client, a lowercase D-format UUID. Bound to the stamped answerer by the first stored answer that carries it."
     }
   }
 }

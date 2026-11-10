@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import Ajv2020 from "ajv/dist/2020.js";
 import { decode, encode } from "@msgpack/msgpack";
@@ -202,8 +203,10 @@ const TAILS: Record<string, string> = {
   body_unknown_field: "the body is a closed shape",
   body_invalid: "the body does not satisfy gamecult.fork.answer_request.v0",
   fork_unknown: "no such fork",
+  forbidden: "only Active members may use the desk",
+  request_id_conflict: "this request_id was used for a different body",
 };
-const REQUEST_KEYS = ["schemaVersion", "fork_id", "options_hash", "answer", "retracted", "retracts", "answered_at"];
+const REQUEST_KEYS = ["schemaVersion", "fork_id", "options_hash", "answer", "retracted", "retracts", "answered_at", "request_id"];
 const hasKey = (v: unknown, names: string[]): boolean =>
   typeof v === "object" && v !== null && Object.entries(v).some(([k, x]) => names.includes(k) || hasKey(x, names));
 const SECONDS = (iso: string): number => Date.parse(iso);
@@ -213,6 +216,7 @@ function judge(start: Card, steps: { kind: string; body: Record<string, any> | n
   let card = start;
   const answers: Record<string, any>[] = [];
   const responses: unknown[] = [];
+  const seen = new Map<string, { body: Record<string, any>; response: unknown }>();   // (answerer, request_id) -> the first stored outcome
   const counted = (): string | null => {
     const hash = optionsHash(card);
     const live = answers.find((a) => (a.outcome === "Counted" || a.outcome === "Revision") && a.options_hash === hash
@@ -229,17 +233,23 @@ function judge(start: Card, steps: { kind: string; body: Record<string, any> | n
       const doc = { schemaVersion: "gamecult.desk_answer.v0", answer_id: s.answer_id, fork_id: b.fork_id, outcome,
         of: outcome === "Revision" ? link : null, retracts: outcome === "Retraction" ? link : null, code: outcome === "Refused" ? code : null,
         options_hash: b.options_hash, choice: a.choice, note: a.note, answered_at: b.answered_at, received_at: s.received_at,
-        claim_in_future: SECONDS(b.answered_at) - SECONDS(s.received_at) > 300_000, answerer: s.answerer, authority: s.authority };
+        claim_in_future: SECONDS(b.answered_at) - SECONDS(s.received_at) > 300_000, answerer: s.answerer, authority: s.authority, request_id: b.request_id };
       answers.push(doc);
-      return { schemaVersion: "gamecult.fork.answer_result.v0", answer: doc, card: code === "stale_fork" ? card : null };
+      const stored = { schemaVersion: "gamecult.fork.answer_result.v0", answer: doc, card: code === "stale_fork" ? card : null };
+      seen.set(`${s.answerer}|${b.request_id}`, { body: structuredClone(b), response: structuredClone(stored) });
+      return stored;
     };
     const refuse = (code: string) => store("Refused", null, code);
+    const down = s.door_down === true, reached = s.stored === true;   // the second door failed to answer; "stored" says whether Huginn had the request by then
+    const unavailable = () => ({ schemaVersion: "gamecult.fork.unavailable.v0", code: "unavailable", error: "unavailable: the outcome is not confirmed, try again with the same request_id", retryAfterSeconds: s.retry_after_seconds });
     let response: unknown;
     if (s.answerer === null) response = door("unauthenticated");
+    else if (s.active === false) response = door("forbidden");
     else if (hasKey(b, ["answerer", "authority"])) response = door("body_forbidden_field");
     else if (Object.keys(b).some((k) => !REQUEST_KEYS.includes(k)) || (b.answer && Object.keys(b.answer).some((k) => k !== "choice" && k !== "note"))) response = door("body_unknown_field");
     else if (!check(forkSchema, "answerRequest", b) || noteRuleErrors("answerRequest", b).length > 0 || (!b.retracted && b.answer === null)) response = door("body_invalid");
-    else if (s.door_down) response = { schemaVersion: "gamecult.fork.unavailable.v0", code: "unavailable", error: "unavailable: the answer path is down, try again", retryAfterSeconds: s.retry_after_seconds };
+    else if (down && !reached) response = unavailable();
+    else if (seen.has(`${s.answerer}|${b.request_id}`)) { const prior = seen.get(`${s.answerer}|${b.request_id}`)!; response = isDeepStrictEqual(prior.body, b) ? structuredClone(prior.response) : door("request_id_conflict"); }
     else if (b.fork_id !== card.fork_id) response = door("fork_unknown");
     else if (b.options_hash !== optionsHash(card)) response = refuse("stale_fork");
     else if (!card.deciders.includes(s.answerer)) response = refuse("not_a_decider");
@@ -254,7 +264,7 @@ function judge(start: Card, steps: { kind: string; body: Record<string, any> | n
       const first = counted();
       response = first === null ? store("Counted", null, null) : store("Revision", first, null);
     }
-    responses.push(response);
+    responses.push(down && reached ? unavailable() : response);
   }
   return { responses, record: { schemaVersion: "gamecult.fork.record.v0", fork_id: card.fork_id, options_hash: optionsHash(card), counted_answer_id: counted(), answers } };
 }
@@ -273,10 +283,12 @@ test("fork card: every scenario replays to the vector's responses and record, by
 });
 
 test("fork card: a body refused at the door or naming an unknown fork is never stored", () => {
-  const door = new Set(["unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown", "unavailable"]);
+  const door = new Set(["unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown", "forbidden", "request_id_conflict"]);
   let doorRefusals = 0;
   for (const sc of fork.scenarios) {
     for (const s of sc.steps) {
+      // unavailable promises nothing: the outcome is not confirmed, so the answer is stored exactly when Huginn had it
+      if (s.response?.code === "unavailable") assert.equal(sc.record.answers.some((a: { answer_id: string }) => a.answer_id === s.server.answer_id), s.server.stored === true, `${sc.name} unavailable`);
       if (s.response && door.has(s.response.code)) {
         doorRefusals++;
         assert.ok(!sc.record.answers.some((a: { answer_id: string }) => a.answer_id === s.server.answer_id), `${sc.name} stored a door refusal`);
@@ -292,7 +304,7 @@ test("fork card: the scenarios cover every outcome and every refusal code", () =
     for (const s of sc.steps) if (s.response) seen.add(s.response.code ?? s.response.answer.code ?? s.response.answer.outcome);
     for (const a of sc.record.answers) seen.add(a.outcome);
   }
-  for (const want of ["Counted", "Revision", "Retraction", "Refused", "unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown", "unavailable", "stale_fork", "not_a_decider",
+  for (const want of ["Counted", "Revision", "Retraction", "Refused", "unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown", "unavailable", "forbidden", "request_id_conflict", "stale_fork", "not_a_decider",
                       "fork_closed", "choice_invalid", "bad_retraction", "already_retracted"]) {
     assert.ok(seen.has(want), want);
   }
