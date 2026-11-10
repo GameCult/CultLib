@@ -674,6 +674,7 @@
             "body_invalid",
             "fork_unknown",
             "insufficient_scope",
+            "forbidden",
             "request_invalid"
           ]
         },

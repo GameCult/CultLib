@@ -336,9 +336,11 @@ const judgeList = (entries: { card: Card }[], ordinal: number, rq: { mind: strin
 };
 
 // Bearer, audience, scope, in that order: a votes.* token fails at the audience and a desk token without the route's scope fails at the scope.
-const authJudge = (route: string, token: { audience: string; scopes: string[] } | null): string => {
+const authJudge = (route: string, token: { audience: string; scopes: string[]; active: boolean } | null, huginnDown: boolean): string => {
   if (token === null || token.audience !== "bifrost-desk") return "unauthenticated";
-  return token.scopes.includes(route === "answer" ? "desk.answer" : "desk.read") ? "ok" : "insufficient_scope";
+  if (!token.scopes.includes(route === "answer" ? "desk.answer" : "desk.read")) return "insufficient_scope";
+  if (!token.active) return "forbidden";
+  return huginnDown ? "unavailable" : "ok";
 };
 
 test("fork transport: requests and entries validate and encode to the vector bytes, and every negative is refused", () => {
@@ -381,10 +383,10 @@ test("fork transport: auth is bearer, then audience, then scope, and a votes tok
   const codes = (forkSchema.$defs.refusal.properties.code as { enum: string[] }).enum;
   const seen = new Set<string>();
   for (const c of fork.transport.authCases) {
-    const got = authJudge(c.route, c.token);
+    const got = authJudge(c.route, c.token, c.huginn_down);
     assert.equal(got, c.expect, c.name);
-    if (got !== "ok") assert.ok(codes.includes(got), c.name);
+    if (got !== "ok" && got !== "unavailable") assert.ok(codes.includes(got), c.name);
     seen.add(`${c.route}:${got}`);
   }
-  for (const want of ["list:insufficient_scope", "answer:insufficient_scope", "read:unauthenticated", "answer:ok"]) assert.ok(seen.has(want), want);
+  for (const want of ["list:insufficient_scope", "answer:insufficient_scope", "read:forbidden", "list:unavailable", "read:unavailable", "answer:unavailable", "read:unauthenticated", "answer:ok"]) assert.ok(seen.has(want), want);
 });

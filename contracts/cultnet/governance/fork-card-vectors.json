@@ -1899,6 +1899,16 @@
       "messagePackHex": "83AD736368656D6156657273696F6EB867616D6563756C742E666F726B2E7265667573616C2E7630A4636F6465B2696E73756666696369656E745F73636F7065A56572726F72D93E696E73756666696369656E745F73636F70653A2074686520746F6B656E206C61636B73207468652073636F7065207468697320726F757465206E65656473"
     },
     {
+      "name": "forbidden",
+      "httpStatus": 403,
+      "message": {
+        "schemaVersion": "gamecult.fork.refusal.v0",
+        "code": "forbidden",
+        "error": "forbidden: only Active members may use the desk"
+      },
+      "messagePackHex": "83AD736368656D6156657273696F6EB867616D6563756C742E666F726B2E7265667573616C2E7630A4636F6465A9666F7262696464656EA56572726F72D92F666F7262696464656E3A206F6E6C7920416374697665206D656D62657273206D61792075736520746865206465736B"
+    },
+    {
       "name": "request_invalid",
       "httpStatus": 400,
       "message": {
@@ -4991,9 +5001,11 @@
           "audience": "bifrost-desk",
           "scopes": [
             "desk.read"
-          ]
+          ],
+          "active": true
         },
-        "expect": "ok"
+        "expect": "ok",
+        "huginn_down": false
       },
       {
         "name": "read_with_desk_read",
@@ -5002,9 +5014,11 @@
           "audience": "bifrost-desk",
           "scopes": [
             "desk.read"
-          ]
+          ],
+          "active": true
         },
-        "expect": "ok"
+        "expect": "ok",
+        "huginn_down": false
       },
       {
         "name": "answer_with_desk_answer",
@@ -5013,9 +5027,11 @@
           "audience": "bifrost-desk",
           "scopes": [
             "desk.answer"
-          ]
+          ],
+          "active": true
         },
-        "expect": "ok"
+        "expect": "ok",
+        "huginn_down": false
       },
       {
         "name": "answer_with_both_scopes",
@@ -5025,21 +5041,25 @@
           "scopes": [
             "desk.read",
             "desk.answer"
-          ]
+          ],
+          "active": true
         },
-        "expect": "ok"
+        "expect": "ok",
+        "huginn_down": false
       },
       {
         "name": "no_bearer_list",
         "route": "list",
         "token": null,
-        "expect": "unauthenticated"
+        "expect": "unauthenticated",
+        "huginn_down": false
       },
       {
         "name": "no_bearer_answer",
         "route": "answer",
         "token": null,
-        "expect": "unauthenticated"
+        "expect": "unauthenticated",
+        "huginn_down": false
       },
       {
         "name": "the_MAS_token_is_refused",
@@ -5049,9 +5069,11 @@
           "scopes": [
             "openid",
             "profile"
-          ]
+          ],
+          "active": true
         },
-        "expect": "unauthenticated"
+        "expect": "unauthenticated",
+        "huginn_down": false
       },
       {
         "name": "a_votes_token_cannot_list",
@@ -5060,9 +5082,11 @@
           "audience": "bifrost-votes",
           "scopes": [
             "votes.read"
-          ]
+          ],
+          "active": true
         },
-        "expect": "unauthenticated"
+        "expect": "unauthenticated",
+        "huginn_down": false
       },
       {
         "name": "a_votes_token_cannot_read",
@@ -5071,9 +5095,11 @@
           "audience": "bifrost-votes",
           "scopes": [
             "votes.read"
-          ]
+          ],
+          "active": true
         },
-        "expect": "unauthenticated"
+        "expect": "unauthenticated",
+        "huginn_down": false
       },
       {
         "name": "a_votes_token_cannot_answer",
@@ -5082,9 +5108,11 @@
           "audience": "bifrost-votes",
           "scopes": [
             "votes.cast"
-          ]
+          ],
+          "active": true
         },
-        "expect": "unauthenticated"
+        "expect": "unauthenticated",
+        "huginn_down": false
       },
       {
         "name": "desk_audience_with_a_votes_scope_only",
@@ -5093,9 +5121,11 @@
           "audience": "bifrost-desk",
           "scopes": [
             "votes.cast"
-          ]
+          ],
+          "active": true
         },
-        "expect": "insufficient_scope"
+        "expect": "insufficient_scope",
+        "huginn_down": false
       },
       {
         "name": "desk_read_cannot_answer",
@@ -5104,9 +5134,11 @@
           "audience": "bifrost-desk",
           "scopes": [
             "desk.read"
-          ]
+          ],
+          "active": true
         },
-        "expect": "insufficient_scope"
+        "expect": "insufficient_scope",
+        "huginn_down": false
       },
       {
         "name": "desk_answer_cannot_list",
@@ -5115,9 +5147,122 @@
           "audience": "bifrost-desk",
           "scopes": [
             "desk.answer"
-          ]
+          ],
+          "active": true
         },
-        "expect": "insufficient_scope"
+        "expect": "insufficient_scope",
+        "huginn_down": false
+      },
+      {
+        "name": "a_non_active_member_cannot_list",
+        "route": "list",
+        "token": {
+          "audience": "bifrost-desk",
+          "scopes": [
+            "desk.read"
+          ],
+          "active": false
+        },
+        "expect": "forbidden",
+        "huginn_down": false
+      },
+      {
+        "name": "a_non_active_member_cannot_read",
+        "route": "read",
+        "token": {
+          "audience": "bifrost-desk",
+          "scopes": [
+            "desk.read"
+          ],
+          "active": false
+        },
+        "expect": "forbidden",
+        "huginn_down": false
+      },
+      {
+        "name": "a_non_active_member_cannot_answer",
+        "route": "answer",
+        "token": {
+          "audience": "bifrost-desk",
+          "scopes": [
+            "desk.answer"
+          ],
+          "active": false
+        },
+        "expect": "forbidden",
+        "huginn_down": false
+      },
+      {
+        "name": "scope_is_judged_before_membership",
+        "route": "answer",
+        "token": {
+          "audience": "bifrost-desk",
+          "scopes": [
+            "desk.read"
+          ],
+          "active": false
+        },
+        "expect": "insufficient_scope",
+        "huginn_down": false
+      },
+      {
+        "name": "huginn_down_list",
+        "route": "list",
+        "token": {
+          "audience": "bifrost-desk",
+          "scopes": [
+            "desk.read"
+          ],
+          "active": true
+        },
+        "expect": "unavailable",
+        "huginn_down": true
+      },
+      {
+        "name": "huginn_down_read",
+        "route": "read",
+        "token": {
+          "audience": "bifrost-desk",
+          "scopes": [
+            "desk.read"
+          ],
+          "active": true
+        },
+        "expect": "unavailable",
+        "huginn_down": true
+      },
+      {
+        "name": "huginn_down_answer",
+        "route": "answer",
+        "token": {
+          "audience": "bifrost-desk",
+          "scopes": [
+            "desk.answer"
+          ],
+          "active": true
+        },
+        "expect": "unavailable",
+        "huginn_down": true
+      },
+      {
+        "name": "auth_is_judged_before_huginn_is_asked",
+        "route": "list",
+        "token": null,
+        "expect": "unauthenticated",
+        "huginn_down": true
+      },
+      {
+        "name": "membership_is_judged_before_huginn_is_asked",
+        "route": "read",
+        "token": {
+          "audience": "bifrost-desk",
+          "scopes": [
+            "desk.read"
+          ],
+          "active": false
+        },
+        "expect": "forbidden",
+        "huginn_down": true
       }
     ]
   },

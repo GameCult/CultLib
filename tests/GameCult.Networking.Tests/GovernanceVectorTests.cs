@@ -475,11 +475,13 @@ namespace GameCult.Networking.Tests
         }
 
         // Bearer, audience, scope, in that order: a votes.* token fails at the audience and a desk token without the route's scope fails at the scope.
-        private static string AuthJudge(string route, JsonNode? token)
+        private static string AuthJudge(string route, JsonNode? token, bool huginnDown)
         {
             if (token is null || S(token["audience"]) != "bifrost-desk") return "unauthenticated";
             var need = route == "answer" ? "desk.answer" : "desk.read";
-            return token["scopes"]!.AsArray().Any(x => S(x) == need) ? "ok" : "insufficient_scope";
+            if (!token["scopes"]!.AsArray().Any(x => S(x) == need)) return "insufficient_scope";
+            if (!token["active"]!.GetValue<bool>()) return "forbidden";
+            return huginnDown ? "unavailable" : "ok";
         }
 
         [Test]
@@ -538,12 +540,12 @@ namespace GameCult.Networking.Tests
             var seen = new HashSet<string>();
             foreach (var c in Fork["transport"]!["authCases"]!.AsArray())
             {
-                var got = AuthJudge(S(c!["route"]), c["token"]);
+                var got = AuthJudge(S(c!["route"]), c["token"], c["huginn_down"]!.GetValue<bool>());
                 Assert.That(got, Is.EqualTo(S(c["expect"])), S(c["name"]));
-                if (got != "ok") Assert.That(codes, Does.Contain(got), S(c["name"]));
+                if (got is not ("ok" or "unavailable")) Assert.That(codes, Does.Contain(got), S(c["name"]));
                 seen.Add(S(c["route"]) + ":" + got);
             }
-            Assert.That(seen, Does.Contain("list:insufficient_scope").And.Contain("answer:insufficient_scope").And.Contain("read:unauthenticated").And.Contain("answer:ok"));
+            Assert.That(seen, Does.Contain("list:insufficient_scope").And.Contain("answer:insufficient_scope").And.Contain("read:forbidden").And.Contain("list:unavailable").And.Contain("read:unavailable").And.Contain("answer:unavailable").And.Contain("read:unauthenticated").And.Contain("answer:ok"));
         }
     }
 }

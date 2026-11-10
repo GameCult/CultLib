@@ -218,7 +218,7 @@ NOTE = "Keep it local: a slot mark is the author's call, and sharing it is a sep
 def srv(aid, who, at, auth="Operator"): return {"answer_id": aid, "answerer": who, "authority": auth, "received_at": at}
 TAIL = {"unauthenticated": "a verified session is required", "body_forbidden_field": "answerer and authority are set by the receiver", "body_unknown_field": "the body is a closed shape",
         "body_invalid": "the body does not satisfy gamecult.fork.answer_request.v0", "fork_unknown": "no such fork",
-        "insufficient_scope": "the token lacks the scope this route needs", "request_invalid": "the request does not satisfy its document"}
+        "insufficient_scope": "the token lacks the scope this route needs", "forbidden": "only Active members may use the desk", "request_invalid": "the request does not satisfy its document"}
 DOOR = set(TAIL)
 def refusal_doc(code): return {"schemaVersion": "gamecult.fork.refusal.v0", "code": code, "error": f"{code}: {TAIL[code]}"}
 def unavailable_doc(retry=30): return {"schemaVersion": "gamecult.fork.unavailable.v0", "code": "unavailable", "error": "unavailable: the answer path is down, try again", "retryAfterSeconds": retry}
@@ -306,7 +306,7 @@ scen = [
  sc("after_every_answer_is_retracted_a_fresh_answer_is_Counted_again", CARD, [X1, ok(RET("n1"), sr("n8"), "Retraction", "n1"), ok(x2, sx2, "Counted", None)], "n2"),
 ]
 REASON_CODES = ["stale_fork", "not_a_decider", "fork_closed", "choice_invalid", "bad_retraction", "already_retracted"]
-HTTP = {"unauthenticated": 401, "body_forbidden_field": 400, "body_unknown_field": 400, "body_invalid": 400, "fork_unknown": 404, "insufficient_scope": 403, "request_invalid": 400,
+HTTP = {"unauthenticated": 401, "body_forbidden_field": 400, "body_unknown_field": 400, "body_invalid": 400, "fork_unknown": 404, "insufficient_scope": 403, "forbidden": 403, "request_invalid": 400,
         "stale_fork": 409, "not_a_decider": 403, "fork_closed": 409, "choice_invalid": 400, "bad_retraction": 400, "already_retracted": 409}
 STORED_REFUSALS = []
 for reason in REASON_CODES:
@@ -359,7 +359,7 @@ LISTS = [
  {"name": "limit_zero_is_the_count_and_stamp_only", "ordinal": 412, "entries": ENTRIES, "steps": [lstep(ENTRIES, 412, lreq(limit=0))]},
  {"name": "a_mind_with_no_forks", "ordinal": 7, "entries": [], "steps": [lstep([], 7, lreq(mind="nibu", limit=10))]},
 ]
-TOK = lambda aud, *sc: {"audience": aud, "scopes": list(sc)}
+TOK = lambda aud, *sc, active=True: {"audience": aud, "scopes": list(sc), "active": active}
 AUTH = [
  ("list_with_desk_read", "list", TOK("bifrost-desk", "desk.read"), "ok"), ("read_with_desk_read", "read", TOK("bifrost-desk", "desk.read"), "ok"),
  ("answer_with_desk_answer", "answer", TOK("bifrost-desk", "desk.answer"), "ok"), ("answer_with_both_scopes", "answer", TOK("bifrost-desk", "desk.read", "desk.answer"), "ok"),
@@ -371,6 +371,15 @@ AUTH = [
  ("desk_audience_with_a_votes_scope_only", "answer", TOK("bifrost-desk", "votes.cast"), "insufficient_scope"),
  ("desk_read_cannot_answer", "answer", TOK("bifrost-desk", "desk.read"), "insufficient_scope"),
  ("desk_answer_cannot_list", "list", TOK("bifrost-desk", "desk.answer"), "insufficient_scope"),
+ ("a_non_active_member_cannot_list", "list", TOK("bifrost-desk", "desk.read", active=False), "forbidden"),
+ ("a_non_active_member_cannot_read", "read", TOK("bifrost-desk", "desk.read", active=False), "forbidden"),
+ ("a_non_active_member_cannot_answer", "answer", TOK("bifrost-desk", "desk.answer", active=False), "forbidden"),
+ ("scope_is_judged_before_membership", "answer", TOK("bifrost-desk", "desk.read", active=False), "insufficient_scope"),
+ ("huginn_down_list", "list", TOK("bifrost-desk", "desk.read"), "unavailable", True),
+ ("huginn_down_read", "read", TOK("bifrost-desk", "desk.read"), "unavailable", True),
+ ("huginn_down_answer", "answer", TOK("bifrost-desk", "desk.answer"), "unavailable", True),
+ ("auth_is_judged_before_huginn_is_asked", "list", None, "unauthenticated", True),
+ ("membership_is_judged_before_huginn_is_asked", "read", TOK("bifrost-desk", "desk.read", active=False), "forbidden", True),
 ]
 def bad(name, why, m, **kw): return dict({"name": name, "why": why, "message": m}, **kw)
 fork = {
@@ -460,7 +469,7 @@ fork = {
       ("stamp_malformed", "a stamp is s<N>", dict(LISTS[0]["steps"][0]["response"], stamp="412")),
       ("count_negative", "counts are not negative", dict(LISTS[0]["steps"][0]["response"], open_count=-1))]],
     "listScenarios": [{"name": l["name"], "ordinal": l["ordinal"], "entries": l["entries"], "steps": l["steps"]} for l in LISTS],
-    "authCases": [{"name": n, "route": r, "token": t, "expect": x} for n, r, t, x in AUTH],
+    "authCases": [{"name": a[0], "route": a[1], "token": a[2], "expect": a[3], "huginn_down": len(a) > 4} for a in AUTH],
   },
   "scenarios": [{"name": n, "card": c, "optionsHash": c["options_hash"], "steps": steps, "record": r, "recordHex": hx(r)} for n, c, steps, r in scen],
 }
