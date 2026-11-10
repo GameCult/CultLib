@@ -106,7 +106,7 @@ Source: the desk's client needs (Ratatoskr PR #24 section 12, `ratatoskr-desk-sp
 |---|---|---|---|---|
 | 1 list | `GET /api/desk/{mind}/forks?status=&cursor=&limit=` | `list_request`: `mind` from the path, the rest from the query string | `list` | audience `bifrost-desk`, scope `desk.read` |
 | 2 read | `GET /api/desk/{mind}/forks/{fork_id}` (the id percent-encoded) | `read_request`, its `mind` and `fork_id` from the path | `entry`, or `refusal` `fork_unknown` (404) | `desk.read` |
-| 3 answer | `POST /api/desk/{mind}/answers` | `answer_request` as the body; `fork_id` stays in the body, the Mind is the route's and is no body field | `answer_result` (200 for a stored outcome of any kind, `Refused` included; the desk reads `outcome` and `code`, not the status), or a `refusal`, or `unavailable` | audience `bifrost-desk`, scope `desk.answer` |
+| 3 answer | `POST /api/desk/{mind}/answers` | `answer_request` as the body; `fork_id` stays in the body, the Mind is the route's and is no body field | `answer_result` (200 for `Counted`, `Revision` and `Retraction`; a stored `Refused` answer keeps the `answer_result` body and takes its code's status from the counting-rules table: `stale_fork` 409, `not_a_decider` 403, `fork_closed` 409, `choice_invalid` 400, `bad_retraction` 400, `already_retracted` 409, as the vectors' `results` pin; a replay returns the same status as the first call; the desk reads `outcome` and `code` from the body), or a `refusal`, or `unavailable` | audience `bifrost-desk`, scope `desk.answer` |
 
 **The `{mind}` segment** (Heimdall's rulings M1 to M5; vectors `transport.mindRoutes`).
 
