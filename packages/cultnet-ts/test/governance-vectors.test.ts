@@ -152,6 +152,7 @@ test("fork card: documents validate and encode to the vector bytes", () => {
   for (const [section, def] of [["request", "answerRequest"], ["deskAnswer", "deskAnswer"]] as const) {
     for (const v of fork[section].valid) {
       assert.ok(check(forkSchema, def, v.message), v.name);
+      assert.deepEqual(noteRuleErrors(def, v.message), [], v.name);
       assert.equal(hexOf(v.message), v.messagePackHex, v.name);
       assert.deepEqual(decode(Buffer.from(v.messagePackHex, "hex")), v.message, v.name);
     }
@@ -163,7 +164,13 @@ test("fork card: documents validate and encode to the vector bytes", () => {
     assert.equal(hexOf(v.message), v.messagePackHex, v.name);
     assert.equal(v.message.card !== null, v.name === "stale_fork", "only a stale refusal shows the new fork");
   }
+  for (const v of fork.unavailable) {
+    assert.ok(check(forkSchema, "unavailable", v.message), v.name);
+    assert.equal(hexOf(v.message), v.messagePackHex, v.name);
+    assert.equal(v.httpStatus, 503, v.name);
+  }
   const doorCodes = (forkSchema.$defs.refusal.properties.code as { enum: string[] }).enum;
+  assert.ok(!doorCodes.includes("unavailable"), "unavailable is kept apart from the refusal set");
   assert.deepEqual(fork.doorRefusals.map((r: { name: string }) => r.name).sort(), [...doorCodes].sort());
   for (const v of fork.doorRefusals) {
     assert.ok(check(forkSchema, "refusal", v.message), v.name);
@@ -177,11 +184,17 @@ test("fork card: every negative is refused by the schema or a stated rule", () =
   }
   for (const [section, def] of [["request", "answerRequest"], ["deskAnswer", "deskAnswer"]] as const) {
     for (const v of fork[section].invalid) {
-      assert.equal(check(forkSchema, def, v.message), false, `${v.name}: ${v.why}`);
+      assert.ok(!check(forkSchema, def, v.message) || noteRuleErrors(def, v.message).length > 0, `${v.name}: ${v.why}`);
       assert.equal(hexOf(v.message), v.messagePackHex, v.name);
     }
   }
 });
+
+// Rules a JSON Schema cannot say: a note is at most 4000 UTF-8 bytes (maxLength counts code points and is only the looser bound).
+const noteRuleErrors = (def: string, message: any): string[] => {
+  const note = def === "answerRequest" ? message?.answer?.note : def === "deskAnswer" ? message?.note : null;
+  return note != null && Buffer.byteLength(note, "utf8") > 4000 ? ["note is over 4000 UTF-8 bytes"] : [];
+};
 
 const TAILS: Record<string, string> = {
   unauthenticated: "a verified session is required",
@@ -225,7 +238,8 @@ function judge(start: Card, steps: { kind: string; body: Record<string, any> | n
     if (s.answerer === null) response = door("unauthenticated");
     else if (hasKey(b, ["answerer", "authority"])) response = door("body_forbidden_field");
     else if (Object.keys(b).some((k) => !REQUEST_KEYS.includes(k)) || (b.answer && Object.keys(b.answer).some((k) => k !== "choice" && k !== "note"))) response = door("body_unknown_field");
-    else if (!check(forkSchema, "answerRequest", b) || (!b.retracted && b.answer === null)) response = door("body_invalid");
+    else if (!check(forkSchema, "answerRequest", b) || noteRuleErrors("answerRequest", b).length > 0 || (!b.retracted && b.answer === null)) response = door("body_invalid");
+    else if (s.door_down) response = { schemaVersion: "gamecult.fork.unavailable.v0", code: "unavailable", error: "unavailable: the answer path is down, try again", retryAfterSeconds: s.retry_after_seconds };
     else if (b.fork_id !== card.fork_id) response = door("fork_unknown");
     else if (b.options_hash !== optionsHash(card)) response = refuse("stale_fork");
     else if (!card.deciders.includes(s.answerer)) response = refuse("not_a_decider");
@@ -254,12 +268,12 @@ test("fork card: every scenario replays to the vector's responses and record, by
     assert.deepEqual(record, sc.record, sc.name);
     assert.ok(check(forkSchema, "record", record), sc.name);
     assert.equal(hexOf(record), sc.recordHex, sc.name);
-    for (const s of sc.steps) if (s.response) assert.ok(check(forkSchema, "answerResult", s.response) || check(forkSchema, "refusal", s.response), sc.name);
+    for (const s of sc.steps) if (s.response) assert.ok(check(forkSchema, "answerResult", s.response) || check(forkSchema, "refusal", s.response) || check(forkSchema, "unavailable", s.response), sc.name);
   }
 });
 
 test("fork card: a body refused at the door or naming an unknown fork is never stored", () => {
-  const door = new Set(["unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown"]);
+  const door = new Set(["unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown", "unavailable"]);
   let doorRefusals = 0;
   for (const sc of fork.scenarios) {
     for (const s of sc.steps) {
@@ -278,7 +292,7 @@ test("fork card: the scenarios cover every outcome and every refusal code", () =
     for (const s of sc.steps) if (s.response) seen.add(s.response.code ?? s.response.answer.code ?? s.response.answer.outcome);
     for (const a of sc.record.answers) seen.add(a.outcome);
   }
-  for (const want of ["Counted", "Revision", "Retraction", "Refused", "unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown", "stale_fork", "not_a_decider",
+  for (const want of ["Counted", "Revision", "Retraction", "Refused", "unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown", "unavailable", "stale_fork", "not_a_decider",
                       "fork_closed", "choice_invalid", "bad_retraction", "already_retracted"]) {
     assert.ok(seen.has(want), want);
   }
@@ -297,4 +311,80 @@ test("fork card: operator authority needs a cited Counted answer record", () => 
     assert.equal(hexOf(c.message), c.messagePackHex, c.name);
     assert.equal(admitRuling(c.message, c.answers), c.admit, c.name);
   }
+});
+
+// ---- transport: list, read, auth (fork-card.md "Transport") ----
+const entryRuleErrors = (e: { card: Card; record: { fork_id: string; options_hash: string; counted_answer_id: string | null; answers: Record<string, any>[] } }): string[] => {
+  const errors = cardRuleErrors(e.card);
+  if (e.record.fork_id !== e.card.fork_id) errors.push("record of another fork");
+  if (e.record.options_hash !== e.card.options_hash) errors.push("record under another hash");
+  const counted = e.record.answers.find((a) => (a.outcome === "Counted" || a.outcome === "Revision") && a.options_hash === e.card.options_hash
+    && !e.record.answers.some((r) => r.outcome === "Retraction" && r.retracts === a.answer_id));
+  if ((counted?.answer_id ?? null) !== e.record.counted_answer_id) errors.push("counted_answer_id is not derived");
+  return errors;
+};
+
+// The reference list judge: newest first by card order, status filter, cursor c<N> = cards below order N, a page of limit, counts over the whole set.
+const judgeList = (entries: { card: Card }[], ordinal: number, rq: { mind: string; status: string | null; cursor: string | null; limit: number }) => {
+  const rows = [...entries].sort((a, b) => (b.card as any).order - (a.card as any).order);
+  let want = rows.filter((e) => rq.status === null || (e.card.status === "open") === (rq.status === "open"));
+  if (rq.cursor !== null) want = want.filter((e) => (e.card as any).order < Number(rq.cursor!.slice(1)));
+  const page = want.slice(0, rq.limit);
+  const more = want.length > page.length && page.length > 0;
+  return { schemaVersion: "gamecult.fork.list.v0", mind: rq.mind, stamp: `s${ordinal}`, open_count: rows.filter((e) => e.card.status === "open").length,
+    recorded_count: rows.filter((e) => e.card.status === "closed").length, forks: page, next_cursor: more ? `c${(page[page.length - 1].card as any).order}` : null };
+};
+
+// Bearer, audience, scope, in that order: a votes.* token fails at the audience and a desk token without the route's scope fails at the scope.
+const authJudge = (route: string, token: { audience: string; scopes: string[] } | null): string => {
+  if (token === null || token.audience !== "bifrost-desk") return "unauthenticated";
+  return token.scopes.includes(route === "answer" ? "desk.answer" : "desk.read") ? "ok" : "insufficient_scope";
+};
+
+test("fork transport: requests and entries validate and encode to the vector bytes, and every negative is refused", () => {
+  const t = fork.transport;
+  for (const [section, def] of [["listRequest", "listRequest"], ["readRequest", "readRequest"], ["entry", "entry"]] as const) {
+    for (const v of t[section].valid) {
+      assert.ok(check(forkSchema, def, v.message), v.name);
+      if (def === "entry") assert.deepEqual(entryRuleErrors(v.message), [], v.name);
+      assert.equal(hexOf(v.message), v.messagePackHex, v.name);
+    }
+    for (const v of t[section].invalid) {
+      assert.ok(!check(forkSchema, def, v.message) || (def === "entry" && entryRuleErrors(v.message).length > 0), `${v.name}: ${v.why}`);
+      assert.equal(hexOf(v.message), v.messagePackHex, v.name);
+    }
+  }
+  for (const v of t.listInvalid) {
+    assert.equal(check(forkSchema, "list", v.message), false, `${v.name}: ${v.why}`);
+    assert.equal(hexOf(v.message), v.messagePackHex, v.name);
+  }
+});
+
+test("fork transport: every list request replays to the vector's response, newest first, paged by the cursor", () => {
+  for (const sc of fork.transport.listScenarios) {
+    for (const e of sc.entries) assert.deepEqual(entryRuleErrors(e), [], sc.name);
+    let previous: { next_cursor: string | null } | null = null;
+    for (const step of sc.steps) {
+      const response = judgeList(sc.entries, sc.ordinal, step.request);
+      assert.deepEqual(response, step.response, sc.name);
+      assert.ok(check(forkSchema, "list", response), sc.name);
+      assert.equal(hexOf(response), step.responseHex, sc.name);
+      const orders = response.forks.map((f: any) => f.card.order);
+      assert.deepEqual(orders, [...orders].sort((a: number, b: number) => b - a), sc.name);
+      if (previous !== null) assert.equal(step.request.cursor, previous.next_cursor, `${sc.name}: the second request follows the first page's cursor`);
+      previous = response;
+    }
+  }
+});
+
+test("fork transport: auth is bearer, then audience, then scope, and a votes token touches nothing", () => {
+  const codes = (forkSchema.$defs.refusal.properties.code as { enum: string[] }).enum;
+  const seen = new Set<string>();
+  for (const c of fork.transport.authCases) {
+    const got = authJudge(c.route, c.token);
+    assert.equal(got, c.expect, c.name);
+    if (got !== "ok") assert.ok(codes.includes(got), c.name);
+    seen.add(`${c.route}:${got}`);
+  }
+  for (const want of ["list:insufficient_scope", "answer:insufficient_scope", "read:unauthenticated", "answer:ok"]) assert.ok(seen.has(want), want);
 });

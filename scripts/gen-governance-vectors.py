@@ -217,9 +217,11 @@ def retraction(target, **kw): return body(retracts=target, **kw)
 NOTE = "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
 def srv(aid, who, at, auth="Operator"): return {"answer_id": aid, "answerer": who, "authority": auth, "received_at": at}
 TAIL = {"unauthenticated": "a verified session is required", "body_forbidden_field": "answerer and authority are set by the receiver", "body_unknown_field": "the body is a closed shape",
-        "body_invalid": "the body does not satisfy gamecult.fork.answer_request.v0", "fork_unknown": "no such fork"}
+        "body_invalid": "the body does not satisfy gamecult.fork.answer_request.v0", "fork_unknown": "no such fork",
+        "insufficient_scope": "the token lacks the scope this route needs", "request_invalid": "the request does not satisfy its document"}
 DOOR = set(TAIL)
 def refusal_doc(code): return {"schemaVersion": "gamecult.fork.refusal.v0", "code": code, "error": f"{code}: {TAIL[code]}"}
+def unavailable_doc(retry=30): return {"schemaVersion": "gamecult.fork.unavailable.v0", "code": "unavailable", "error": "unavailable: the answer path is down, try again", "retryAfterSeconds": retry}
 def future(a, r):
     import datetime as dt
     p = lambda x: dt.datetime.strptime(x, "%Y-%m-%dT%H:%M:%SZ")
@@ -270,6 +272,8 @@ scen = [
  sc("an_unknown_key_is_refused_the_body_is_closed", CARD, [door(dict(x1, mood="happy"), sx1, "body_unknown_field")], None),
  sc("an_answer_with_neither_choice_nor_note_is_invalid", CARD, [door(body(answer={"choice": None, "note": None}), sx1, "body_invalid")], None),
  sc("a_non_retraction_without_an_answer_is_invalid", CARD, [door(body(answer=None), sx1, "body_invalid")], None),
+ sc("the_second_door_down_is_unavailable_and_stores_nothing", CARD, [step("answer", x1, dict(sx1, door_down=True, retry_after_seconds=30), unavailable_doc(30)), ok(x1, sx2, "Counted", None)], "n2"),
+ sc("a_bad_body_is_refused_before_the_door_is_asked", CARD, [door(dict(x1, answerer="x"), dict(sx1, door_down=True, retry_after_seconds=30), "body_forbidden_field")], None),
  sc("no_session_is_unauthenticated", CARD, [door(x1, srv("n1", None, T(2), None), "unauthenticated")], None),
  sc("an_unknown_fork_is_refused_at_the_door", CARD, [door(body("no", NOTE, fork="gamecult-chat:question:nope"), sx1, "fork_unknown")], None),
  sc("V2_stale_hash_is_refused_not_counted_and_stored_as_Refused", CARD, [rf(stale_body(), sx1, "stale_fork", c=CARD)], None),
@@ -302,7 +306,7 @@ scen = [
  sc("after_every_answer_is_retracted_a_fresh_answer_is_Counted_again", CARD, [X1, ok(RET("n1"), sr("n8"), "Retraction", "n1"), ok(x2, sx2, "Counted", None)], "n2"),
 ]
 REASON_CODES = ["stale_fork", "not_a_decider", "fork_closed", "choice_invalid", "bad_retraction", "already_retracted"]
-HTTP = {"unauthenticated": 401, "body_forbidden_field": 400, "body_unknown_field": 400, "body_invalid": 400, "fork_unknown": 404,
+HTTP = {"unauthenticated": 401, "body_forbidden_field": 400, "body_unknown_field": 400, "body_invalid": 400, "fork_unknown": 404, "insufficient_scope": 403, "request_invalid": 400,
         "stale_fork": 409, "not_a_decider": 403, "fork_closed": 409, "choice_invalid": 400, "bad_retraction": 400, "already_retracted": 409}
 STORED_REFUSALS = []
 for reason in REASON_CODES:
@@ -323,6 +327,51 @@ cites = [
  {"name": "steward_needs_no_citation", "answers": [], "message": cite("Steward", None), "admit": True},
 ]
 for cz in cites: cz["messagePackHex"] = hx(cz["message"])
+# ---------- transport: list, read, auth ----------
+def fcard(n, status="open", **kw):
+    c = card(fork_id=f"gamecult-chat:question:q{n}", title=f"Fork {n}", order=n, status=status, **kw)
+    return c
+def fbody(c, choice, aid_note):
+    return body(choice, aid_note, h=c["options_hash"], fork=c["fork_id"])
+def fentry(c, answers=(), counted=None):
+    return {"schemaVersion": "gamecult.fork.entry.v0", "card": c, "record": record(counted, list(answers), c["options_hash"], c["fork_id"])}
+q5 = fcard(5); q4 = fcard(4); q2 = fcard(2)
+q3 = fcard(3, "closed", ruling="cultlib-gaps:resolution:question.q3.n1", ruled_from=["n1"]); q1 = fcard(1, "closed", ruling="cultlib-gaps:resolution:question.q1.n1")
+a5 = da("Counted", None, None, fbody(q5, "no", NOTE), srv("n1", OP, T(2)))
+a3 = da("Counted", None, None, fbody(q3, "yes", NOTE), srv("n1", OP, T(2)))
+r3 = da("Refused", None, "fork_closed", fbody(q3, "no", NOTE), srv("n2", HM, T(4), "Steward"))
+ENTRIES = [fentry(q5, [a5], "n1"), fentry(q4), fentry(q3, [a3, r3], "n1"), fentry(q2), fentry(q1)]
+def lreq(mind="gamecult-chat", status=None, cursor=None, limit=10): return {"schemaVersion": "gamecult.fork.list_request.v0", "mind": mind, "status": status, "cursor": cursor, "limit": limit}
+def judge_list(entries, ordinal, rq):
+    rows = sorted(entries, key=lambda e: -e["card"]["order"])
+    want = [e for e in rows if rq["status"] is None or (e["card"]["status"] == "open") == (rq["status"] == "open")]
+    if rq["cursor"] is not None: want = [e for e in want if e["card"]["order"] < int(rq["cursor"][1:])]
+    page = want[:rq["limit"]]
+    more = len(want) > len(page) and len(page) > 0
+    return {"schemaVersion": "gamecult.fork.list.v0", "mind": rq["mind"], "stamp": f"s{ordinal}",
+            "open_count": sum(e["card"]["status"] == "open" for e in rows), "recorded_count": sum(e["card"]["status"] == "closed" for e in rows),
+            "forks": page, "next_cursor": f"c{page[-1]['card']['order']}" if more else None}
+def lstep(entries, ordinal, rq): r = judge_list(entries, ordinal, rq); return {"request": rq, "response": r, "responseHex": hx(r)}
+LISTS = [
+ {"name": "newest_first_paged_open_only", "ordinal": 412, "entries": ENTRIES, "steps": [lstep(ENTRIES, 412, lreq(status="open", limit=2)), lstep(ENTRIES, 412, lreq(status="open", cursor="c4", limit=2))]},
+ {"name": "all_forks_one_page", "ordinal": 412, "entries": ENTRIES, "steps": [lstep(ENTRIES, 412, lreq(limit=50))]},
+ {"name": "recorded_only_paged", "ordinal": 412, "entries": ENTRIES, "steps": [lstep(ENTRIES, 412, lreq(status="recorded", limit=1)), lstep(ENTRIES, 412, lreq(status="recorded", cursor="c3", limit=1))]},
+ {"name": "limit_zero_is_the_count_and_stamp_only", "ordinal": 412, "entries": ENTRIES, "steps": [lstep(ENTRIES, 412, lreq(limit=0))]},
+ {"name": "a_mind_with_no_forks", "ordinal": 7, "entries": [], "steps": [lstep([], 7, lreq(mind="nibu", limit=10))]},
+]
+TOK = lambda aud, *sc: {"audience": aud, "scopes": list(sc)}
+AUTH = [
+ ("list_with_desk_read", "list", TOK("bifrost-desk", "desk.read"), "ok"), ("read_with_desk_read", "read", TOK("bifrost-desk", "desk.read"), "ok"),
+ ("answer_with_desk_answer", "answer", TOK("bifrost-desk", "desk.answer"), "ok"), ("answer_with_both_scopes", "answer", TOK("bifrost-desk", "desk.read", "desk.answer"), "ok"),
+ ("no_bearer_list", "list", None, "unauthenticated"), ("no_bearer_answer", "answer", None, "unauthenticated"),
+ ("the_MAS_token_is_refused", "list", TOK("matrix-authentication-service", "openid", "profile"), "unauthenticated"),
+ ("a_votes_token_cannot_list", "list", TOK("bifrost-votes", "votes.read"), "unauthenticated"),
+ ("a_votes_token_cannot_read", "read", TOK("bifrost-votes", "votes.read"), "unauthenticated"),
+ ("a_votes_token_cannot_answer", "answer", TOK("bifrost-votes", "votes.cast"), "unauthenticated"),
+ ("desk_audience_with_a_votes_scope_only", "answer", TOK("bifrost-desk", "votes.cast"), "insufficient_scope"),
+ ("desk_read_cannot_answer", "answer", TOK("bifrost-desk", "desk.read"), "insufficient_scope"),
+ ("desk_answer_cannot_list", "list", TOK("bifrost-desk", "desk.answer"), "insufficient_scope"),
+]
 def bad(name, why, m, **kw): return dict({"name": name, "why": why, "message": m}, **kw)
 fork = {
   "provenance": "Rule source: /opt/commons/handoff/fork-desk-answer-binding-20261110.md (Heimdall), amended by the Persona briefs of 2026-11-10 (Eureka's fit check). Bytes spec-authored with msgpack-python (scripts/gen-governance-vectors.py); every runtime re-encodes `message` and must match messagePackHex. options_hash follows fork-card.md 'Options hash'; the vectors named heimdall_* are that file's, with its digests.",
@@ -347,11 +396,16 @@ fork = {
                ("options_hash_of_another_card", "rule: options_hash equals the hash of the shown members (not expressible in the schema)", dict(card(), options_hash=STALE_H)),
            ]]},
   "request": {"valid": [{"name": n, "message": m, "messagePackHex": hx(m)} for n, m in
-                       [("choice_and_note", x1), ("choice_alone", pick), ("note_alone_clear_pick", words), ("retraction", retraction("n1"))]],
+                       [("choice_and_note", x1), ("choice_alone", pick), ("note_alone_clear_pick", words), ("retraction", retraction("n1")),
+                        ("note_4000_ascii_bytes", body(None, "x" * 4000)), ("note_astral_4000_bytes", body(None, "\U0001F600" * 1000)),
+                        ("note_combining_4000_bytes", body(None, "e\u0301" * 1333 + "x"))]],
              "invalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
                ("answer_with_neither", "an answer object holds a choice, a note, or both", body(answer={"choice": None, "note": None})),
                ("blank_note", "a blank note is no answer", body(None, "  \u00a0 ")),
-               ("note_over_4000", "notes are at most 4000 characters", body(None, "x" * 4001)),
+               ("note_over_4000", "notes are at most 4000 UTF-8 bytes", body(None, "x" * 4001)),
+               ("note_multibyte_4001_bytes", "a note is counted in UTF-8 bytes: 1999 e-acute is 3998 bytes, plus three ASCII is 4001 (rule: not expressible in the schema, 2002 characters)", body(None, "\u00e9" * 1999 + "abc")),
+               ("note_astral_4004_bytes", "1001 astral characters are 4004 bytes though only 1001 code points (rule: not expressible in the schema)", body(None, "\U0001F600" * 1001)),
+               ("note_combining_4002_bytes", "e plus a combining acute is 3 bytes: 1334 of them are 4002 (rule: not expressible in the schema)", body(None, "e\u0301" * 1334)),
                ("options_hash_uppercase", "hash is lowercase hex", body("no", None, h=H.upper())),
                ("answerer_key", "answerer is server-set; the door answers body_forbidden_field", dict(x1, answerer=OP)),
                ("authority_key", "authority is server-set; the door answers body_forbidden_field", dict(x1, authority="Operator")),
@@ -379,7 +433,35 @@ fork = {
                  ]]},
   "results": [{"name": r["name"], "httpStatus": r["httpStatus"], "message": r["message"], "messagePackHex": hx(r["message"])} for r in STORED_REFUSALS],
   "doorRefusals": [{"name": c, "httpStatus": HTTP[c], "message": refusal_doc(c), "messagePackHex": hx(refusal_doc(c))} for c in TAIL],
+  "unavailable": [{"name": "second_door_down", "httpStatus": 503, "message": unavailable_doc(30), "messagePackHex": hx(unavailable_doc(30))},
+                  {"name": "second_door_down_no_hint", "httpStatus": 503, "message": unavailable_doc(None), "messagePackHex": hx(unavailable_doc(None))}],
   "rulingCites": cites,
+  "transport": {
+    "listRequest": {"valid": [{"name": "list_open_page", "message": lreq(status="open", limit=2), "messagePackHex": hx(lreq(status="open", limit=2))},
+                              {"name": "list_next_page", "message": lreq(status="open", cursor="c4", limit=2), "messagePackHex": hx(lreq(status="open", cursor="c4", limit=2))},
+                              {"name": "list_count_only", "message": lreq(limit=0), "messagePackHex": hx(lreq(limit=0))}],
+                    "invalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
+                      ("limit_51", "a page is at most 50 forks", lreq(limit=51)), ("limit_negative", "limit is 0 to 50", lreq(limit=-1)),
+                      ("status_all", "status is open, recorded or nil", lreq(status="all")), ("cursor_malformed", "a cursor is c<N>", lreq(cursor="next")),
+                      ("cursor_zero", "a cursor names a positive order", lreq(cursor="c0")), ("mind_empty", "a list names a Mind", lreq(mind="")),
+                      ("unknown_key", "closed document", dict(lreq(), sort="oldest"))]]},
+    "readRequest": {"valid": [{"name": "read_one", "message": {"schemaVersion": "gamecult.fork.read_request.v0", "fork_id": FID}, "messagePackHex": hx({"schemaVersion": "gamecult.fork.read_request.v0", "fork_id": FID})}],
+                    "invalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
+                      ("fork_id_empty", "a read names a fork", {"schemaVersion": "gamecult.fork.read_request.v0", "fork_id": ""})]]},
+    "entry": {"valid": [{"name": n, "message": e, "messagePackHex": hx(e)} for n, e in [("open_no_answers", ENTRIES[1]), ("open_counted", ENTRIES[0]), ("closed_with_ruling_and_a_refusal", ENTRIES[2])]],
+              "invalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
+                ("entry_without_record", "an entry holds the card and its record", {k: v for k, v in ENTRIES[0].items() if k != "record"}),
+                ("record_of_another_fork", "rule: the record names the card's fork (not expressible in the schema)", dict(ENTRIES[0], record=dict(ENTRIES[0]["record"], fork_id="gamecult-chat:question:q9"))),
+                ("record_under_another_hash", "rule: the record is under the card's options_hash (not expressible in the schema)", dict(ENTRIES[0], record=dict(ENTRIES[0]["record"], options_hash=STALE_H))),
+                ("counted_answer_not_derived", "rule: counted_answer_id is the first live Counted or Revision answer under the card's hash (not expressible in the schema)", dict(ENTRIES[0], record=dict(ENTRIES[0]["record"], counted_answer_id=None))),
+                ("card_hash_wrong", "rule: the server computes options_hash and a client recomputes it; a card with another hash is no card", dict(ENTRIES[1], card=dict(ENTRIES[1]["card"], options_hash=STALE_H), record=dict(ENTRIES[1]["record"], options_hash=STALE_H)))]]},
+    "listInvalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
+      ("next_cursor_malformed", "a cursor is c<N>", dict(LISTS[0]["steps"][0]["response"], next_cursor="more")),
+      ("stamp_malformed", "a stamp is s<N>", dict(LISTS[0]["steps"][0]["response"], stamp="412")),
+      ("count_negative", "counts are not negative", dict(LISTS[0]["steps"][0]["response"], open_count=-1))]],
+    "listScenarios": [{"name": l["name"], "ordinal": l["ordinal"], "entries": l["entries"], "steps": l["steps"]} for l in LISTS],
+    "authCases": [{"name": n, "route": r, "token": t, "expect": x} for n, r, t, x in AUTH],
+  },
   "scenarios": [{"name": n, "card": c, "optionsHash": c["options_hash"], "steps": steps, "record": r, "recordHex": hx(r)} for n, c, steps, r in scen],
 }
 (OUT / "fork-card-vectors.json").write_text(json.dumps(fork, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

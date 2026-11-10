@@ -56,6 +56,7 @@ namespace GameCult.Networking.Tests
                     foreach (var item in a) Write(ref w, item);
                     break;
                 case JsonValue v when v.TryGetValue<bool>(out var b): w.Write(b); break;
+                case JsonValue v when v.TryGetValue<int>(out var i): w.Write(i); break;
                 case JsonValue v when v.TryGetValue<long>(out var l): w.Write(l); break;
                 case JsonValue v: w.Write(v.GetValue<string>()); break;
             }
@@ -238,11 +239,13 @@ namespace GameCult.Networking.Tests
                 foreach (var v in Fork[section]!["valid"]!.AsArray())
                 {
                     Assert.That(Errors(ForkSchema, def, v!["message"]), Is.Empty, S(v["name"]));
+                    Assert.That(NoteRuleErrors(def, v["message"]), Is.Empty, S(v["name"]));
                     Assert.That(HexOf(v["message"]), Is.EqualTo(S(v["messagePackHex"])), S(v["name"]));
                     var decoded = JsonNode.Parse(MessagePackSerializer.ConvertToJson(Convert.FromHexString(S(v["messagePackHex"]))))!;
                     Assert.That(JsonNode.DeepEquals(decoded, v["message"]), Is.True, S(v["name"]));
                 }
             var schema = JsonNode.Parse(File.ReadAllText(Path.Combine(RepoRoot(), "contracts", "cultnet", ForkSchema)))!;
+            IEnumerable<string> codesOfRefusal() => schema["$defs"]!["refusal"]!["properties"]!["code"]!["enum"]!.AsArray().Select(S);
             IEnumerable<string> Codes(string def) => schema["$defs"]![def]!["properties"]!["code"]!["enum"]!.AsArray().Select(S).OrderBy(x => x, StringComparer.Ordinal);
             Assert.That(Fork["results"]!.AsArray().Select(r => S(r!["name"])).OrderBy(x => x, StringComparer.Ordinal), Is.EqualTo(Codes("deskAnswerRefused")));
             foreach (var v in Fork["results"]!.AsArray())
@@ -252,6 +255,13 @@ namespace GameCult.Networking.Tests
                 Assert.That(v["message"]!["card"] is not null, Is.EqualTo(S(v["name"]) == "stale_fork"), "only a stale refusal shows the new fork");
             }
             Assert.That(Fork["doorRefusals"]!.AsArray().Select(r => S(r!["name"])).OrderBy(x => x, StringComparer.Ordinal), Is.EqualTo(Codes("refusal")));
+            foreach (var v in Fork["unavailable"]!.AsArray())
+            {
+                Assert.That(Errors(ForkSchema, "unavailable", v!["message"]), Is.Empty, S(v["name"]));
+                Assert.That(HexOf(v["message"]), Is.EqualTo(S(v["messagePackHex"])), S(v["name"]));
+                Assert.That(v["httpStatus"]!.GetValue<int>(), Is.EqualTo(503));
+                Assert.That(codesOfRefusal(), Does.Not.Contain("unavailable"), "unavailable is kept apart from the refusal set");
+            }
             foreach (var v in Fork["doorRefusals"]!.AsArray())
             {
                 Assert.That(Errors(ForkSchema, "refusal", v!["message"]), Is.Empty, S(v["name"]));
@@ -267,9 +277,16 @@ namespace GameCult.Networking.Tests
             foreach (var (section, def) in new[] { ("request", "answerRequest"), ("deskAnswer", "deskAnswer") })
                 foreach (var v in Fork[section]!["invalid"]!.AsArray())
                 {
-                    Assert.That(Errors(ForkSchema, def, v!["message"]), Is.Not.Empty, $"{S(v["name"])}: {S(v["why"])}");
+                    Assert.That(Errors(ForkSchema, def, v!["message"]).Count > 0 || NoteRuleErrors(def, v["message"]).Any(), Is.True, $"{S(v["name"])}: {S(v["why"])}");
                     Assert.That(HexOf(v["message"]), Is.EqualTo(S(v["messagePackHex"])), S(v["name"]));
                 }
+        }
+
+        // Rules a JSON Schema cannot say: a note is at most 4000 UTF-8 bytes (maxLength counts code points and is only the looser bound).
+        private static IEnumerable<string> NoteRuleErrors(string def, JsonNode? message)
+        {
+            var note = def switch { "answerRequest" => message?["answer"]?["note"], "deskAnswer" => message?["note"], _ => null };
+            if (note is not null && Encoding.UTF8.GetByteCount(S(note)) > 4000) yield return "note is over 4000 UTF-8 bytes";
         }
 
         private static readonly Dictionary<string, string> Tails = new()
@@ -336,7 +353,8 @@ namespace GameCult.Networking.Tests
                 if (s["answerer"] is null) response = Door("unauthenticated");
                 else if (HasKey(b, "answerer", "authority")) response = Door("body_forbidden_field");
                 else if (b.Any(kv => !RequestKeys.Contains(kv.Key)) || (b["answer"] is JsonObject ao && ao.Any(kv => kv.Key is not ("choice" or "note")))) response = Door("body_unknown_field");
-                else if (Errors(ForkSchema, "answerRequest", b).Count > 0 || (!retracted && b["answer"] is null)) response = Door("body_invalid");
+                else if (Errors(ForkSchema, "answerRequest", b).Count > 0 || NoteRuleErrors("answerRequest", b).Any() || (!retracted && b["answer"] is null)) response = Door("body_invalid");
+                else if (s["door_down"] is not null) response = new JsonObject { ["schemaVersion"] = "gamecult.fork.unavailable.v0", ["code"] = "unavailable", ["error"] = "unavailable: the answer path is down, try again", ["retryAfterSeconds"] = Clone(s["retry_after_seconds"]) };
                 else if (S(b["fork_id"]) != S(card["fork_id"])) response = Door("fork_unknown");
                 else if (S(b["options_hash"]) != HashOf(card)) response = Refuse("stale_fork");
                 else if (!deciders.Contains(S(s["answerer"]))) response = Refuse("not_a_decider");
@@ -369,7 +387,7 @@ namespace GameCult.Networking.Tests
         {
             var seen = new HashSet<string>();
             var doorRefusals = 0;
-            var door = new HashSet<string> { "unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown" };
+            var door = new HashSet<string> { "unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown", "unavailable" };
             foreach (var sc in Fork["scenarios"]!.AsArray())
             {
                 var name = S(sc!["name"]);
@@ -387,7 +405,7 @@ namespace GameCult.Networking.Tests
                 {
                     var r = step!["response"];
                     if (r is null) continue;
-                    Assert.That(Errors(ForkSchema, "answerResult", r).Count == 0 || Errors(ForkSchema, "refusal", r).Count == 0, Is.True, name);
+                    Assert.That(Errors(ForkSchema, "answerResult", r).Count == 0 || Errors(ForkSchema, "refusal", r).Count == 0 || Errors(ForkSchema, "unavailable", r).Count == 0, Is.True, name);
                     if (r["code"] is not null)
                     {
                         seen.Add(S(r["code"]));
@@ -402,7 +420,7 @@ namespace GameCult.Networking.Tests
                 foreach (var a in sc["record"]!["answers"]!.AsArray()) seen.Add(S(a!["outcome"]));
             }
             Assert.That(doorRefusals, Is.GreaterThanOrEqualTo(8));
-            foreach (var want in new[] { "Counted", "Revision", "Retraction", "Refused", "unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown", "stale_fork",
+            foreach (var want in new[] { "Counted", "Revision", "Retraction", "Refused", "unauthenticated", "body_forbidden_field", "body_unknown_field", "body_invalid", "fork_unknown", "unavailable", "stale_fork",
                                          "not_a_decider", "fork_closed", "choice_invalid", "bad_retraction", "already_retracted" })
                 Assert.That(seen, Does.Contain(want));
         }
@@ -424,6 +442,108 @@ namespace GameCult.Networking.Tests
                 Assert.That(HexOf(c["message"]), Is.EqualTo(S(c["messagePackHex"])), S(c["name"]));
                 Assert.That(AdmitRuling(c["message"]!, c["answers"]!.AsArray()), Is.EqualTo(c["admit"]!.GetValue<bool>()), S(c["name"]));
             }
+        }
+
+        // ---- transport: list, read, auth (fork-card.md "Transport") ----
+        private static IEnumerable<string> EntryRuleErrors(JsonNode e)
+        {
+            var card = e["card"]!; var record = e["record"]!;
+            foreach (var error in CardRuleErrors(card)) yield return error;
+            if (S(record["fork_id"]) != S(card["fork_id"])) yield return "record of another fork";
+            if (S(record["options_hash"]) != S(card["options_hash"])) yield return "record under another hash";
+            var answers = record["answers"]!.AsArray();
+            var counted = answers.Where(a => (S(a!["outcome"]) is "Counted" or "Revision") && S(a["options_hash"]) == S(card["options_hash"])
+                && !answers.Any(r => S(r!["outcome"]) == "Retraction" && S(r["retracts"]) == S(a["answer_id"]))).Select(a => S(a!["answer_id"])).FirstOrDefault();
+            if ((record["counted_answer_id"] is null ? null : S(record["counted_answer_id"])) != counted) yield return "counted_answer_id is not derived";
+        }
+
+        // The reference list judge: newest first by card order, status filter, cursor c<N> = cards below order N, a page of limit, counts over the whole set.
+        private static JsonNode JudgeList(JsonArray entries, long ordinal, JsonNode request)
+        {
+            long Order(JsonNode? e) => e!["card"]!["order"]!.GetValue<long>();
+            var rows = entries.OrderByDescending(Order).ToList();
+            var want = rows.Where(e => request["status"] is null || (S(e!["card"]!["status"]) == "open") == (S(request["status"]) == "open")).ToList();
+            if (request["cursor"] is not null) { var below = long.Parse(S(request["cursor"])[1..]); want = want.Where(e => Order(e) < below).ToList(); }
+            var page = want.Take(request["limit"]!.GetValue<int>()).ToList();
+            var more = want.Count > page.Count && page.Count > 0;
+            return new JsonObject
+            {
+                ["schemaVersion"] = "gamecult.fork.list.v0", ["mind"] = Clone(request["mind"]), ["stamp"] = $"s{ordinal}",
+                ["open_count"] = rows.Count(e => S(e!["card"]!["status"]) == "open"), ["recorded_count"] = rows.Count(e => S(e!["card"]!["status"]) == "closed"),
+                ["forks"] = new JsonArray(page.Select(Clone).ToArray()), ["next_cursor"] = more ? JsonValue.Create($"c{Order(page[^1])}") : null
+            };
+        }
+
+        // Bearer, audience, scope, in that order: a votes.* token fails at the audience and a desk token without the route's scope fails at the scope.
+        private static string AuthJudge(string route, JsonNode? token)
+        {
+            if (token is null || S(token["audience"]) != "bifrost-desk") return "unauthenticated";
+            var need = route == "answer" ? "desk.answer" : "desk.read";
+            return token["scopes"]!.AsArray().Any(x => S(x) == need) ? "ok" : "insufficient_scope";
+        }
+
+        [Test]
+        public void ForkTransport_RequestsAndEntriesValidateEncodeToTheVectorBytes_AndEveryNegativeIsRefused()
+        {
+            var t = Fork["transport"]!;
+            foreach (var (section, def) in new[] { ("listRequest", "listRequest"), ("readRequest", "readRequest"), ("entry", "entry") })
+            {
+                foreach (var v in t[section]!["valid"]!.AsArray())
+                {
+                    Assert.That(Errors(ForkSchema, def, v!["message"]), Is.Empty, S(v["name"]));
+                    if (def == "entry") Assert.That(EntryRuleErrors(v["message"]!), Is.Empty, S(v["name"]));
+                    Assert.That(HexOf(v["message"]), Is.EqualTo(S(v["messagePackHex"])), S(v["name"]));
+                }
+                foreach (var v in t[section]!["invalid"]!.AsArray())
+                {
+                    Assert.That(Errors(ForkSchema, def, v!["message"]).Count > 0 || (def == "entry" && EntryRuleErrors(v["message"]!).Any()), Is.True, $"{S(v["name"])}: {S(v["why"])}");
+                    Assert.That(HexOf(v["message"]), Is.EqualTo(S(v["messagePackHex"])), S(v["name"]));
+                }
+            }
+            foreach (var v in t["listInvalid"]!.AsArray())
+            {
+                Assert.That(Errors(ForkSchema, "list", v!["message"]), Is.Not.Empty, $"{S(v["name"])}: {S(v["why"])}");
+                Assert.That(HexOf(v["message"]), Is.EqualTo(S(v["messagePackHex"])), S(v["name"]));
+            }
+        }
+
+        [Test]
+        public void ForkTransport_EveryListRequest_ReplaysToTheVectorsResponse_NewestFirst_PagedByTheCursor()
+        {
+            foreach (var sc in Fork["transport"]!["listScenarios"]!.AsArray())
+            {
+                var name = S(sc!["name"]);
+                var entries = sc["entries"]!.AsArray();
+                foreach (var e in entries) Assert.That(EntryRuleErrors(e!), Is.Empty, name);
+                JsonNode? previous = null;
+                foreach (var step in sc["steps"]!.AsArray())
+                {
+                    var response = JudgeList(entries, sc["ordinal"]!.GetValue<long>(), step!["request"]!);
+                    Assert.That(JsonNode.DeepEquals(response, step["response"]), Is.True, $"{name}: {response.ToJsonString()}");
+                    Assert.That(Errors(ForkSchema, "list", response), Is.Empty, name);
+                    Assert.That(HexOf(response), Is.EqualTo(S(step["responseHex"])), name);
+                    var orders = response["forks"]!.AsArray().Select(f => f!["card"]!["order"]!.GetValue<long>()).ToList();
+                    Assert.That(orders, Is.Ordered.Descending, name);
+                    if (previous is not null) Assert.That(S(step["request"]!["cursor"]), Is.EqualTo(S(previous["next_cursor"])), $"{name}: the second request follows the first page's cursor");
+                    previous = response;
+                }
+            }
+        }
+
+        [Test]
+        public void ForkTransport_Auth_BearerThenAudienceThenScope_AVotesTokenTouchesNothing()
+        {
+            var schema = JsonNode.Parse(File.ReadAllText(Path.Combine(RepoRoot(), "contracts", "cultnet", ForkSchema)))!;
+            var codes = schema["$defs"]!["refusal"]!["properties"]!["code"]!["enum"]!.AsArray().Select(S).ToList();
+            var seen = new HashSet<string>();
+            foreach (var c in Fork["transport"]!["authCases"]!.AsArray())
+            {
+                var got = AuthJudge(S(c!["route"]), c["token"]);
+                Assert.That(got, Is.EqualTo(S(c["expect"])), S(c["name"]));
+                if (got != "ok") Assert.That(codes, Does.Contain(got), S(c["name"]));
+                seen.Add(S(c["route"]) + ":" + got);
+            }
+            Assert.That(seen, Does.Contain("list:insufficient_scope").And.Contain("answer:insufficient_scope").And.Contain("read:unauthenticated").And.Contain("answer:ok"));
         }
     }
 }

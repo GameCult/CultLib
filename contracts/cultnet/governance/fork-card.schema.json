@@ -185,7 +185,8 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 4000,
-      "pattern": "^(?![\\t-\\r \\u0085   -     　]+$)[\\s\\S]+$"
+      "pattern": "^(?![\\t-\\r \\u0085   -     　]+$)[\\s\\S]+$",
+      "description": "At most 4000 UTF-8 bytes, which a schema cannot say: maxLength here counts code points and is only the looser bound (a code point is at least one byte). The byte limit is a rule both suites enforce (fork-card.md, answer_request)."
     },
     "answerObject": {
       "oneOf": [
@@ -671,7 +672,9 @@
             "body_forbidden_field",
             "body_unknown_field",
             "body_invalid",
-            "fork_unknown"
+            "fork_unknown",
+            "insufficient_scope",
+            "request_invalid"
           ]
         },
         "error": {
@@ -743,6 +746,181 @@
           "oneOf": [
             {
               "$ref": "#/$defs/answerId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "cursor": {
+      "type": "string",
+      "pattern": "^c[1-9][0-9]*$",
+      "description": "Opaque to a client. c<N> means: the cards whose order is below N."
+    },
+    "stamp": {
+      "type": "string",
+      "pattern": "^s[0-9]+$",
+      "description": "s<N>, N the receiver's last-seen Huginn admission ordinal for the Mind's desk documents. Two lists with the same stamp are the same state."
+    },
+    "listRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "mind",
+        "status",
+        "cursor",
+        "limit"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.fork.list_request.v0"
+        },
+        "mind": {
+          "$ref": "#/$defs/id"
+        },
+        "status": {
+          "oneOf": [
+            {
+              "enum": [
+                "open",
+                "recorded"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cursor": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50
+        }
+      }
+    },
+    "readRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "fork_id"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.fork.read_request.v0"
+        },
+        "fork_id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "card",
+        "record"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.fork.entry.v0"
+        },
+        "card": {
+          "$ref": "#/$defs/card"
+        },
+        "record": {
+          "$ref": "#/$defs/record"
+        }
+      }
+    },
+    "list": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "mind",
+        "stamp",
+        "open_count",
+        "recorded_count",
+        "forks",
+        "next_cursor"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.fork.list.v0"
+        },
+        "mind": {
+          "$ref": "#/$defs/id"
+        },
+        "stamp": {
+          "$ref": "#/$defs/stamp"
+        },
+        "open_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "recorded_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "forks": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/$defs/entry"
+          }
+        },
+        "next_cursor": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "unavailable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "code",
+        "error",
+        "retryAfterSeconds"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "gamecult.fork.unavailable.v0"
+        },
+        "code": {
+          "const": "unavailable"
+        },
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retryAfterSeconds": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1
             },
             {
               "type": "null"
