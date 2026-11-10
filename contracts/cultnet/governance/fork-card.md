@@ -29,7 +29,7 @@ All documents are CultNet map-mode: every key written, nil where absent, closed 
 `{schemaVersion, fork_id, title, context, options[{id, text}], recommendation, depends[], leans, flag, raised_in, deciders[], status, ruling, ruled_from[], order, options_hash}`.
 
 - `fork_id`: the mind's `question` key, `<campaign>:question:<label>`.
-- **Hashed (the shown members):** `title`, `context`, `options` (each `{id, text}`, in shown order), `recommendation` (an option id, **never nil**: the stored `question` requires `recommended`), `depends` (strings, each the `campaign:kind:label` rendering of a stored reference, in shown order, empty when none).
+- **Hashed (the shown members):** `title`, `context`, `options` (each `{id, text}`, in shown order), `recommendation` (an option id, **never nil**: the stored `question` requires `recommended`), `depends` (strings, each one of the stored question's `depends` lines verbatim, at most 8, in shown order, empty when none; the stored kind holds prose lines, so a line may read like a reference such as `campaign:kind:label` but is hashed as the text it is).
 - **Not hashed:** `fork_id` (bound beside the hash), `leans` (an option id or nil), `flag`, `raised_in`, `deciders`, `status` (`open` or `closed`), `ruling` (the ruling id when a ruling closed the fork; nil when the card is open, and nil on a closed card whose question was withdrawn or otherwise resolved with no ruling), `ruled_from` (answer ids a ruling has been admitted from; non-empty only on a closed card), `order`, and `options_hash` itself.
 - **`deciders` is read-only data.** The list is set outside the Mind, through Bifrost's admin path; the Mind reads it and the card projection copies it. A question's own `audience` may only narrow it. A Mind never writes it, so a Mind cannot add itself and answer its own fork.
 - Rules a schema cannot say, each with a negative vector: option ids are unique; `recommendation` and `leans` name an option; deciders are unique; an open card names no `ruling` and its `ruled_from` is empty (a ruling that answers a fork closes it); `ruled_from` is non-empty only when `ruling` is set; a closed card may name no ruling (the question was withdrawn, superseded or deferred: step 6 reads `status`, not the ruling); `options_hash` equals the hash of the shown members.
@@ -137,7 +137,7 @@ The old desk (`index.html`) read `questions/<id>` and wrote `answers/<id>` in a 
 | `qid`, `id` | key `campaign:question:label` | `fork_id` |
 | `title` | `title` | `title` |
 | `body` | `question` (the long text) | `context` |
-| `depends`: a free string | `depends`: a list of references | `depends`: list of `campaign:kind:label` strings |
+| `depends`: a free string | `depends`: up to 8 prose lines (`huginn schema question`) | `depends`: the lines verbatim |
 | `options[{key, label, text}]` | `options[{label, text}]` | `options[{id, text}]` |
 | option `key` | option `label` (a slug, the id) | option `id` |
 | option `label` (a human title) | none | **dropped**: not stored, not hashed; shown text is `text` |
