@@ -143,6 +143,7 @@ use serde::de::DeserializeOwned;
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -1745,7 +1746,8 @@ impl CacheBackingStore for SingleFileMessagePackBackingStore {
     fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
         self.with_exclusive_lock(|| {
             let mut entries = self.read_all_unlocked()?;
-            entries.retain(|candidate| entry_id(candidate) != entry_id(entry));
+            // A store holds one record per key whatever its type, so a write replaces the record under its key.
+            entries.retain(|candidate| candidate.key != entry.key);
             entries.push(entry.clone());
             entries.sort_by_key(entry_id);
             self.write_all_unlocked(&entries)
@@ -1768,7 +1770,12 @@ impl CacheBackingStore for SingleFileMessagePackBackingStore {
                 return Ok(());
             }
 
-            let mut entries = entries.to_vec();
+            // One record per key: of entries sharing a key the last one given is the record.
+            let mut by_key = BTreeMap::<&str, &CultCacheEnvelope>::new();
+            for entry in entries {
+                by_key.insert(entry.key.as_str(), entry);
+            }
+            let mut entries: Vec<CultCacheEnvelope> = by_key.into_values().cloned().collect();
             entries.sort_by_key(entry_id);
             self.write_all_unlocked(&entries)
         })
@@ -3748,6 +3755,13 @@ fn decode_store_snapshot(bytes: &[u8]) -> Result<(Vec<CultCacheEnvelope>, Vec<Pe
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    // A record's identity is its key string alone, compared ordinal: a store holding a key twice is unreadable.
+    let mut keys = HashSet::<&str>::new();
+    for envelope in &envelopes {
+        if !keys.insert(envelope.key.as_str()) {
+            bail!("CultCache record {:?} appears more than once", envelope.key);
+        }
+    }
     Ok((envelopes, snapshot.1))
 }
 
@@ -5907,6 +5921,26 @@ mod tests {
         Ok(())
     }
 
+
+    // The writer keeps one record per key: a write of another type to a key replaces the record, so the file it leaves reads.
+    #[test]
+    fn a_write_of_another_type_under_an_existing_key_replaces_the_record() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.msgpack");
+        let mut store = SingleFileMessagePackBackingStore::new(&path);
+        let mut other = snapshot_envelope("k", b"two");
+        other.r#type = "snapshot.other".to_string();
+        other.schema_id = Some("snapshot.other".to_string());
+        store.push(&snapshot_envelope("k", b"one"))?;
+        store.push(&other)?;
+        let read = store.pull_all()?;
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].r#type, "snapshot.other");
+        store.push_all(&[snapshot_envelope("k", b"one"), other.clone()], PushAllOptions::default())?;
+        let read = store.pull_all()?;
+        assert_eq!((read.len(), read[0].payload.as_slice()), (1, b"two".as_slice()));
+        Ok(())
+    }
 
     // A file is replaced by a rewrite exactly when this runtime's own reader opens it: one verdict per file, asked by open,
     // push_all and push alike. The bytes and every runtime's verdict are tests/vectors/document-variants-c2a/readability.
