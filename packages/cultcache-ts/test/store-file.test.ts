@@ -571,15 +571,17 @@ const snapshotOf = async (store: SingleFileMessagePackBackingStore): Promise<str
     .map((entry) => `${entry.type}/${entry.key}:${[...documentPayloadBytes(entry.payload)].at(-1)}`)
     .sort();
 
-test("push replaces the record at the same type and key and keeps every other", async () => {
+test("push replaces the record under the same key whatever its type and keeps every other", async () => {
   const directory = await scratch();
   try {
     const store = new SingleFileMessagePackBackingStore(join(directory, "store.cc"));
-    await store.pushAll([entryOf("a", "t", 1), entryOf("b", "t", 2), entryOf("a", "u", 3)]);
+    await store.pushAll([entryOf("a", "t", 1), entryOf("b", "t", 2), entryOf("c", "u", 3)]);
     await store.push(entryOf("a", "t", 9));
-    assert.deepEqual(await snapshotOf(store), ["t/a:9", "t/b:2", "u/a:3"]);
-    await store.push(entryOf("c", "t", 4));
-    assert.deepEqual(await snapshotOf(store), ["t/a:9", "t/b:2", "t/c:4", "u/a:3"]);
+    assert.deepEqual(await snapshotOf(store), ["t/a:9", "t/b:2", "u/c:3"]);
+    await store.push(entryOf("d", "t", 4));
+    assert.deepEqual(await snapshotOf(store), ["t/a:9", "t/b:2", "t/d:4", "u/c:3"]);
+    await store.push(entryOf("a", "u", 5));
+    assert.deepEqual(await snapshotOf(store), ["t/b:2", "t/d:4", "u/a:5", "u/c:3"]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -589,11 +591,12 @@ test("delete removes only the record at that type and key", async () => {
   const directory = await scratch();
   try {
     const store = new SingleFileMessagePackBackingStore(join(directory, "store.cc"));
-    await store.pushAll([entryOf("a", "t", 1), entryOf("b", "t", 2), entryOf("a", "u", 3)]);
+    await store.pushAll([entryOf("a", "t", 1), entryOf("b", "t", 2), entryOf("c", "u", 3)]);
     await store.delete(entryOf("a", "t"));
-    assert.deepEqual(await snapshotOf(store), ["t/b:2", "u/a:3"]);
+    assert.deepEqual(await snapshotOf(store), ["t/b:2", "u/c:3"]);
     await store.delete(entryOf("zzz", "t"));
-    assert.deepEqual(await snapshotOf(store), ["t/b:2", "u/a:3"]);
+    await store.delete(entryOf("c", "t"));
+    assert.deepEqual(await snapshotOf(store), ["t/b:2", "u/c:3"]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
