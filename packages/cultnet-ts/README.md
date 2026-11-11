@@ -66,6 +66,7 @@ Current message families:
 - `cultnet.snapshot_response.v0`
 - `cultnet.snapshot_response_raw.v0`
 - `cultnet.snapshot_request.v1`, `cultnet.database_subscribe.v1`, `cultnet.snapshot_response_raw.v1` (typed-selection carriers; no selection engine yet)
+- `cultnet.database_change_raw.v0` (optional `commitId` and `commitCount >= 2` mark the changes of one commit; carried and validated here, no TS code groups or applies by them)
 - `cultnet.sample.change_name.v0`
 - `cultnet.sample.chat.v0`
 
