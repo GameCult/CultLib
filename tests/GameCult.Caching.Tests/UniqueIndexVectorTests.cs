@@ -562,5 +562,21 @@ namespace GameCult.Caching.Tests
 
             Assert.That(walked, Is.EqualTo(13));
         }
+
+        // Not a vector row (the cross-runtime rows are fixed by the spec): keys order by code unit, so "B" precedes "a".
+        [Test]
+        public void RefusalOrdersKeysByCodeUnitNotByCase()
+        {
+            using var cache = CultCacheMessagePack.Create(
+                Path.Combine(Path.GetTempPath(), $"cultlib-uidxc-{Guid.NewGuid():N}.cc"),
+                new CultCacheOpenOptions { Registry = CultDocumentRegistry.ForTypes(new[] { ItemIndex }) });
+            var refused = Assert.Throws<InvalidOperationException>(() => cache.Commit(batch =>
+            {
+                foreach (var (key, sku) in new[] { ("a", "S"), ("z", "S"), ("B", "T"), ("C", "T") })
+                    batch.Upsert(ItemIndex, EmittedDocumentTypes.New(ItemIndex, ("Sku", sku), ("Category", "")), new CultRecordKey(key));
+            }))!;
+            Assert.That(refused.Message, Is.EqualTo(
+                "Records B and C (tests.unique_item) both hold unique index 'Sku'; an index value names one record."));
+        }
     }
 }
