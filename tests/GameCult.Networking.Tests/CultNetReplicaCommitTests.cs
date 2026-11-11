@@ -394,8 +394,10 @@ namespace GameCult.Networking.Tests
                 Stage(run.Source, ("a", a), ("b", b));
             }
 
-            await Until(() => run.ReplicaItem("a")!.Sku == "s0");
+            Stage(run.Source, ("a", "last-a"), ("b", "last-b"));
+            await Until(() => run.Client.Fault != null || run.ReplicaItem("a")!.Sku == "last-a");
             Assert.That(run.Client.Fault, Is.Null, "completed commits leave the buffer");
+            Assert.That(run.ReplicaItem("b")!.Sku, Is.EqualTo("last-b"));
         }
 
         [Test]
