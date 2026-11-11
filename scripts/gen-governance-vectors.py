@@ -430,6 +430,11 @@ def read_too_large_doc(c): return {"schemaVersion": "gamecult.fork.refusal.v0", 
 READ_TOO_LARGE = [{"name": "a_read_whose_entry_is_past_the_cap_is_fork_too_large_without_an_order", "ordinal": 9, "entries": ORDER0,
                    "request": {"schemaVersion": "gamecult.fork.read_request.v0", "mind": "gamecult-chat", "fork_id": ORDER0[0]["card"]["fork_id"]},
                    "refusal": read_too_large_doc(ORDER0[0]["card"]), "refusalHex": hx(read_too_large_doc(ORDER0[0]["card"])), "httpStatus": HTTP["fork_too_large"], "fork_id": ORDER0[0]["card"]["fork_id"]}]
+# An answer on a stale card whose current-card re-read is past the cap: the same refusal document as the read form, nothing stored.
+_big = ORDER0[0]["card"]
+ANSWER_TOO_LARGE = [{"name": "a_stale_answer_whose_card_reread_is_past_the_cap_is_fork_too_large_and_nothing_is_stored",
+                     "entries": ORDER0, "request": body("yes", NOTE, h=STALE_H, fork=_big["fork_id"], rid="0000a001-0000-4000-8000-00000000a001"),
+                     "refusal": read_too_large_doc(_big), "refusalHex": hx(read_too_large_doc(_big)), "httpStatus": HTTP["fork_too_large"], "stored": False, "fork_id": _big["fork_id"]}]
 def short_step(entries, ordinal, rq, keep):
     full = judge_list(entries, ordinal, rq); page = full["forks"][:keep]
     assert 0 < keep < len(full["forks"])
@@ -642,6 +647,7 @@ fork = {
     "listScenarios": [{"name": l["name"], "ordinal": l["ordinal"], "entries": l["entries"], "steps": l["steps"]} for l in LISTS],
     "listShortPages": SHORT_PAGES,
     "readTooLarge": READ_TOO_LARGE,
+    "answerTooLarge": ANSWER_TOO_LARGE,
     "doorFaults": [dict(c, response=r, responseHex=hx(r)) for c, r in
                    [({"name": f"{x}_door_answers_request_id_conflict_the_client_sees_unavailable", "route": x, "doorCode": "request_id_conflict", "httpStatus": 503}, unavailable_doc(30)) for x in ("read", "list")]
                    + [({"name": "answer_door_answers_request_id_conflict_the_client_sees_it", "route": "answer", "doorCode": "request_id_conflict", "httpStatus": HTTP["request_id_conflict"]}, refusal_doc("request_id_conflict"))]],

@@ -762,6 +762,28 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void ForkTransport_AStaleAnswerWhoseCardRereadIsPastTheCap_IsTheReadFormForkTooLarge422_NothingStored()
+        {
+            var cases = Fork["transport"]!["answerTooLarge"]!.AsArray();
+            Assert.That(cases.Count, Is.EqualTo(1));
+            var read = Fork["transport"]!["readTooLarge"]![0]!;
+            foreach (var c in cases)
+            {
+                var held = c!["entries"]!.AsArray().Single(e => S(e!["card"]!["fork_id"]) == S(c["request"]!["fork_id"]))!;
+                Assert.That(Errors(ForkSchema, "answerRequest", c["request"]), Is.Empty, S(c["name"]));
+                Assert.That(S(c["request"]!["options_hash"]), Is.Not.EqualTo(S(held["card"]!["options_hash"])), "the card moved: the answer is stale");
+                Assert.That(Errors(ForkSchema, "refusal", c["refusal"]), Is.Empty, S(c["name"]));
+                Assert.That(S(c["refusal"]!["code"]), Is.EqualTo("fork_too_large"));
+                Assert.That(S(c["refusal"]!["error"]), Is.EqualTo($"fork_too_large: fork {S(held["card"]!["fork_id"])} alone is past the response budget"));
+                Assert.That(HexOf(c["refusal"]), Is.EqualTo(S(c["refusalHex"])), S(c["name"]));
+                Assert.That(S(c["refusalHex"]), Is.EqualTo(S(read["refusalHex"])), "the same document as the read form");
+                Assert.That(c["httpStatus"]!.GetValue<int>(), Is.EqualTo(422));
+                Assert.That(c["httpStatus"]!.GetValue<int>(), Is.EqualTo(Fork["doorRefusals"]!.AsArray().Single(r => S(r!["name"]) == "fork_too_large")!["httpStatus"]!.GetValue<int>()));
+                Assert.That(c["stored"]!.GetValue<bool>(), Is.False);
+            }
+        }
+
+        [Test]
         public void ForkTransport_ADoorRequestIdConflict_IsAFaultOnReadAndList_AndARefusalOnlyOnTheAnswer()
         {
             var cases = Fork["transport"]!["doorFaults"]!.AsArray();

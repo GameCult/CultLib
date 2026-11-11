@@ -560,6 +560,23 @@ test("fork transport: a read whose entry is past the cap is fork_too_large (422)
   }
 });
 
+test("fork transport: a stale answer whose card re-read is past the cap is the read-form fork_too_large (422), nothing stored", () => {
+  assert.equal(fork.transport.answerTooLarge.length, 1);
+  const read = fork.transport.readTooLarge[0];
+  for (const c of fork.transport.answerTooLarge) {
+    const held = c.entries.find((e: any) => e.card.fork_id === c.request.fork_id);
+    assert.ok(held !== undefined && check(forkSchema, "answerRequest", c.request), c.name);
+    assert.notEqual(c.request.options_hash, held.card.options_hash, "the card moved: the answer is stale");
+    assert.ok(check(forkSchema, "refusal", c.refusal), c.name);
+    assert.equal(c.refusal.code, "fork_too_large");
+    assert.equal(c.refusal.error, `fork_too_large: fork ${held.card.fork_id} alone is past the response budget`);
+    assert.equal(hexOf(c.refusal), c.refusalHex, c.name);
+    assert.equal(c.refusalHex, read.refusalHex, "the same document as the read form");
+    assert.equal(c.httpStatus, 422); assert.equal(c.httpStatus, fork.doorRefusals.find((r: any) => r.name === "fork_too_large").httpStatus);
+    assert.equal(c.stored, false);
+  }
+});
+
 test("fork transport: a door request_id_conflict is a fault on read and list (503 unavailable) and a refusal only on the answer", () => {
   assert.deepEqual(fork.transport.doorFaults.map((c: any) => c.route), ["read", "list", "answer"]);
   for (const c of fork.transport.doorFaults) {
