@@ -1,9 +1,11 @@
 ﻿from __future__ import annotations
 
 import functools
+import math
 import threading
+from decimal import Decimal
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Generic, TypeVar
+from typing import Any, Callable, Generic, Iterable, TypeVar
 
 from .backing_store import BackingStore, CultCacheEnvelope
 from .documents import DocumentDefinition, extract_value
@@ -50,6 +52,47 @@ def _mutating(method: F) -> F:
 
 class CultCacheError(RuntimeError):
     pass
+
+
+# Blank is no value: empty or only C# White_Space characters (the 25 chars string.IsNullOrWhiteSpace is true for).
+# An explicit set, not str.isspace(): Python also counts U+001C-001F, which C# does not, and omits nothing C# counts.
+_BLANK_INDEX_CHARS = frozenset(
+    chr(code)
+    for code in (
+        *range(0x09, 0x0E),
+        0x20,
+        0x85,
+        0xA0,
+        0x1680,
+        *range(0x2000, 0x200B),
+        0x2028,
+        0x2029,
+        0x202F,
+        0x205F,
+        0x3000,
+    )
+)
+
+
+def _index_text(value: Any) -> str | None:
+    """The canonical text of an index value, as C# IndexValue and RenderCanonicalNumber, or None when it names no
+    value: a string is as is (never trimmed), a boolean is `True`/`False`, an integer is its digits, a non-integral
+    finite float is its exact decimal expansion, NaN and infinities and blank strings are no value."""
+    if value is None:
+        return None
+    if isinstance(value, bool):  # before int: bool is an int subclass
+        return "True" if value else "False"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        if value.is_integer():
+            return str(int(value))  # -0.0 is 0
+        text = format(Decimal(value), "f")  # Decimal(float) is exact
+        return text.rstrip("0").rstrip(".") if "." in text else text
+    text = value if isinstance(value, str) else str(value)
+    return None if all(char in _BLANK_INDEX_CHARS for char in text) else text
 
 
 @dataclass
@@ -438,6 +481,12 @@ class CultCache:
             (envelope, value, self._lookup_keys_for(value, name_extractor, index_extractors))
             for envelope, value in records
         ]
+        self._refuse_index_sharing(
+            type,
+            {envelope.key: keys for envelope, _, keys in admitted},
+            self._state.indexes,
+            [envelope.key for envelope, _ in records],
+        )
         store = self._store_for_type(type)
         legacy_key = self._state.legacy_global_keys.get(type)
         if store is not None:
@@ -552,9 +601,9 @@ class CultCache:
         name = None if name_extractor is None else extract_value(value, name_extractor)
         indexes: dict[str, str] = {}
         for index, extractor in index_extractors.items():
-            index_value = extract_value(value, extractor)
+            index_value = _index_text(extract_value(value, extractor))
             if index_value is not None:
-                indexes[index] = str(index_value)
+                indexes[index] = index_value
         return _LookupKeys(None if name is None else str(name), indexes)
 
     def _derive_lookups(
@@ -571,17 +620,48 @@ class CultCache:
             name_extractor = name_extractors.get(type)
             type_index_extractors = index_extractors.get(type, {})
             for key, value in values.items():
-                keys = self._lookup_keys_for(value, name_extractor, type_index_extractors)
-                lookup_keys.setdefault(type, {})[key] = keys
+                lookup_keys.setdefault(type, {})[key] = self._lookup_keys_for(value, name_extractor, type_index_extractors)
+            # Judged whole over every alias: a held value can have been mutated in place since it was admitted.
+            self._refuse_index_sharing(type, lookup_keys.get(type, {}), {}, ())
+            for key, keys in lookup_keys.get(type, {}).items():
                 if keys.name is not None:
                     names[(type, keys.name)] = key
                 for index, index_value in keys.indexes.items():
                     indexes[(type, index, index_value)] = key
         return names, indexes, lookup_keys
 
+    def _refuse_index_sharing(
+        self,
+        type: str,
+        landing: dict[str, _LookupKeys],
+        held: dict[tuple[str, str, str], str],
+        replaced: Iterable[str],
+    ) -> None:
+        """The one index rule (variants:ruling:unique-indexes): within one type and one unique alias, no two records
+        hold one non-blank value, judged on the result. The holders of a value are the landing keys projecting it plus
+        the held key unless this admission replaces it; two distinct holders refuse, naming the two smallest keys
+        (ordinal) and the alias, never the value. Aliases are judged in ordinal order, values in ordinal order."""
+        released = set(replaced)
+        holders: dict[tuple[str, str], set[str]] = {}
+        for key, keys in landing.items():
+            for index, index_value in keys.indexes.items():
+                holders.setdefault((index, index_value), set()).add(key)
+        for (index, index_value), keys in sorted(holders.items()):
+            held_key = held.get((type, index, index_value))
+            if held_key is not None and held_key not in released:
+                keys = keys | {held_key}
+            if len(keys) > 1:
+                first, second = sorted(keys)[:2]
+                document = self._state.documents.get(type)
+                schema_name = (document.schema_name if document is not None else None) or type
+                raise CultCacheError(
+                    f"Records {first} and {second} ({schema_name}) both hold unique index '{index}'; "
+                    "an index value names one record."
+                )
+
     def _remove_lookups(self, type: str, key: str) -> None:
-        """Removes the lookups the held record produced at admission, handing a name or index value to
-        another held record that produced it too. Reads stored lookup keys only; runs no extractor."""
+        """Removes the lookups the held record produced at admission, handing a name to another held
+        record that produced it too (an index value has one holder). Reads stored lookup keys only; runs no extractor."""
         held = self._state.lookup_keys.get(type, {})
         keys = held.get(key)
         if keys is None:
@@ -596,9 +676,6 @@ class CultCache:
             if self._state.indexes.get(lookup_key) != key:
                 continue
             del self._state.indexes[lookup_key]
-            for candidate_key, candidate in held.items():
-                if candidate_key != key and candidate.indexes.get(index) == index_value:
-                    self._state.indexes[lookup_key] = candidate_key
 
     def _assert_registered(self, document: DocumentDefinition[Any]) -> None:
         if self._state.documents.get(document.type) is not document:

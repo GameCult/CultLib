@@ -692,7 +692,7 @@ simulation_fact_document: DocumentDefinition[CultMeshSimulationFact] = define_da
     ],
     cls=CultMeshSimulationFact,
     name="fact_id",
-    indexes={"shard": "shard_id", "frame": "frame", "subject": "subject_id", "claim_kind": "claim_kind"},
+    roles={"shard": "shard_id", "frame": "frame", "subject": "subject_id", "claim_kind": "claim_kind"},
     schema_name=SIMULATION_FACT_DOCUMENT_TYPE,
     schema_version=SIMULATION_FACT_SCHEMA_VERSION,
 )

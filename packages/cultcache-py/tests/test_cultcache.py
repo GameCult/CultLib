@@ -103,20 +103,20 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(cache.get_key_by_name(document, "Elixir"), "item:potion")
         self.assertEqual(cache.get_by_index(document, "category", "Rare").name, "Elixir")
 
-    def test_incremental_lookup_delete_restores_duplicate_owner(self) -> None:
+    def test_incremental_lookup_delete_restores_duplicate_name_owner(self) -> None:
         document = item_doc()
         cache = CultCache()
         cache.register_document_type(document)
 
         cache.put(document, "item:first", Item(name="Potion", category="Consumable", value=50))
-        cache.put(document, "item:second", Item(name="Potion", category="Consumable", value=60))
+        cache.put(document, "item:second", Item(name="Potion", category="Rare", value=60))
         self.assertEqual(cache.get_key_by_name(document, "Potion"), "item:second")
-        self.assertEqual(cache.get_key_by_index(document, "category", "Consumable"), "item:second")
 
         cache.delete(document, "item:second")
 
         self.assertEqual(cache.get_key_by_name(document, "Potion"), "item:first")
         self.assertEqual(cache.get_key_by_index(document, "category", "Consumable"), "item:first")
+        self.assertIsNone(cache.get_key_by_index(document, "category", "Rare"))
 
     def test_database_entry_formatter_uses_slot_indexed_messagepack_array(self) -> None:
         try:

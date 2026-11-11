@@ -167,8 +167,8 @@ fn first_call() -> anyhow::Result<()> {
 
 ## Python first call
 
-A document is a definition with an encoder and decoder; `name=` and `indexes=` register the name lookup
-and indexes. The source is
+A document is a definition with an encoder and decoder; `name=` registers the name lookup, `indexes=` unique lookups and
+`roles=` many-row selection aliases. The source is
 [`packages/cultcache-py/tests/test_first_call.py`](../../packages/cultcache-py/tests/test_first_call.py),
 run by `python -m unittest tests.test_first_call` in `packages/cultcache-py` with `src` on `PYTHONPATH`
 and `msgpack` installed (the store needs it). A second test fails if the block below stops matching the
@@ -194,7 +194,6 @@ item_doc = define_document_type(
     encode=lambda item: asdict(item),
     decode=lambda raw: Item(**raw),
     name="name",
-    indexes={"category": "category"},
 )
 
 

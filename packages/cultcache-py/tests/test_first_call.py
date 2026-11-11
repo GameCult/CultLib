@@ -24,7 +24,6 @@ item_doc = define_document_type(
     encode=lambda item: asdict(item),
     decode=lambda raw: Item(**raw),
     name="name",
-    indexes={"category": "category"},
 )
 
 
