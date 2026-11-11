@@ -103,7 +103,8 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       }
 
       requireOneTypePerKey(this.filePath, entries, []);
-      await this.#writeAll(entries, []);
+      // A key is held once: of same-type entries sharing a key in one batch, the last is kept.
+      await this.#writeAll([...new Map(entries.map((entry) => [entry.key, entry])).values()], []);
     });
   }
 

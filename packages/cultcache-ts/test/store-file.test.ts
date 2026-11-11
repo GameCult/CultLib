@@ -623,6 +623,17 @@ test("a pushAll batch that carries one key under two types is refused and writes
   }
 });
 
+test("a pushAll batch that carries one key twice under one type keeps the last and the file reads back with one record", async () => {
+  const directory = await scratch();
+  try {
+    const path = join(directory, "store.cc");
+    await new SingleFileMessagePackBackingStore(path).pushAll([entryOf("k", "t", 1), entryOf("a", "t", 3), entryOf("k", "t", 2)]);
+    assert.deepEqual(await snapshotOf(new SingleFileMessagePackBackingStore(path)), ["t/a:3", "t/k:2"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("a legacy envelope array that holds a key under two types is refused on open, as a v1 store is", async () => {
   const directory = await scratch();
   try {
