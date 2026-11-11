@@ -2981,6 +2981,10 @@ impl CultCache {
                 }
                 entry.r#type = canonical_type;
                 self.refuse_retype(&loaded, &foreign, &entry)?;
+                // Two records of a store resolving to one type at one key (one stamped with the other's id): one record per key.
+                if let Some(held) = loaded.get(&entry_id(&entry)) {
+                    return Err(retype_conflict(held, &entry));
+                }
                 loaded.insert(entry_id(&entry), entry);
             }
         }
@@ -3556,9 +3560,11 @@ impl CultCache {
 
     /// The one key-identity judge (C# `RefuseUndeclared` and the cache's held-owned check): a cache holds one record per key
     /// whatever its type. `written` may not land at a key a store carries foreign, nor at a key another registered type holds
-    /// in `image` unless it owns that record's schema id (equal ids). Refused with a typed [`SchemaConflictError`] naming the
-    /// key and both types, never a value; nothing is changed. The single-file store's commit guard judges the same question
-    /// for the file on disk (another writer's file) and stays.
+    /// in `image`. C# `WrittenOwns` lets a write replace a held record its own type's id owns; a registered type's id here is
+    /// its entry type and declares no compatible ids, so another type's record is never owned, whatever schema id either
+    /// envelope claims. Refused with a typed [`SchemaConflictError`] naming the key and both types, never a value; nothing is
+    /// changed. The single-file store's commit guard judges the same question for the file on disk (another writer's file)
+    /// and stays.
     fn refuse_retype(
         &self,
         image: &BTreeMap<(String, String), CultCacheEnvelope>,
@@ -3569,9 +3575,7 @@ impl CultCache {
             return Err(foreign_conflict(carried, &written.r#type));
         }
         for type_id in self.definitions.keys().filter(|type_id| **type_id != written.r#type) {
-            if let Some(held) = image.get(&(type_id.clone(), written.key.clone()))
-                && schema_identity(held) != schema_identity(written)
-            {
+            if let Some(held) = image.get(&(type_id.clone(), written.key.clone())) {
                 return Err(retype_conflict(held, written));
             }
         }
@@ -3811,9 +3815,7 @@ fn require_unique_keys(envelopes: &[CultCacheEnvelope]) -> Result<()> {
     Ok(())
 }
 
-/// What a record's stored schema id is: the id it carries, else its type (a registered type's id is its entry type). This
-/// runtime's registered types declare no compatible ids, so a written record owns a held one exactly when the ids are equal:
-/// the question C# `WrittenOwns` asks of the stored id, not a comparison of type names.
+/// What a record's stored schema id is: the id it carries, else its type (a registered type's id is its entry type).
 fn schema_identity(entry: &CultCacheEnvelope) -> &str {
     entry.schema_id.as_deref().unwrap_or(&entry.r#type)
 }
