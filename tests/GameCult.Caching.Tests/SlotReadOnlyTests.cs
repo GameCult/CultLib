@@ -106,7 +106,7 @@ namespace GameCult.Caching.Tests
         }
 
         private string SeedSurface(string vector) =>
-            Seed(SurfaceRegistry, typeof(Surface), () => new Surface { Id = "x" }, UnionParityVectorTests.Committed(vector));
+            Seed(SurfaceRegistry, typeof(Surface), () => new Surface { Id = "x" }, VectorFiles.Committed("union-parity", vector));
 
         private static CultStoredDocument Stored(CultCache cache, CultRecordKey key) => cache.GetStored(key)!;
 
@@ -138,7 +138,7 @@ namespace GameCult.Caching.Tests
         [Test]
         public void AUnitArmWithAnExtraSlotHoldsTheRecordReadOnly()
         {
-            var arm = UnionParityVectorTests.Committed("extra-slot-unit-arm.msgpack");
+            var arm = VectorFiles.Committed("union-parity", "extra-slot-unit-arm.msgpack");
             var payload = Emit((ref MessagePackWriter w) => { w.WriteArrayHeader(2); w.Write("u"); w.WriteRaw(arm); });
             var path = Seed(UnitRegistry, typeof(UnitDoc), () => new UnitDoc { Name = "u" }, payload);
             using var cache = Open(path, UnitRegistry);
@@ -214,7 +214,7 @@ namespace GameCult.Caching.Tests
         [TestCase("extra-slot-nested-record.msgpack", false, TestName = "ANestedMarkBesideACatalogReportedSlotIsNotConsentedTo")]
         public void ACompatibleIdConsentsOnlyToTheDepthZeroSlotTheCatalogReports(string vector, bool consented)
         {
-            var original = UnionParityVectorTests.Committed(vector);
+            var original = VectorFiles.Committed("union-parity", vector);
             var path = Seed(SurfaceRegistry, typeof(Surface), () => new Surface { Id = "x" }, AppendRootSlot(original, "wider writer"));
             var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
             var entry = snapshot.SchemaCatalog.Single();
@@ -265,7 +265,7 @@ namespace GameCult.Caching.Tests
         public void AMarkedRecordIsCarriedByteForByteWhenAnotherRecordIsWritten()
         {
             var path = Path.Combine(_directory, "extra-slot-store.cc");
-            File.WriteAllBytes(path, UnionParityVectorTests.Committed("extra-slot-store.cc"));
+            File.WriteAllBytes(path, VectorFiles.Committed("union-parity", "extra-slot-store.cc"));
             var before = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
             var original = before.Records.Single(record => record.Key == Marked.Value);
             using (var cache = Open(path, SurfaceRegistry))

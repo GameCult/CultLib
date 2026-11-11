@@ -58,7 +58,7 @@ namespace GameCult.Caching.Tests
             Assert.That(Convert.ToHexString(reference), Is.EqualTo(Convert.ToHexString(File.ReadAllBytes(path))), $"vector {name}");
         }
 
-        internal static byte[] Committed(string name)
+        private static byte[] Committed(string name)
         {
             var path = VectorPath(name);
             Assert.That(File.Exists(path), Is.True, $"vector {name} is committed");

@@ -513,7 +513,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void AnOverrideOfASlotTheTypeNeverHadIsIgnoredOnLoadAsAPlainRecordIgnoresAnExtraSlot()
+        public void AnOverrideOfASlotTheTypeNeverHadIsReadPastOnLoadAsAPlainRecordReadsPastAnExtraSlot()
         {
             var path = WriteStore(PlainGear("hand-base"), OverridingRecord("hand-variant", "hand-base",
                 CultVariantOverride.Set(99, new byte[] { 0x01 }),
