@@ -2,6 +2,12 @@
 
 All notable changes to this package are documented in this file.
 
+## Unreleased
+
+### Breaking
+
+- A single-file store holding two records under one key is unreadable: the reader refuses it with `CultStoreUnreadableException` naming the key (keys compare by ordinal code units, no case folding or normalisation), so a cache, `ReadStoreSnapshot` and a flush refuse the file and leave it as it is. Before, the later record silently replaced the earlier. A directory store reads its manifest through the same reader and refuses a duplicate key the same way. Repair the duplicate with the runtime that wrote it before reading the store here.
+
 ## [3.0.0] - 2026-11-11
 
 ### Breaking

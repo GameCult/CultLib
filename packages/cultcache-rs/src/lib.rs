@@ -1187,6 +1187,10 @@ impl SingleFileMessagePackBackingStore {
             if entries[index] != *expected {
                 return Ok(false);
             }
+            // An in-place retype is a retype: the replacement must own the schema id the held record is stored under.
+            if schema_identity(&entries[index]) != schema_identity(&replacement) {
+                return Err(retype_conflict(&entries[index], &replacement));
+            }
             entries[index] = replacement;
             entries.sort_by_key(entry_id);
             self.write_all_unlocked(&entries)?;
@@ -1479,7 +1483,6 @@ impl SingleFileMessagePackBackingStore {
     }
 
     fn write_all_unlocked(&self, entries: &[CultCacheEnvelope]) -> Result<()> {
-        require_one_record_per_key(entries)?;
         let failed = |kind| CultCacheStoreWriteFailed {
             path: self.path.clone(),
             kind,
@@ -1495,7 +1498,8 @@ impl SingleFileMessagePackBackingStore {
             Err(error) if io_not_found(&error) => DiskStore::absent(),
             other => other?,
         };
-        let bytes = encode_store_snapshot(entries, &disk)
+        let entries = settle_one_record_per_key(entries, &disk)?;
+        let bytes = encode_store_snapshot(&entries, &disk)
             .and_then(|snapshot| rmp_serde::to_vec(&snapshot).context("failed to encode MessagePack"))
             .map_err(|error| error.context(failed(CultCacheStoreWriteFailedKind::Rejected)))?;
         self.replace_unlocked(&bytes)
@@ -1773,11 +1777,11 @@ impl CacheBackingStore for SingleFileMessagePackBackingStore {
                 return Ok(());
             }
 
-            // Of same-type entries sharing a key the last one given is the record; a second type under a key reaches the
-            // commit guard.
+            // Of entries sharing a key and a schema id the last one given is the record, whatever their type names (a type
+            // renamed under a stable id); a second schema id under a key reaches the commit guard.
             let mut by_id = BTreeMap::<(String, String), &CultCacheEnvelope>::new();
             for entry in entries {
-                by_id.insert(entry_id(entry), entry);
+                by_id.insert((schema_identity(entry).to_string(), entry.key.clone()), entry);
             }
             let mut entries: Vec<CultCacheEnvelope> = by_id.into_values().cloned().collect();
             entries.sort_by_key(entry_id);
@@ -3738,23 +3742,47 @@ fn require_unique_keys(envelopes: &[CultCacheEnvelope]) -> Result<()> {
     Ok(())
 }
 
-/// The commit guard every single-file write passes: a store holds one record per key, so a snapshot about to be written
-/// may not hold a key twice. Two types under a key are a retype, refused with the key and both types (retyping is
-/// remove-then-add); the same type twice is a malformed snapshot. Nothing is written.
-fn require_one_record_per_key(entries: &[CultCacheEnvelope]) -> Result<()> {
-    let mut held = HashMap::<&str, &CultCacheEnvelope>::new();
+/// What a record's stored schema id is: the id it carries, else its type (a registered type's id is its entry type). This
+/// runtime's registered types declare no compatible ids, so a written record owns a held one exactly when the ids are equal:
+/// the question C# `WrittenOwns` asks of the stored id, not a comparison of type names.
+fn schema_identity(entry: &CultCacheEnvelope) -> &str {
+    entry.schema_id.as_deref().unwrap_or(&entry.r#type)
+}
+
+/// The refusal of a write that would retype a key: the written record does not own the schema id the held one is stored under.
+/// Retyping is remove-then-add (variants:ruling:cache-refuses-retype).
+fn retype_conflict(held: &CultCacheEnvelope, written: &CultCacheEnvelope) -> anyhow::Error {
+    anyhow::Error::new(SchemaConflictError {
+        schema_id: schema_identity(written).to_string(),
+        schema_names: vec![held.r#type.clone(), written.r#type.clone()],
+        record_key: written.key.clone(),
+    })
+}
+
+/// The commit guard every single-file write passes: a store holds one record per key. Two entries under a key whose schema
+/// ids differ are a retype and are refused with the key and both types, nothing written. Two under one schema id are one
+/// record: a written entry replaces the held one it owns (a type renamed under a stable id), the held one being what the file
+/// already carries.
+fn settle_one_record_per_key(entries: &[CultCacheEnvelope], disk: &DiskStore) -> Result<Vec<CultCacheEnvelope>> {
+    let arrived: BTreeMap<(String, String), &CultCacheEnvelope> = disk.envelopes.iter().map(|entry| (entry_id(entry), entry)).collect();
+    let held = |entry: &CultCacheEnvelope| arrived.get(&entry_id(entry)) == Some(&entry);
+    let mut settled = Vec::<&CultCacheEnvelope>::new();
+    let mut at_key = HashMap::<&str, usize>::new();
     for entry in entries {
-        let Some(first) = held.insert(entry.key.as_str(), entry) else { continue };
-        if first.r#type == entry.r#type {
-            bail!("CultCache snapshot holds record {:?} of type {:?} more than once", entry.key, entry.r#type);
+        match at_key.get(entry.key.as_str()) {
+            None => {
+                at_key.insert(entry.key.as_str(), settled.len());
+                settled.push(entry);
+            }
+            Some(&slot) if schema_identity(settled[slot]) != schema_identity(entry) => return Err(retype_conflict(settled[slot], entry)),
+            Some(&slot) => {
+                if !held(entry) || held(settled[slot]) {
+                    settled[slot] = entry;
+                }
+            }
         }
-        return Err(anyhow::Error::new(SchemaConflictError {
-            schema_id: entry.schema_id.clone().unwrap_or_else(|| entry.r#type.clone()),
-            schema_names: vec![first.r#type.clone(), entry.r#type.clone()],
-            record_key: entry.key.clone(),
-        }));
     }
-    Ok(())
+    Ok(settled.into_iter().cloned().collect())
 }
 
 /// Decodes a store whose header the caller has already read as a readable one: its envelopes and its catalog.
@@ -4372,6 +4400,7 @@ mod tests {
             ("push", |s, e, _| s.push(&e[2]).map(|()| true)),
             ("push_all", |s, e, _| s.push_all(&[e[0].clone(), e[2].clone()], PushAllOptions::default()).map(|()| true)),
             ("insert_entry_if_absent", |s, e, _| s.insert_entry_if_absent(e[2].clone())),
+            ("compare_and_swap_entry", |s, e, _| s.compare_and_swap_entry(&e[0], e[2].clone())),
             ("compare_exchange", |s, e, x| s.compare_exchange(std::slice::from_ref(x), &[e[2].clone()])),
             ("compare_and_swap_batch", |s, e, _| s.compare_and_swap_batch(&[], vec![e[2].clone()])),
             ("append_if_snapshot_unchanged", |s, e, _| s.append_if_snapshot_unchanged(&[e[0].clone(), e[1].clone()], vec![e[2].clone()])),
@@ -6621,6 +6650,93 @@ mod tests {
         assert_eq!(conflict.schema_id, "t.s");
         assert_eq!(conflict.record_key, "b");
         assert_eq!(std::fs::read(&path)?, before, "the file is left as it was");
+        Ok(())
+    }
+
+    // The retype refusal asks what C# WrittenOwns asks: does the written record own the schema id the held one is stored under.
+    // A type renamed under a stable id owns it, so its write replaces the record; another id does not, and is refused.
+    #[test]
+    fn a_write_owning_the_stored_schema_id_replaces_the_record_under_a_new_name() -> Result<()> {
+        let envelope = |r#type: &str, schema_id: &str, payload: &[u8]| CultCacheEnvelope {
+            key: "a".into(),
+            r#type: r#type.into(),
+            payload: payload.to_vec(),
+            stored_at: "2026-09-30T00:00:00Z".into(),
+            schema_id: Some(schema_id.into()),
+        };
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.msgpack");
+        store_file(&path, &[("t.s", "t.old")], &[("a", "t.s", b"one".to_vec())])?;
+        let before = std::fs::read(&path)?;
+        let error = SingleFileMessagePackBackingStore::new(&path).push(&envelope("t.other", "t.other", b"x")).unwrap_err();
+        assert_eq!(retype_refusal(&error).record_key, "a");
+        assert_eq!(std::fs::read(&path)?, before);
+
+        SingleFileMessagePackBackingStore::new(&path).push(&envelope("t.s", "t.s", b"two"))?;
+        let held = SingleFileMessagePackBackingStore::new(&path).pull_all()?;
+        assert_eq!(held.len(), 1);
+        assert_eq!((held[0].r#type.as_str(), held[0].payload.as_slice()), ("t.s", b"two".as_slice()));
+        Ok(())
+    }
+
+    // Where a held record and a written one share a schema id under different type names, the written one is the record
+    // whichever name sorts first: the writers hand settle_one_record_per_key their entries sorted by type name.
+    #[test]
+    fn a_renamed_type_replaces_the_held_record_whether_its_name_sorts_before_or_after() -> Result<()> {
+        for new_name in ["a.new", "z.new"] {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.msgpack");
+            store_file(&path, &[("t.s", "t.old")], &[("a", "t.s", b"one".to_vec())])?;
+            let written = CultCacheEnvelope {
+                key: "a".into(),
+                r#type: new_name.into(),
+                payload: b"two".to_vec(),
+                stored_at: "2026-09-30T00:00:00Z".into(),
+                schema_id: Some("t.s".into()),
+            };
+            SingleFileMessagePackBackingStore::new(&path).push(&written)?;
+            let held = SingleFileMessagePackBackingStore::new(&path).pull_all()?;
+            assert_eq!(held.len(), 1, "{new_name}");
+            assert_eq!(held[0].payload, b"two".to_vec(), "{new_name}");
+        }
+        Ok(())
+    }
+
+    // In one push_all, entries under a key and a schema id with different type names resolve by the order given, not by
+    // the order of the names.
+    #[test]
+    fn push_all_resolves_same_id_entries_with_different_names_by_the_order_given() -> Result<()> {
+        let envelope = |r#type: &str, payload: &[u8]| CultCacheEnvelope {
+            key: "a".into(),
+            r#type: r#type.into(),
+            payload: payload.to_vec(),
+            stored_at: "2026-09-30T00:00:00Z".into(),
+            schema_id: Some("t.s".into()),
+        };
+        for (first, second) in [("a.name", "b.name"), ("b.name", "a.name")] {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.msgpack");
+            let mut store = SingleFileMessagePackBackingStore::new(&path);
+            store.push_all(&[envelope(first, b"first"), envelope(second, b"second")], PushAllOptions::default())?;
+            let held = store.pull_all()?;
+            assert_eq!(held.len(), 1, "{first} then {second}");
+            assert_eq!(held[0].payload, b"second".to_vec(), "{first} then {second}");
+        }
+        Ok(())
+    }
+
+    // Of same-type entries sharing a key in one push_all the last one given is the record.
+    #[test]
+    fn push_all_keeps_the_last_of_two_same_type_entries_under_a_key() -> Result<()> {
+        let mut cache = CultCache::new();
+        cache.register_registry(TestEntries)?;
+        let (first, _) = cache.prepare_entry("k", &settings_one())?;
+        let (last, _) = cache.prepare_entry("k", &Settings { theme: "red".to_string(), retries: 2 })?;
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        let mut store = SingleFileMessagePackBackingStore::new(&path);
+        store.push_all(&[first, last.clone()], PushAllOptions::default())?;
+        assert_eq!(store.pull_all()?.into_iter().map(|e| e.payload).collect::<Vec<_>>(), vec![last.payload]);
         Ok(())
     }
 
