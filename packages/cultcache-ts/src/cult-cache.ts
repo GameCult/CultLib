@@ -224,7 +224,7 @@ export class CultCache {
     return this.#serial(() => {
       const registered = this.#requireDefinition(definition);
       const nameAccessor = this.#compileAccessor(definition.type, "name", accessor);
-      const derived = this.#deriveTypeLookups(definition.type, nameAccessor, registered.indexAccessors);
+      const derived = this.#deriveTypeLookups(definition.type, registered.catalogEntry.schemaName, nameAccessor, registered.indexAccessors);
       this.#installAccessors(registered, nameAccessor, registered.indexAccessors, derived);
       return definition;
     });
@@ -243,7 +243,7 @@ export class CultCache {
       const registered = this.#requireDefinition(definition);
       const indexAccessors = new Map(registered.indexAccessors);
       indexAccessors.set(indexName, this.#compileAccessor(definition.type, `index "${indexName}"`, accessor));
-      const derived = this.#deriveTypeLookups(definition.type, registered.nameAccessor, indexAccessors);
+      const derived = this.#deriveTypeLookups(definition.type, registered.catalogEntry.schemaName, registered.nameAccessor, indexAccessors);
       this.#installAccessors(registered, registered.nameAccessor, indexAccessors, derived);
       return definition;
     });
@@ -418,6 +418,7 @@ export class CultCache {
     return key ? this.get(definition, key) : undefined;
   }
 
+  // A unique index: one key per non-blank value. A roles alias is never indexed and answers undefined.
   getKeyByIndex<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
     indexName: string,
@@ -579,7 +580,7 @@ export class CultCache {
     if (existingBySchemaName && existingBySchemaName !== registered) {
       throw refuse(existingBySchemaName, registered.catalogEntry, `schema name "${registered.catalogEntry.schemaName}"`);
     }
-    const derived = this.#deriveTypeLookups(definition.type, nameAccessor, indexAccessors);
+    const derived = this.#deriveTypeLookups(definition.type, registered.catalogEntry.schemaName, nameAccessor, indexAccessors);
 
     // Every check and accessor has run; install.
     this.#definitions.set(definition.type, registered);
@@ -795,11 +796,13 @@ export class CultCache {
 
     switch (typeof value) {
       case "string":
-        return value;
-      case "number":
+        return isBlankIndexText(value) ? undefined : value;
       case "boolean":
+        return value ? "True" : "False";
       case "bigint":
-        return String(value);
+        return value.toString();
+      case "number":
+        return canonicalNumberText(value);
       default:
         throw new Error(`CultCache ${label} accessor for type "${type}" produced a non-scalar value.`);
     }
@@ -894,6 +897,8 @@ export class CultCache {
       }
     }
 
+    const lookups = this.#lookupsFor(registered.nameAccessor, registered.indexAccessors, value);
+    this.#refuseIndexSharing(state, entry.type, registered.catalogEntry.schemaName, entry.key, lookups);
     return {
       ...entry,
       payload: this.#cloneBytes(entry.payload),
@@ -902,8 +907,20 @@ export class CultCache {
       schemaId: registered.catalogEntry.schemaId,
       catalogEntry: registered.catalogEntry,
       value,
-      lookups: this.#lookupsFor(registered.nameAccessor, registered.indexAccessors, value),
+      lookups,
     };
+  }
+
+  // The one index rule (variants:ruling:unique-indexes): within one type and one unique alias, no two records hold one
+  // non-blank value. The held key at the landing record's own key is its previous self and keeps its value. The message
+  // names both keys, ordinal, and the alias, never the value.
+  #refuseIndexSharing(state: HydratedState, type: string, schemaName: string, key: string, lookups: EntryLookups): void {
+    for (const alias of [...lookups.indexes.keys()].sort(compareOrdinal)) {
+      const held = state.indexToKeyMaps.get(this.#indexId(type, alias))?.get(lookups.indexes.get(alias)!);
+      if (held !== undefined && held !== key) {
+        throw indexSharingRefusal(held, key, schemaName, alias);
+      }
+    }
   }
 
   // Infallible half of admission: replaces any held record at the same key and installs the admitted one.
@@ -966,12 +983,14 @@ export class CultCache {
   // Runs the candidate accessors over every held record of the type into local maps.
   #deriveTypeLookups(
     type: string,
+    schemaName: string,
     nameAccessor: Accessor | undefined,
     indexAccessors: ReadonlyMap<string, Accessor>,
   ): DerivedTypeLookups {
     const entryLookups: Array<[HydratedEntry, EntryLookups]> = [];
     const nameMap = nameAccessor ? new Map<string, string>() : undefined;
     const indexMaps = new Map<string, Map<string, string>>();
+    const sharing = new Map<string, string[]>();
     for (const indexName of indexAccessors.keys()) {
       indexMaps.set(indexName, new Map());
     }
@@ -983,8 +1002,21 @@ export class CultCache {
         nameMap?.set(lookups.name, entry.key);
       }
       for (const [indexName, indexValue] of lookups.indexes) {
-        indexMaps.get(indexName)?.set(indexValue, entry.key);
+        const map = indexMaps.get(indexName)!;
+        const holder = map.get(indexValue);
+        if (holder === undefined) {
+          map.set(indexValue, entry.key);
+        } else {
+          sharing.set(`${indexName}\u0000${indexValue}`, [...(sharing.get(`${indexName}\u0000${indexValue}`) ?? [holder]), entry.key]);
+        }
       }
+    }
+
+    // Judged whole: any value held by two records refuses, naming the two smallest keys of the first alias in ordinal order.
+    const shared = [...sharing].map(([id, keys]) => ({ alias: id.slice(0, id.indexOf("\u0000")), keys: keys.sort(compareOrdinal) }))
+      .sort((a, b) => compareOrdinal(a.alias, b.alias));
+    if (shared.length > 0) {
+      throw indexSharingRefusal(shared[0].keys[0], shared[0].keys[1], schemaName, shared[0].alias);
     }
 
     return { entryLookups, nameMap, indexMaps };
@@ -1056,4 +1088,43 @@ export class CultCache {
   #cloneBytes(payload: DocumentPayload): DocumentPayload {
     return documentPayloadFromBytes(new Uint8Array(documentPayloadBytes(payload)));
   }
+}
+
+function compareOrdinal(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function indexSharingRefusal(keyA: string, keyB: string, schemaName: string, alias: string): Error {
+  const [first, second] = compareOrdinal(keyA, keyB) <= 0 ? [keyA, keyB] : [keyB, keyA];
+  return new Error(`Records ${first} and ${second} (${schemaName}) both hold unique index '${alias}'; an index value names one record.`);
+}
+
+// Blank is no value: empty or only C# White_Space characters. Not JavaScript's \s, which counts U+FEFF and omits U+0085.
+const BLANK_INDEX_TEXT = /^[\t-\r \u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]*$/;
+
+function isBlankIndexText(value: string): boolean {
+  return BLANK_INDEX_TEXT.test(value);
+}
+
+// The canonical text of a number, as C# RenderCanonicalNumber: integers as their digits (-0 is 0), a non-integral finite
+// double as its exact decimal expansion, NaN and infinities as no value.
+function canonicalNumberText(value: number): string | undefined {
+  if (!Number.isFinite(value)) {
+    return undefined;
+  }
+  if (Number.isInteger(value)) {
+    return BigInt(value).toString();
+  }
+
+  // value = mantissa * 2^exponent with exponent < 0, so value = mantissa * 5^k / 10^k for k = -exponent.
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, value);
+  const bits = view.getBigUint64(0);
+  const biasedExponent = Number((bits >> 52n) & 0x7ffn);
+  const fraction = bits & 0xfffffffffffffn;
+  const mantissa = biasedExponent === 0 ? fraction : fraction | (1n << 52n);
+  const k = -((biasedExponent === 0 ? 1 : biasedExponent) - 1075);
+  const digits = (mantissa * 5n ** BigInt(k)).toString().padStart(k + 1, "0");
+  const text = `${digits.slice(0, digits.length - k)}.${digits.slice(digits.length - k)}`.replace(/0+$/, "").replace(/\.$/, "");
+  return value < 0 ? `-${text}` : text;
 }

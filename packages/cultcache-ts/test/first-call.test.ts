@@ -24,7 +24,6 @@ const itemDocument = defineDocumentType({
   schemaVersion: "gamecult.first_call_item.v1",
   schema: z.object({ name: z.string(), category: z.string(), value: z.number().int() }),
   name: "name",
-  indexes: { category: "category" },
 });
 const registry = defineDocumentRegistry(itemDocument);
 
