@@ -1606,14 +1606,12 @@ class CultCacheTests(unittest.TestCase):
                         # A path that cannot be reached as a file stays an OSError (_read_store): not a store that failed to decode.
                         with self.assertRaises(OSError, msg=f"{vector} {operation}"):
                             run()
+                        self.assertTrue(store_path.is_dir() and not any(store_path.iterdir()), f"{vector} {operation} touched the directory")
                     else:
                         with self.assertRaises(StoreUnreadableError, msg=f"{vector} {operation}") as refused:
                             run()
                         self.assertIsNotNone(refused.exception.__cause__, f"{vector} {operation}")
-                        if content is None:
-                            self.assertTrue(store_path.is_dir() and not any(store_path.iterdir()), f"{vector} {operation} touched the directory")
-                        else:
-                            self.assertEqual(store_path.read_bytes(), content, f"{vector} {operation} rewrote a file it cannot read")
+                        self.assertEqual(store_path.read_bytes(), content, f"{vector} {operation} rewrote a file it cannot read")
 
     @staticmethod
     def _rec(type: str, key: str, second: int = 0) -> CultCacheEnvelope:
