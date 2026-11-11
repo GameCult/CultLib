@@ -652,7 +652,7 @@ fn vectors_refusals_hold_the_rule() {
         }
         walked += 1;
     }
-    assert_eq!(walked, 22);
+    assert_eq!(walked, 24);
 }
 
 // A pull replaces the holder table with the stored image's: a value another writer changed is released, not kept.
