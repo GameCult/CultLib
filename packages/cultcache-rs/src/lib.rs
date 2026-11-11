@@ -2738,6 +2738,16 @@ pub struct CultCache {
 }
 
 type IndexProjector = fn(&[u8]) -> Result<Vec<(&'static str, String)>>;
+/// Orders by UTF-16 code unit (C# `StringComparer.Ordinal`), not by UTF-8 bytes or code point.
+fn utf16_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    left.encode_utf16().cmp(right.encode_utf16())
+}
+
+/// Orders violations (alias, least key, second key, schema) field by field, each by UTF-16.
+fn violation_cmp(left: &[&str; 4], right: &[&str; 4]) -> std::cmp::Ordering {
+    left.iter().zip(right).map(|(a, b)| utf16_cmp(a, b)).find(|order| order.is_ne()).unwrap_or(std::cmp::Ordering::Equal)
+}
+
 type IndexSlot = (String, String, String);
 type IndexHolders = BTreeMap<IndexSlot, String>;
 
@@ -3424,22 +3434,36 @@ impl CultCache {
                 groups[index].1.insert(key);
             }
         }
-        groups.sort_by(|left, right| left.0.1.cmp(&right.0.1));
-        for (slot, mut holders) in groups {
-            if let Some(held_key) = held.get(&slot)
+        let mut least: Option<[&str; 4]> = None;
+        for (slot, holders) in &mut groups {
+            if let Some(held_key) = held.get(&*slot)
                 && !last.contains_key(&(slot.0.as_str(), held_key.as_str()))
             {
                 holders.insert(held_key.clone());
             }
-            let mut ordered = holders.iter();
-            if let (Some(first), Some(second)) = (ordered.next(), ordered.next()) {
-                return Err(anyhow!(
-                    "Records {first} and {second} ({}) both hold unique index '{}'; an index value names one record.",
-                    self.definitions.get(&slot.0).copied().unwrap_or(&slot.0),
-                    slot.1
-                ));
+        }
+        let mut ordered: Vec<(&IndexSlot, Vec<&String>)> = Vec::new();
+        for (slot, holders) in &groups {
+            let mut keys: Vec<&String> = holders.iter().collect();
+            keys.sort_by(|left, right| utf16_cmp(left, right));
+            ordered.push((slot, keys));
+        }
+        for (slot, keys) in &ordered {
+            if let [first, second, ..] = keys.as_slice() {
+                let schema = self.definitions.get(&slot.0).copied().unwrap_or(&slot.0);
+                let violation = [slot.1.as_str(), first.as_str(), second.as_str(), schema];
+                if least.is_none_or(|best| violation_cmp(&violation, &best).is_lt()) {
+                    least = Some(violation);
+                }
             }
-            let key = holders.into_iter().next().expect("a group holds at least one key");
+        }
+        if let Some([alias, first, second, schema]) = least {
+            return Err(anyhow!(
+                "Records {first} and {second} ({schema}) both hold unique index '{alias}'; an index value names one record."
+            ));
+        }
+        for (slot, mut keys) in ordered.into_iter().map(|(slot, keys)| (slot.clone(), keys)) {
+            let key = keys.remove(0).clone();
             change.taken.push((slot, key));
         }
         Ok(change)
