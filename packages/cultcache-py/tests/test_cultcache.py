@@ -1604,6 +1604,28 @@ class CultCacheTests(unittest.TestCase):
                         self.assertIsNotNone(refused.exception.__cause__, f"{vector} {operation}")
                         self.assertEqual(store_path.read_bytes(), content, f"{vector} {operation} rewrote a file it cannot read")
 
+    def test_a_supplied_record_replaces_an_arrived_one_by_key_alone(self) -> None:
+        import msgpack  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            store = SingleFileMessagePackBackingStore(path)
+            store.push(CultCacheEnvelope(key="k", type="first", payload=b"\x90", stored_at="2026-09-30T00:00:00Z"))
+            store.push(CultCacheEnvelope(key="k", type="second", payload=b"\x90", stored_at="2026-09-30T00:00:01Z"))
+            records = msgpack.unpackb(path.read_bytes(), raw=False)[2]
+            self.assertEqual([record[0] for record in records], ["k"])
+            self.assertEqual([envelope.type for envelope in store.pull_all()], ["second"])
+
+    def test_a_catalog_entry_with_a_non_string_canonical_schema_is_unreadable(self) -> None:
+        # Direct probe of the c0 vector; its manifest row is added by the TS cut.
+        vector = self._C2A_VECTORS.parent / "document-variants-c0" / "current-catalog-bad-canonical.msgpack"
+        content = vector.read_bytes()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            path.write_bytes(content)
+            with self.assertRaises(StoreUnreadableError):
+                SingleFileMessagePackBackingStore(path).pull_all()
+            self.assertEqual(path.read_bytes(), content)
 
 
 if __name__ == "__main__":
