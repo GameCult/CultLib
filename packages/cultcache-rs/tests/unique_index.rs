@@ -80,6 +80,41 @@ struct VBool {
     v: bool,
 }
 
+/// The refusals vector's other schemas: `Sku` is unique in each; `Alt` is a second unique index in `uq_pair` (alias
+/// `Alt`) and `uq_alias` (alias `alt`, sorting after `Sku` only under an ordinal compare); alpha and beta are plain.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "uq_pair", schema = "tests.uq_pair")]
+struct UqPair {
+    #[cultcache(key = 0, index = "Sku")]
+    sku: String,
+    #[cultcache(key = 1, index = "Alt")]
+    alt: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "uq_alias", schema = "tests.uq_alias")]
+struct UqAlias {
+    #[cultcache(key = 0, index = "Sku")]
+    sku: String,
+    #[cultcache(key = 1, index = "alt")]
+    alt: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "uq_alpha", schema = "tests.uq_alpha")]
+struct UqAlpha {
+    #[cultcache(key = 0, index = "Sku")]
+    sku: String,
+    #[cultcache(key = 1)]
+    second: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "uq_beta", schema = "tests.uq_beta")]
+struct UqBeta {
+    #[cultcache(key = 0, index = "Sku")]
+    sku: String,
+    #[cultcache(key = 1)]
+    second: String,
+}
+
 fn unique(sku: &str) -> Unique {
     Unique { sku: sku.into(), category: "c".into() }
 }
@@ -339,35 +374,6 @@ fn a_batch_is_judged_whole() {
     assert_eq!(cache.get_by_index::<Unique>("Sku", "D1").unwrap(), cache.get::<Unique>("e").unwrap());
 }
 
-// The verdict and the named pair do not depend on key order, staging order, or alias declaration order.
-#[test]
-fn the_refusal_names_the_ordinal_pair_whatever_the_order() {
-    let orders: [[&str; 3]; 6] =
-        [["a", "b", "c"], ["a", "c", "b"], ["b", "a", "c"], ["b", "c", "a"], ["c", "a", "b"], ["c", "b", "a"]];
-    for order in orders {
-        let mut cache = memory_cache();
-        let rows: Vec<_> = order.iter().map(|key| (*key, unique("S"))).collect();
-        let text = error_text(cache.put_prepared_batch(staged(&cache, &rows)));
-        assert_eq!(text, refusal("a", "b", "tests.unique_item", "Sku"), "{order:?}");
-        assert!(skus(&cache).is_empty());
-    }
-    // Both aliases collide in one batch: the alias sorting first is named, though `B` is declared first.
-    for order in [["x", "y"], ["y", "x"]] {
-        let mut cache = memory_cache();
-        let rows: Vec<_> = order.iter().map(|key| (*key, multi(Some("s"), Some("t")))).collect();
-        let text = error_text(cache.put_prepared_batch(staged(&cache, &rows)));
-        assert_eq!(text, refusal("x", "y", "Multi", "A"));
-    }
-    // A held key and a landing key: the pair is ordinal, not held-first.
-    let mut cache = memory_cache();
-    cache.put("m", &unique("S")).unwrap();
-    assert_eq!(error_text(cache.put("z", &unique("S"))), refusal("m", "z", "tests.unique_item", "Sku"));
-    assert_eq!(error_text(cache.put("a", &unique("S"))), refusal("a", "m", "tests.unique_item", "Sku"));
-    // A value that differs only by case or by a surrounding space is another value.
-    cache.put("n", &unique("s")).unwrap();
-    cache.put("o", &unique("S ")).unwrap();
-}
-
 #[test]
 fn a_load_of_a_duplicate_image_is_refused_and_keeps_the_prior_view() {
     let dir = tempfile::tempdir().unwrap();
@@ -559,6 +565,94 @@ fn vectors_stores_hold_their_verdicts() {
         }
         assert_eq!(std::fs::read(&path).unwrap(), before, "{file} is byte-identical");
     }
+}
+
+/// One op of a refusals row: `["open", file-or-nil]`, `["pull", file]` or `["commit", [[key, schema, sku, second], ...]]`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Arg {
+    Records(Vec<(String, String, String, String)>),
+    File(Option<String>),
+}
+
+type RefusalRow = (String, Vec<(String, Arg)>, Option<(String, String, String, String)>);
+
+/// Rows `[label, ops, refusal]`: the pair a refusal names is a function of the state the admission would leave
+/// (`tests/vectors/unique-index/README.md`, RULE), whatever the staging, file or pull order, key case or alias case.
+#[test]
+fn vectors_refusals_hold_the_rule() {
+    let bytes = std::fs::read(vectors().join("refusals.msgpack")).unwrap();
+    let rows: Vec<RefusalRow> = rmp_serde::from_slice(&bytes).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut walked = 0;
+    for (index, (label, ops, refused)) in rows.into_iter().enumerate() {
+        let path = dir.path().join(format!("row-{index}.cc"));
+        let mut cache: Option<CultCache> = None;
+        let mut failure = None;
+        for (at, (kind, arg)) in ops.iter().enumerate() {
+            let last = at + 1 == ops.len();
+            let mut before = path.exists().then(|| std::fs::read(&path).unwrap());
+            let result = match (kind.as_str(), arg) {
+                ("open", Arg::File(file)) => {
+                    if let Some(file) = file {
+                        std::fs::copy(vectors().join(file), &path).unwrap();
+                    }
+                    let mut opened = CultCache::new();
+                    opened.register_entry_type::<Unique>().unwrap();
+                    opened.register_entry_type::<UqPair>().unwrap();
+                    opened.register_entry_type::<UqAlias>().unwrap();
+                    opened.register_entry_type::<UqAlpha>().unwrap();
+                    opened.register_entry_type::<UqBeta>().unwrap();
+                    opened.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+                    let pulled = opened.pull_all_backing_stores();
+                    cache = Some(opened);
+                    pulled
+                }
+                ("pull", Arg::File(Some(file))) => {
+                    std::fs::copy(vectors().join(file), &path).unwrap();
+                    before = Some(std::fs::read(&path).unwrap());
+                    cache.as_mut().unwrap().pull_all_backing_stores()
+                }
+                ("commit", Arg::Records(records)) => {
+                    let cache = cache.as_mut().unwrap();
+                    let staged: Vec<_> = records
+                        .iter()
+                        .map(|(key, schema, sku, second)| {
+                            let (sku, second) = (sku.clone(), second.clone());
+                            match schema.as_str() {
+                                "tests.unique_item" => cache.prepare_entry(key, &Unique { sku, category: second }).map(|(envelope, _)| envelope),
+                                "tests.uq_pair" => cache.prepare_entry(key, &UqPair { sku, alt: second }).map(|(envelope, _)| envelope),
+                                "tests.uq_alias" => cache.prepare_entry(key, &UqAlias { sku, alt: second }).map(|(envelope, _)| envelope),
+                                "tests.uq_alpha" => cache.prepare_entry(key, &UqAlpha { sku, second }).map(|(envelope, _)| envelope),
+                                "tests.uq_beta" => cache.prepare_entry(key, &UqBeta { sku, second }).map(|(envelope, _)| envelope),
+                                other => panic!("{label}: unexpected schema {other}"),
+                            }
+                            .unwrap()
+                        })
+                        .collect();
+                    cache.put_prepared_batch(staged)
+                }
+                other => panic!("{label}: unexpected op {:?}", other.0),
+            };
+            if last {
+                failure = Some((result, before));
+            } else {
+                result.unwrap_or_else(|error| panic!("{label}: op {at} should succeed: {error:#}"));
+            }
+        }
+        let (result, before) = failure.unwrap();
+        match refused {
+            None => result.unwrap_or_else(|error| panic!("{label}: should succeed: {error:#}")),
+            Some((k1, k2, schema, alias)) => {
+                assert_eq!(error_text(result), refusal(&k1, &k2, &schema, &alias), "{label}");
+                if let Some(before) = before {
+                    assert_eq!(std::fs::read(&path).unwrap(), before, "{label}: the file is byte-identical");
+                }
+            }
+        }
+        walked += 1;
+    }
+    assert_eq!(walked, 22);
 }
 
 // A pull replaces the holder table with the stored image's: a value another writer changed is released, not kept.
