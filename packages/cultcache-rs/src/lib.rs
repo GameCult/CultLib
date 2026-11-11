@@ -6148,7 +6148,12 @@ mod tests {
             let bytes = if directory { Vec::new() } else { std::fs::read(root.join(vector))? };
             // A v3 store keeps its marker through a rewrite; every other file that reads is written v1.
             let header = if vector.contains("v3") { "cultcache.store.v3" } else { STORE_FORMAT_V1 };
-            for operation in ["open", "soft_push_all", "push_all", "push"] {
+            let operations: &[&str] = if directory {
+                &["open", "soft_push_all", "push_all", "push", "delete"]
+            } else {
+                &["open", "soft_push_all", "push_all", "push"]
+            };
+            for &operation in operations {
                 let temp = tempfile::tempdir()?;
                 let path = temp.path().join("store.msgpack");
                 if directory {
@@ -6161,11 +6166,15 @@ mod tests {
                     "open" => store.pull_all().map(|_| ()),
                     "soft_push_all" => store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions { soft: true }),
                     "push_all" => store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default()),
+                    "delete" => store.delete(&snapshot_envelope("x", b"one")),
                     _ => store.push(&snapshot_envelope("x", b"one")),
                 };
                 let what = format!("{vector} {operation}");
                 assert_eq!(outcome.is_ok(), reads, "{what}: {outcome:?}");
                 if directory {
+                    // A directory is an I/O failure, never a typed unreadable store.
+                    let error = outcome.unwrap_err();
+                    assert!(io_error_in(&error).is_some() && unreadable_kind(&error).is_none(), "{what}: {error:#}");
                     assert!(path.is_dir() && std::fs::read_dir(&path)?.next().is_none(), "{what} touched the directory");
                     continue;
                 }

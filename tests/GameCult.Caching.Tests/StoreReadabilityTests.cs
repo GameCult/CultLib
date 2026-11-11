@@ -314,6 +314,9 @@ namespace GameCult.Caching.Tests
             Assert.That(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"))),
                 Throws.TypeOf<IOException>().With.Message.Contains("directory"));
 
+            Assert.That(() => cache.Commit(batch => batch.Remove(new CultRecordKey("e"))),
+                Throws.TypeOf<IOException>().With.Message.Contains("directory"));
+
             Assert.That(Directory.GetFileSystemEntries(path), Is.Empty);
             Assert.That(Directory.GetFileSystemEntries(later), Is.Empty);
         }

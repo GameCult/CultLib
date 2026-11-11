@@ -1609,7 +1609,7 @@ The one door per runtime, and who walks through it:
 - **Shared paths.** cultnet-ts reaches the header decision only through `readSingleFileStore` (AUTH:4, :321) and checks only record count, schema id and type. cultnet-ts therefore needs a cultcache-ts release that exports it, which is the release that ships with this change; the manifests move to that version then (c0-ships-with-c2a), not before.
 - **Cut line.** `merge-r1` h3 (Rust) and h4 (TS, cultnet-ts); spec `cut-merge-r1.r3` authority map.
 - **Pinned by.** `tests/vectors/document-variants-c2a/readability/manifest.txt`, walked by `StoreReadabilityTests.OpenReadsExactlyTheFilesTheVectorsSayItReads` (C#), `CultMeshSingleFileReadabilityTests.AWriteReplacesAFileExactlyWhenItReads` (Mesh), `a_file_is_replaced_exactly_when_it_reads` (RS:5132), "SingleFileMessagePackBackingStore replaces a file exactly when it reads" (TS test :2321) and `test_single_file_replaces_a_file_exactly_when_it_reads` (Python). AUTH cases: `packages/cultnet-ts/test/idunn-runtime-authority.test.ts`. Declared divergences in the manifest: `legacy-envelopes.bin` (C# refuses; the others read and replace it) and `variant-slot-v3.bin` (C# reads; the others refuse).
-- **Known gaps.** `variants:follow_up:c0-bad-canonical-in-manifest` (`current-catalog-bad-canonical.msgpack` is not in the manifest; TS reads it, Rust refuses). `variants:follow_up:legacy-vectors-all-runtimes` (the three `legacy-catalog-*` c0 vectors have a verdict only in C# tests; all four runtimes refuse them, probed). `variants:follow_up:range-check-in-ci` (`npm run test:pack:ts` builds every admitted tag and checks exports, but `.github/workflows/publish-packages.yml` does not run it).
+- **Known gaps.** `variants:follow_up:range-check-in-ci` (`npm run test:pack:ts` builds every admitted tag and checks exports, but `.github/workflows/publish-packages.yml` does not run it).
 
 ### B. Existence and links (what "nothing at the path" means)
 
@@ -1640,7 +1640,7 @@ The one door per runtime, and who walks through it:
 - **Shared paths.** Open, commit, Mesh read and write.
 - **Cut line.** `mesh-single-file-reader` h1 (the C# clause). Rust, TS and Python were correct by construction of their reads.
 - **Pinned by.** C#: `ADirectoryAtTheStorePathIsAnIoErrorOnOpenAndOnCommitNotAnEmptyStore` (`StoreReadabilityTests.cs:236`). Mesh: `ADirectoryAtThePathIsAnIoErrorOnReadAndWriteAndIsLeftAlone` (:149). Rust: `a_write_over_a_directory_stops_at_the_read_and_leaves_no_staging_file` RS:5726.
-- **Known gaps.** TS and Python have no test for a directory at the store path. No follow-up is registered; the natural home is `write-set-vectors` with the other readability pins.
+- **Known gaps.** None open. The `@directory` manifest row is walked by all four runtimes: every operation including delete is refused and leaves the directory untouched; Rust pins an I/O failure rather than a typed unreadable store.
 
 ### E. Lock
 

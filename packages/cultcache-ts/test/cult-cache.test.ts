@@ -2635,7 +2635,7 @@ test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", 
           assert.ok(!keys.includes(envelopes[0]!.key), `${vector} ${operation}`);
         }
       } else if (isDirectory) {
-        await assert.rejects(run, `${vector} ${operation}`);
+        await assert.rejects(run, (error) => !(error instanceof StoreUnreadableError), `${vector} ${operation}: an I/O failure, not a typed refusal`);
         assert.ok((await lstat(file)).isDirectory(), `${vector} ${operation} replaced the directory`);
         assert.deepEqual(await readdir(file), [], `${vector} ${operation} wrote into the directory`);
       } else {
