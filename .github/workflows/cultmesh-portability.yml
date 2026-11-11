@@ -1,11 +1,17 @@
 name: CultMesh portability and performance
 
+# The forge runs one job at a time and this workflow holds the slot 14 to 30 minutes, so it runs once per change:
+# on the pull request (never again on the push that merges it), skipped for documentation-only changes, and on a
+# daily schedule so main is still exercised when nobody opens a pull request.
 on:
-  push:
-    branches:
-      - main
-      - "codex/**"
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "research/**"
+      - ".voidbot/**"
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 concurrency:

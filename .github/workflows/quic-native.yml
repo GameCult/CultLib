@@ -9,13 +9,21 @@ name: CultMesh QUIC native
 # from the pinned debian:13 container below, never from a local or Yggdrasil
 # build.
 
+# Only a change to the committed binaries, their manifest or this workflow can change what verify-committed checks,
+# so a branch push or pull request runs it for those paths alone; a tag always runs it.
 on:
   push:
     branches:
       - main
+    paths:
+      - "packages/cultmesh-ts/native/**"
+      - ".github/workflows/quic-native.yml"
     tags:
       - "cultmesh-quic-native-v*"
   pull_request:
+    paths:
+      - "packages/cultmesh-ts/native/**"
+      - ".github/workflows/quic-native.yml"
   workflow_dispatch:
 
 concurrency:
