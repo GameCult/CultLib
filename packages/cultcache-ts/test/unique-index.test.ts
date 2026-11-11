@@ -401,3 +401,104 @@ test("registerIndex over distinct held values installs the lookup", async () => 
   await cache.registerIndex(document, "sku", "sku");
   assert.equal(cache.getKeyByIndex(document, "sku", "S"), "a");
 });
+
+// ---- a type with several unique indexes: the second alias is judged, in alias order, in both judges ----
+
+const pairSchema = z.object({ a: z.string().optional(), b: z.string().optional() });
+
+function pair(where: { indexes?: Record<string, "a" | "b">; roles?: Record<string, "a" | "b"> }) {
+  return defineDocumentType({
+    type: "pair",
+    schemaId: "tests.pair.v1",
+    schemaName: "tests.pair",
+    schemaVersion: "tests.pair.v1",
+    schema: pairSchema,
+    ...where,
+  });
+}
+
+// Declared b first, so insertion order is the opposite of alias order.
+const BOTH_UNIQUE = { indexes: { b: "b", a: "a" } as Record<string, "a" | "b"> };
+
+test("a collision on the second unique alias is refused, with a value on the first alias that does not collide", async () => {
+  const document = pair(BOTH_UNIQUE);
+  const cache = memory(document);
+  await cache.put(document, "k1", { a: "x1", b: "shared" });
+  await assert.rejects(cache.put(document, "k2", { a: "x2", b: "shared" }), { message: refusal("k1", "k2", "tests.pair", "b") });
+  await assert.rejects(cache.put(document, "k2", { a: "x1", b: "y" }), { message: refusal("k1", "k2", "tests.pair", "a") });
+  assert.equal(cache.get(document, "k2"), undefined);
+});
+
+test("when two aliases collide the first alias in ordinal order is named, and its keys are in ordinal order", async () => {
+  const document = pair(BOTH_UNIQUE);
+  const cache = memory(document);
+  await cache.put(document, "m", { a: "same-a", b: "same-b" });
+  await assert.rejects(cache.put(document, "c", { a: "same-a", b: "same-b" }), { message: refusal("c", "m", "tests.pair", "a") });
+  // The colliding holders differ per alias: a is held by m, b by n; alias a is still the one named.
+  await cache.put(document, "n", { a: "other-a", b: "other-b" });
+  await assert.rejects(cache.put(document, "z", { a: "same-a", b: "other-b" }), { message: refusal("m", "z", "tests.pair", "a") });
+});
+
+test("a load judges every unique alias: a store collision on the second alias refuses the open", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "uidx-pair-"));
+  try {
+    for (const [name, records, expected] of [
+      ["second-only", [["k1", { a: "1", b: "s" }], ["k2", { a: "2", b: "s" }]], refusal("k1", "k2", "tests.pair", "b")],
+      ["both-aliases", [["m", { a: "s", b: "s" }], ["c", { a: "s", b: "s" }]], refusal("c", "m", "tests.pair", "a")],
+    ] as const) {
+      const file = join(dir, `${name}.cc`);
+      const roles = pair({ roles: { b: "b", a: "a" } });
+      const writer = CultCache.builder().withDocumentType(roles).withGenericStore(new SingleFileMessagePackBackingStore(file)).build();
+      for (const [key, value] of records) await writer.put(roles, key, value);
+      const before = await readFile(file);
+
+      const unique = pair(BOTH_UNIQUE);
+      const reader = CultCache.builder().withDocumentType(unique).withGenericStore(new SingleFileMessagePackBackingStore(file)).build();
+      await assert.rejects(reader.pullAllBackingStores(), { message: expected }, name);
+      assert.deepEqual(reader.snapshot(), [], "a refused load admits nothing");
+      assert.deepEqual(await readFile(file), before);
+
+      const rolesReader = CultCache.builder().withDocumentType(roles).withGenericStore(new SingleFileMessagePackBackingStore(file)).build();
+      await rolesReader.pullAllBackingStores();
+      assert.equal(rolesReader.snapshot().length, 2, `${name}: the same store opens under roles`);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("registerIndex of a second unique alias judges it, naming the two smallest keys whatever order they were written in", async () => {
+  const document = pair({ indexes: { a: "a" }, roles: { b: "b" } });
+  const cache = memory(document);
+  await cache.put(document, "z", { a: "1", b: "s" });
+  await cache.put(document, "m", { a: "2", b: "s" });
+  await cache.put(document, "q", { a: "3", b: "s" });
+  await assert.rejects(cache.registerIndex(document, "b", "b"), { message: refusal("m", "q", "tests.pair", "b") });
+  assert.equal(cache.getKeyByIndex(document, "a", "1"), "z", "the alias already installed is intact");
+  assert.equal(cache.getKeyByIndex(document, "b", "s"), undefined);
+});
+
+test("verdict parity: the same stores are refused whatever the load order, and the first collision refuses (text is informational)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "uidx-verdict-"));
+  try {
+    // Three records, one pair colliding; whichever position the pair has in the file, the store is refused and a clean store opens.
+    const roles = pair({ roles: { a: "a" } });
+    for (const [name, values, refused] of [
+      ["pair-first", ["s", "s", "t"], true],
+      ["pair-last", ["t", "s", "s"], true],
+      ["pair-split", ["s", "t", "s"], true],
+      ["distinct", ["r", "s", "t"], false],
+    ] as const) {
+      const file = join(dir, `${name}.cc`);
+      const writer = CultCache.builder().withDocumentType(roles).withGenericStore(new SingleFileMessagePackBackingStore(file)).build();
+      for (const [i, a] of values.entries()) await writer.put(roles, `r${i}`, { a });
+      const unique = pair({ indexes: { a: "a" } });
+      const reader = CultCache.builder().withDocumentType(unique).withGenericStore(new SingleFileMessagePackBackingStore(file)).build();
+      if (refused) await assert.rejects(reader.pullAllBackingStores(), /both hold unique index 'a'/u, name);
+      else await reader.pullAllBackingStores();
+      assert.equal(reader.snapshot().length, refused ? 0 : 3, name);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

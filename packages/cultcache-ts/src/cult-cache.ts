@@ -1012,11 +1012,11 @@ export class CultCache {
       }
     }
 
-    // Judged whole: any value held by two records refuses, naming the two smallest keys of the first alias in ordinal order.
-    const shared = [...sharing].map(([id, keys]) => ({ alias: id.slice(0, id.indexOf("\u0000")), keys: keys.sort(compareOrdinal) }))
-      .sort((a, b) => compareOrdinal(a.alias, b.alias));
-    if (shared.length > 0) {
-      throw indexSharingRefusal(shared[0].keys[0], shared[0].keys[1], schemaName, shared[0].alias);
+    // Judged whole: any value held by two records refuses, naming the two smallest of its keys. Held records already
+    // passed the judge for every alias installed before, so only the alias being registered can be shared here.
+    for (const [id, keys] of sharing) {
+      keys.sort(compareOrdinal);
+      throw indexSharingRefusal(keys[0], keys[1], schemaName, id.slice(0, id.indexOf("\u0000")));
     }
 
     return { entryLookups, nameMap, indexMaps };
