@@ -60,9 +60,8 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       const disk = this.#readDisk();
       this.#format = disk.format;
       const existing = disk.envelopes;
-      const filtered = existing.filter(
-        (candidate) => !(candidate.type === entry.type && candidate.key === entry.key),
-      );
+      requireOneTypePerKey(this.filePath, [entry], existing);
+      const filtered = existing.filter((candidate) => candidate.key !== entry.key);
       await this.#writeAll([entry], filtered);
     });
   }
@@ -103,6 +102,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
         this.#format = STORE_FORMAT_VERSION;
       }
 
+      requireOneTypePerKey(this.filePath, entries, []);
       await this.#writeAll(entries, []);
     });
   }
@@ -134,6 +134,28 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
     await mkdir(dirname(this.filePath), { recursive: true });
 
     await commitStoreFile(this.filePath, encode(encodeSnapshot(supplied, arrived, this.#format)));
+  }
+}
+
+// A store holds a key once, and the reader refuses a file that holds it twice, so a write that would put a second type under a
+// key (against a record on disk, or within its own batch) is refused before anything is written. Retyping a record is a delete
+// of the old type followed by a put of the new one.
+function requireOneTypePerKey(path: string, supplied: CultCacheEnvelope[], held: CultCacheEnvelope[]): void {
+  const typeByKey = new Map<string, CultCacheEnvelope>();
+  for (const entry of held) {
+    typeByKey.set(entry.key, entry);
+  }
+  for (const entry of supplied) {
+    const prior = typeByKey.get(entry.key);
+    if (prior !== undefined && prior.type !== entry.type) {
+      throw new SchemaConflictError(
+        schemaIdForEnvelope(entry),
+        [prior.type, entry.type],
+        entry.key,
+        `CultCache store ${path} holds record "${entry.key}" as type "${prior.type}", so type "${entry.type}" cannot be written under the same key; remove the record first.`,
+      );
+    }
+    typeByKey.set(entry.key, entry);
   }
 }
 
@@ -417,6 +439,7 @@ function decodeStoreFile(data: Uint8Array): Omit<SingleFileStoreRead, "absent"> 
     throw new Error("CultCache file is not a recognized CultCache MessagePack store.");
   }
 
+  requireUniqueKeys(legacy);
   const normalized = legacy.map((entry) => ({ ...entry, payload: normalizePayload(entry.payload) }));
   return { format: STORE_FORMAT_VERSION, envelopes: envelopeArraySchema.parse(normalized).map((entry) => ({ ...entry, payload: documentPayloadFromBytes(entry.payload) })) as CultCacheEnvelope[] };
 }
@@ -450,6 +473,12 @@ function decodeSnapshot(decoded: unknown): DecodedSnapshot | undefined {
   }
 
   const records = recordsRaw.map(decodeRecord);
+  requireUniqueKeys(records);
+  return { format: decoded[0], catalogBySchemaId, records };
+}
+
+// A store holds a key once, whatever the type: a repeat is refused in a v1 snapshot and in a legacy envelope array alike.
+function requireUniqueKeys(records: Array<{ key: string }>): void {
   const seen = new Set<string>();
   for (const { key } of records) {
     if (seen.has(key)) {
@@ -457,7 +486,6 @@ function decodeSnapshot(decoded: unknown): DecodedSnapshot | undefined {
     }
     seen.add(key);
   }
-  return { format: decoded[0], catalogBySchemaId, records };
 }
 
 function decodeCatalogEntry(value: unknown): CultCacheSchemaCatalogEntry {

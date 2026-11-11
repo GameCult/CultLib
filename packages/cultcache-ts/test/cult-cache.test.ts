@@ -143,6 +143,33 @@ test("CultCache supports registry bootstrap, global documents, and lookup by nam
   });
 });
 
+test("a put that would land a second type under a persisted key is refused, the cache and the file are unchanged, and the store reloads", async () => {
+  const alpha = defineDocumentType({ type: "alpha", schema: z.object({ v: z.number() }) });
+  const beta = defineDocumentType({ type: "beta", schema: z.object({ v: z.number() }) });
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-ts-")), "cache.msgpack");
+  const registry = defineDocumentRegistry(alpha, beta);
+  const open = () => CultCache.builder().withRegistry(registry).withGenericStore(new SingleFileMessagePackBackingStore(storePath)).build();
+
+  const cache = open();
+  await cache.put(alpha, "shared", { v: 1 });
+  const before = [...(await readFile(storePath))];
+  await assert.rejects(() => cache.put(beta, "shared", { v: 2 }), SchemaConflictError);
+  assert.deepEqual([...(await readFile(storePath))], before);
+  assert.deepEqual(cache.get(alpha, "shared"), { v: 1 });
+  assert.equal(cache.get(beta, "shared"), undefined);
+
+  const reloaded = open();
+  await reloaded.pullAllBackingStores();
+  assert.deepEqual(reloaded.get(alpha, "shared"), { v: 1 });
+
+  assert.equal(await cache.delete(alpha, "shared"), true);
+  await cache.put(beta, "shared", { v: 2 });
+  const retyped = open();
+  await retyped.pullAllBackingStores();
+  assert.equal(retyped.get(alpha, "shared"), undefined);
+  assert.deepEqual(retyped.get(beta, "shared"), { v: 2 });
+});
+
 test("CultCache can register name and index lookups after entries already exist", async () => {
   const noteDocument = defineDocumentType({
     type: "note",
@@ -2582,18 +2609,17 @@ test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", 
   }
 });
 
-// One key is held once: a record pushed under a key replaces the stored record under that key, whatever its type, so the writer cannot
-// emit a store its own reader refuses.
-test("SingleFileMessagePackBackingStore push replaces the stored record under a key whatever the type", async () => {
+// One key is held once: a push of a second type under a stored key is refused, so the writer cannot emit a store its own reader refuses.
+test("SingleFileMessagePackBackingStore push refuses a second type under a stored key", async () => {
   const seed = CultCache.builder().withDocumentType(ownsId).withDocumentType(listsId).build();
   await seed.put(ownsId, "k", { name: "owner" });
   await seed.put(listsId, "k", { name: "lister" });
   const file = join(await mkdtemp(join(tmpdir(), "cultcache-push-key-")), "store.msgpack");
   const store = new SingleFileMessagePackBackingStore(file);
   await store.push(seed.getRequiredEnvelope(ownsId, "k"));
-  await store.push(seed.getRequiredEnvelope(listsId, "k"));
+  await assert.rejects(() => store.push(seed.getRequiredEnvelope(listsId, "k")), SchemaConflictError);
   const records = (decode(await readFile(file)) as unknown[][])[2] as unknown[][];
-  assert.deepEqual(records.map((record) => [record[0], record[1]]), [["k", "id.lister"]]);
+  assert.deepEqual(records.map((record) => [record[0], record[1]]), [["k", "id.owned"]]);
   assert.equal((await store.pullAll()).length, 1);
 });
 

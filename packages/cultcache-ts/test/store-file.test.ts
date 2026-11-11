@@ -12,6 +12,7 @@ import { decode, encode } from "@msgpack/msgpack";
 
 import { documentPayloadBytes, documentPayloadFromBytes } from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
+import { SchemaConflictError, StoreUnreadableError } from "../src/store-format";
 import type { CultCacheEnvelope } from "../src/types";
 
 import {
@@ -571,7 +572,7 @@ const snapshotOf = async (store: SingleFileMessagePackBackingStore): Promise<str
     .map((entry) => `${entry.type}/${entry.key}:${[...documentPayloadBytes(entry.payload)].at(-1)}`)
     .sort();
 
-test("push replaces the record under the same key whatever its type and keeps every other", async () => {
+test("push replaces the record under the same key and type and keeps every other; retyping is delete then push", async () => {
   const directory = await scratch();
   try {
     const store = new SingleFileMessagePackBackingStore(join(directory, "store.cc"));
@@ -580,8 +581,64 @@ test("push replaces the record under the same key whatever its type and keeps ev
     assert.deepEqual(await snapshotOf(store), ["t/a:9", "t/b:2", "u/c:3"]);
     await store.push(entryOf("d", "t", 4));
     assert.deepEqual(await snapshotOf(store), ["t/a:9", "t/b:2", "t/d:4", "u/c:3"]);
+    await store.delete(entryOf("a", "t"));
     await store.push(entryOf("a", "u", 5));
     assert.deepEqual(await snapshotOf(store), ["t/b:2", "t/d:4", "u/a:5", "u/c:3"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a push that would land a second type under an existing key is refused and the file is byte for byte unchanged", async () => {
+  const directory = await scratch();
+  try {
+    const path = join(directory, "store.cc");
+    const store = new SingleFileMessagePackBackingStore(path);
+    await store.pushAll([entryOf("k", "t", 1), entryOf("m", "t", 2)]);
+    const before = [...(await readFile(path))];
+    await assert.rejects(
+      () => store.push(entryOf("k", "u", 9)),
+      (error: unknown) => error instanceof SchemaConflictError && error.recordKey === "k" && /holds record "k" as type "t"/u.test(error.message),
+    );
+    assert.deepEqual([...(await readFile(path))], before);
+    assert.deepEqual(await snapshotOf(new SingleFileMessagePackBackingStore(path)), ["t/k:1", "t/m:2"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a pushAll batch that carries one key under two types is refused and writes nothing", async () => {
+  const directory = await scratch();
+  try {
+    const path = join(directory, "store.cc");
+    const store = new SingleFileMessagePackBackingStore(path);
+    await assert.rejects(() => store.pushAll([entryOf("k", "t", 1), entryOf("k", "u", 2)]), SchemaConflictError);
+    assert.equal((await readdir(directory)).includes("store.cc"), false);
+    await store.pushAll([entryOf("a", "t", 1)]);
+    const before = [...(await readFile(path))];
+    await assert.rejects(() => store.pushAll([entryOf("k", "t", 1), entryOf("k", "u", 2)]), SchemaConflictError);
+    assert.deepEqual([...(await readFile(path))], before);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a legacy envelope array that holds a key under two types is refused on open, as a v1 store is", async () => {
+  const directory = await scratch();
+  try {
+    const path = join(directory, "legacy.cc");
+    const bytes = encode([
+      { key: "a", type: "t", payload: { n: 1 }, storedAt: "2026-10-20T00:00:00Z" },
+      { key: "a", type: "u", payload: { n: 2 }, storedAt: "2026-10-20T00:00:00Z" },
+    ]);
+    await writeFile(path, bytes);
+    const store = new SingleFileMessagePackBackingStore(path);
+    await assert.rejects(
+      () => store.pullAll(),
+      (error: unknown) => error instanceof StoreUnreadableError && /"a" appears more than once/u.test(error.message),
+    );
+    await assert.rejects(() => store.push(entryOf("b")), StoreUnreadableError);
+    assert.deepEqual([...(await readFile(path))], [...bytes]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
