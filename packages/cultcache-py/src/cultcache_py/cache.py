@@ -234,6 +234,8 @@ class CultCache:
     @_mutating
     def register_index(self, document: DocumentDefinition[Any], index: str, extractor: str | Any) -> None:
         self._assert_registered(document)
+        if index in document.roles:
+            raise CultCacheError(f"Index '{index}' of {document.type} is declared as a role; a role is never a unique index.")
         index_extractors = {type: dict(indexes) for type, indexes in self._state.index_extractors.items()}
         index_extractors.setdefault(document.type, {})[index] = extractor
         self._install_lookups(self._state.name_extractors, index_extractors)
@@ -243,7 +245,11 @@ class CultCache:
     ) -> None:
         """Derives every lookup under the candidate extractors, then installs extractors and lookups
         together. An extractor that raises on a held value installs nothing."""
-        names, indexes, lookup_keys = self._derive_lookups(self._state.values, name_extractors, index_extractors)
+        names, indexes, lookup_keys = self._derive_lookups(
+            [(type, key, value) for type, values in self._state.values.items() for key, value in values.items()],
+            name_extractors,
+            index_extractors,
+        )
         (
             self._state.name_extractors,
             self._state.index_extractors,
@@ -311,6 +317,7 @@ class CultCache:
         structures, running every check and every user extractor; the cache's state is replaced
         only once that build finishes, so a refused load admits nothing."""
         loaded_values: dict[str, dict[str, Any]] = {}
+        read_order: dict[tuple[str, str], Any] = {}  # (type, key) -> value, in the order the stores yielded them
         loaded_envelopes: dict[str, dict[str, CultCacheEnvelope]] = {}
         loaded_legacy_global_keys: dict[str, str] = {}
         routes, generic = self._state.stores_by_type, self._state.generic_store
@@ -349,9 +356,10 @@ class CultCache:
                 envelope = self._stamped(document, envelope)
                 value = document.decode_payload(envelope.payload)
                 loaded_values.setdefault(envelope.type, {})[envelope.key] = value
+                read_order[(envelope.type, envelope.key)] = value
                 loaded_envelopes.setdefault(envelope.type, {})[envelope.key] = envelope
         loaded_names, loaded_indexes, loaded_lookup_keys = self._derive_lookups(
-            loaded_values, self._state.name_extractors, self._state.index_extractors
+            [(type, key, value) for (type, key), value in read_order.items()], self._state.name_extractors, self._state.index_extractors
         )
         # Plain attribute assignments: nothing fallible runs once the swap begins.
         (
@@ -615,24 +623,22 @@ class CultCache:
 
     def _derive_lookups(
         self,
-        values_by_type: dict[str, dict[str, Any]],
+        records: list[tuple[str, str, Any]],
         name_extractors: dict[str, str | Any],
         index_extractors: dict[str, dict[str, str | Any]],
     ) -> tuple[_Names, _Indexes, _LookupKeysByType]:
-        """Builds name and index lookups for the given values in fresh dicts, touching no cache state."""
+        """Builds name and index lookups for the given (type, key, value) records, judged in the order given, in fresh dicts, touching no cache state."""
         names: _Names = {}
         indexes: _Indexes = {}
         lookup_keys: _LookupKeysByType = {}
-        for type, values in values_by_type.items():
-            name_extractor = name_extractors.get(type)
-            type_index_extractors = index_extractors.get(type, {})
-            for key, value in values.items():
-                lookup_keys.setdefault(type, {})[key] = self._lookup_keys_for(value, name_extractor, type_index_extractors)
+        landing: list[tuple[str, str, _LookupKeys]] = []
+        for type, key, value in records:
+            keys = self._lookup_keys_for(value, name_extractors.get(type), index_extractors.get(type, {}))
+            lookup_keys.setdefault(type, {})[key] = keys
+            landing.append((type, key, keys))
         # Judged whole, over every type at once and on the file alone (never against what the cache held): a held value can
         # have been mutated in place since it was admitted, and another process may have moved a value between records.
-        self._refuse_index_sharing(
-            [(type, key, keys) for type, by_key in lookup_keys.items() for key, keys in by_key.items()], {}, ()
-        )
+        self._refuse_index_sharing(landing, {}, ())
         for type in lookup_keys:
             for key, keys in lookup_keys.get(type, {}).items():
                 if keys.name is not None:

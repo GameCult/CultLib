@@ -226,6 +226,39 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void ATwoChangeCommitIsWrittenAsTheVectorOtherRuntimesDecode()
+        {
+            // tests/vectors/database-change-commit/two-change-commit.msgpack: the two change messages of one commit, as the C#
+            // serializer writes them, concatenated. Written with CULTCACHE_WRITE_VECTORS=1; every other run compares bytes.
+            var commit = Enumerable.Range(0, 2).Select(index => new CultNetDatabaseChangeRawMessage
+            {
+                MessageId = $"change-{index}",
+                SubscriptionId = "sub-1",
+                ChangeKind = "removed",
+                RecordKey = index == 0 ? "note:a" : "note:b",
+                SchemaId = "schema-note",
+                CommitId = "9f1c0f0e4b7a4c1f9d2e",
+                CommitCount = 2
+            });
+            var bytes = commit.SelectMany(message => CultNetSchemaMessageSerialization.Serialize(message)).ToArray();
+
+            var directory = TestContext.CurrentContext.TestDirectory;
+            while (directory != null && !System.IO.Directory.Exists(System.IO.Path.Combine(directory, "tests", "vectors")))
+                directory = System.IO.Path.GetDirectoryName(directory);
+            Assert.That(directory, Is.Not.Null, "tests/vectors is above the test directory");
+            var path = System.IO.Path.Combine(directory!, "tests", "vectors", "database-change-commit", "two-change-commit.msgpack");
+            if (Environment.GetEnvironmentVariable("CULTCACHE_WRITE_VECTORS") == "1")
+            {
+                System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+                System.IO.File.WriteAllBytes(path, bytes);
+                return;
+            }
+
+            Assert.That(System.IO.File.Exists(path), Is.True, "the vector is committed");
+            Assert.That(Convert.ToHexString(bytes), Is.EqualTo(Convert.ToHexString(System.IO.File.ReadAllBytes(path))));
+        }
+
+        [Test]
         public void AnOlderPeerReadsTheChangeAndIgnoresTheCommitFields()
         {
             var tagged = new CultNetDatabaseChangeRawMessage

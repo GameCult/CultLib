@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 from uuid import uuid4
+import msgpack
 from cultcache_py import CultCache, define_database_entry_type
 from cultnet_py.benchmark import run_benchmark
 from cultnet_py.compare_csharp import (
@@ -1600,25 +1601,13 @@ class CultNetTests(unittest.TestCase):
             with self.subTest(field=field, bad=bad), self.assertRaisesRegex(ValueError, field):
                 CultNetDatabaseChange.from_wire({**base, field: bad})
 
-    def test_a_two_change_commit_from_the_csharp_server_parses(self) -> None:
-        # CultNetDatabaseServer.DeliverCommit (CultNetDatabaseServer.cs:791-797) tags every change of a commit with its
-        # commitId and commitCount = the number of changes delivered, so a swap of two records arrives with commitCount 2.
-        # Shaped as the C# [MessagePackObject] writes it: every key present, nil where unset.
-        swap = [
-            {
-                "schemaVersion": "cultnet.database_change_raw.v0",
-                "messageId": f"change-{index}",
-                "subscriptionId": "sub-1",
-                "changeKind": "updated",
-                "document": None,
-                "recordKey": key,
-                "schemaId": "schema-note",
-                "commitId": "9f1c0f0e4b7a4c1f9d2e",
-                "commitCount": 2,
-            }
-            for index, key in enumerate(("note:a", "note:b"))
-        ]
-        changes = [CultNetDatabaseChange.from_wire(message) for message in swap]
+    def test_a_two_change_commit_written_by_csharp_parses(self) -> None:
+        # tests/vectors/database-change-commit/two-change-commit.msgpack: the two change messages of one commit, written by the
+        # C# serializer (CultNetReplicaCommitTests), so a rename or retyping of commitId/commitCount fails here.
+        vector = Path(__file__).resolve().parents[3] / "tests" / "vectors" / "database-change-commit" / "two-change-commit.msgpack"
+        messages = list(msgpack.Unpacker(io.BytesIO(vector.read_bytes()), raw=False))
+        self.assertEqual(len(messages), 2)
+        changes = [CultNetDatabaseChange.from_wire(message) for message in messages]
         self.assertEqual([change.commit_count for change in changes], [2, 2])
         self.assertEqual({change.commit_id for change in changes}, {"9f1c0f0e4b7a4c1f9d2e"})
         self.assertEqual([change.to_wire()["commitCount"] for change in changes], [2, 2])
