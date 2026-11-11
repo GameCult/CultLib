@@ -1,0 +1,16 @@
+name: setup probe
+on:
+  push:
+    branches: ["hands/ci-setup-time"]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: image tools
+        run: |
+          date -u +%T
+          for t in python python3 pip3 node npm dotnet cargo rustc pwsh git; do printf '%s: ' $t; (command -v $t && $t --version 2>&1 | head -1) || echo MISSING; done
+          ls /opt/hostedtoolcache 2>/dev/null; id -u; nproc; df -h / | tail -1
+          curl -s -o /dev/null -w "github dl %{speed_download} B/s\n" -L https://github.com/actions/python-versions/releases/download/3.12.16-40260402378/python-3.12.16-linux-24.04-x64.tar.gz
+          curl -s -o /dev/null -w "forge dl %{speed_download} B/s\n" -L --max-time 20 https://eureka.gamecult.org/forge/GameCult/CultLib/archive/main.zip
