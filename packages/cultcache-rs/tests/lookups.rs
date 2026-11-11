@@ -30,7 +30,7 @@ struct Gadget {
     #[cultcache(key = 0, name)]
     name: String,
     #[cultcache(key = 1, index)]
-    category: String,
+    serial: String,
 }
 
 /// Sorts after `Item` and has its exact shape: a lookup that ran past the end of its own type would answer from it.
@@ -71,7 +71,7 @@ struct Numbered {
     #[cultcache(key = 0, name)]
     id: u32,
     #[cultcache(key = 1, index)]
-    owner: u64,
+    badge: u64,
 }
 
 fn cache() -> CultCache {
@@ -134,8 +134,8 @@ fn a_missing_name_or_value_is_none_and_an_unregistered_type_is_refused() {
 #[test]
 fn an_index_without_an_alias_is_named_by_its_member() {
     let mut cache = cache();
-    cache.put("numbered:1", &Numbered { id: 1, owner: 7 }).unwrap();
-    assert!(cache.get_by_index::<Numbered>("owner", "7").unwrap().is_some());
+    cache.put("numbered:1", &Numbered { id: 1, badge: 7 }).unwrap();
+    assert!(cache.get_by_index::<Numbered>("badge", "7").unwrap().is_some());
 }
 
 // A blank name is no name; a blank index value is not indexed; a nil member holds no value.
@@ -157,7 +157,7 @@ fn blank_and_nil_values_are_not_found() {
 fn lookups_never_cross_types() {
     let mut cache = cache();
     cache.put("item:a", &item("same", "same", Some("same"))).unwrap();
-    cache.put("gadget:a", &Gadget { name: "same".into(), category: "same".into() }).unwrap();
+    cache.put("gadget:a", &Gadget { name: "same".into(), serial: "same".into() }).unwrap();
     cache.put("zed:a", &Zed { name: "same".into(), category: "same".into(), code: None, value: 0 }).unwrap();
 
     assert_eq!(cache.get_by_name::<Gadget>("same").unwrap().unwrap().name, "same");
@@ -165,7 +165,7 @@ fn lookups_never_cross_types() {
     assert_eq!(cache.get_by_name::<Item>("same").unwrap(), None);
     assert_eq!(cache.get_by_index::<Item>("sku", "same").unwrap(), None);
     assert!(cache.get_by_name::<Gadget>("same").unwrap().is_some());
-    assert!(cache.get_by_index::<Gadget>("category", "same").unwrap().is_some());
+    assert!(cache.get_by_index::<Gadget>("serial", "same").unwrap().is_some());
 }
 
 #[test]
@@ -187,10 +187,10 @@ fn a_name_and_index_follow_a_rewritten_record_and_leave_a_removed_one() {
 #[test]
 fn non_string_members_are_found_by_their_text() {
     let mut cache = cache();
-    let owner = 161_u64;
-    cache.put("numbered:1", &Numbered { id: 42, owner }).unwrap();
+    let badge = 161_u64;
+    cache.put("numbered:1", &Numbered { id: 42, badge }).unwrap();
     assert!(cache.get_by_name::<Numbered>("42").unwrap().is_some());
-    assert!(cache.get_by_index::<Numbered>("owner", "161").unwrap().is_some());
+    assert!(cache.get_by_index::<Numbered>("badge", "161").unwrap().is_some());
 }
 
 #[test]
