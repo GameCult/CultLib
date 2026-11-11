@@ -107,6 +107,8 @@ namespace GameCult.Networking.Tests
             public CultNetDatabase Database { get; }
             private readonly CultNetDatabaseSubscriptionServer _server;
             public void Reconcile() => _server.Reconcile();
+            public object Gate => typeof(CultNetDatabaseSubscriptionServer)
+                .GetField("_lifecycleGate", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(_server)!;
 
             public Replication(Action<CultCache>? seedSource = null, Action<CultCache>? seedReplica = null,
                 Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, string, string, bool>? authorizeRecord = null)
@@ -610,20 +612,24 @@ namespace GameCult.Networking.Tests
                 .GetField("_commits", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(client)!;
 
         // The check that a subscription is live belongs to the same lock Unsubscribe evicts under. The test holds that lock (it is
-        // re-entrant), lets a straggler's handler arrive at it, ends the subscription, and releases: a handler that had already
-        // passed its check by then would buffer a commit nobody will ever finish.
+        // re-entrant), waits until the straggler's handler is contending for it, ends the subscription, and releases: a handler
+        // that had already passed its check by then would buffer a commit nobody will ever finish.
         [Test]
         public void AStragglerThatArrivedBeforeUnsubscribeBuffersNothingAfterIt()
         {
             using var run = new Replication();
+            Task tail;
 
             lock (CommitsOf(run.Client))
             {
+                var contended = Monitor.LockContentionCount;
                 run.Peer.Client!.Emit(Put(run, "items", "a", "one", "4", 2));
-                Thread.Sleep(250);
+                Assert.That(SpinWait.SpinUntil(() => Monitor.LockContentionCount > contended, 10_000), "the handler never reached the lock");
                 run.Client.Unsubscribe("items");
+                tail = (Task)typeof(CultNetDatabaseSubscriptionClient)
+                    .GetField("_queue", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(run.Client)!;
             }
-            Thread.Sleep(250);
+            tail.GetAwaiter().GetResult();
 
             Assert.That(Pending(run.Client), Is.Zero);
             Assert.That(run.Client.Fault, Is.Null);
@@ -668,6 +674,7 @@ namespace GameCult.Networking.Tests
 
             run.Peer.Client!.Emit(Put(run, "items-ghost", "a", "one", "4", 2));
             run.Peer.Client!.Emit(Put(run, "items-ghost", "c", "three", "5", 3));
+            run.Peer.Client!.Emit(Put(run, "item", "e", "five", "6", 2));
             await Task.Delay(200);
 
             Assert.That(Pending(run.Client), Is.EqualTo(1), "only the live subscription's commit is held");
@@ -677,10 +684,30 @@ namespace GameCult.Networking.Tests
             Assert.That(run.ReplicaItem("a"), Is.Null);
         }
 
-        // A public Reconcile() diffs the projection against the source outside any commit, so its messages carry no commit. That is
-        // sound because a projection only ever differs from the source by records the policy hid or showed, never by a changed
-        // value (a changed record is re-judged the moment its commit arrives): both sides of the diff are subsets of one source
-        // state, whose unique values are distinct, so no order of its removals, updates and additions can meet a held value.
+        // Reconcile() can run after the cache admitted a commit and before the subscription's Watch has seen it (the observer
+        // runs on the writer's thread after the cache gate opens). Its diff then carries changed values, and a swap sent record by
+        // record faults the replica. The test holds the subscription server's gate to stand in that window.
+        [Test]
+        public async Task AReconcileThatRacesACommitSendsItsSwapAsOneCommit()
+        {
+            using var run = new Replication(source => Stage(source, ("a", "one"), ("b", "two")));
+            Task write;
+
+            lock (run.Gate)
+            {
+                write = Task.Run(() => Stage(run.Source, ("a", "two"), ("b", "one")));
+                Assert.That(SpinWait.SpinUntil(() => run.Source.Get<ReplicaItem>(new CultRecordKey("a"))!.Sku == "two", 10_000),
+                    "the source did not take the swap");
+                run.Reconcile();
+            }
+            await write;
+            await Until(() => run.ReplicaItem("a")!.Sku == "two");
+
+            Assert.That(run.ReplicaItem("b")!.Sku, Is.EqualTo("one"));
+            Assert.That(run.Client.Fault, Is.Null);
+            Assert.That(run.Peer.Changes.Select(change => change.CommitCount), Is.All.EqualTo(2));
+        }
+
         [Test]
         public async Task ReconcilingAfterAPolicyChangeThatFollowsASwapLeavesTheReplicaIntact()
         {
@@ -699,7 +726,6 @@ namespace GameCult.Networking.Tests
 
             Assert.That(run.ReplicaItem("b")!.Sku, Is.EqualTo("one"));
             Assert.That(run.Client.Fault, Is.Null);
-            Assert.That(run.Peer.Changes.Last().CommitId, Is.Null, "the reconcile diff is not a commit");
         }
 
         // Source, wire and client all real: a CultNetDatabaseServer behind a Server on a loopback socket, a LiteNetLib client
