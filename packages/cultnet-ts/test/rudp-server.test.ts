@@ -115,6 +115,8 @@ test("a client reconnecting from the same endpoint replaces only its own session
     assert.throws(() => server.send(oldPeer, "schema", enc("stale")), /not connected/);
     assert.equal(server.peers.length, 2);
 
+    // The server accepting is not the client hearing it: send only once the client's new session is connected.
+    await waitFor(() => a.connection.connected, "the reconnecting client's handshake");
     a.connection.send("schema", enc("after"));
     b.connection.send("schema", enc("still"));
     await waitFor(() => a.received.includes("re:after") && b.received.includes("re:still"), "replies after the reconnect");
