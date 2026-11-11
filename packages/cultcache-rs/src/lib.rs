@@ -4493,6 +4493,54 @@ mod tests {
     }
 
     #[test]
+    fn retype_a_foreign_key_in_another_store_refuses_the_pull_and_every_write_to_it() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let (routed, generic) = (temp.path().join("routed.cc"), temp.path().join("generic.cc"));
+        store_with(&routed, |cache| cache.put("k", &settings_one()).map(drop))?;
+        store_with(&generic, |cache| cache.put("n", &note_one()).map(drop))?;
+        let open = || -> Result<CultCache> {
+            let mut cache = CultCache::new();
+            cache.register_entry_type::<Settings>()?;
+            cache.add_backing_store(SingleFileMessagePackBackingStore::new(&routed), [Settings::TYPE])?;
+            cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&generic))?;
+            Ok(cache)
+        };
+
+        // A registered record in one store and a foreign one at the same key in another: the pull is refused.
+        store_with(&generic, |cache| cache.put("k", &note_one()).map(drop))?;
+        let mut cache = open()?;
+        assert_eq!(retype_refusal(&cache.pull_all_backing_stores().unwrap_err()).record_key, "k");
+        assert!(cache.snapshot().is_empty() && cache.foreign_records().is_empty());
+
+        // The foreign key lives in the generic store; a write routed to the other store is refused by the cache alone.
+        fs::remove_file(&generic)?;
+        store_with(&generic, |cache| cache.put("n", &note_one()).map(drop))?;
+        let mut cache = open()?;
+        cache.pull_all_backing_stores()?;
+        let before = (cache.snapshot(), fs::read(&routed)?, fs::read(&generic)?);
+        let (staged, _) = cache.prepare_entry("n", &settings_one())?;
+        for error in [cache.put("n", &settings_one()).unwrap_err(), cache.put_prepared_batch(vec![staged]).unwrap_err()] {
+            assert_eq!(retype_refusal(&error).record_key, "n");
+        }
+        assert_eq!((cache.snapshot(), fs::read(&routed)?, fs::read(&generic)?), before);
+        Ok(())
+    }
+
+    #[test]
+    fn retype_load_soa_refuses_a_second_type_at_a_key_and_admits_nothing() -> Result<()> {
+        let mut cache = CultCache::new();
+        cache.register_registry(TestEntries)?;
+        cache.put("kept", &settings_one())?;
+        let before = cache.snapshot();
+        let (settings, _) = cache.prepare_entry("k", &settings_one())?;
+        let (note, _) = cache.prepare_entry("k", &note_one())?;
+        let error = cache.load_soa(CultCacheSoaTable::from_envelopes(vec![settings, note])).unwrap_err();
+        assert_eq!(retype_refusal(&error).record_key, "k");
+        assert_eq!(cache.snapshot(), before);
+        Ok(())
+    }
+
+    #[test]
     fn retype_a_later_registration_claims_the_foreign_record_at_the_next_load() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("cache.cc");
