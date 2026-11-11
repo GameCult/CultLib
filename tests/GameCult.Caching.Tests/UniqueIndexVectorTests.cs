@@ -350,11 +350,16 @@ namespace GameCult.Caching.Tests
         private static readonly Rec[] AliasRecords = { new("item:a", Alias, "S", "X"), new("item:b", Alias, "S", "Y"), new("item:c", Alias, "T", "Y") };
         private static readonly Rec[] RepullBefore = Items_(("item:a1", "A"), ("item:b1", "C"));
         private static readonly Rec[] RepullAfter = Items_(("item:a1", "A"), ("item:b1", "B"), ("item:b2", "B"), ("item:c1", "A"));
+        private static readonly Rec[] KeyCaseRecords = Items_(("a", "S"), ("z", "S"), ("B", "T"), ("C", "T"));
+        private static readonly Rec[] KeyPunctuationRecords = Items_(("_", "S"), ("a", "S"), ("Z", "T"), ("b", "T"));
+        private static readonly Rec[] SurrogateGroupRecords = Items_(("\uE000", "S"), ("\uE000b", "S"), ("\U0001F600", "T"), ("\U0001F600b", "T"));
 
         private static readonly (string File, Rec[] Records)[] RefusalStores =
         {
             ("pair-store.cc", PairRecords), ("surrogate-store.cc", SurrogateRecords), ("types-store.cc", TypeRecords),
             ("repull-before.cc", RepullBefore), ("repull-after.cc", RepullAfter), ("alias-store.cc", AliasRecords),
+            ("key-case-store.cc", KeyCaseRecords), ("key-punctuation-store.cc", KeyPunctuationRecords),
+            ("surrogate-groups-store.cc", SurrogateGroupRecords),
         };
 
         private static readonly Refusal SurrogateRefusal = new("k\U0001F600", "k\uE000", Item, "Sku");
@@ -362,6 +367,9 @@ namespace GameCult.Caching.Tests
         private static readonly Refusal PairRefusal = new("item:b", "item:c", Pair, "Alt");
         private static readonly Refusal AliasRefusal = new("item:a", "item:b", Alias, "Sku");
         private static readonly Refusal RepullRefusal = new("item:a1", "item:c1", Item, "Sku");
+        private static readonly Refusal KeyCaseRefusal = new("B", "C", Item, "Sku");
+        private static readonly Refusal KeyPunctuationRefusal = new("Z", "b", Item, "Sku");
+        private static readonly Refusal SurrogateGroupRefusal = new("\U0001F600", "\U0001F600b", Item, "Sku");
 
         private static readonly Case[] Cases =
         {
@@ -383,16 +391,17 @@ namespace GameCult.Caching.Tests
             new("commit-onto-a-loaded-holder", new[] { Open("repull-before.cc"), Commit(Items_(("item:z", "A"))) },
                 new Refusal("item:a1", "item:z", Item, "Sku")),
             // Rows 14-19 extend the spec's floor of 13: orderings a code-point, case-insensitive or culture compare would flip.
-            new("batch-key-case", new[] { Open(), Commit(Items_(("a", "S"), ("z", "S"), ("B", "T"), ("C", "T"))) },
-                new Refusal("B", "C", Item, "Sku")),
-            new("batch-key-punctuation", new[] { Open(), Commit(Items_(("_", "S"), ("a", "S"), ("Z", "T"), ("b", "T"))) },
-                new Refusal("Z", "b", Item, "Sku")),
+            new("batch-key-case", new[] { Open(), Commit(KeyCaseRecords) }, KeyCaseRefusal),
+            new("batch-key-punctuation", new[] { Open(), Commit(KeyPunctuationRecords) }, KeyPunctuationRefusal),
             new("batch-key-case-in-a-group", new[] { Open(), Commit(Items_(("a", "S"), ("B", "S"))) },
                 new Refusal("B", "a", Item, "Sku")),
-            new("batch-surrogate-groups", new[] { Open(), Commit(Items_(("\uE000", "S"), ("\uE000b", "S"), ("\U0001F600", "T"), ("\U0001F600b", "T"))) },
-                new Refusal("\U0001F600", "\U0001F600b", Item, "Sku")),
+            new("batch-surrogate-groups", new[] { Open(), Commit(SurrogateGroupRecords) }, SurrogateGroupRefusal),
             new("batch-alias-case", new[] { Open(), Commit(AliasRecords) }, AliasRefusal),
             new("load-alias-case", new[] { Open("alias-store.cc") }, AliasRefusal),
+            // Rows 20-22 load rows 14, 15 and 17's records, so a runtime with no batch commit still walks cross-group key order.
+            new("load-key-case", new[] { Open("key-case-store.cc") }, KeyCaseRefusal),
+            new("load-key-punctuation", new[] { Open("key-punctuation-store.cc") }, KeyPunctuationRefusal),
+            new("load-surrogate-groups", new[] { Open("surrogate-groups-store.cc") }, SurrogateGroupRefusal),
         };
 
         private static byte[] RefusalStoreBytes(Rec[] records)
@@ -580,7 +589,7 @@ namespace GameCult.Caching.Tests
                 }
             }
 
-            Assert.That(walked, Is.EqualTo(19));
+            Assert.That(walked, Is.EqualTo(22));
         }
     }
 }
