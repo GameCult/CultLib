@@ -14,7 +14,7 @@ import { z } from "zod";
 import { CultCache } from "../src/cult-cache";
 import { inspectCultCacheBytes } from "../src/cult-cache-inspector";
 import { defineDocumentRegistry, defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "../src/document";
-import { SingleFileMessagePackBackingStore, readStoreBytes } from "../src/single-file-messagepack-backing-store";
+import { SingleFileMessagePackBackingStore, readSingleFileStore, readStoreBytes } from "../src/single-file-messagepack-backing-store";
 import { SchemaConflictError, StoreUnreadableError, refuseUnreadStoreBytes } from "../src/store-format";
 import type { AnyCultCacheDocumentDefinition, CacheBackingStore, CultCacheEnvelope, CultCacheSchema } from "../src/types";
 
@@ -168,6 +168,36 @@ test("a put that would land a second type under a persisted key is refused, the 
   await retyped.pullAllBackingStores();
   assert.equal(retyped.get(alpha, "shared"), undefined);
   assert.deepEqual(retyped.get(beta, "shared"), { v: 2 });
+});
+
+test("a put by a type renamed under the stored id, which lists that id compatible, restamps the record; an unrelated type is refused", async () => {
+  const old = defineDocumentType({ type: "ren.old", schema: z.object({ v: z.number() }), schemaId: "ren.id.v1", schemaName: "ren.old" });
+  const renamed = defineDocumentType({
+    type: "ren.new",
+    schema: z.object({ v: z.number() }),
+    schemaId: "ren.id.v2",
+    schemaName: "ren.new",
+    compatibleSchemaIds: ["ren.id.v2", "ren.id.v1"],
+  });
+  const other = defineDocumentType({ type: "ren.other", schema: z.object({ v: z.number() }), schemaId: "ren.id.other", schemaName: "ren.other" });
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-ts-")), "cache.msgpack");
+  const open = (...types: (typeof old)[]) =>
+    types
+      .reduce((builder, type) => builder.withDocumentType(type), CultCache.builder())
+      .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
+      .build();
+
+  await open(old).put(old, "k", { v: 1 });
+  const cache = open(renamed, other as unknown as typeof old);
+  await cache.pullAllBackingStores();
+  assert.deepEqual(cache.get(renamed, "k"), { v: 1 });
+  await assert.rejects(() => cache.put(other, "k", { v: 9 }), SchemaConflictError);
+  await cache.put(renamed, "k", { v: 2 });
+
+  const reloaded = open(renamed);
+  await reloaded.pullAllBackingStores();
+  assert.deepEqual(reloaded.get(renamed, "k"), { v: 2 });
+  assert.equal(readSingleFileStore(storePath).envelopes.filter((envelope) => envelope.key === "k").length, 1);
 });
 
 test("CultCache can register name and index lookups after entries already exist", async () => {
@@ -2609,17 +2639,22 @@ test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", 
   }
 });
 
-// One key is held once: a push of a second type under a stored key is refused, so the writer cannot emit a store its own reader refuses.
-test("SingleFileMessagePackBackingStore push refuses a second type under a stored key", async () => {
+// One key is held once: a push whose type does not own the stored schema id is refused, so the writer cannot emit a store its own
+// reader refuses; one whose type owns it (its own id, or one it lists compatible, as C# WrittenOwns) restamps the record in place.
+test("SingleFileMessagePackBackingStore push asks whether the written type owns the stored id, not what the types are called", async () => {
   const seed = CultCache.builder().withDocumentType(ownsId).withDocumentType(listsId).build();
   await seed.put(ownsId, "k", { name: "owner" });
   await seed.put(listsId, "k", { name: "lister" });
   const file = join(await mkdtemp(join(tmpdir(), "cultcache-push-key-")), "store.msgpack");
   const store = new SingleFileMessagePackBackingStore(file);
-  await store.push(seed.getRequiredEnvelope(ownsId, "k"));
-  await assert.rejects(() => store.push(seed.getRequiredEnvelope(listsId, "k")), SchemaConflictError);
-  const records = (decode(await readFile(file)) as unknown[][])[2] as unknown[][];
-  assert.deepEqual(records.map((record) => [record[0], record[1]]), [["k", "id.owned"]]);
+  const idsOf = async () => ((decode(await readFile(file)) as unknown[][])[2] as unknown[][]).map((record) => [record[0], record[1]]);
+
+  await store.push(seed.getRequiredEnvelope(listsId, "k"));
+  await assert.rejects(() => store.push(seed.getRequiredEnvelope(ownsId, "k")), SchemaConflictError);
+  assert.deepEqual(await idsOf(), [["k", "id.lister"]]);
+
+  await store.pushAll([seed.getRequiredEnvelope(listsId, "k")]);
+  await store.push(seed.getRequiredEnvelope(listsId, "k"));
   assert.equal((await store.pullAll()).length, 1);
 });
 

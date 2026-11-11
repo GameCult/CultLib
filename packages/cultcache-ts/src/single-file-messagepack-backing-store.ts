@@ -138,6 +138,14 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   }
 }
 
+// As C# WrittenOwns' declared half: the written type owns the stored schema id when its catalog entry carries that id as its own
+// or lists it compatible, so a type renamed under a stable id restamps the record it already holds. (The C# half that lets an
+// undeclared older id of the same schema name through when it reads whole is not ported; a same-named type keeps passing.)
+function writtenOwns(written: CultCacheEnvelope, storedId: string): boolean {
+  const entry = written.catalogEntry;
+  return entry !== undefined && (entry.schemaId === storedId || (entry.compatibleSchemaIds ?? []).includes(storedId));
+}
+
 // A store holds a key once, and the reader refuses a file that holds it twice, so a write that would put a second type under a
 // key (against a record on disk, or within its own batch) is refused before anything is written. Retyping a record is a delete
 // of the old type followed by a put of the new one.
@@ -148,7 +156,7 @@ function requireOneTypePerKey(path: string, supplied: CultCacheEnvelope[], held:
   }
   for (const entry of supplied) {
     const prior = typeByKey.get(entry.key);
-    if (prior !== undefined && prior.type !== entry.type) {
+    if (prior !== undefined && prior.type !== entry.type && !writtenOwns(entry, schemaIdForEnvelope(prior))) {
       throw new SchemaConflictError(
         schemaIdForEnvelope(entry),
         [prior.type, entry.type],

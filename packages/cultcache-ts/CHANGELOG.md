@@ -14,6 +14,10 @@ All notable changes to `@gamecult/cultcache-ts` are recorded here, following
   an empty string is no longer a value. `registerIndex` over held duplicates installs nothing. A new `roles` map names
   the many-row selection aliases (never indexed for lookup, same catalog `indexAlias`). The per-key migration rule is
   in the README; classify every key before the CultLib your tools load is updated. The refusal verdict is the contract, its text is informational.
+- The single-file reader (v1 and the legacy envelope array) refuses a store that holds two records under one key as `StoreUnreadableError`; a store that opened before may now be refused. Repair it by removing the extra record with the runtime that wrote it.
+- A `put`, `push` or `pushAll` that would land a second type under a held key (against the file, or within one batch) is refused with `SchemaConflictError`, and nothing is written. The written type may replace the record when its catalog entry carries the stored schema id as its own or lists it compatible (a type renamed under a stable id restamps the record, as C# does); otherwise retyping a key is a delete, then a put. The C# allowance for an undeclared older id of the same schema name that reads whole is not ported: a same-named type keeps passing.
+- Same-type writes replace by key; in one `pushAll` batch the last entry for a key wins.
+- A store whose canonical-schema catalog slot is not a string is refused as `StoreUnreadableError`.
 
 ### Changed
 
