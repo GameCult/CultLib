@@ -115,6 +115,26 @@ jobs:
       - name: Verify the CultCache document owner with the TypeScript cache
         run: npm run test --workspace packages/cultcache-ts
 
+      # The Python cache's unit suite ran only in cultnet-interop.yml (windows-latest, dispatch-only), so on Linux
+      # it ran nowhere. It sits after the TypeScript cache's test so the built cultcache-ts store holder exists for the
+      # cross-runtime store-lock test, which skips without it.
+      - name: Verify the CultCache document owner with the Python cache
+        run: python -m unittest discover -s packages/cultcache-py/tests
+
+      # cargo test for packages/cultcache-rs ran in no workflow: the Rust cache's own unit and doc tests were unwatched
+      # (only the interop example built, inside the C# store tests). The target directory is under RUNNER_TEMP, away from the checkout.
+      - name: Verify the CultCache document owner with the Rust cache
+        shell: bash
+        run: CARGO_TARGET_DIR="$RUNNER_TEMP/cultcache-rs-target" cargo test --manifest-path packages/cultcache-rs/Cargo.toml
+
+      # tests/GameCult.Caching.Tests, the C# reference cache's own suite (about 1,260 tests, under a minute), ran in no
+      # forge workflow; only the Mesh tests above exercised the reference.
+      # The forge runner is globalization-invariant, so ADeterministicIdIsTheSameUnderEveryCulture... cannot construct a
+      # culture and throws CultureNotFoundException; it is excluded here and still runs wherever ICU is present
+      # (variants:follow_up:culture-test-invariant-image).
+      - name: Verify the CultCache document owner with the C# reference
+        run: dotnet test tests/GameCult.Caching.Tests/GameCult.Caching.Tests.csproj --filter "FullyQualifiedName!~ADeterministicIdIsTheSameUnderEveryCulture" --logger "console;verbosity=minimal"
+
       # Packs the four TypeScript packages and installs them into a clean consumer, so a package that builds but does
       # not install or load fails here.
       - name: Verify the packed TypeScript packages install and load from a clean consumer
