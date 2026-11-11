@@ -5,7 +5,7 @@ All notable changes to this package are documented in this file.
 Earlier releases (0.2.0-0.2.3) predate this package's changelog and are not
 backfilled here; see `docs/semver-policy.md` for why.
 
-## [Unreleased]
+## [0.5.1] - 2026-11-11
 
 ### Added
 
