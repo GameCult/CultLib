@@ -193,7 +193,12 @@ fn walk(row: &Row, as_batch: bool) -> Result<(), String> {
             assert_eq!(named, conflict.record_key, "{label}: the refusal names the key written, removed or shared");
         }
         let key = refused_key.clone().unwrap_or_default();
-        assert!(format!("{error:#}").contains(&key) && !key.is_empty(), "{label}: the refusal names the key: {error:#}");
+        let message = format!("{error:#}");
+        let (all, delimited) = occurrences(&message, &key);
+        assert!(!key.is_empty() && delimited > 0, "{label}: the refusal names the key as a token: {message}");
+        if text(&last[0]) == "attach" {
+            assert_eq!(all, delimited, "{label}: the key occurs in the refusal only as a delimited token: {message}");
+        }
     }
     let mut held: Vec<(String, String, String)> = cache
         .snapshot()
@@ -237,6 +242,17 @@ fn walk(row: &Row, as_batch: bool) -> Result<(), String> {
     if &observed == expect { Ok(()) } else { Err(format!("{label} (batch {as_batch}): committed {expect:?} but this cache answers {observed:?}")) }
 }
 
+/// How often `key` occurs in `message`, and how often as a delimited token (not a piece of a longer word, schema name or id).
+fn occurrences(message: &str, key: &str) -> (usize, usize) {
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+    let found: Vec<usize> = message.match_indices(key).map(|(at, _)| at).collect();
+    let delimited = found
+        .iter()
+        .filter(|at| !word(message[..**at].chars().next_back()) && !word(message[**at + key.len()..].chars().next()))
+        .count();
+    (found.len(), delimited)
+}
+
 fn short_to_type(name: &str) -> &'static str {
     match name {
         "alpha" => Alpha::TYPE,
@@ -263,5 +279,5 @@ fn key_identity_rows_hold_their_verdicts() {
         walked += usize::from(ok);
     }
     assert!(failed.is_empty(), "{}", failed.join("\n"));
-    assert_eq!(walked, 11, "rows walked");
+    assert_eq!(walked, 12, "rows walked");
 }
