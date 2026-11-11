@@ -1644,6 +1644,25 @@ class CultCacheTests(unittest.TestCase):
             store.push(self._rec("second", "k", 1))
             self.assertEqual([e.type for e in SingleFileMessagePackBackingStore(path).pull_all()], ["second"])
 
+    def test_a_retype_is_judged_by_the_stored_schema_id_the_written_type_declares_not_by_name(self) -> None:
+        from cultcache_py import SchemaConflictError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            store = SingleFileMessagePackBackingStore(path)
+            store.push(self._writer_record("k", "old", "id-old", self._writer_entry("id-old", "old", "h1", ("id-old",))))
+            content = path.read_bytes()
+            # A renamed type that lists the stored id compatible owns the record, so its write replaces it.
+            renamed = self._writer_record("k", "new", "id-new", self._writer_entry("id-new", "new", "h2", ("id-new", "id-old")))
+            # A type that lists nothing of the stored id and has another name does not.
+            stranger = self._writer_record("k", "stranger", "id-x", self._writer_entry("id-x", "stranger", "h3", ("id-x",)))
+            for run in (lambda: store.push(stranger), lambda: store.push_all([stranger])):
+                with self.assertRaises(SchemaConflictError):
+                    run()
+                self.assertEqual(path.read_bytes(), content)
+            store.push(renamed)
+            self.assertEqual([(e.type, e.schema_id) for e in SingleFileMessagePackBackingStore(path).pull_all()], [("new", "id-new")])
+
     def test_a_batch_naming_one_key_under_two_types_is_refused_whole(self) -> None:
         from cultcache_py import SchemaConflictError
 
