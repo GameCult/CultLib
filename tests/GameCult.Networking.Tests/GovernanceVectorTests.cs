@@ -693,6 +693,55 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void ForkTransport_AShortPage_AndForkTooLarge422_ContinuedBelowItsOrder()
+        {
+            var sc = Fork["transport"]!["listShortPages"]!.AsArray();
+            Assert.That(sc.Select(x => S(x!["name"])), Is.EqualTo(new[] { "a_short_page_resumes_below_its_last_entry", "a_first_entry_past_the_budget_is_fork_too_large_and_the_client_continues_below_its_order", "fork_too_large_on_order_zero_leaves_nothing_below" }));
+            var schema = JsonNode.Parse(File.ReadAllText(Path.Combine(RepoRoot(), "contracts", "cultnet", ForkSchema)))!;
+            Assert.That(schema["$defs"]!["refusal"]!["properties"]!["code"]!["enum"]!.AsArray().Select(S), Does.Contain("fork_too_large"));
+            var covered = new List<long>();
+            foreach (var s in sc)
+            {
+                var entries = s!["entries"]!.AsArray(); var steps = s["steps"]!.AsArray(); string? last = null; var follow = false;
+                for (var i = 0; i < steps.Count; i++)
+                {
+                    var step = steps[i]!; var name = S(s["name"]);
+                    if (follow) Assert.That(step["request"]!["cursor"] is null ? null : S(step["request"]!["cursor"]), Is.EqualTo(last), name);
+                    var full = JudgeList(entries, s["ordinal"]!.GetValue<long>(), step["request"]!);
+                    var fullForks = full["forks"]!.AsArray();
+                    if (step["response"] is not null)
+                    {
+                        var r = step["response"]!; var forks = r["forks"]!.AsArray(); var n = forks.Count;
+                        Assert.That(Errors(ForkSchema, "list", r), Is.Empty, name);
+                        Assert.That(HexOf(r), Is.EqualTo(S(step["responseHex"])), name);
+                        Assert.That(n, Is.GreaterThanOrEqualTo(1), name);
+                        for (var k = 0; k < n; k++) Assert.That(JsonNode.DeepEquals(forks[k], fullForks[k]), Is.True, $"{name}: a prefix of the unbudgeted page");
+                        var o = forks[n - 1]!["card"]!["order"]!.GetValue<long>();
+                        if (full["next_cursor"] is not null || n < fullForks.Count) Assert.That(S(r["next_cursor"]), Is.EqualTo($"c{o}"), name); else Assert.That(r["next_cursor"], Is.Null, name);
+                        Assert.That(S(r["stamp"]), Is.EqualTo(S(full["stamp"]))); Assert.That(r["open_count"]!.GetValue<int>(), Is.EqualTo(full["open_count"]!.GetValue<int>())); Assert.That(r["recorded_count"]!.GetValue<int>(), Is.EqualTo(full["recorded_count"]!.GetValue<int>()));
+                        covered.AddRange(forks.Select(f => f!["card"]!["order"]!.GetValue<long>()));
+                        last = r["next_cursor"] is null ? null : S(r["next_cursor"]); follow = true;
+                    }
+                    else
+                    {
+                        var r = step["refusal"]!; var first = fullForks[0]!["card"]!;
+                        Assert.That(Errors(ForkSchema, "refusal", r), Is.Empty, name);
+                        Assert.That(HexOf(r), Is.EqualTo(S(step["refusalHex"])), name);
+                        Assert.That(S(r["code"]), Is.EqualTo("fork_too_large")); Assert.That(step["httpStatus"]!.GetValue<int>(), Is.EqualTo(422));
+                        Assert.That(S(step["fork_id"]), Is.EqualTo(S(first["fork_id"]))); Assert.That(step["order"]!.GetValue<long>(), Is.EqualTo(first["order"]!.GetValue<long>()));
+                        Assert.That(S(r["error"]), Is.EqualTo($"fork_too_large: fork {S(first["fork_id"])} (order {first["order"]!.GetValue<long>()}) alone is past the response budget; read it by id"));
+                        Assert.That(step["request"]!["limit"]!.GetValue<int>(), Is.GreaterThanOrEqualTo(1));
+                        var order = first["order"]!.GetValue<long>();
+                        if (order >= 1) { Assert.That(i + 1, Is.LessThan(steps.Count), name); last = $"c{order}"; follow = true; Assert.That(Errors(ForkSchema, "cursor", JsonValue.Create(last)), Is.Empty); }
+                        else { Assert.That(i, Is.EqualTo(steps.Count - 1), $"{name}: order 0 is the end"); follow = false; }
+                    }
+                }
+            }
+            Assert.That(covered, Is.EqualTo(new long[] { 3, 2, 1, 0, 2, 1, 0, 1 }));
+            Assert.That(sc[0]!["steps"]!.AsArray().Select(x => x!["response"]!["forks"]!.AsArray().Count), Is.EqualTo(new[] { 2, 2 }));
+        }
+
+        [Test]
         public void ForkTransport_Auth_BearerThenAudienceThenScope_AVotesTokenTouchesNothing()
         {
             var schema = JsonNode.Parse(File.ReadAllText(Path.Combine(RepoRoot(), "contracts", "cultnet", ForkSchema)))!;
