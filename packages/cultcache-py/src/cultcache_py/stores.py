@@ -258,16 +258,26 @@ def _retyped(held: CultCacheEnvelope, written: CultCacheEnvelope) -> SchemaConfl
     )
 
 
+def _written_owns(held: CultCacheEnvelope, written: CultCacheEnvelope) -> bool:
+    """Whether a write of `written` may replace `held` at its key (C# WrittenOwns): the written type's entry declares the held
+    record's schema id (its own id or one it lists compatible), or it is the type of the same schema name. The same-name half
+    stands in for C#'s "reads the published entry whole": this runtime does not compare shapes, so it never refuses a
+    same-name type for dropping slots."""
+    stored_id = _schema_id_for(held)
+    entry = written.catalog_entry if written.catalog_entry is not None else _default_catalog_entry(written)
+    return stored_id == entry.schema_id or stored_id in entry.compatible_schema_ids or held.type == written.type
+
+
 def _encode_snapshot(
     supplied: list[CultCacheEnvelope], arrived: list[CultCacheEnvelope], format_version: str
 ) -> list[Any]:
     # A key names one record whatever its type, so a supplied record replaces the arrived one by key alone, and only of the
-    # same type: retyping a key is a removal and an add, so a record of another type under the key refuses the write.
+    # type that owns it: retyping a key is a removal and an add, so a record another type owns under the key refuses the write.
     held_by_key = {envelope.key: envelope for envelope in arrived}
     landing: dict[str, CultCacheEnvelope] = {}
     for envelope in supplied:
         for held in (landing.get(envelope.key), held_by_key.get(envelope.key)):
-            if held is not None and held.type != envelope.type:
+            if held is not None and not _written_owns(held, envelope):
                 raise _retyped(held, envelope)
         landing[envelope.key] = envelope
     supplied = list(landing.values())
