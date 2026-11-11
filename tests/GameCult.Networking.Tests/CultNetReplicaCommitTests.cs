@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Caching;
+using LiteNetLib;
 using R3;
 using MessagePack;
 using NUnit.Framework;
@@ -105,14 +106,16 @@ namespace GameCult.Networking.Tests
             public List<Exception> Faults { get; } = new();
             public CultNetDatabase Database { get; }
             private readonly CultNetDatabaseSubscriptionServer _server;
+            public void Reconcile() => _server.Reconcile();
 
-            public Replication(Action<CultCache>? seedSource = null, Action<CultCache>? seedReplica = null)
+            public Replication(Action<CultCache>? seedSource = null, Action<CultCache>? seedReplica = null,
+                Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, string, string, bool>? authorizeRecord = null)
             {
                 seedSource?.Invoke(Source);
                 seedReplica?.Invoke(Replica);
                 Database = new CultNetDatabase(Source);
                 var wire = new LoopbackServer();
-                _server = new CultNetDatabaseSubscriptionServer(wire, Database);
+                _server = new CultNetDatabaseSubscriptionServer(wire, Database, authorizeRecord: authorizeRecord);
                 var documents = new CultNetDocumentRegistry(Replica.Registry)
                     .Register(CultNetDocumentBinding.ForDocument<ReplicaItem>(Replica.Registry));
                 Client = new CultNetDatabaseSubscriptionClient(new Client(wire, Peer), Replica, documents);
@@ -600,6 +603,172 @@ namespace GameCult.Networking.Tests
 
             Assert.That(run.Faults, Has.Count.EqualTo(1));
             Assert.That(run.Client.Fault!.Message, Is.EqualTo("first"));
+        }
+
+        private static object CommitsOf(CultNetDatabaseSubscriptionClient client) =>
+            typeof(CultNetDatabaseSubscriptionClient)
+                .GetField("_commits", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(client)!;
+
+        // The check that a subscription is live belongs to the same lock Unsubscribe evicts under. The test holds that lock (it is
+        // re-entrant), lets a straggler's handler arrive at it, ends the subscription, and releases: a handler that had already
+        // passed its check by then would buffer a commit nobody will ever finish.
+        [Test]
+        public void AStragglerThatArrivedBeforeUnsubscribeBuffersNothingAfterIt()
+        {
+            using var run = new Replication();
+
+            lock (CommitsOf(run.Client))
+            {
+                run.Peer.Client!.Emit(Put(run, "items", "a", "one", "4", 2));
+                Thread.Sleep(250);
+                run.Client.Unsubscribe("items");
+            }
+            Thread.Sleep(250);
+
+            Assert.That(Pending(run.Client), Is.Zero);
+            Assert.That(run.Client.Fault, Is.Null);
+        }
+
+        // The 1,000,000 budget is the client's, over every subscription's incomplete commits, not each subscription's own.
+        [Test]
+        public async Task TheBudgetIsSharedByAllSubscriptions()
+        {
+            using var run = new Replication();
+            run.Client.SubscribeAsync("items2", recordKeys: new[] { "nothing-matches" }).GetAwaiter().GetResult();
+
+            run.Peer.Client!.Emit(Put(run, "items", "a", "one", "1", 600_000));
+            run.Peer.Client!.Emit(Put(run, "items2", "b", "two", "2", 400_000));
+            await Task.Delay(200);
+            Assert.That(run.Client.Fault, Is.Null, "600k and 400k fit in one million");
+            Assert.That(Pending(run.Client), Is.EqualTo(2));
+
+            run.Peer.Client!.Emit(Put(run, "items2", "c", "three", "3", 2));
+            await Until(() => run.Client.Fault != null);
+        }
+
+        [Test]
+        public async Task TwoSubscriptionsAnnouncingMoreThanTheBudgetBetweenThemFault()
+        {
+            using var run = new Replication();
+            run.Client.SubscribeAsync("items2", recordKeys: new[] { "nothing-matches" }).GetAwaiter().GetResult();
+
+            run.Peer.Client!.Emit(Put(run, "items", "a", "one", "1", 600_000));
+            run.Peer.Client!.Emit(Put(run, "items2", "b", "two", "2", 600_000));
+            await Until(() => run.Client.Fault != null);
+            Assert.That(Pending(run.Client), Is.Zero);
+        }
+
+        [Test]
+        public async Task AStragglerFromAnUnknownIdIsDroppedWhileAnotherSubscriptionIsLive()
+        {
+            using var run = new Replication();
+            run.Client.SubscribeAsync("items2", recordKeys: new[] { "nothing-matches" }).GetAwaiter().GetResult();
+            run.Peer.Client!.Emit(Put(run, "items2", "b", "two", "4", 2));
+            await Until(() => Pending(run.Client) == 1);
+
+            run.Peer.Client!.Emit(Put(run, "ghost", "a", "one", "4", 2));
+            run.Peer.Client!.Emit(Put(run, "ghost", "c", "three", "5", 3));
+            await Task.Delay(200);
+
+            Assert.That(Pending(run.Client), Is.EqualTo(1), "only the live subscription's commit is held");
+            Assert.That(run.Client.Fault, Is.Null);
+            run.Peer.Client!.Emit(Put(run, "items2", "d", "four", "4", 2));
+            await Until(() => run.ReplicaItem("b") != null);
+            Assert.That(run.ReplicaItem("a"), Is.Null);
+        }
+
+        // A public Reconcile() diffs the projection against the source outside any commit, so its messages carry no commit. That is
+        // sound because a projection only ever differs from the source by records the policy hid or showed, never by a changed
+        // value (a changed record is re-judged the moment its commit arrives): both sides of the diff are subsets of one source
+        // state, whose unique values are distinct, so no order of its removals, updates and additions can meet a held value.
+        [Test]
+        public async Task ReconcilingAfterAPolicyChangeThatFollowsASwapLeavesTheReplicaIntact()
+        {
+            var hidden = new HashSet<string>();
+            using var run = new Replication(source => Stage(source, ("a", "one"), ("b", "two")),
+                authorizeRecord: (_, _, key, _) => !hidden.Contains(key));
+            hidden.Add("b");
+
+            Stage(run.Source, ("a", "two"), ("b", "one"));
+            await Until(() => run.ReplicaItem("b") == null && run.ReplicaItem("a")!.Sku == "two");
+
+            hidden.Remove("b");
+            hidden.Add("a");
+            run.Reconcile();
+            await Until(() => run.ReplicaItem("b") != null && run.ReplicaItem("a") == null);
+
+            Assert.That(run.ReplicaItem("b")!.Sku, Is.EqualTo("one"));
+            Assert.That(run.Client.Fault, Is.Null);
+            Assert.That(run.Peer.Changes.Last().CommitId, Is.Null, "the reconcile diff is not a commit");
+        }
+
+        // Source, wire and client all real: a CultNetDatabaseServer behind a Server on a loopback socket, a LiteNetLib client
+        // standing in for the transport of a CultNetDatabaseSubscriptionClient. No handler is called directly.
+        private sealed class SocketClient : ICultNetSchemaClient
+        {
+            private readonly NetManager _manager;
+            private readonly NetPeer _peer;
+            private readonly List<Action<CultNetSnapshotResponseRawMessage>> _snapshots = new();
+            private readonly List<Action<CultNetDatabaseChangeRawMessage>> _changes = new();
+
+            public SocketClient(int port, string key)
+            {
+                var listener = new EventBasedNetListener();
+                var connected = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var decoder = new LiteNetLibTransportConnection();
+                listener.PeerConnectedEvent += _ => connected.TrySetResult(true);
+                listener.NetworkReceiveEvent += (_, reader, _, _) =>
+                {
+                    switch (LiteNetLibTransportConnection.DecodeSchema(decoder.Receive(reader.GetRemainingBytes())))
+                    {
+                        case CultNetSnapshotResponseRawMessage snapshot: foreach (var handler in _snapshots.ToArray()) handler(snapshot); break;
+                        case CultNetDatabaseChangeRawMessage change: foreach (var handler in _changes.ToArray()) handler(change); break;
+                    }
+                };
+                _manager = new NetManager(listener) { UnsyncedEvents = true };
+                _manager.Start(0);
+                _peer = _manager.Connect("127.0.0.1", port, key);
+                if (!connected.Task.Wait(TimeSpan.FromSeconds(10))) Assert.Fail("the client did not connect");
+            }
+
+            public bool Connected => _peer.ConnectionState == ConnectionState.Connected;
+            public void Connect(string host, int port) { }
+            public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage =>
+                _peer.Send(CultNetSchemaMessageSerialization.Serialize(message), DeliveryMethod.ReliableOrdered);
+            public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+            {
+                if (callback is Action<CultNetSnapshotResponseRawMessage> snapshot) _snapshots.Add(snapshot);
+                else if (callback is Action<CultNetDatabaseChangeRawMessage> change) _changes.Add(change);
+            }
+            public void Dispose() => _manager.Stop();
+        }
+
+        [Test]
+        public async Task ASwapThroughTheRealDatabaseServerReachesTheClientIntact()
+        {
+            var source = new CultCache();
+            Stage(source, ("a", "one"), ("b", "two"));
+            using var database = new CultNetDatabase(source);
+            using var server = new Server(source, ServerSecurityOptions.Development()) { Port = 0 };
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+            server.Start();
+            var replica = new CultCache();
+            var documents = new CultNetDocumentRegistry(replica.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<ReplicaItem>(replica.Registry));
+            using var client = new CultNetDatabaseSubscriptionClient(
+                new SocketClient(server.Port, ServerSecurityOptions.Development().ConnectionKey), replica, documents);
+            var faults = new List<Exception>();
+            client.Faulted += faults.Add;
+            await client.SubscribeAsync("items", schemaIds: new[] { source.Registry.GetRequired<ReplicaItem>().SchemaId });
+            Assert.That(replica.Get<ReplicaItem>(new CultRecordKey("a"))!.Sku, Is.EqualTo("one"));
+
+            Stage(source, ("a", "two"), ("b", "one"));
+            await Until(() => replica.Get<ReplicaItem>(new CultRecordKey("a"))!.Sku == "two");
+
+            Assert.That(replica.Get<ReplicaItem>(new CultRecordKey("b"))!.Sku, Is.EqualTo("one"));
+            Assert.That(replica.GetByIndex<ReplicaItem>("sku", "one"), Is.SameAs(replica.Get<ReplicaItem>(new CultRecordKey("b"))));
+            Assert.That(client.Fault, Is.Null);
+            Assert.That(faults, Is.Empty);
         }
 
         [TestCase(5000)]

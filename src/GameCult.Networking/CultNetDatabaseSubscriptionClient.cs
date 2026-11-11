@@ -245,14 +245,13 @@ namespace GameCult.Networking
                     return Apply(deliveryMode, new[] { message });
 
                 // The commit's other changes follow on this connection; the replica applies them as one commit.
-                // A straggler of a subscription that was ended, or never made, is not buffered.
-                if (!_deliveryModes.ContainsKey(message.SubscriptionId))
-                    return Task.CompletedTask;
                 var held = (message.SubscriptionId, message.CommitId);
                 PendingCommit? pending;
                 lock (_commits)
                 {
-                    if (Fault != null)
+                    // A straggler of a subscription that was ended, or never made, is not buffered. Judged under the lock that
+                    // Unsubscribe evicts under: a check before it could pass, lose the race to the eviction, and then buffer.
+                    if (Fault != null || !_deliveryModes.ContainsKey(message.SubscriptionId))
                         return Task.CompletedTask;
                     var count = message.CommitCount!.Value;
                     var refusal = !_commits.TryGetValue(held, out pending)
