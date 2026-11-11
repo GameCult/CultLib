@@ -4586,6 +4586,79 @@ mod tests {
         Ok(())
     }
 
+    /// A batch lays back only its home store's foreign records: another store's are never copied into it.
+    #[test]
+    fn retype_a_batch_lays_back_only_its_own_stores_foreign_records() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let (routed, generic) = (temp.path().join("routed.cc"), temp.path().join("generic.cc"));
+        store_with(&routed, |cache| cache.put("own", &settings_one()).map(drop))?;
+        store_with(&generic, |cache| cache.put("carried", &note_one()).map(drop))?;
+        let generic_bytes = fs::read(&generic)?;
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<Settings>()?;
+        cache.add_backing_store(SingleFileMessagePackBackingStore::new(&routed), [Settings::TYPE])?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&generic))?;
+        cache.pull_all_backing_stores()?;
+        let (staged, _) = cache.prepare_entry("other", &settings_one())?;
+        cache.put_prepared_batch(vec![staged])?;
+        let keys: Vec<String> = reloaded(&routed)?.into_iter().map(|entry| entry.key).collect();
+        assert_eq!(keys, ["other", "own"], "the routed store holds its own records only");
+        assert_eq!(fs::read(&generic)?, generic_bytes);
+        cache.pull_all_backing_stores()?;
+        Ok(())
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+    #[cultcache(type = "only-one", schema = "tests.only_one", global)]
+    struct OnlyOne {
+        #[cultcache(key = 0)]
+        text: String,
+    }
+
+    /// A pull refused after every record is read (here, a second global) changes nothing, the foreign list included.
+    #[test]
+    fn retype_a_pull_refused_after_reading_keeps_the_foreign_list() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("cache.cc");
+        store_with(&path, |cache| cache.put("carried", &note_one()).map(drop))?;
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<Settings>()?;
+        cache.register_entry_type::<OnlyOne>()?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+        cache.pull_all_backing_stores()?;
+        let before = (cache.snapshot(), cache.foreign_records());
+
+        // Behind the cache's back: another foreign record and two records of the global type.
+        let mut store = SingleFileMessagePackBackingStore::new(&path);
+        let (mut late, _) = cache.prepare_entry("late", &settings_one())?;
+        late.r#type = Note::TYPE.to_string();
+        late.schema_id = Some(Note::TYPE.to_string());
+        store.push(&late)?;
+        for key in ["g1", "g2"] {
+            store.push(&cache.prepare_entry(key, &OnlyOne { text: key.to_string() })?.0)?;
+        }
+        assert!(cache.pull_all_backing_stores().is_err());
+        assert_eq!((cache.snapshot(), cache.foreign_records()), before, "a refused pull changes nothing");
+        Ok(())
+    }
+
+    /// An SoA image is judged against the foreign keys too: it may not put a record at a key a store carries foreign.
+    #[test]
+    fn retype_load_soa_refuses_a_record_at_a_foreign_key() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("cache.cc");
+        store_with(&path, |cache| cache.put("carried", &note_one()).map(drop))?;
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<Settings>()?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+        cache.pull_all_backing_stores()?;
+        let (staged, _) = cache.prepare_entry("carried", &settings_one())?;
+        let error = cache.load_soa(CultCacheSoaTable::from_envelopes(vec![staged])).unwrap_err();
+        assert_eq!(retype_refusal(&error).record_key, "carried");
+        assert!(cache.snapshot().is_empty());
+        Ok(())
+    }
+
     #[test]
     fn retype_load_soa_refuses_a_second_type_at_a_key_and_admits_nothing() -> Result<()> {
         let mut cache = CultCache::new();
