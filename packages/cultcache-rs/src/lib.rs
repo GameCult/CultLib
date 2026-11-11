@@ -2750,6 +2750,18 @@ pub struct CultCache {
     /// values. Registration data, so the judge decodes only indexed types.
     projectors: BTreeMap<String, IndexProjector>,
     stores: Vec<CultCacheStoreRegistration>,
+    /// Records a store holds that no registered type claims: (store index, the envelope as the store read it). Derived from the last
+    /// pull and replaced with it; written nowhere else. It decides only refusals at its keys.
+    foreign: Vec<(usize, CultCacheEnvelope)>,
+}
+
+/// A record a store holds that no registered type claims: carried, never served.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForeignRecord {
+    pub key: String,
+    pub schema_id: String,
+    pub schema_name: String,
+    pub stored_at: String,
 }
 
 type IndexProjector = fn(&[u8]) -> Result<Vec<(&'static str, String)>>;
@@ -2803,6 +2815,7 @@ impl CultCache {
             index_holders: BTreeMap::new(),
             projectors: BTreeMap::new(),
             stores: Vec::new(),
+            foreign: Vec::new(),
         }
     }
 
@@ -2974,6 +2987,23 @@ impl CultCache {
         self.entries = loaded;
         self.index_holders = holders;
         Ok(())
+    }
+
+    /// The records the last pull found in a store that no registered type claims, sorted by key (UTF-16 order). The cache does not
+    /// serve them; it carries them through every write and refuses a write or removal at their keys.
+    pub fn foreign_records(&self) -> Vec<ForeignRecord> {
+        let mut records: Vec<ForeignRecord> = self
+            .foreign
+            .iter()
+            .map(|(_, entry)| ForeignRecord {
+                key: entry.key.clone(),
+                schema_id: schema_identity(entry).to_string(),
+                schema_name: entry.r#type.clone(),
+                stored_at: entry.stored_at.clone(),
+            })
+            .collect();
+        records.sort_by(|left, right| utf16_cmp(&left.key, &right.key));
+        records
     }
 
     /// Returns the exact envelopes in the currently loaded cache image.
