@@ -290,5 +290,277 @@ namespace GameCult.Caching.Tests
                 }
             }
         }
+
+        // ---- refusals.msgpack: [label, ops, refusal]; the pair a refusal names is a function of the resulting state ----
+
+        private sealed record Schema(string Name, Type Role, Type Index, string SecondField);
+
+        private static Schema Plain(string suffix, string name) => new(
+            name,
+            EmittedDocumentTypes.Emit("UqVec" + suffix + "Role", name, name + ".v1", RoleFields),
+            EmittedDocumentTypes.Emit("UqVec" + suffix + "Index", name, name + ".v1", IndexFields),
+            "Category");
+
+        private static readonly Schema[] Schemas =
+        {
+            new("tests.unique_item", ItemRole, ItemIndex, "Category"),
+            new("tests.uq_pair",
+                EmittedDocumentTypes.Emit("UqVecPairRole", "tests.uq_pair", "tests.uq_pair.v1",
+                    new EmittedDocumentTypes.Field[] { new("Sku", typeof(string), 0, Role: "Sku"), new("Alt", typeof(string), 1, Role: "Alt") }),
+                EmittedDocumentTypes.Emit("UqVecPairIndex", "tests.uq_pair", "tests.uq_pair.v1",
+                    new EmittedDocumentTypes.Field[] { new("Sku", typeof(string), 0, Index: "Sku"), new("Alt", typeof(string), 1, Index: "Alt") }),
+                "Alt"),
+            Plain("Alpha", "tests.uq_alpha"),
+            Plain("Beta", "tests.uq_beta"),
+        };
+
+        private static Schema SchemaNamed(string name) => Schemas.Single(schema => schema.Name == name);
+
+        private sealed record Rec(string Key, string Schema, string Sku, string Second = "");
+
+        private sealed record Op(string Kind, string? File = null, Rec[]? Records = null);
+
+        private sealed record Refusal(string K1, string K2, string Schema, string Alias);
+
+        private sealed record Case(string Label, Op[] Ops, Refusal? Refusal);
+
+        private const string Item = "tests.unique_item";
+        private const string Pair = "tests.uq_pair";
+        private const string Alpha = "tests.uq_alpha";
+        private const string Beta = "tests.uq_beta";
+
+        private static Rec[] Items_(params (string Key, string Sku)[] rows) => rows.Select(row => new Rec(row.Key, Item, row.Sku)).ToArray();
+        private static Op Open(string? file = null) => new("open", file);
+        private static Op Pull(string file) => new("pull", file);
+        private static Op Commit(params Rec[] records) => new("commit", Records: records);
+
+        private static readonly Rec[] PairRecords = { new("item:a", Pair, "S", "X"), new("item:b", Pair, "S", "Y"), new("item:c", Pair, "T", "Y") };
+        private static readonly Rec[] SurrogateRecords = Items_(("k\uFF01", "S"), ("k\U0001F600", "S"), ("k\uE000", "S"));
+        private static readonly Rec[] TypeRecords =
+        {
+            new("b:1", Alpha, "P"), new("a:1", Beta, "P"), new("b:2", Alpha, "P"), new("a:2", Beta, "P")
+        };
+        private static readonly Rec[] RepullBefore = Items_(("item:a1", "A"), ("item:b1", "C"));
+        private static readonly Rec[] RepullAfter = Items_(("item:a1", "A"), ("item:b1", "B"), ("item:b2", "B"), ("item:c1", "A"));
+
+        private static readonly (string File, Rec[] Records)[] RefusalStores =
+        {
+            ("pair-store.cc", PairRecords), ("surrogate-store.cc", SurrogateRecords), ("types-store.cc", TypeRecords),
+            ("repull-before.cc", RepullBefore), ("repull-after.cc", RepullAfter),
+        };
+
+        private static readonly Refusal SurrogateRefusal = new("k\U0001F600", "k\uE000", Item, "Sku");
+        private static readonly Refusal TypesRefusal = new("a:1", "a:2", Beta, "Sku");
+        private static readonly Refusal PairRefusal = new("item:b", "item:c", Pair, "Alt");
+        private static readonly Refusal RepullRefusal = new("item:a1", "item:c1", Item, "Sku");
+
+        private static readonly Case[] Cases =
+        {
+            new("batch-later-value-staged-first", new[] { Open(), Commit(Items_(("x", "A"), ("y", "A"), ("a", "B"), ("b", "B"))) },
+                new Refusal("a", "b", Item, "Sku")),
+            new("batch-surrogate-keys", new[] { Open(), Commit(SurrogateRecords) }, SurrogateRefusal),
+            new("batch-interleaved-types", new[] { Open(), Commit(TypeRecords) }, TypesRefusal),
+            new("batch-two-aliases", new[] { Open(), Commit(PairRecords) }, PairRefusal),
+            new("held-then-landing", new[] { Open(), Commit(Items_(("m", "S"))), Commit(Items_(("a", "S"))) },
+                new Refusal("a", "m", Item, "Sku")),
+            new("held-in-the-least-group", new[] { Open(), Commit(Items_(("m", "A"))), Commit(Items_(("z", "B"), ("y", "B"), ("a", "A"))) },
+                new Refusal("a", "m", Item, "Sku")),
+            new("swap-off-a-held-value", new[] { Open(), Commit(Items_(("a1", "A"))), Commit(Items_(("a1", "B"), ("c1", "A"))) }, null),
+            new("load-two-aliases", new[] { Open("pair-store.cc") }, PairRefusal),
+            new("load-surrogate-keys", new[] { Open("surrogate-store.cc") }, SurrogateRefusal),
+            new("load-interleaved-types", new[] { Open("types-store.cc") }, TypesRefusal),
+            new("repull-held-pair", new[] { Open("repull-before.cc"), Pull("repull-after.cc") }, RepullRefusal),
+            new("load-repull-after", new[] { Open("repull-after.cc") }, RepullRefusal),
+            new("commit-onto-a-loaded-holder", new[] { Open("repull-before.cc"), Commit(Items_(("item:z", "A"))) },
+                new Refusal("item:a1", "item:z", Item, "Sku")),
+        };
+
+        private static byte[] RefusalStoreBytes(Rec[] records)
+        {
+            var directory = Path.Combine(Path.GetTempPath(), $"cultlib-uidxr-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(directory);
+            try
+            {
+                var path = Path.Combine(directory, "store.cc");
+                var roles = records.Select(record => SchemaNamed(record.Schema).Role).Distinct().ToArray();
+                using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions
+                {
+                    Registry = CultDocumentRegistry.ForTypes(roles), StoreFlushOnDispose = true
+                }))
+                {
+                    cache.Clock = () => StoredAt;
+                    foreach (var record in records)
+                    {
+                        var schema = SchemaNamed(record.Schema);
+                        cache.UpsertAsync(schema.Role, EmittedDocumentTypes.New(schema.Role, ("Sku", record.Sku), (schema.SecondField, record.Second)), new CultRecordKey(record.Key))
+                            .GetAwaiter().GetResult();
+                    }
+
+                    cache.FlushAsync().GetAwaiter().GetResult();
+                }
+
+                return File.ReadAllBytes(path);
+            }
+            finally
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        private static byte[] RefusalsFile()
+        {
+            var buffer = new ArrayBufferWriter<byte>();
+            var writer = new MessagePackWriter(buffer);
+            writer.WriteArrayHeader(Cases.Length);
+            foreach (var row in Cases)
+            {
+                writer.WriteArrayHeader(3);
+                writer.Write(row.Label);
+                writer.WriteArrayHeader(row.Ops.Length);
+                foreach (var op in row.Ops)
+                {
+                    writer.WriteArrayHeader(2);
+                    writer.Write(op.Kind);
+                    if (op.Records != null)
+                    {
+                        writer.WriteArrayHeader(op.Records.Length);
+                        foreach (var record in op.Records)
+                        {
+                            writer.WriteArrayHeader(4);
+                            writer.Write(record.Key);
+                            writer.Write(record.Schema);
+                            writer.Write(record.Sku);
+                            writer.Write(record.Second);
+                        }
+                    }
+                    else if (op.File == null) writer.WriteNil();
+                    else writer.Write(op.File);
+                }
+
+                if (row.Refusal == null) writer.WriteNil();
+                else
+                {
+                    writer.WriteArrayHeader(4);
+                    writer.Write(row.Refusal.K1);
+                    writer.Write(row.Refusal.K2);
+                    writer.Write(row.Refusal.Schema);
+                    writer.Write(row.Refusal.Alias);
+                }
+            }
+
+            writer.Flush();
+            return buffer.WrittenSpan.ToArray();
+        }
+
+        // Performs one op of a row against the open cache; the cache's own file is the only state it leaves behind.
+        private static void Perform(ref CultCache? cache, string path, Op op)
+        {
+            var indexTypes = Schemas.Select(schema => schema.Index).ToArray();
+            switch (op.Kind)
+            {
+                case "open":
+                    if (op.File != null) File.WriteAllBytes(path, Committed(op.File));
+                    cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = CultDocumentRegistry.ForTypes(indexTypes) });
+                    break;
+                case "pull":
+                    File.WriteAllBytes(path, Committed(op.File!));
+                    cache!.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+                    break;
+                case "commit":
+                    cache!.Commit(batch =>
+                    {
+                        foreach (var record in op.Records!)
+                        {
+                            var schema = SchemaNamed(record.Schema);
+                            batch.Upsert(schema.Index, EmittedDocumentTypes.New(schema.Index, ("Sku", record.Sku), (schema.SecondField, record.Second)), new CultRecordKey(record.Key));
+                        }
+                    });
+                    break;
+                default:
+                    throw new InvalidOperationException(op.Kind);
+            }
+        }
+
+        [Test]
+        public void RefusalsHoldTheRule()
+        {
+            Check("refusals.msgpack", RefusalsFile());
+            foreach (var (file, records) in RefusalStores)
+                Check(file, RefusalStoreBytes(records));
+
+            // The committed file is what is walked, not the in-memory table.
+            var reader = new MessagePackReader(Committed("refusals.msgpack"));
+            var count = reader.ReadArrayHeader();
+            Assert.That(count, Is.EqualTo(Cases.Length));
+            var walked = 0;
+            for (var i = 0; i < count; i++)
+            {
+                Assert.That(reader.ReadArrayHeader(), Is.EqualTo(3));
+                var label = reader.ReadString()!;
+                var ops = new List<Op>();
+                for (var n = reader.ReadArrayHeader(); n > 0; n--)
+                {
+                    Assert.That(reader.ReadArrayHeader(), Is.EqualTo(2));
+                    var kind = reader.ReadString()!;
+                    if (kind == "commit")
+                    {
+                        var records = new List<Rec>();
+                        for (var m = reader.ReadArrayHeader(); m > 0; m--)
+                        {
+                            Assert.That(reader.ReadArrayHeader(), Is.EqualTo(4));
+                            records.Add(new Rec(reader.ReadString()!, reader.ReadString()!, reader.ReadString()!, reader.ReadString()!));
+                        }
+
+                        ops.Add(new Op(kind, Records: records.ToArray()));
+                    }
+                    else ops.Add(new Op(kind, NextText(ref reader)));
+                }
+
+                Refusal? refusal = null;
+                if (!reader.TryReadNil())
+                {
+                    Assert.That(reader.ReadArrayHeader(), Is.EqualTo(4));
+                    refusal = new Refusal(reader.ReadString()!, reader.ReadString()!, reader.ReadString()!, reader.ReadString()!);
+                }
+
+                var directory = Path.Combine(Path.GetTempPath(), $"cultlib-uidxf-{Guid.NewGuid():N}");
+                Directory.CreateDirectory(directory);
+                CultCache? cache = null;
+                try
+                {
+                    var path = Path.Combine(directory, "store.cc");
+                    foreach (var op in ops.Take(ops.Count - 1))
+                        Perform(ref cache, path, op);
+
+                    var last = ops[^1];
+                    if (refusal == null)
+                    {
+                        Assert.DoesNotThrow(() => Perform(ref cache, path, last), label);
+                    }
+                    else
+                    {
+                        cache?.FlushAsync().GetAwaiter().GetResult();
+                        var before = last.Kind == "open" && last.File != null ? Committed(last.File)
+                            : last.Kind == "pull" ? Committed(last.File!)
+                            : File.Exists(path) ? File.ReadAllBytes(path) : Array.Empty<byte>();
+                        CultCache? attempt = cache;
+                        var refused = Assert.Throws<InvalidOperationException>(() => Perform(ref attempt, path, last), label)!;
+                        Assert.That(refused.Message, Is.EqualTo(
+                            $"Records {refusal.K1} and {refusal.K2} ({refusal.Schema}) both hold unique index '{refusal.Alias}'; an index value names one record."), label);
+                        if (last.Kind != "open") cache?.FlushAsync().GetAwaiter().GetResult();
+                        Assert.That(File.Exists(path) ? File.ReadAllBytes(path) : Array.Empty<byte>(), Is.EqualTo(before), $"{label}: the file is untouched");
+                    }
+
+                    walked++;
+                }
+                finally
+                {
+                    cache?.Dispose();
+                    Directory.Delete(directory, recursive: true);
+                }
+            }
+
+            Assert.That(walked, Is.EqualTo(13));
+        }
     }
 }
