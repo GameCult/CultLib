@@ -71,8 +71,10 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       const disk = this.#readDisk();
       this.#format = disk.format;
       const existing = disk.envelopes;
+      // The record the file stores at the key is the one removed when the removal's schema owns its stored id: the
+      // arrived record's type is its schema's name, which a type of another name does not carry.
       const filtered = existing.filter(
-        (candidate) => !(candidate.type === entry.type && candidate.key === entry.key),
+        (candidate) => !(candidate.key === entry.key && (schemaIdForEnvelope(candidate) === schemaIdForEnvelope(entry) || writtenOwns(entry, schemaIdForEnvelope(candidate)))),
       );
       await this.#writeAll([], filtered);
     });

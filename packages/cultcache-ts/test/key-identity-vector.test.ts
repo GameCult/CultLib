@@ -60,7 +60,7 @@ const sameRecord = (left: CultCacheEnvelope | undefined, right: CultCacheEnvelop
 
 test("vectors rows.msgpack: every row's refusal, held records, file, foreign list and kept bytes", async () => {
   const rows = decode(await readFile(join(vectors, "rows.msgpack"))) as Row[];
-  assert.equal(rows.length, 11);
+  assert.equal(rows.length, 12);
   let walked = 0;
   const failures: string[] = [];
   for (const [label, registered, ops, expect] of rows) {
@@ -139,7 +139,12 @@ test("vectors rows.msgpack: every row's refusal, held records, file, foreign lis
         assert.equal(failed, true, `${label}: the last op is refused`);
         const [key] = refusal;
         if (label === "key-in-two-stores-refused") {
-          assert.ok((refused as Error).message.includes(key), `${label}: the refusal names the key`);
+          // The key is read out of the refusal as a delimited token: the message opens "Record <key> is held by" and the key
+          // occurs nowhere else in it (not inside a schema name).
+          const message = (refused as Error).message;
+          const named = /^Record (\S+) is held by/u.exec(message);
+          assert.equal(named?.[1], key, `${label}: the refusal opens with the key`);
+          assert.equal(message.split(/[^A-Za-z0-9_.]+/u).filter((token) => token === key).length, 1, `${label}: the key occurs only as a delimited token`);
           assert.deepEqual(cache.snapshot(), beforeCache, `${label}: the earlier pulled state survives`);
           assert.deepEqual(await Promise.all(attached.slice(0, beforeAttached.length).map((copy) => readFile(copy))), beforeAttached, `${label}: the attached files are byte-identical`);
         } else {
@@ -181,7 +186,7 @@ test("vectors rows.msgpack: every row's refusal, held records, file, foreign lis
     }
   }
   assert.deepEqual(failures, [], "every row holds its verdict");
-  assert.equal(walked, 11);
+  assert.equal(walked, 12);
 });
 
 // Beyond the vector: what the walker's string-typed rows cannot say.
@@ -252,13 +257,13 @@ test("a foreign key one store carries and another holds under a registered type 
     const catalog = join(dir, "catalog.cc");
     await copyFile(join(vectors, "catalog-store.cc"), catalog);
     const writer = CultCache.builder().withDocumentType(types.gamma!).withGenericStore(new SingleFileMessagePackBackingStore(foreign)).build();
-    await writer.put(types.gamma!, "k", { text: "g" } as never);
+    await writer.put(types.gamma!, "qx", { text: "g" } as never);
     const cache = CultCache.builder().withDocumentType(types.alpha!).build();
     await cache.addBackingStore(new SingleFileMessagePackBackingStore(catalog), types.alpha!);
     await cache.pullAllBackingStores();
     await cache.addBackingStore(new SingleFileMessagePackBackingStore(foreign));
     await assert.rejects(cache.pullAllBackingStores(), /held by two stores/u);
-    assert.deepEqual(cache.snapshot().map((e) => e.key), ["k"], "the earlier pulled state survives");
+    assert.deepEqual(cache.snapshot().map((e) => e.key), ["qx"], "the earlier pulled state survives");
     assert.deepEqual(cache.foreignRecords(), []);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -292,4 +297,81 @@ test("a foreign key is refused by the cache before any store is asked, and forei
   await assert.rejects(cache.delete(types.alpha!, "b"), (error: Error) => error instanceof SchemaConflictError && error.recordKey === "b");
   assert.equal(await cache.delete(types.alpha!, "nobody"), false);
   assert.deepEqual(calls, []);
+});
+
+// The store's delete matches the record the file stores by its schema id, not by the type string: a record read back is
+// typed by its schema's name, which a type of another name does not carry.
+test("a delete removes the record the file stores although the type differs from the schema name, and the key retypes across a reload", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ki-"));
+  try {
+    const path = join(dir, "s.cc");
+    const named = (type: string, schemaName: string, schemaId: string) =>
+      defineDocumentType({ type, schemaId, schemaName, schemaVersion: `${schemaName}.v1`, schema: z.object({ v: z.string() }) });
+    const first = named("app.first", "wire.first", "wire.first.v1");
+    const second = named("app.second", "wire.second", "wire.second.v1");
+    const open = () => CultCache.builder().withDocumentType(first).withDocumentType(second).withGenericStore(new SingleFileMessagePackBackingStore(path)).build();
+    const writer = open();
+    await writer.put(first, "k", { v: "a" });
+    const reader = open();
+    await reader.pullAllBackingStores();
+    assert.equal(await reader.delete(first, "k"), true);
+    assert.deepEqual([...stored(path).keys()], [], "the record is gone from the file");
+    await reader.put(second, "k", { v: "b" });
+    assert.deepEqual([...stored(path).values()].map((e) => [e.key, e.catalogEntry?.schemaName]), [["k", "wire.second"]]);
+    const again = open();
+    await again.pullAllBackingStores();
+    assert.deepEqual(again.snapshot().map((e) => [e.type, e.key]), [["app.second", "k"]]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an owned rename whose two types home in different stores is refused, and neither store changes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ki-"));
+  try {
+    const oldPath = join(dir, "old.cc");
+    const newPath = join(dir, "new.cc");
+    const old = plain("rn.old", "rn.id.v1");
+    const renamed = plain("rn.new", "rn.id.v2", ["rn.id.v2", "rn.id.v1"]);
+    const cache = CultCache.builder().withDocumentType(old).withDocumentType(renamed).build();
+    await cache.addBackingStore(new SingleFileMessagePackBackingStore(oldPath), old);
+    await cache.addBackingStore(new SingleFileMessagePackBackingStore(newPath), renamed);
+    await cache.put(old, "k", { v: "a" });
+    const before = await readFile(oldPath);
+    await assert.rejects(cache.put(renamed, "k", { v: CANARY }), (error: Error) => {
+      assert.ok(error instanceof SchemaConflictError && error.recordKey === "k");
+      assert.ok(!error.message.includes(CANARY));
+      return true;
+    });
+    assert.deepEqual(await readFile(oldPath), before);
+    assert.equal(existsSync(newPath), false, "the new home was never written");
+    assert.deepEqual(cache.snapshot().map((e) => [e.type, e.key]), [["rn.old", "k"]]);
+    // Same home: the rename replaces.
+    const together = CultCache.builder().withDocumentType(old).withDocumentType(renamed).withGenericStore(new SingleFileMessagePackBackingStore(join(dir, "one.cc"))).build();
+    await together.put(old, "k", { v: "a" });
+    await together.put(renamed, "k", { v: "b" });
+    assert.deepEqual(together.snapshot().map((e) => [e.type, e.key]), [["rn.new", "k"]]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("two stores each carrying an unregistered record at one key refuse the load and admit nothing", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ki-"));
+  try {
+    const paths = [join(dir, "a.cc"), join(dir, "b.cc")];
+    for (const path of paths) {
+      const writer = CultCache.builder().withDocumentType(types.gamma!).withGenericStore(new SingleFileMessagePackBackingStore(path)).build();
+      await writer.put(types.gamma!, "k", { text: "g" } as never);
+    }
+    // Neither store's records are claimed: gamma is not registered here.
+    const cache = CultCache.builder().withDocumentType(types.alpha!).withDocumentType(types.beta!).build();
+    await cache.addBackingStore(new SingleFileMessagePackBackingStore(paths[0]!), types.alpha!);
+    await cache.addBackingStore(new SingleFileMessagePackBackingStore(paths[1]!), types.beta!);
+    await assert.rejects(cache.pullAllBackingStores(), /^Error: Record k is held by two stores/u);
+    assert.deepEqual(cache.foreignRecords(), []);
+    assert.deepEqual(cache.snapshot(), []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

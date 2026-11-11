@@ -330,16 +330,22 @@ export class CultCache {
           const hydrated = this.#admitEntry(next, registered, admitted, value);
           const other = this.#heldUnderOtherType(next, type, hydrated.key);
           if (other !== undefined) {
-            throw new Error(`CultCache record "${hydrated.key}" is held by two stores, as type "${other.type}" and as type "${type}".`);
+            throw new Error(`Record ${hydrated.key} is held by two stores, as type "${other.type}" and as type "${type}".`);
           }
           this.#installEntry(next, registered, hydrated);
         }
       }
 
+      const foreignByKey = new Map<string, string>();
       for (const record of next.foreign) {
+        const first = foreignByKey.get(record.key);
+        if (first !== undefined) {
+          throw new Error(`Record ${record.key} is held by two stores, as schema "${first}" and as schema "${record.schemaName}".`);
+        }
+        foreignByKey.set(record.key, record.schemaName);
         const other = [...this.#definitions.keys()].map((type) => next.entries.get(this.#entryId(type, record.key))).find((held) => held !== undefined);
         if (other !== undefined) {
-          throw new Error(`CultCache record "${record.key}" is held by two stores, as type "${other.type}" and as schema "${record.schemaName}".`);
+          throw new Error(`Record ${record.key} is held by two stores, as type "${other.type}" and as schema "${record.schemaName}".`);
         }
       }
 
@@ -694,6 +700,16 @@ export class CultCache {
   async #writeNow(registered: RegisteredDefinition, entry: CultCacheEnvelope, value: unknown): Promise<void> {
     const home = this.#homeStore(entry.type);
     const retyped = this.#refuseRetype(entry);
+    if (retyped !== undefined && this.#homeStore(retyped.type) !== home) {
+      // The write owns the held record's id and would replace it, but the held record is in another store; the push
+      // reaches only this type's home, so the old record would stay in its own file and load as a second holder.
+      throw new SchemaConflictError(
+        schemaIdForEnvelope(entry),
+        [retyped.type, entry.type],
+        entry.key,
+        `CultCache holds record "${entry.key}" as type "${retyped.type}" in another store than the home of type "${entry.type}", so the rename cannot replace it; remove the record first.`,
+      );
+    }
     const hydrated = this.#admitEntry(this.#hydrated, registered, entry, value);
     this.#refuseIndexSharing(this.#hydrated, entry.type, registered.catalogEntry.schemaName, entry.key, hydrated.lookups);
     const legacy = this.#hydrated.legacyGlobals.get(entry.type);
