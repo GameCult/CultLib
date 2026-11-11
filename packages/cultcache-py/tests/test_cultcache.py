@@ -1567,15 +1567,19 @@ class CultCacheTests(unittest.TestCase):
         # Every vector in the folder has a manifest row.
         self.assertEqual(
             sorted(path.name for path in root.glob("*.bin")),
-            sorted(vector for vector, *_ in rows if not vector.startswith("..")),
+            sorted(vector for vector, *_ in rows if not vector.startswith(("..", "@"))),
         )
         envelopes = SingleFileMessagePackBackingStore(self._C2A_VECTORS / "v3-base.msgpack").pull_all()
         for vector, _, _, _, python in rows:
-            content = (root / vector).read_bytes()
+            # "@directory": the walker makes an empty directory at the store path; it is refused and left untouched.
+            content = None if vector == "@directory" else (root / vector).read_bytes()
             for operation in ("pull_all", "push_all", "push", "delete"):
                 with tempfile.TemporaryDirectory() as tmp:
                     store_path = Path(tmp) / "store.msgpack"
-                    store_path.write_bytes(content)
+                    if content is None:
+                        store_path.mkdir()
+                    else:
+                        store_path.write_bytes(content)
                     store = SingleFileMessagePackBackingStore(store_path)
                     run = {
                         "pull_all": store.pull_all,
@@ -1598,11 +1602,18 @@ class CultCacheTests(unittest.TestCase):
                             self.assertIn(envelopes[0].key, keys, f"{vector} {operation}")
                         else:
                             self.assertNotIn(envelopes[0].key, keys, f"{vector} {operation}")
+                    elif content is None:
+                        # A path that cannot be reached as a file stays an OSError (_read_store): not a store that failed to decode.
+                        with self.assertRaises(OSError, msg=f"{vector} {operation}"):
+                            run()
                     else:
                         with self.assertRaises(StoreUnreadableError, msg=f"{vector} {operation}") as refused:
                             run()
                         self.assertIsNotNone(refused.exception.__cause__, f"{vector} {operation}")
-                        self.assertEqual(store_path.read_bytes(), content, f"{vector} {operation} rewrote a file it cannot read")
+                        if content is None:
+                            self.assertTrue(store_path.is_dir() and not any(store_path.iterdir()), f"{vector} {operation} touched the directory")
+                        else:
+                            self.assertEqual(store_path.read_bytes(), content, f"{vector} {operation} rewrote a file it cannot read")
 
     @staticmethod
     def _rec(type: str, key: str, second: int = 0) -> CultCacheEnvelope:
