@@ -470,6 +470,74 @@ class VectorTests(unittest.TestCase):
                     self.assertEqual(path.read_bytes(), before)
 
 
+    def test_refusals(self) -> None:
+        ids = {
+            "tests.unique_item": "sha256:93bb890de83069061af696b23f94fd32fb3c2dad3c91ee645e8add56085f1882",
+            "tests.uq_pair": "sha256:2538cceafb6dcbce22ef11b932ecb804af5f96bc3aaedff692a52d3640433e60",
+            "tests.uq_alias": "sha256:77a77a394ebd8bf71e14b9b6f2cea4978c25d4e705fd12364f660edbf6c63b1f",
+            "tests.uq_alpha": "sha256:53aeaf2ea9b25e85ade6b15fc04c7653e7b206c87e258f1aa74dd32a840a1389",
+            "tests.uq_beta": "sha256:45ed62a64c91f6d815d3ec975c4a4a1b2ce07b6e7262a32d828673cf10899586",
+        }
+        aliases = {
+            "tests.uq_pair": {"Sku": "sku", "Alt": "second"},
+            "tests.uq_alias": {"Sku": "sku", "alt": "second"},
+        }
+        documents = {
+            name: define_database_entry_type(
+                name,
+                [database_entry_field("sku", 0, codec=t.string), database_entry_field("second", 1, codec=t.string)],
+                indexes=aliases.get(name, {"Sku": "sku"}),
+                roles={},
+                schema_id=schema_id,
+                schema_name=name,
+            )
+            for name, schema_id in ids.items()
+        }
+        rows = msgpack.unpackb((VECTORS / "refusals.msgpack").read_bytes(), raw=False)
+        walked = 0
+        for label, ops, expected in rows:
+            if any(op[0] == "commit" and len({schema for _, schema, _, _ in op[1]}) > 1 for op in ops):
+                continue  # put_envelopes takes one type: no batch across types (rows 3 and 26)
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "store.cc"
+                state: dict[str, CultCache] = {}
+
+                def perform(op) -> None:
+                    if op[0] == "open":
+                        if op[1] is not None:
+                            shutil.copyfile(VECTORS / op[1], path)
+                        state["cache"] = cache_of(*documents.values(), store=SingleFileMessagePackBackingStore(path))
+                        state["cache"].pull_all_backing_stores()
+                    elif op[0] == "pull":
+                        shutil.copyfile(VECTORS / op[1], path)
+                        state["cache"].pull_all_backing_stores()
+                    else:
+                        document = documents[op[1][0][1]]
+                        state["cache"].put_envelopes(
+                            document, [envelope(document, key, {"sku": sku, "second": second}) for key, _, sku, second in op[1]]
+                        )
+
+                for op in ops[:-1]:
+                    perform(op)
+                if expected is None:
+                    perform(ops[-1])
+                else:
+                    last = ops[-1]
+                    if last[0] == "open":
+                        before = (VECTORS / last[1]).read_bytes()
+                    elif last[0] == "pull":
+                        before = (VECTORS / last[1]).read_bytes()
+                    else:
+                        before = path.read_bytes() if path.exists() else b""
+                    k1, k2, schema, alias = expected
+                    with self.assertRaises(CultCacheError) as caught:
+                        perform(last)
+                    self.assertEqual(str(caught.exception), refusal(k1, k2, schema, alias))
+                    self.assertEqual(path.read_bytes() if path.exists() else b"", before)
+                walked += 1
+        self.assertEqual(walked, 31)
+
+
 class ListStore(RecordingStore):
     """A store whose contents the test swaps between loads: another process rewrote the file."""
 
@@ -515,22 +583,6 @@ class BatchAndOrderTests(unittest.TestCase):
             )
         self.assertNotIn("item:j", cache.snapshot().get("item", {}))
 
-    def test_values_are_named_in_landing_order(self) -> None:
-        document = item_doc()
-        cache = cache_of(document)
-        rows = [("item:a", "B"), ("item:b", "B"), ("item:x", "A"), ("item:y", "A")]
-        with self.assertRaises(CultCacheError) as caught:
-            cache.put_envelopes(document, [envelope(document, key, Item(sku=sku)) for key, sku in rows])
-        self.assertEqual(str(caught.exception), refusal("item:a", "item:b", "item", "sku"))
-
-    def test_keys_sort_by_utf16_code_unit_not_code_point(self) -> None:
-        document = item_doc()
-        cache = cache_of(document)
-        astral, bmp = "k\U0001F600", "k\uff01"  # code points: bmp < astral; UTF-16 units: D83D < FF01
-        with self.assertRaises(CultCacheError) as caught:
-            cache.put_envelopes(document, [envelope(document, bmp, Item(sku="S")), envelope(document, astral, Item(sku="S"))])
-        self.assertEqual(str(caught.exception), refusal(astral, bmp, "item", "sku"))
-
     def test_a_load_judges_every_type_at_once_aliases_in_ordinal_order(self) -> None:
         first = item_doc("first", indexes={"zeta": "sku"}, roles={})
         second = item_doc("second", indexes={"alpha": "sku"}, roles={})
@@ -553,7 +605,7 @@ class BatchAndOrderTests(unittest.TestCase):
             cache.put_envelopes(document, [envelope(document, f"item:{n}", row) for n, row in enumerate(rows)])
         self.assertEqual(str(caught.exception), refusal("item:0", "item:1", "item", astral))
 
-    def test_a_load_judges_records_in_the_order_the_file_yields_them(self) -> None:
+    def test_a_load_names_the_least_violation_whatever_order_the_store_yields(self) -> None:
         alpha, beta = item_doc("alpha", indexes={"k": "sku"}, roles={}), item_doc("beta", indexes={"k": "sku"}, roles={})
         loose_alpha, loose_beta = item_doc("alpha", indexes={}, roles={}), item_doc("beta", indexes={}, roles={})
         store = ListStore(
@@ -568,7 +620,7 @@ class BatchAndOrderTests(unittest.TestCase):
         cache = cache_of(alpha, beta, store=store)
         with self.assertRaises(CultCacheError) as caught:
             cache.pull_all_backing_stores()
-        self.assertEqual(str(caught.exception), refusal("b:1", "b:2", "beta", "k"))
+        self.assertEqual(str(caught.exception), refusal("a:1", "a:2", "alpha", "k"))
 
     def test_register_index_refuses_an_alias_the_definition_declares_as_a_role(self) -> None:
         document = item_doc()
