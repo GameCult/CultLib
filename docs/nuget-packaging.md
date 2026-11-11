@@ -31,7 +31,7 @@ https://github.com/GameCult/CultLib.git?path=/unity/org.gamecult.cultlib#cultlib
 ## Rolling back across the store format
 
 A consumer that upgrades and writes a store holding an element id leaves a
-`cultcache.store.v3` single-file store (`v5` directory store). The first CultLib release that refuses such a store by name is `cultlib-unity-v2.0.0` (`caching-unity-v2.0.0`). Earlier pins, the 1.x line (`cultlib-unity-v1.0.61`, `cultlib-v1.0.32`), read the header string and never compare it: rolling back to one of them reads a v3 or v5 store silently, drops the ids, and can rewrite the elements without them. That is the dangerous case. There is
+`cultcache.store.v3` single-file store (`v5` directory store). Refusal by name depends on the store kind and the pin. A **directory** store (`v5`) is refused by every Unity pin from `cultlib-unity-v1.0.57` and `caching-unity-v1.2.0` on (the earliest tags of each line whose `DirectoryMessagePackBackingStore` reads only the `v4` stamp: "only ... is readable"). A **single-file** store (`v3`) is refused only from `cultlib-unity-v2.0.0` and `caching-unity-v2.0.0`: `cultlib-unity-v1.0.61` and `caching-unity-v1.4.0` read the header string and never compare it. The NuGet line (`cultlib-v1.0.32`, the last `cultlib-v` tag) refuses neither: its directory store writes `cultcache.store.v1.directory` and never checks the stamp on read. Rolling back a single-file store to any of those pins reads it silently, drops the ids, and can rewrite the elements without them. That is the dangerous case. There is
 no general carry-back; restore from a copy taken before upgrading, and upgrade
 readers before writers. Detail: the Store format and rollback section of
 `src/GameCult.Caching/README.md`.

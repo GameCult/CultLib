@@ -260,8 +260,8 @@ hex), and that is deliberate:
 
 Adopting the recipe on data that already exists: the existing member becomes an
 id source, so it must be non-empty and unique within its list. A record with a
-duplicate value refuses to load (`CultElementIdException`, duplicate id) and an
-empty one is refused at write, so clean such data first.
+duplicate value and an empty one both refuse to load
+(`CultElementIdException`), so clean such data first.
 
 Take the next free `[Key]` slot, after the highest key on the type (and above
 the subclasses' keys on a union base).
@@ -274,7 +274,7 @@ A single-file store that holds a variant but no id is `v2`, and a store with
 neither stays `v1`. The mark follows content: a whole-store write that leaves no
 element holding an id drops it.
 
-The first CultLib release that refuses such a store by name is `cultlib-unity-v2.0.0` (`caching-unity-v2.0.0`). Earlier pins, the 1.x line (`cultlib-unity-v1.0.61`, `cultlib-v1.0.32`), read the header string and never compare it: rolling back to one of them reads a v3 or v5 store silently, drops the ids, and can rewrite the elements without them. That is the dangerous case.
+Refusal by name depends on the store kind and the pin. A **directory** store (`v5`) is refused by every Unity pin from `cultlib-unity-v1.0.57` and `caching-unity-v1.2.0` on (the earliest tags of each line whose `DirectoryMessagePackBackingStore` reads only the `v4` stamp: "only ... is readable"). A **single-file** store (`v3`) is refused only from `cultlib-unity-v2.0.0` and `caching-unity-v2.0.0`: `cultlib-unity-v1.0.61` and `caching-unity-v1.4.0` read the header string and never compare it. The NuGet line (`cultlib-v1.0.32`, the last `cultlib-v` tag) refuses neither: its directory store writes `cultcache.store.v1.directory` and never checks the stamp on read. Rolling back a single-file store to any of those pins reads it silently, drops the ids, and can rewrite the elements without them. That is the dangerous case.
 
 Rolling a consumer back after it has written a v3 or v5 store is therefore
 one-way. The only carry-back is narrow and lossy: a whole-store write that leaves
