@@ -54,6 +54,7 @@ import {
   validateGhostlightAgentStateGenerated,
   validateGhostlightAgentState,
   shardServes,
+  type CultNetDatabaseChangeRawMessage,
   type CultNetLoginMessage,
   type GhostlightAgentStateShape,
   type GhostlightAgentStateDocument,
@@ -1687,6 +1688,32 @@ test("database subscription contracts match the C# live document lane", () => {
   });
   assert.equal(removed.schemaVersion, "cultnet.database_change_raw.v0");
   assert.equal(removed.recordKey, "counter:main");
+
+  const grouped = parseCultNetMessage({
+    schemaVersion: "cultnet.database_change_raw.v0",
+    messageId: "change-counter-3",
+    subscriptionId: "counter:browser-1",
+    changeKind: "removed",
+    recordKey: "counter:main",
+    schemaId: "sample.counter_state.v1",
+    commitId: "c1",
+    commitCount: 2,
+  });
+  assert.equal((grouped as CultNetDatabaseChangeRawMessage).commitId, "c1");
+  assert.equal((grouped as CultNetDatabaseChangeRawMessage).commitCount, 2);
+  assert.deepEqual(encodeCultNetMessageForWire(grouped), grouped, "both commit fields travel");
+  assert.equal((removed as CultNetDatabaseChangeRawMessage).commitId, undefined, "a change without them parses as before");
+  const changeWith = (extra: Record<string, unknown>) => () => parseCultNetMessage({
+    schemaVersion: "cultnet.database_change_raw.v0",
+    messageId: "change-counter-4",
+    subscriptionId: "counter:browser-1",
+    changeKind: "removed",
+    recordKey: "counter:main",
+    schemaId: "sample.counter_state.v1",
+    ...extra,
+  });
+  for (const commitId of ["", 5]) assert.throws(changeWith({ commitId }), /\/commitId/, `commitId ${JSON.stringify(commitId)}`);
+  for (const commitCount of [1, 0, 2.5, "two", -3]) assert.throws(changeWith({ commitCount }), /\/commitCount/, `commitCount ${commitCount}`);
 
   const unsubscribe = parseCultNetMessage({
     schemaVersion: "cultnet.database_unsubscribe.v0",
