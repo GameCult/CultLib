@@ -393,6 +393,16 @@ a5 = da("Counted", None, None, fbody(q5, "no", NOTE), srv("n1", OP, T(2)))
 a3 = da("Counted", None, None, fbody(q3, "yes", NOTE), srv("n1", OP, T(2)))
 r3 = da("Refused", None, "fork_closed", fbody(q3, "no", NOTE), srv("n2", HM, T(4), "Steward"))
 ENTRIES = [fentry(q5, [a5], "n1"), fentry(q4), fentry(q3, [a3, r3], "n1"), fentry(q2), fentry(q1)]
+q0 = fcard(0)
+ORDER0 = [fentry(fcard(3)), fentry(fcard(2)), fentry(fcard(1)), fentry(q0)]   # a Mind whose oldest card has order 0
+q4b = dict(fcard(4), fork_id="gamecult-chat:question:q4b")                      # a second card on order 4 in the same Mind
+def order_shared(entries):
+    seen, out = {}, []
+    for e in entries:
+        c = e["card"]
+        if c["order"] in seen: out.append(f"order {c['order']} is shared by {seen[c['order']]} and {c['fork_id']}")
+        else: seen[c["order"]] = c["fork_id"]
+    return out
 def lreq(mind="gamecult-chat", status=None, cursor=None, limit=10): return {"schemaVersion": "gamecult.fork.list_request.v0", "mind": mind, "status": status, "cursor": cursor, "limit": limit}
 def judge_list(entries, ordinal, rq):
     rows = sorted(entries, key=lambda e: -e["card"]["order"])
@@ -409,8 +419,11 @@ LISTS = [
  {"name": "all_forks_one_page", "ordinal": 412, "entries": ENTRIES, "steps": [lstep(ENTRIES, 412, lreq(limit=50))]},
  {"name": "recorded_only_paged", "ordinal": 412, "entries": ENTRIES, "steps": [lstep(ENTRIES, 412, lreq(status="recorded", limit=1)), lstep(ENTRIES, 412, lreq(status="recorded", cursor="c3", limit=1))]},
  {"name": "limit_zero_is_the_count_and_stamp_only", "ordinal": 412, "entries": ENTRIES, "steps": [lstep(ENTRIES, 412, lreq(limit=0))]},
+ {"name": "order_zero_is_legal_but_no_cursor_names_it", "ordinal": 9, "entries": ORDER0, "steps": [lstep(ORDER0, 9, lreq(limit=3)), lstep(ORDER0, 9, lreq(cursor="c1", limit=3))]},
  {"name": "a_mind_with_no_forks", "ordinal": 7, "entries": [], "steps": [lstep([], 7, lreq(mind="nibu", limit=10))]},
 ]
+DUP_LIST = judge_list(ENTRIES + [fentry(q4b)], 412, lreq(limit=50))
+assert order_shared(DUP_LIST["forks"]) == ["order 4 is shared by gamecult-chat:question:q4 and gamecult-chat:question:q4b"]
 TOK = lambda aud, *sc, active=True: {"audience": aud, "scopes": list(sc), "active": active}
 AUTH = [
  ("list_with_desk_read", "list", TOK("bifrost-desk", "desk.read"), "ok"), ("read_with_desk_read", "read", TOK("bifrost-desk", "desk.read"), "ok"),
@@ -601,7 +614,9 @@ fork = {
     "listInvalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
       ("next_cursor_malformed", "a cursor is c<N>", dict(LISTS[0]["steps"][0]["response"], next_cursor="more")),
       ("stamp_malformed", "a stamp is s<N>", dict(LISTS[0]["steps"][0]["response"], stamp="412")),
-      ("count_negative", "counts are not negative", dict(LISTS[0]["steps"][0]["response"], open_count=-1))]],
+      ("count_negative", "counts are not negative", dict(LISTS[0]["steps"][0]["response"], open_count=-1))]]
+      + [dict(bad("two_cards_share_one_order", "rule: order is a unique rank per Mind; the refusal names both fork ids (not expressible in the schema)", DUP_LIST),
+              messagePackHex=hx(DUP_LIST), refusal=order_shared(DUP_LIST["forks"])[0])],
     "listScenarios": [{"name": l["name"], "ordinal": l["ordinal"], "entries": l["entries"], "steps": l["steps"]} for l in LISTS],
     "mindRoutes": {"minds": MINDS, "forks": MIND_FORKS, "cases": MINDCASES, "sameResponse": SAME_RESPONSE},
     "authCases": [{"name": a[0], "route": a[1], "token": a[2], "expect": a[3], "huginn_down": len(a) > 4} for a in AUTH],
