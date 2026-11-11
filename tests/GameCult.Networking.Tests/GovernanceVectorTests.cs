@@ -178,6 +178,7 @@ namespace GameCult.Networking.Tests
             if (c["leans"] is not null && !ids.Contains(S(c["leans"]))) yield return "leans is not an option";
             var deciders = c["deciders"]!.AsArray().Select(S).ToList();
             if (deciders.Distinct().Count() != deciders.Count) yield return "duplicate deciders";
+            if (deciders.Count > 0 && deciders.Count != c["decider_count"]!.GetValue<int>()) yield return "R-card: shown deciders are not exactly decider_count ids";
             if (c["depends"]!.AsArray().Any(d => Encoding.UTF8.GetByteCount(S(d)) > 1000)) yield return "a depends line is over 1000 UTF-8 bytes";
             if (S(c["status"]) == "open" && c["ruling"] is not null) yield return "an open card names a ruling";
             if (c["ruling"] is null && c["ruled_from"]!.AsArray().Count > 0) yield return "ruled_from without a ruling";
@@ -258,10 +259,17 @@ namespace GameCult.Networking.Tests
                 Assert.That(HashOf(copy), Is.Not.EqualTo(baseline), $"mutation {i}");
             }
             var hidden = Clone(card);
-            hidden["fork_id"] = "other:question:id"; hidden["leans"] = "yes"; hidden["status"] = "closed"; hidden["ruled_from"] = new JsonArray("n1"); hidden["raised_at"] = "2027-01-02T03:04:05.123Z";
+            hidden["fork_id"] = "other:question:id"; hidden["leans"] = "yes"; hidden["deciders"] = new JsonArray(); hidden["decider_count"] = 7; hidden["status"] = "closed"; hidden["ruled_from"] = new JsonArray("n1"); hidden["raised_at"] = "2027-01-02T03:04:05.123Z";
             Assert.That(HashOf(hidden), Is.EqualTo(baseline), "fork_id and the unshown members stay outside the hash");
             hidden["raised_at"] = null;
             Assert.That(HashOf(hidden), Is.EqualTo(baseline), "a nil raised_at stays outside the hash");
+            foreach (var (ids, count) in new[] { (0, 2), (1, 64) })
+            {
+                var counted = Clone(card)!;
+                counted["deciders"] = new JsonArray(card["deciders"]!.AsArray().Take(ids).Select(d => JsonValue.Create(S(d))).ToArray());
+                counted["decider_count"] = count;
+                Assert.That(HashOf(counted), Is.EqualTo(baseline), "decider_count and the emptiness of deciders stay outside the hash");
+            }
         }
 
         [Test]
@@ -291,6 +299,12 @@ namespace GameCult.Networking.Tests
                 Assert.That(Errors(ForkSchema, "answerResult", v!["message"]), Is.Empty, S(v["name"]));
                 Assert.That(HexOf(v["message"]), Is.EqualTo(S(v["messagePackHex"])), S(v["name"]));
                 Assert.That(v["message"]!["card"] is not null, Is.EqualTo(S(v["name"]) == "stale_fork"), "only a stale refusal shows the new fork");
+                Assert.That(ResultRuleErrors(v["message"]!), Is.Empty, S(v["name"]));
+            }
+            foreach (var v in Fork["resultsInvalid"]!.AsArray())
+            {
+                Assert.That(Errors(ForkSchema, "answerResult", v!["message"]).Count > 0 || ResultRuleErrors(v["message"]!).Any(), Is.True, $"{S(v["name"])}: {S(v["why"])}");
+                Assert.That(HexOf(v["message"]), Is.EqualTo(S(v["messagePackHex"])), S(v["name"]));
             }
             Assert.That(Fork["doorRefusals"]!.AsArray().Select(r => S(r!["name"])).OrderBy(x => x, StringComparer.Ordinal), Is.EqualTo(Codes("refusal")));
             foreach (var v in Fork["unavailable"]!.AsArray())
@@ -319,6 +333,12 @@ namespace GameCult.Networking.Tests
                     Assert.That(Errors(ForkSchema, def, v!["message"]).Count > 0 || NoteRuleErrors(def, v["message"]).Any(), Is.True, $"{S(v["name"])}: {S(v["why"])}");
                     Assert.That(HexOf(v["message"]), Is.EqualTo(S(v["messagePackHex"])), S(v["name"]));
                 }
+        }
+
+        // R-answer-result: the answer in an answer_result is the sender's own, stamped with their account, never nil (nil exists only in a record shown to a non-decider).
+        private static IEnumerable<string> ResultRuleErrors(JsonNode r)
+        {
+            if (r["answer"]!["answerer"] is null) yield return "R-answer-result: the answerer is nil";
         }
 
         // Rules a JSON Schema cannot say: a note is at most 4000 UTF-8 bytes (maxLength counts code points and is only the looser bound).
@@ -428,7 +448,8 @@ namespace GameCult.Networking.Tests
             }
             var record = new JsonObject
             {
-                ["schemaVersion"] = "gamecult.fork.record.v0", ["fork_id"] = Clone(card["fork_id"]), ["options_hash"] = HashOf(card), ["counted_answer_id"] = Counted(), ["answers"] = answers
+                ["schemaVersion"] = "gamecult.fork.record.v0", ["fork_id"] = Clone(card["fork_id"]), ["options_hash"] = HashOf(card), ["counted_answer_id"] = Counted(),
+                ["answerer_count"] = answers.Select(a => S(a!["answerer"])).Distinct().Count(), ["answers"] = answers
             };
             return (responses, record);
         }
@@ -476,6 +497,7 @@ namespace GameCult.Networking.Tests
                 Assert.That(JsonNode.DeepEquals(record, sc["record"]), Is.True, $"{name}: {record.ToJsonString()}");
                 Assert.That(Errors(ForkSchema, "record", record), Is.Empty, name);
                 Assert.That(HexOf(record), Is.EqualTo(S(sc["recordHex"])), name);
+                foreach (var st in steps) if (st!["response"]?["answer"] is not null) Assert.That(ResultRuleErrors(st["response"]!), Is.Empty, name);
                 foreach (var step in steps)
                 {
                     var r = step!["response"];
@@ -533,6 +555,39 @@ namespace GameCult.Networking.Tests
             var counted = answers.Where(a => (S(a!["outcome"]) is "Counted" or "Revision") && S(a["options_hash"]) == S(card["options_hash"])
                 && !answers.Any(r => S(r!["outcome"]) == "Retraction" && S(r["retracts"]) == S(a["answer_id"]))).Select(a => S(a!["answer_id"])).FirstOrDefault();
             if ((record["counted_answer_id"] is null ? null : S(record["counted_answer_id"])) != counted) yield return "counted_answer_id is not derived";
+            // R-record: a record is one reader's view; named answerers are counted by distinct id, nil ones by a bound
+            var named = answers.Count(a => a!["answerer"] is not null); var total = answers.Count; var n = record["answerer_count"]!.GetValue<long>();
+            if (named > 0 && named < total) yield return "R-record: a record mixes named and nil answerers";
+            else if (total == 0 && n != 0) yield return "R-record: no answers and a count other than 0";
+            else if (named == total && total > 0 && n != answers.Select(a => S(a!["answerer"])).Distinct().Count()) yield return "R-record: answerer_count is not the distinct answerers";
+            else if (named == 0 && total > 0 && (n < 1 || n > total)) yield return "R-record: a withheld count outside 1..answers";
+            // R-entry: the card's view and the record's view agree, so a withheld card never rides beside a named account
+            var shown = card["deciders"]!.AsArray().Count > 0;
+            if (shown && named < total) yield return "R-entry: a decider-view card with withheld answerers";
+            if (!shown && named > 0) yield return "R-entry: a withheld card beside a named answerer";
+        }
+
+        // R-list: all entries of one page are one reader's view.
+        private static IEnumerable<string> ViewRuleErrors(JsonArray forks)
+        {
+            if (forks.Select(f => f!["card"]!["deciders"]!.AsArray().Count > 0).Distinct().Count() > 1) yield return "R-list: a page mixes views";
+        }
+
+        // The non-decider twin of a decider-view entry: ids withheld, counts kept.
+        private static JsonNode Withheld(JsonNode e)
+        {
+            var w = Clone(e)!;
+            w["card"]!["deciders"] = new JsonArray();
+            foreach (var a in w["record"]!["answers"]!.AsArray()) a!["answerer"] = null;
+            return w;
+        }
+        private static List<string> IdsOf(JsonNode e) =>
+            e["card"]!["deciders"]!.AsArray().Select(S).Concat(e["record"]!["answers"]!.AsArray().Select(a => S(a!["answerer"]))).ToList();
+        private static void NoIdInBytes(string hex, IEnumerable<string> ids, string name)
+        {
+            var list = ids.ToList();
+            Assert.That(list, Is.Not.Empty, name);
+            foreach (var id in list) Assert.That(hex, Does.Not.Contain(Convert.ToHexString(Encoding.UTF8.GetBytes(id))), $"{name}: the withheld bytes carry {id}");
         }
 
         // Order is a unique rank per Mind: the refusal names both fork ids, the first holder and the second.
@@ -643,6 +698,14 @@ namespace GameCult.Networking.Tests
                 {
                     Assert.That(Errors(ForkSchema, def, v!["message"]), Is.Empty, S(v["name"]));
                     if (def == "entry") Assert.That(EntryRuleErrors(v["message"]!), Is.Empty, S(v["name"]));
+                    if (def == "entry" && v["twin"] is not null)
+                    {
+                        var twin = t[section]!["valid"]!.AsArray().Single(x => S(x!["name"]) == S(v["twin"]));
+                        Assert.That(JsonNode.DeepEquals(v["message"], Withheld(twin!["message"]!)), Is.True, $"{S(v["name"])}: the twin of {S(v["twin"])}");
+                        Assert.That(v["message"]!["record"]!["answerer_count"]!.GetValue<long>(), Is.EqualTo(twin["message"]!["record"]!["answerer_count"]!.GetValue<long>()), "a decider and a non-decider read the same count");
+                        NoIdInBytes(S(v["messagePackHex"]), IdsOf(twin["message"]!), S(v["name"]));
+                        Assert.That(S(twin["messagePackHex"]), Does.Contain(Convert.ToHexString(Encoding.UTF8.GetBytes(IdsOf(twin["message"]!)[0]))), "the decider view does carry the ids");
+                    }
                     Assert.That(HexOf(v["message"]), Is.EqualTo(S(v["messagePackHex"])), S(v["name"]));
                 }
                 foreach (var v in t[section]!["invalid"]!.AsArray())
@@ -654,7 +717,9 @@ namespace GameCult.Networking.Tests
             foreach (var v in t["listInvalid"]!.AsArray())
             {
                 var shared = OrderErrors(v!["message"]!["forks"]!.AsArray().Select(f => f!["card"]));
-                Assert.That(Errors(ForkSchema, "list", v["message"]).Count > 0 || shared.Count > 0, Is.True, $"{S(v["name"])}: {S(v["why"])}");
+                var views = ViewRuleErrors(v["message"]!["forks"]!.AsArray()).ToList();
+                Assert.That(Errors(ForkSchema, "list", v["message"]).Count > 0 || shared.Count > 0 || views.Count > 0, Is.True, $"{S(v["name"])}: {S(v["why"])}");
+                if (S(v["name"]) == "a_page_mixes_views") Assert.That(views, Has.Count.EqualTo(1));
                 if (v["refusal"] is not null) Assert.That(shared, Is.EqualTo(new[] { S(v["refusal"]) }), S(v["name"]));
                 Assert.That(HexOf(v["message"]), Is.EqualTo(S(v["messagePackHex"])), S(v["name"]));
             }
@@ -669,12 +734,29 @@ namespace GameCult.Networking.Tests
                 var entries = sc["entries"]!.AsArray();
                 foreach (var e in entries) Assert.That(EntryRuleErrors(e!), Is.Empty, name);
                 Assert.That(OrderErrors(entries.Select(e => e!["card"])), Is.Empty, name);
+                if (sc["twin"] is not null)
+                {
+                    // the non-decider page is the decider page with the ids withheld: counts, order, cursor and stamp equal, byte for byte but the withheld members
+                    var twin = Fork["transport"]!["listScenarios"]!.AsArray().Single(x => S(x!["name"]) == S(sc["twin"]))!;
+                    Assert.That(JsonNode.DeepEquals(sc["entries"], new JsonArray(twin["entries"]!.AsArray().Select(e => Withheld(e!)).ToArray())), Is.True, name);
+                    var mine = sc["steps"]!.AsArray(); var theirs = twin["steps"]!.AsArray();
+                    Assert.That(mine.Count, Is.EqualTo(theirs.Count), name);
+                    for (var i = 0; i < mine.Count; i++)
+                    {
+                        var expected = Clone(theirs[i]!["response"])!;
+                        expected["forks"] = new JsonArray(expected["forks"]!.AsArray().Select(e => Withheld(e!)).ToArray());
+                        Assert.That(JsonNode.DeepEquals(mine[i]!["response"], expected), Is.True, name);
+                        NoIdInBytes(S(mine[i]!["responseHex"]), twin["entries"]!.AsArray().SelectMany(e => IdsOf(e!)), name);
+                    }
+                    Assert.That(S(theirs[0]!["responseHex"]), Does.Contain(Convert.ToHexString(Encoding.UTF8.GetBytes(IdsOf(twin["entries"]![0]!)[0]))), "the decider page does carry the ids");
+                }
                 JsonNode? previous = null;
                 foreach (var step in sc["steps"]!.AsArray())
                 {
                     var response = JudgeList(entries, sc["ordinal"]!.GetValue<long>(), step!["request"]!);
                     Assert.That(JsonNode.DeepEquals(response, step["response"]), Is.True, $"{name}: {response.ToJsonString()}");
                     Assert.That(Errors(ForkSchema, "list", response), Is.Empty, name);
+                    Assert.That(ViewRuleErrors(response["forks"]!.AsArray()), Is.Empty, name);
                     Assert.That(HexOf(response), Is.EqualTo(S(step["responseHex"])), name);
                     var orders = response["forks"]!.AsArray().Select(f => f!["card"]!["order"]!.GetValue<long>()).ToList();
                     Assert.That(orders, Is.Ordered.Descending, name);
