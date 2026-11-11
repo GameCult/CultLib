@@ -310,7 +310,7 @@ public static class CultDocumentMessagePackSerialization
     /// <summary>
     /// Reads a store file: exactly one complete MessagePack array of three slots (header, schema catalog, records), or an empty
     /// array, which is an empty store. A truncated file, bytes after the array, a value that is not an array, a first slot that
-    /// is not a header string, a store with fewer or more slots, a record whose schema the catalog does not publish, or a body
+    /// is not a header string, a store with fewer or more slots, a record whose schema the catalog does not publish, two records under one key, or a body
     /// that does not decode are refused with
     /// <see cref="CultStoreUnreadableException"/>, so a reader never takes part of a file for the whole and never skips a slot
     /// it does not understand. The rewriting paths use this same reader as their verdict on whether a file may be replaced.
@@ -366,6 +366,7 @@ public static class CultDocumentMessagePackSerialization
             }
 
             RequirePublishedSchemas(snapshot);
+            RequireUniqueKeys(snapshot);
             return (snapshot, catalogBytes, recordBytes);
         }
         catch (CultStoreUnreadableException)
@@ -394,6 +395,17 @@ public static class CultDocumentMessagePackSerialization
         {
             throw new CultStoreUnreadableException(
                 $"Record '{unpublished.Key}' names schema '{unpublished.SchemaId}', which the store's schema catalog does not publish.");
+        }
+    }
+
+    // A key names one record: identity is the key string alone, compared by ordinal code units (no case folding, no normalisation).
+    private static void RequireUniqueKeys(CultPersistedStoreSnapshot snapshot)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var record in snapshot.Records)
+        {
+            if (!seen.Add(record.Key))
+                throw new CultStoreUnreadableException($"Record '{record.Key}' appears more than once.");
         }
     }
 
