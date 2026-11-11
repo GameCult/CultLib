@@ -25,7 +25,9 @@ jobs:
   reactive-and-resource-lifetime:
     name: ${{ matrix.os }} reactive semantics and leases
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # The job dies at the lower of this value and the forge runner's own cap, which Eureka is raising from 30 to 60 minutes
+    # (run 1378 carried 60 and was still cancelled at 30:02); the two must both say 60 before a full run can finish.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -45,16 +47,40 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
+      # The forge runner image (catthehacker/ubuntu:act-latest) carries Node 24 and Python 3.12 on PATH, and these two
+      # setup actions downloaded them again from github.com anyway (about 2.7 and 2.8 minutes, run 639) because the
+      # image's tool cache is not the one they read. They run only where the image does not carry the tools (the
+      # workflow_dispatch Windows leg); the check below fails a Linux image that stops carrying them.
       - name: Set up Node.js
+        if: runner.os != 'Linux'
         uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
 
       - name: Set up Python
+        if: runner.os != 'Linux'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Check the image carries Node 24 and Python 3.12
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version | grep -E '^v24\.'
+          python --version | grep -E '^Python 3\.12\.'
+
+      # The image's Python is distro-managed (PEP 668): pip refuses to install into it, so the Linux leg installs the
+      # CultLib packages into a venv under RUNNER_TEMP that later steps find first on PATH.
+      - name: Create the Python environment
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
 
       - name: Install TypeScript workspace dependencies
         run: npm install --no-package-lock
