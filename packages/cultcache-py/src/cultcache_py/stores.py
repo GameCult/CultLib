@@ -248,8 +248,9 @@ def _derive_catalog(records: list[tuple[CultCacheEnvelope, bool]]) -> list[CultC
 def _encode_snapshot(
     supplied: list[CultCacheEnvelope], arrived: list[CultCacheEnvelope], format_version: str
 ) -> list[Any]:
-    replaced = {(envelope.type, envelope.key) for envelope in supplied}
-    kept = [envelope for envelope in arrived if (envelope.type, envelope.key) not in replaced]
+    # A key names one record whatever its type, so a supplied record replaces the arrived one by key alone.
+    replaced = {envelope.key for envelope in supplied}
+    kept = [envelope for envelope in arrived if envelope.key not in replaced]
     envelopes = [*kept, *supplied]
     catalog = [
         _encode_catalog_entry(entry)
@@ -400,6 +401,7 @@ def _decode_snapshot(decoded: Any) -> tuple[str, list[CultCacheEnvelope]] | None
             catalog_by_schema_id.setdefault(compatible_schema_id, entry)
 
     envelopes: list[CultCacheEnvelope] = []
+    seen: set[str] = set()
     for raw_record in decoded[2]:
         if not isinstance(raw_record, list) or len(raw_record) < 4:
             raise ValueError("CultCache persisted records must be MessagePack arrays")
@@ -412,6 +414,9 @@ def _decode_snapshot(decoded: Any) -> tuple[str, list[CultCacheEnvelope]] | None
         key, schema_id, stored_at, payload = raw_record
         if not isinstance(key, str) or not key:
             raise ValueError("CultCache persisted records must declare a key")
+        if key in seen:
+            raise ValueError(f"CultCache record {key!r} appears more than once")
+        seen.add(key)
         if not isinstance(schema_id, str) or not schema_id:
             raise ValueError("CultCache persisted records must declare a schema id")
         if not isinstance(stored_at, str) or not stored_at:
@@ -484,12 +489,14 @@ def _decode_catalog_entry(value: Any) -> CultCacheSchemaCatalogEntry:
         raise ValueError(f'CultCache schema catalog entry "{schema_id}" has invalid compatible schema ids')
     if not isinstance(members, list):
         raise ValueError(f'CultCache schema catalog entry "{schema_id}" has invalid members')
+    if not isinstance(canonical_schema_json, str):
+        raise ValueError(f'CultCache schema catalog entry "{schema_id}" has an invalid canonical schema')
     return CultCacheSchemaCatalogEntry(
         schema_id=schema_id,
         schema_name=schema_name,
         schema_version=schema_version if isinstance(schema_version, str) and schema_version else f"{schema_name}.v1",
         content_hash=content_hash if isinstance(content_hash, str) and content_hash else schema_id,
-        canonical_schema_json=canonical_schema_json if isinstance(canonical_schema_json, str) else "",
+        canonical_schema_json=canonical_schema_json,
         compatible_schema_ids=tuple(compatible_schema_ids),
         members=tuple(_decode_catalog_member(member) for member in members),
     )
