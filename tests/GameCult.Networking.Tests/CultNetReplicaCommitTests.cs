@@ -302,5 +302,16 @@ namespace GameCult.Networking.Tests
             Assert.That(lone.CommitCount, Is.Null);
             Assert.That(commits[0].Id, Is.Not.EqualTo(commits[1].Id));
         }
+
+        [Test]
+        public void ASnapshotThatSwapsIndexValuesAgainstWhatTheReplicaHoldsIsApplied()
+        {
+            using var run = new Replication(
+                source => Stage(source, ("a", "two"), ("b", "one")),
+                replica => Stage(replica, ("a", "one"), ("b", "two")));
+
+            Assert.That(run.ReplicaItem("a")!.Sku, Is.EqualTo("two"));
+            Assert.That(run.ReplicaItem("b")!.Sku, Is.EqualTo("one"));
+        }
     }
 }
