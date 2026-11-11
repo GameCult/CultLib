@@ -666,8 +666,8 @@ namespace GameCult.Networking.Tests
             run.Peer.Client!.Emit(Put(run, "items2", "b", "two", "4", 2));
             await Until(() => Pending(run.Client) == 1);
 
-            run.Peer.Client!.Emit(Put(run, "ghost", "a", "one", "4", 2));
-            run.Peer.Client!.Emit(Put(run, "ghost", "c", "three", "5", 3));
+            run.Peer.Client!.Emit(Put(run, "items-ghost", "a", "one", "4", 2));
+            run.Peer.Client!.Emit(Put(run, "items-ghost", "c", "three", "5", 3));
             await Task.Delay(200);
 
             Assert.That(Pending(run.Client), Is.EqualTo(1), "only the live subscription's commit is held");
