@@ -12,7 +12,9 @@
     "changeKind": { "enum": ["added", "updated", "removed"] },
     "document": { "$ref": "./cultnet.raw-document-record.schema.json" },
     "recordKey": { "type": "string", "minLength": 1 },
-    "schemaId": { "type": "string", "minLength": 1 }
+    "schemaId": { "type": "string", "minLength": 1 },
+    "commitId": { "type": "string", "minLength": 1 },
+    "commitCount": { "type": "integer", "minimum": 2 }
   },
   "allOf": [
     {

@@ -765,12 +765,39 @@ namespace GameCult.Networking
         {
             // Keys this subscriber only ever received as a refusal: it was never given them as records.
             var refused = new HashSet<string>(StringComparer.Ordinal);
-            return _database.WatchAllChanges().Subscribe(change =>
+            return _database.WatchCommits().Subscribe(commit =>
             {
-                var outbound = DeliverChange(change, subscriptionId, selection, refused, error => peer.SendCultNet(error));
-                if (outbound != null)
-                    peer.SendCultNet(outbound);
+                foreach (var message in DeliverCommit(commit, subscriptionId, selection, refused, error => peer.SendCultNet(error)))
+                    peer.SendCultNet(message);
             });
+        }
+
+        // One subscriber's view of one commit. Its changes go out together, tagged with the commit, so a replica applies them as one.
+        internal IReadOnlyList<CultNetDatabaseChangeRawMessage> DeliverCommit(
+            CultNetDatabaseCommit commit,
+            string subscriptionId,
+            CultNetSelection selection,
+            HashSet<string> refused,
+            Action<CultNetErrorMessage> sendError)
+        {
+            var outbound = new List<CultNetDatabaseChangeRawMessage>();
+            foreach (var change in commit.Changes)
+            {
+                var message = DeliverChange(change, subscriptionId, selection, refused, sendError);
+                if (message != null)
+                    outbound.Add(message);
+            }
+
+            if (outbound.Count > 1)
+            {
+                foreach (var message in outbound)
+                {
+                    message.CommitId = commit.Id;
+                    message.CommitCount = outbound.Count;
+                }
+            }
+
+            return outbound;
         }
 
         // One subscriber's view of one change. A variant is not a record CultNet can carry (Q6): the subscriber is told, by key, and

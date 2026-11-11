@@ -723,6 +723,49 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Applies change messages to a cache as one commit, so the cache judges the result of the changes together and not the
+        /// state between them. Returns the applied document of each message, null for a removal. A refusal by the cache throws
+        /// and nothing is applied.
+        /// </summary>
+        internal IReadOnlyList<object?> ApplyRawChangesAsOneCommit(
+            CultCache cache,
+            IReadOnlyList<CultNetDatabaseChangeRawMessage> changes)
+        {
+            var applied = new object?[changes.Count];
+            var staged = new List<(Type? Type, object? Document, CultRecordKey Key)>(changes.Count);
+            for (var index = 0; index < changes.Count; index++)
+            {
+                var change = changes[index];
+                if (string.Equals(change.ChangeKind, "removed", StringComparison.Ordinal))
+                {
+                    if (string.IsNullOrWhiteSpace(change.RecordKey) || string.IsNullOrWhiteSpace(change.SchemaId))
+                        continue;
+                    ResolveDescriptorForSchemaId(change.SchemaId!);
+                    staged.Add((null, null, new CultRecordKey(change.RecordKey!)));
+                    continue;
+                }
+
+                if (change.Document == null)
+                    continue;
+                var document = DeserializeRawDocument(change.Document);
+                applied[index] = document;
+                staged.Add((ResolveDescriptorForRawDocument(change.Document).DocumentType, document, new CultRecordKey(change.Document.RecordKey)));
+            }
+
+            cache.Commit(batch =>
+            {
+                foreach (var (type, document, key) in staged)
+                {
+                    if (type == null)
+                        batch.Remove(key);
+                    else
+                        batch.Upsert(type, document!, key);
+                }
+            });
+            return applied;
+        }
+
+        /// <summary>
         /// Decodes one validated raw document without materializing it in a CultCache replica.
         /// Use this for ephemeral reactive subscriptions whose callback is the consumer.
         /// </summary>
@@ -754,25 +797,22 @@ namespace GameCult.Networking
         }
 
         /// <summary>
-        /// Applies all documents from a raw snapshot response.
+        /// Applies all documents from a raw snapshot response as one commit, so a snapshot that moves a unique-index value
+        /// between records is judged on its result.
         /// </summary>
-        public async Task<IReadOnlyList<object>> ApplyRawSnapshotResponseAsync(
+        public Task<IReadOnlyList<object>> ApplyRawSnapshotResponseAsync(
             CultCache cache,
             CultNetSnapshotResponseRawMessage response)
         {
-            var applied = new List<object>(response.Documents.Length);
-            foreach (var document in response.Documents)
-            {
-                applied.Add(await ApplyRawDocumentPutMessageAsync(
-                    cache,
-                    new CultNetDocumentPutRawMessage
-                    {
-                        MessageId = response.MessageId,
-                        Document = document
-                    }).ConfigureAwait(false));
-            }
-
-            return applied;
+            var applied = ApplyRawChangesAsOneCommit(
+                cache,
+                response.Documents.Select(document => new CultNetDatabaseChangeRawMessage
+                {
+                    SubscriptionId = response.MessageId,
+                    ChangeKind = "added",
+                    Document = document
+                }).ToArray());
+            return Task.FromResult<IReadOnlyList<object>>(applied.Select(document => document!).ToArray());
         }
 
         internal CultDocumentDescriptor ResolveDescriptorForRawDocument(CultNetRawDocumentRecord document)

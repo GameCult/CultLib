@@ -140,6 +140,12 @@ A malformed put or delete is `message_invalid`, not a per-operation code: the pe
 - A shard snapshot represents a log sequence. Applying it replaces the local
   shard view and advances the replica cursor to that sequence.
 - Realtime subscriptions publish domain changes, not storage envelopes.
+- A subscription's `database_change_raw` messages may carry `commitId` and `commitCount`: the changes of one cache
+  commit that this subscription delivers (`commitCount` of them, at least two). Both fields are optional and additive; a
+  peer that does not know them ignores them and applies each change alone. A replica that knows them applies the
+  commit's changes as one commit, so the replica judges the result (a swap of two unique-index values) and not the state
+  between records. A replica whose cache refuses a commit is faulted, never silent. `commitId` is opaque and valid only
+  within the subscription. The C# subscription server and database server tag commits; other runtimes adopt next.
 - Client-owned input documents may be predicted locally only inside explicit
   `CultNetClientAuthorityScope` declarations.
 - Predicted input state is not authoritative shared state. The shard log still
