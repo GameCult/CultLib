@@ -19,7 +19,7 @@ from cultcache_py import (
     leaves as t,
     database_entry_field,
 )
-from cultcache_py.cache import CultCacheError, _index_text
+from cultcache_py.cache import CultCacheError, index_text
 
 # variants:ruling:unique-indexes. `indexes` are unique within one type, `roles` are selection aliases. The vectors in
 # tests/vectors/unique-index are written by the C# reference; the rest of the behaviour is pinned here.
@@ -108,36 +108,36 @@ class IndexTextTests(unittest.TestCase):
         ]
         for value, text in cases:
             with self.subTest(value=value):
-                self.assertEqual(_index_text(value), text)
-                self.assertIsInstance(_index_text(value), str)
+                self.assertEqual(index_text(value), text)
+                self.assertIsInstance(index_text(value), str)
 
     def test_no_value(self) -> None:
         blank = ["", " ", "\t", "\n", "\x0b", "\x0c", "\r", "\x85", "\xa0", " ", " ", " ", " ",
                  " ", "　", " 　\x85 ", *map(chr, range(0x2000, 0x200B))]
         for value in [None, float("nan"), float("inf"), float("-inf"), *blank]:
             with self.subTest(value=repr(value)):
-                self.assertIsNone(_index_text(value))
+                self.assertIsNone(index_text(value))
 
     def test_blank_set_is_exactly_the_csharp_set(self) -> None:
         csharp = {*range(0x09, 0x0E), 0x20, 0x85, 0xA0, 0x1680, *range(0x2000, 0x200B), 0x2028, 0x2029, 0x202F, 0x205F, 0x3000}
         self.assertEqual(len(csharp), 25)
-        got = {code for code in range(0x110000) if 0xD800 > code or code > 0xDFFF if _index_text(chr(code)) is None}
+        got = {code for code in range(0x110000) if 0xD800 > code or code > 0xDFFF if index_text(chr(code)) is None}
         self.assertEqual(got, csharp)
         # Python's isspace is the wrong test: it also counts U+001C-001F.
         self.assertTrue("\x1f".isspace())
-        self.assertEqual(_index_text("\x1f"), "\x1f")
+        self.assertEqual(index_text("\x1f"), "\x1f")
 
     def test_floats_render_exactly_not_through_str(self) -> None:
         for value in (0.1, 1e-7, 123456789.123456789, 5e-324, 1.7976931348623157e308):
             with self.subTest(value=value):
-                text = _index_text(value)
+                text = index_text(value)
                 self.assertNotIn("e", text.lower())
                 self.assertEqual(Decimal(text), Decimal(value))
                 self.assertFalse(text.endswith("0") and "." in text)
 
     def test_bool_is_not_an_integer(self) -> None:
-        self.assertEqual(_index_text(True), "True")
-        self.assertNotEqual(_index_text(True), "1")
+        self.assertEqual(index_text(True), "True")
+        self.assertNotEqual(index_text(True), "1")
 
 
 class UniqueIndexTests(unittest.TestCase):
@@ -425,7 +425,7 @@ class VectorTests(unittest.TestCase):
         document = item_doc(indexes={"sku": "sku"}, roles={})
         for label, kind, value, text in msgpack.unpackb((VECTORS / "values.msgpack").read_bytes(), raw=False):
             with self.subTest(label=label):
-                self.assertEqual(_index_text(value), text)
+                self.assertEqual(index_text(value), text)
                 cache = cache_of(document)
                 cache.put(document, "item:1", Item(sku=value))
                 if text is None:
@@ -468,6 +468,107 @@ class VectorTests(unittest.TestCase):
                         self.assertNotIn("S-1", str(caught.exception))
                         self.assertEqual(cache.snapshot(), {})
                     self.assertEqual(path.read_bytes(), before)
+
+
+class ListStore(RecordingStore):
+    """A store whose contents the test swaps between loads: another process rewrote the file."""
+
+    def __init__(self, envelopes=()) -> None:
+        super().__init__()
+        self.envelopes = list(envelopes)
+
+    def pull_all(self):
+        return list(self.envelopes)
+
+
+class BatchAndOrderTests(unittest.TestCase):
+    def test_a_batch_naming_a_key_twice_lands_the_last_record_and_keeps_every_held_lookup(self) -> None:
+        # C# CultCacheBatch stages one operation per key, the last one named.
+        document = item_doc()
+        store = RecordingStore()
+        cache = cache_of(document, store=store)
+        cache.put(document, "item:h", Item(sku="S"))
+        store.pushed.clear()
+        cache.put_envelopes(
+            document, [envelope(document, "item:k", Item(sku="S")), envelope(document, "item:k", Item(sku="T"))]
+        )
+        self.assertEqual(store.pushed, ["item:k"])
+        self.assertEqual(cache.get_required(document, "item:k").sku, "T")
+        self.assertEqual(cache.get_key_by_index(document, "sku", "S"), "item:h")
+        self.assertEqual(cache.get_key_by_index(document, "sku", "T"), "item:k")
+        with self.assertRaises(CultCacheError) as caught:
+            cache.put(document, "item:z", Item(sku="S"))
+        self.assertEqual(str(caught.exception), refusal("item:h", "item:z", "item", "sku"))
+
+    def test_a_batch_naming_a_key_twice_is_judged_on_the_record_that_lands(self) -> None:
+        document = item_doc()
+        cache = cache_of(document)
+        cache.put(document, "item:h", Item(sku="S"))
+        # the first record for k would collide with h; only the last lands, so the batch is admitted
+        cache.put_envelopes(
+            document, [envelope(document, "item:k", Item(sku="S")), envelope(document, "item:k", Item(sku="T"))]
+        )
+        # and the reverse order lands the colliding record, which is refused
+        with self.assertRaises(CultCacheError):
+            cache.put_envelopes(
+                document, [envelope(document, "item:j", Item(sku="U")), envelope(document, "item:j", Item(sku="S"))]
+            )
+        self.assertNotIn("item:j", cache.snapshot().get("item", {}))
+
+    def test_values_are_named_in_landing_order(self) -> None:
+        document = item_doc()
+        cache = cache_of(document)
+        rows = [("item:a", "B"), ("item:b", "B"), ("item:x", "A"), ("item:y", "A")]
+        with self.assertRaises(CultCacheError) as caught:
+            cache.put_envelopes(document, [envelope(document, key, Item(sku=sku)) for key, sku in rows])
+        self.assertEqual(str(caught.exception), refusal("item:a", "item:b", "item", "sku"))
+
+    def test_keys_sort_by_utf16_code_unit_not_code_point(self) -> None:
+        document = item_doc()
+        cache = cache_of(document)
+        astral, bmp = "k\U0001F600", "k\uff01"  # code points: bmp < astral; UTF-16 units: D83D < FF01
+        with self.assertRaises(CultCacheError) as caught:
+            cache.put_envelopes(document, [envelope(document, bmp, Item(sku="S")), envelope(document, astral, Item(sku="S"))])
+        self.assertEqual(str(caught.exception), refusal(astral, bmp, "item", "sku"))
+
+    def test_a_load_judges_every_type_at_once_aliases_in_ordinal_order(self) -> None:
+        first = item_doc("first", indexes={"zeta": "sku"}, roles={})
+        second = item_doc("second", indexes={"alpha": "sku"}, roles={})
+        loose_first, loose_second = item_doc("first", indexes={}, roles={}), item_doc("second", indexes={}, roles={})
+        store = ListStore(
+            [envelope(loose_first, "f:1", Item(sku="S")), envelope(loose_first, "f:2", Item(sku="S"))]
+            + [envelope(loose_second, "s:1", Item(sku="S")), envelope(loose_second, "s:2", Item(sku="S"))]
+        )
+        cache = cache_of(first, second, store=store)
+        with self.assertRaises(CultCacheError) as caught:
+            cache.pull_all_backing_stores()
+        self.assertEqual(str(caught.exception), refusal("s:1", "s:2", "second", "alpha"))
+
+
+class LoadFreshnessTests(unittest.TestCase):
+    def test_a_load_is_judged_on_the_file_alone_not_against_the_held_map(self) -> None:
+        document = item_doc()
+        store = ListStore([envelope(document, "item:b", Item(sku="S")), envelope(document, "item:c", Item(sku="T"))])
+        cache = cache_of(document, store=store)
+        cache.pull_all_backing_stores()
+        self.assertEqual(cache.get_key_by_index(document, "sku", "S"), "item:b")
+        # another process moved S from b to a, and b to T's old place
+        store.envelopes = [envelope(document, "item:a", Item(sku="S")), envelope(document, "item:b", Item(sku="U")), store.envelopes[1]]
+        cache.pull_all_backing_stores()
+        self.assertEqual(cache.get_key_by_index(document, "sku", "S"), "item:a")
+        self.assertEqual(cache.get_key_by_index(document, "sku", "U"), "item:b")
+
+
+class DefinitionTests(unittest.TestCase):
+    def test_every_constructor_refuses_an_alias_in_both_indexes_and_roles(self) -> None:
+        from dataclasses import replace
+
+        from cultcache_py import DocumentDefinition
+
+        with self.assertRaisesRegex(ValueError, "both an index and a role"):
+            DocumentDefinition(type="item", indexes={"sku": "sku"}, roles={"sku": "sku"})
+        with self.assertRaisesRegex(ValueError, "both an index and a role"):
+            replace(item_doc(roles={}), roles={"sku": "sku"})
 
 
 if __name__ == "__main__":

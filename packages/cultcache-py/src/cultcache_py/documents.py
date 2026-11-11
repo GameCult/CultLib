@@ -195,6 +195,14 @@ class DocumentDefinition(Generic[T]):
             self.validate(value)
         return value
 
+    def __post_init__(self) -> None:
+        # Judged here so every constructor passes it: the factories, the dataclass constructor and dataclasses.replace.
+        for alias in self.roles:
+            if alias in self.indexes:
+                raise ValueError(
+                    f"Document type {self.type} declares '{alias}' as both an index and a role; an index already names its role."
+                )
+
     def catalog_entry(self) -> CultCacheSchemaCatalogEntry:
         if self._catalog_entry is not None:
             return self._catalog_entry
@@ -237,14 +245,6 @@ class DocumentDefinition(Generic[T]):
         return catalog_entry
 
 
-def _refuse_shared_aliases(type: str, indexes: dict[str, Any] | None, roles: dict[str, Any] | None) -> None:
-    for alias in roles or ():
-        if alias in (indexes or {}):
-            raise ValueError(
-                f"Document type {type} declares '{alias}' as both an index and a role; an index already names its role."
-            )
-
-
 def define_document_type(
     type: str,
     *,
@@ -265,7 +265,6 @@ def define_document_type(
     compatible_schema_ids: Iterable[str] | None = None,
     members: Iterable[CultCacheSchemaCatalogMember] | Callable[[], tuple[CultCacheSchemaCatalogMember, ...]] | None = None,
 ) -> DocumentDefinition[T]:
-    _refuse_shared_aliases(type, indexes, roles)
     return DocumentDefinition(
         type=type,
         encode=encode,
