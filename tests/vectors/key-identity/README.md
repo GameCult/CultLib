@@ -30,8 +30,7 @@ Registering a type that declares its schema id claims it at the next load.
     `[put, type, key, text]`, `[delete, type, key]` (each one commit).
   - `expect` is `[refusal, held, file, foreign, kept]`. Every op but the last succeeds; the last succeeds or refuses, and in the generator only a schema conflict (or, for an attach, an invalid-operation refusal) counts as a refusal: any other exception fails the run.
     `refusal` is nil or `[key]`: a typed schema-conflict refusal naming the key for a put or a delete (rows 1, 3, 5, 8, 9),
-    and for row 11 any refusal (an invalid-operation error, not a schema conflict) whose message opens `Record <key> is held by` and
-    contains the key only as a delimited token (not inside a schema name or other word); the key in `expect` is read out of that message, the store file it was refused from left byte-identical.
+    and for row 11 any refusal (an invalid-operation error, not a schema conflict) whose message contains the key as a delimited token (not inside a schema name or other word; the C# walker also pins its own `Record <key> is held by` opening, which a leaf need not copy); the key in `expect` is the one the stores share, the store file it was refused from left byte-identical.
     `held` is the cache's records, sorted by type then key, as `[type, key, text]`. `file` is the store file's records after
     the ops, sorted by key, as `[key, schema name]`, nil for a cache with no store. `foreign` is the keys the cache lists as
     foreign, sorted. `kept` is the foreign keys whose stored record (schema id, stored-at, payload) after the ops equals the
