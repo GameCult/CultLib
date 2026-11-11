@@ -26,11 +26,11 @@ All documents are CultNet map-mode: every key written, nil where absent, closed 
 
 ### card
 
-`{schemaVersion, fork_id, title, context, options[{id, text}], recommendation, depends[], leans, flag, raised_in, deciders[], status, ruling, ruled_from[], order, options_hash}`.
+`{schemaVersion, fork_id, title, context, options[{id, text}], recommendation, depends[], leans, flag, raised_in, raised_at, deciders[], status, ruling, ruled_from[], order, options_hash}`.
 
 - `fork_id`: the mind's `question` key, `<campaign>:question:<label>`.
 - **Hashed (the shown members):** `title`, `context`, `options` (each `{id, text}`, in shown order), `recommendation` (an option id, **never nil**: the stored `question` requires `recommended`), `depends` (strings, each one of the stored question's `depends` lines verbatim, at most 8, each at most 1000 UTF-8 bytes (the stored `Line`), in shown order, empty when none; the stored kind holds prose lines, so a line may read like a reference such as `campaign:kind:label` but is hashed as the text it is).
-- **Not hashed:** `fork_id` (bound beside the hash), `leans` (an option id or nil), `flag`, `raised_in`, `deciders`, `status` (`open` or `closed`), `ruling` (the ruling id when a ruling closed the fork; nil when the card is open, and nil on a closed card whose question was withdrawn or otherwise resolved with no ruling), `ruled_from` (answer ids a ruling has been admitted from; non-empty only on a closed card), `order`, and `options_hash` itself.
+- **Not hashed:** `fork_id` (bound beside the hash), `leans` (an option id or nil), `flag`, `raised_in`, `raised_at` (the instant the question was first admitted, an RFC3339 instant string as `answered_at`, or nil when the mind holds no admission time, as for a card projected before the field; the key is always written; it never moves when the question is edited; age is the client's: now minus `raised_at`), `deciders`, `status` (`open` or `closed`), `ruling` (the ruling id when a ruling closed the fork; nil when the card is open, and nil on a closed card whose question was withdrawn or otherwise resolved with no ruling), `ruled_from` (answer ids a ruling has been admitted from; non-empty only on a closed card), `order`, and `options_hash` itself.
 - **`deciders` is read-only data.** The list is set outside the Mind, through Bifrost's admin path, and **Bifrost sends it per call**: Huginn keeps no copy (M5). The card projection copies the list the call carried. **The list holds one to 64 ids** (Huginn's bound), on the card and in the per-call list alike (vectors `deciders_at_the_cap_of_64`, `deciders_65`); the per-call list has no schema here, so the bound is stated for the cut that builds it. A question's own `audience` may only narrow it. A Mind never writes it, so a Mind cannot add itself and answer its own fork.
 - Rules a schema cannot say, each with a negative vector: a `depends` line is at most 1000 UTF-8 bytes (the schema bounds 8 lines and 1000 characters; bytes need the rule); option ids are unique; `order` is unique among a Mind's cards (a list with two cards on one `order` is refused, naming both fork ids); `recommendation` and `leans` name an option; deciders are unique; an open card names no `ruling` and its `ruled_from` is empty (a ruling that answers a fork closes it); `ruled_from` is non-empty only when `ruling` is set; a closed card may name no ruling (the question was withdrawn, superseded or deferred: step 6 reads `status`, not the ruling); `options_hash` equals the hash of the shown members.
 
@@ -149,6 +149,7 @@ The old desk (`index.html`) read `questions/<id>` and wrote `answers/<id>` in a 
 | `status` open or closed, `ruling` | derived from the resolution (status is never written): any resolution of the question closes it; the ruling is the one that answered it | `status`, `ruling`, both a projection (`ruling` is nil on an open card and on a card closed with no ruling) |
 | `order` | none (unique rank per Mind, from 0) | `order` |
 | none | `raised_in`, `asked_on` | `raised_in`; `asked_on` is not carried |
+| none | the question's admission time (no timestamp in the old format; `asked_on` is a date and stays uncarried) | `raised_at`, an instant or nil, not hashed |
 | none | none | `deciders` (outside the Mind), `ruled_from`, `options_hash` |
 | answer `{choice: key or null, note, question, updatedAt}`, one mutable document per question | none | `answer_request` then an append-only `desk_answer` |
 | `note`: her words verbatim | | `answer.note`, verbatim |
@@ -178,6 +179,7 @@ Option B, **Bifrost receives the answer and Huginn stores it** (the design in th
 - `request_id` (on the request and the stored `desk_answer`) and `request_id_conflict` are this page's: his file has no idempotency key, and a retry after `unavailable` needs one. Eureka's `desk_answer` kind and Huginn's request type must carry it.
 - Transport: the routes, the `{mind}` segment, the scopes, the audience and the auth order are his rulings (4.1 to 4.3a); the documents (list, read, `unavailable`) are this page's. The note limit is 4000 UTF-8 bytes here, as his 1.1 leaves the unit unsaid.
 - The recommendation is never nil. The binding file's earlier vectors D and E used a nil recommendation; its updated D and E use `"a"`, as here.
+- `raised_at` (2026-11-11) is the desk-feed addition (Bifrost PR 67): a required key, an instant or nil, outside `options_hash` (the five hashed members and every digest are unchanged; vectors `raised_at_nil`, `raised_at_epoch_integer`, `raised_at_date_only`, `raised_at_missing`). The card is spec-authored and no runtime deploys it, so the schema id stays `gamecult.fork.card.v0`.
 - Hash vectors: A, B, C, D, E, F and G of the binding file are reproduced digest for digest by the Python generator, the C# suite and the TypeScript suite (the generator prints `same` for each; none differs).
 
 ## Open choices
@@ -186,7 +188,7 @@ Option B, **Bifrost receives the answer and Huginn stores it** (the design in th
 2. NFC across runtimes relies on each runtime's normaliser; a pinned table, as `write-receipt.md` does for letters, would remove the reliance. The risk is only for code points assigned after a runtime's Unicode version.
 3. How Huginn learns the verified subject: the second door's authenticated context (the peer credential names Bifrost the service, not the member), so the subject must travel beside the request. This contract has no envelope for it.
 4. Whether `fork_unknown` and shape refusals should leave an audit record somewhere other than a `desk_answer`.
-5. Whether `leans` and `flag`, which the booth shows, should join the hash. The binding file's five members do not include them; a changed lean would not make an answer stale.
+5. Whether `leans` and `flag`, which the booth shows, should join the hash. The binding file's five members do not include them; a changed lean would not make an answer stale. `raised_at` is immutable, so it was kept out of the hash for the same reason it need not be in: it can never make a shown card stale.
 6. What the person sees of a retracted counted answer when the next answer counts: this contract only says the count moves.
 7. `received_at` is not in the binding file's stored fields; it is kept for `claim_in_future` and could be dropped if the `n<seq>` answer ordinal alone decided answer order.
 8. The stamped `authority` field is an attribution, not an authority (above); renaming it `attribution` would say so, at the price of a new key the door must also refuse in a body.

@@ -173,7 +173,7 @@ def chash(c): return sha(canonical_json(c["title"], c["context"], c["options"], 
 def card(**kw):
     c = {"schemaVersion": "gamecult.fork.card.v0", "fork_id": FID, "title": "Slot mark consent", "context": "Should a slot mark be shared?",
          "options": OPT, "recommendation": "no", "depends": DEP, "leans": None, "flag": None,
-         "raised_in": {"kind": "CutSpec", "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"}, "deciders": [OP],
+         "raised_in": {"kind": "CutSpec", "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"}, "raised_at": "2026-11-10T09:30:00Z", "deciders": [OP],
          "status": "open", "ruling": None, "ruled_from": [], "order": 3, "options_hash": ""}
     c.update(kw); c["options_hash"] = chash(c); return c
 CARD = card(); H = CARD["options_hash"]
@@ -202,7 +202,7 @@ hv("title_changed", card(title="Slot mark consent?"))
 hv("context_changed", card(context="Should slot marks be shared?"))
 hv("depends_order_changed", card(depends=DEP + ["x:question:y"]))
 hv("depends_order_changed_reversed", card(depends=["x:question:y"] + DEP))
-hv("hidden_members_do_not_move_it", card(leans="yes", flag="provisional", deciders=[OP, HM], status="closed", ruling="r:1", ruled_from=["rc-1"], order=9, raised_in=None, fork_id="other:question:id"))
+hv("hidden_members_do_not_move_it", card(leans="yes", flag="provisional", deciders=[OP, HM], status="closed", ruling="r:1", ruled_from=["rc-1"], order=9, raised_in=None, raised_at="2027-01-02T03:04:05.123Z", fork_id="other:question:id"))
 hv("control_characters_and_markup_are_escaped_minimally", card(title='q " b \\ t \t n \n bell \u0007 del \u007f', context="</script> \u2028 &"))
 hv("astral_option_id_and_text", card(options=[{"id": "\U0001F600", "text": "\U0001D11E"}, OPT[1]]))
 assert [h["sha256"] for h in hashes if h["heimdall"] == "D"] == [h["sha256"] for h in hashes if h["heimdall"] == "E"]
@@ -547,6 +547,7 @@ fork = {
   "card": {"valid": [{"name": "operator_fork", "message": CARD, "messagePackHex": hx(CARD)},
                      {"name": "leans_flag_closed_two_deciders", "message": card(leans="yes", flag="provisional: Self expects this to move", deciders=[OP, HM], depends=[], raised_in=None, status="closed", ruling="x:resolution:y", ruled_from=["n1"], order=0),
                       "messagePackHex": hx(card(leans="yes", flag="provisional: Self expects this to move", deciders=[OP, HM], depends=[], raised_in=None, status="closed", ruling="x:resolution:y", ruled_from=["n1"], order=0))},
+                     {"name": "raised_at_nil", "message": card(raised_at=None), "messagePackHex": hx(card(raised_at=None))},
                      {"name": "depends_at_both_caps", "message": card(depends=["a"] * 7 + ["\u00e9" * 500]), "messagePackHex": hx(card(depends=["a"] * 7 + ["\u00e9" * 500]))},
                      {"name": "closed_without_a_ruling_the_question_was_withdrawn", "message": card(status="closed"), "messagePackHex": hx(card(status="closed"))},
                      {"name": "deciders_at_the_cap_of_64", "message": card(deciders=DECIDERS_64), "messagePackHex": hx(card(deciders=DECIDERS_64))}],
@@ -570,6 +571,9 @@ fork = {
                ("open_card_names_a_ruling", "rule: only a closed card names a ruling (not expressible in the schema)", card(ruling="cultlib-gaps:resolution:question.slot-mark-consent.n1")),
                ("ruled_from_without_a_ruling", "rule: ruled_from lists answers a ruling was admitted from, so it needs the ruling (not expressible in the schema)", card(status="closed", ruled_from=["n1"])),
                ("options_hash_of_another_card", "rule: options_hash equals the hash of the shown members (not expressible in the schema)", dict(card(), options_hash=STALE_H)),
+               ("raised_at_epoch_integer", "raised_at is an RFC3339 instant string or nil, not epoch milliseconds", card(raised_at=1762767000000)),
+               ("raised_at_date_only", "raised_at is an instant with a time and a Z, not a date", card(raised_at="2026-11-10")),
+               ("raised_at_missing", "map-mode writes every key: raised_at is required, nil when unknown", {k: v for k, v in card().items() if k != "raised_at"}),
                ("deciders_65", "deciders holds at most 64 (Huginn's bound)", card(deciders=DECIDERS_64 + ["00000041-0000-4000-8000-000000000041"])),
            ]]},
   "request": {"valid": [{"name": n, "message": m, "messagePackHex": hx(m)} for n, m in

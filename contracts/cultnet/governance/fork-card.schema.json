@@ -70,6 +70,7 @@
         "leans",
         "flag",
         "raised_in",
+        "raised_at",
         "deciders",
         "status",
         "ruling",
@@ -137,6 +138,16 @@
           "oneOf": [
             {
               "$ref": "#/$defs/ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "raised_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/instant"
             },
             {
               "type": "null"
