@@ -1777,11 +1777,11 @@ impl CacheBackingStore for SingleFileMessagePackBackingStore {
                 return Ok(());
             }
 
-            // Of same-type entries sharing a key the last one given is the record; a second type under a key reaches the
-            // commit guard.
+            // Of entries sharing a key and a schema id the last one given is the record, whatever their type names (a type
+            // renamed under a stable id); a second schema id under a key reaches the commit guard.
             let mut by_id = BTreeMap::<(String, String), &CultCacheEnvelope>::new();
             for entry in entries {
-                by_id.insert(entry_id(entry), entry);
+                by_id.insert((schema_identity(entry).to_string(), entry.key.clone()), entry);
             }
             let mut entries: Vec<CultCacheEnvelope> = by_id.into_values().cloned().collect();
             entries.sort_by_key(entry_id);
@@ -6676,6 +6676,52 @@ mod tests {
         let held = SingleFileMessagePackBackingStore::new(&path).pull_all()?;
         assert_eq!(held.len(), 1);
         assert_eq!((held[0].r#type.as_str(), held[0].payload.as_slice()), ("t.s", b"two".as_slice()));
+        Ok(())
+    }
+
+    // Where a held record and a written one share a schema id under different type names, the written one is the record
+    // whichever name sorts first: the writers hand settle_one_record_per_key their entries sorted by type name.
+    #[test]
+    fn a_renamed_type_replaces_the_held_record_whether_its_name_sorts_before_or_after() -> Result<()> {
+        for new_name in ["a.new", "z.new"] {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.msgpack");
+            store_file(&path, &[("t.s", "t.old")], &[("a", "t.s", b"one".to_vec())])?;
+            let written = CultCacheEnvelope {
+                key: "a".into(),
+                r#type: new_name.into(),
+                payload: b"two".to_vec(),
+                stored_at: "2026-09-30T00:00:00Z".into(),
+                schema_id: Some("t.s".into()),
+            };
+            SingleFileMessagePackBackingStore::new(&path).push(&written)?;
+            let held = SingleFileMessagePackBackingStore::new(&path).pull_all()?;
+            assert_eq!(held.len(), 1, "{new_name}");
+            assert_eq!(held[0].payload, b"two".to_vec(), "{new_name}");
+        }
+        Ok(())
+    }
+
+    // In one push_all, entries under a key and a schema id with different type names resolve by the order given, not by
+    // the order of the names.
+    #[test]
+    fn push_all_resolves_same_id_entries_with_different_names_by_the_order_given() -> Result<()> {
+        let envelope = |r#type: &str, payload: &[u8]| CultCacheEnvelope {
+            key: "a".into(),
+            r#type: r#type.into(),
+            payload: payload.to_vec(),
+            stored_at: "2026-09-30T00:00:00Z".into(),
+            schema_id: Some("t.s".into()),
+        };
+        for (first, second) in [("a.name", "b.name"), ("b.name", "a.name")] {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.msgpack");
+            let mut store = SingleFileMessagePackBackingStore::new(&path);
+            store.push_all(&[envelope(first, b"first"), envelope(second, b"second")], PushAllOptions::default())?;
+            let held = store.pull_all()?;
+            assert_eq!(held.len(), 1, "{first} then {second}");
+            assert_eq!(held[0].payload, b"second".to_vec(), "{first} then {second}");
+        }
         Ok(())
     }
 
