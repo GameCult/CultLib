@@ -220,6 +220,7 @@ def body(choice=None, note=None, h=None, at="2026-11-12T19:02:00Z", fork=FID, re
     return {"schemaVersion": "gamecult.fork.answer_request.v0", "fork_id": fork, "options_hash": h or H, "answer": a,
             "retracted": retracts is not None, "retracts": retracts, "answered_at": at, "request_id": rid or next_rid()}
 def retraction(target, **kw): return body(retracts=target, **kw)
+NULLANS_RID = "0000b001-0000-4000-8000-00000000b001"
 NOTE = "Keep it local: a slot mark is the author's call, and sharing it is a separate act."
 def srv(aid, who, at, auth="Operator"): return {"answer_id": aid, "answerer": who, "authority": auth, "received_at": at}
 TAIL = {"unauthenticated": "a verified session is required", "body_forbidden_field": "answerer and authority are set by the receiver", "body_unknown_field": "the body is a closed shape",
@@ -411,6 +412,15 @@ ENTRIES = [fentry(q5, [a5], "n1"), fentry(q4), fentry(q3, [a3, r3], "n1"), fentr
 a5b = da("Revision", "n1", None, fbody(q5, "yes", NOTE), srv("n2", OP, T(4)))
 TWICE = fentry(q5, [a5, a5b], "n1")                                                 # two answers, one account
 q0 = fcard(0)
+# Revision and Retraction answers are nullable like Counted and Refused: one fork holding a Counted, its Revision and a Retraction of the Counted (appended after the older entries; nothing above moves)
+q6 = fcard(6); _RID = RID[0]   # the request_id counter is restored after this block: no later body changes
+a6 = da("Counted", None, None, fbody(q6, "no", NOTE), srv("n1", OP, T(2)))
+a6r = da("Revision", "n1", None, fbody(q6, "yes", NOTE), srv("n2", OP, T(4)))
+a6x = da("Retraction", "n1", None, body(retracts="n1", h=q6["options_hash"], fork=q6["fork_id"]), srv("n3", HM, T(6), "Steward"))
+RID[0] = _RID
+REVRET = fentry(q6, [a6, a6r, a6x], "n2")
+WREVRET = withheld(REVRET)
+NAMED_RETRACTION = json.loads(json.dumps(WREVRET)); NAMED_RETRACTION["record"]["answers"][2]["answerer"] = HM
 WENTRIES = [withheld(e) for e in ENTRIES]
 MIXED = json.loads(json.dumps(WENTRIES[2])); MIXED["record"]["answers"][0]["answerer"] = OP     # one answer named among nils
 ORDER0 = [fentry(fcard(3)), fentry(fcard(2)), fentry(fcard(1)), fentry(q0)]   # a Mind whose oldest card has order 0
@@ -441,6 +451,8 @@ LISTS = [
  {"name": "order_zero_is_legal_but_no_cursor_names_it", "ordinal": 9, "entries": ORDER0, "steps": [lstep(ORDER0, 9, lreq(limit=3)), lstep(ORDER0, 9, lreq(cursor="c1", limit=3))]},
  {"name": "non_decider_page", "ordinal": 412, "entries": WENTRIES, "twin": "all_forks_one_page", "steps": [lstep(WENTRIES, 412, lreq(limit=50))]},
  {"name": "a_mind_with_no_forks", "ordinal": 7, "entries": [], "steps": [lstep([], 7, lreq(mind="nibu", limit=10))]},
+ {"name": "counted_revision_and_retraction_page", "ordinal": 413, "entries": [REVRET], "steps": [lstep([REVRET], 413, lreq(limit=10))]},
+ {"name": "non_decider_counted_revision_and_retraction_page", "ordinal": 413, "entries": [WREVRET], "twin": "counted_revision_and_retraction_page", "steps": [lstep([WREVRET], 413, lreq(limit=10))]},
 ]
 # A page may stop short of `limit` when the next entry would pass the receiver's response budget; a list whose first
 # entry alone passes it is refused `fork_too_large` (422). The budget is not in the vector: a step records what the receiver answered, and the
@@ -629,7 +641,9 @@ fork = {
                            [("counted", CNT), ("revision", REV), ("retraction", da("Retraction", "n1", None, retraction("n1"), sr("n8"))),
                             ("withheld_answerer", dict(CNT, answerer=None)),
                             ("refused_stale", da("Refused", None, "stale_fork", stale_body(), sx1)),
-                            ("refused_closed_retraction_names_its_target", da("Refused", None, "fork_closed", retraction("n1"), sr("n9")))]],
+                            ("refused_closed_retraction_names_its_target", da("Refused", None, "fork_closed", retraction("n1"), sr("n9"))),
+                            ("withheld_answerer_revision", dict(REV, answerer=None)),
+                            ("withheld_answerer_retraction", dict(da("Retraction", "n1", None, retraction("n1", rid=NULLANS_RID), sr("n8")), answerer=None))]],
                  "invalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
                    ("counted_with_a_code", "only Refused carries a code", dict(CNT, code="fork_closed")),
                    ("refused_without_a_code", "Refused carries a reason code", dict(REF, code=None)),
@@ -645,7 +659,9 @@ fork = {
                    ("no_answerer", "answerer is stamped on every stored answer", dict(CNT, answerer="")),
                  ]]},
   "resultsInvalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
-    ("answer_result_with_a_nil_answerer", "rule R-answer-result: the answer is the sender's own, stamped with their account; a nil answerer exists only inside a record shown to a non-decider (not expressible in the schema)", dict(result(dict(CNT, answerer=None)), counted_answer_id="n1"))]],
+    ("answer_result_with_a_nil_answerer", "rule R-answer-result: the answer is the sender's own, stamped with their account; a nil answerer exists only inside a record shown to a non-decider (not expressible in the schema)", dict(result(dict(CNT, answerer=None)), counted_answer_id="n1")),
+    ("answer_result_with_a_nil_answerer_on_a_revision", "rule R-answer-result holds for every outcome: a Revision the sender just made is stamped with their account (not expressible in the schema)", dict(result(dict(REV, answerer=None)), counted_answer_id="n2")),
+    ("answer_result_with_a_nil_answerer_on_a_retraction", "rule R-answer-result holds for every outcome: a Retraction the sender just made is stamped with their account (not expressible in the schema)", dict(result(dict(da("Retraction", "n1", None, retraction("n1", rid=NULLANS_RID), sr("n8")), answerer=None)), counted_answer_id=None))]],
   "results": [{"name": r["name"], "httpStatus": r["httpStatus"], "message": r["message"], "messagePackHex": hx(r["message"])} for r in STORED_REFUSALS],
   "doorRefusals": [{"name": c, "httpStatus": HTTP[c], "message": refusal_doc(c), "messagePackHex": hx(refusal_doc(c))} for c in TAIL] + [{"name": "fork_too_large", "httpStatus": HTTP["fork_too_large"], "message": SHORT_PAGES[1]["steps"][0]["refusal"], "messagePackHex": SHORT_PAGES[1]["steps"][0]["refusalHex"]}],
   "unavailable": [{"name": "second_door_down", "httpStatus": 503, "message": unavailable_doc(30), "messagePackHex": hx(unavailable_doc(30))},
@@ -666,7 +682,9 @@ fork = {
                       ("mind_empty", "a read names a Mind", {"schemaVersion": "gamecult.fork.read_request.v0", "mind": "", "fork_id": FID}),
                       ("mind_missing", "map-mode writes every key; the Mind is the route's", {"schemaVersion": "gamecult.fork.read_request.v0", "fork_id": FID})]]},
     "entry": {"valid": [{"name": n, "message": e, "messagePackHex": hx(e)} for n, e in [("open_no_answers", ENTRIES[1]), ("open_counted", ENTRIES[0]), ("closed_with_ruling_and_a_refusal", ENTRIES[2])]]
-                       + [dict({"name": n, "message": e, "messagePackHex": hx(e)}, twin=t) for n, e, t in [("withheld_open_counted", WENTRIES[0], "open_counted"), ("withheld_closed_with_ruling_and_a_refusal", WENTRIES[2], "closed_with_ruling_and_a_refusal"), ("withheld_no_answers", WENTRIES[1], "open_no_answers")]],
+                       + [dict({"name": n, "message": e, "messagePackHex": hx(e)}, twin=t) for n, e, t in [("withheld_open_counted", WENTRIES[0], "open_counted"), ("withheld_closed_with_ruling_and_a_refusal", WENTRIES[2], "closed_with_ruling_and_a_refusal"), ("withheld_no_answers", WENTRIES[1], "open_no_answers")]]
+                       + [{"name": "open_counted_revision_and_retraction", "message": REVRET, "messagePackHex": hx(REVRET)},
+                          dict({"name": "withheld_counted_revision_and_retraction", "message": WREVRET, "messagePackHex": hx(WREVRET)}, twin="open_counted_revision_and_retraction")],
               "invalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
                 ("entry_without_record", "an entry holds the card and its record", {k: v for k, v in ENTRIES[0].items() if k != "record"}),
                 ("record_of_another_fork", "rule: the record names the card's fork (not expressible in the schema)", dict(ENTRIES[0], record=dict(ENTRIES[0]["record"], fork_id="gamecult-chat:question:q9"))),
@@ -683,7 +701,9 @@ fork = {
                 ("withheld_count_over_no_answers", "rule R-record: with no answers the count is 0 in both views (not expressible in the schema)", with_count(WENTRIES[1], 1)),
                 ("decider_card_with_withheld_answers", "rule R-entry: a card that shows deciders is the decider view, so every answerer is named (not expressible in the schema)", withheld_answers(ENTRIES[0])),
                 ("withheld_card_with_named_answers", "rule R-entry, the leak: a card with deciders withheld beside an answer that still names its account (not expressible in the schema)", dict(ENTRIES[0], card=WENTRIES[0]["card"])),
-                ("card_hash_wrong", "rule: the server computes options_hash and a client recomputes it; a card with another hash is no card", dict(ENTRIES[1], card=dict(ENTRIES[1]["card"], options_hash=STALE_H), record=dict(ENTRIES[1]["record"], options_hash=STALE_H)))]]},
+                ("card_hash_wrong", "rule: the server computes options_hash and a client recomputes it; a card with another hash is no card", dict(ENTRIES[1], card=dict(ENTRIES[1]["card"], options_hash=STALE_H), record=dict(ENTRIES[1]["record"], options_hash=STALE_H))),
+                ("withheld_revision_and_retraction_beside_a_named_retraction", "rule R-entry: a withheld card beside one named answerer, a Retraction's included (not expressible in the schema)", NAMED_RETRACTION),
+                ("withheld_revision_and_retraction_count_over_the_answers", "rule R-record: withheld answers are at most as many answerers as answers (three answers, count 4; not expressible in the schema)", with_count(WREVRET, 4))]]},
     "listInvalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
       ("next_cursor_malformed", "a cursor is c<N>", dict(LISTS[0]["steps"][0]["response"], next_cursor="more")),
       ("stamp_malformed", "a stamp is s<N>", dict(LISTS[0]["steps"][0]["response"], stamp="412")),
