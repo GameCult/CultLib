@@ -173,9 +173,11 @@ def chash(c): return sha(canonical_json(c["title"], c["context"], c["options"], 
 def card(**kw):
     c = {"schemaVersion": "gamecult.fork.card.v0", "fork_id": FID, "title": "Slot mark consent", "context": "Should a slot mark be shared?",
          "options": OPT, "recommendation": "no", "depends": DEP, "leans": None, "flag": None,
-         "raised_in": {"kind": "CutSpec", "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"}, "raised_at": "2026-11-10T09:30:00Z", "deciders": [OP],
+         "raised_in": {"kind": "CutSpec", "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"}, "raised_at": "2026-11-10T09:30:00Z", "deciders": [OP], "decider_count": 1,
          "status": "open", "ruling": None, "ruled_from": [], "order": 3, "options_hash": ""}
-    c.update(kw); c["options_hash"] = chash(c); return c
+    c.update(kw)
+    if "decider_count" not in kw: c["decider_count"] = len(c["deciders"])   # the decider view: the count equals the ids; a withheld card passes its own
+    c["options_hash"] = chash(c); return c
 CARD = card(); H = CARD["options_hash"]
 
 hashes = []
@@ -202,7 +204,7 @@ hv("title_changed", card(title="Slot mark consent?"))
 hv("context_changed", card(context="Should slot marks be shared?"))
 hv("depends_order_changed", card(depends=DEP + ["x:question:y"]))
 hv("depends_order_changed_reversed", card(depends=["x:question:y"] + DEP))
-hv("hidden_members_do_not_move_it", card(leans="yes", flag="provisional", deciders=[OP, HM], status="closed", ruling="r:1", ruled_from=["rc-1"], order=9, raised_in=None, raised_at="2027-01-02T03:04:05.123Z", fork_id="other:question:id"))
+hv("hidden_members_do_not_move_it", card(leans="yes", flag="provisional", deciders=[], decider_count=2, status="closed", ruling="r:1", ruled_from=["rc-1"], order=9, raised_in=None, raised_at="2027-01-02T03:04:05.123Z", fork_id="other:question:id"))
 hv("control_characters_and_markup_are_escaped_minimally", card(title='q " b \\ t \t n \n bell \u0007 del \u007f', context="</script> \u2028 &"))
 hv("astral_option_id_and_text", card(options=[{"id": "\U0001F600", "text": "\U0001D11E"}, OPT[1]]))
 assert [h["sha256"] for h in hashes if h["heimdall"] == "D"] == [h["sha256"] for h in hashes if h["heimdall"] == "E"]
@@ -237,7 +239,10 @@ def da(outcome, link, code, b, server):
             "options_hash": b["options_hash"], "choice": a["choice"], "note": a["note"], "answered_at": b["answered_at"], "received_at": server["received_at"],
             "claim_in_future": future(b["answered_at"], server["received_at"]), "answerer": server["answerer"], "authority": server["authority"], "request_id": b["request_id"]}
 def result(answer, c=None): return {"schemaVersion": "gamecult.fork.answer_result.v0", "answer": answer, "card": c, "counted_answer_id": None}   # sc() fills counted_answer_id
-def record(counted, answers, h=H, fork=FID): return {"schemaVersion": "gamecult.fork.record.v0", "fork_id": fork, "options_hash": h, "counted_answer_id": counted, "answers": answers}
+def record(counted, answers, h=H, fork=FID, answerer_count=None):
+    # answerer_count: distinct answerers over every stored answer, refusals included; a withheld record passes the count it kept
+    n = len({a["answerer"] for a in answers}) if answerer_count is None else answerer_count
+    return {"schemaVersion": "gamecult.fork.record.v0", "fork_id": fork, "options_hash": h, "counted_answer_id": counted, "answerer_count": n, "answers": answers}
 T = lambda m, sec=5: f"2026-11-12T19:{m:02d}:{sec:02d}Z"
 def step(kind, body_=None, server=None, response=None, **kw):
     d = {"kind": kind, "body": body_, "server": server, "response": response}; d.update(kw); return d
@@ -385,15 +390,29 @@ def fcard(n, status="open", **kw):
     return c
 def fbody(c, choice, aid_note):
     return body(choice, aid_note, h=c["options_hash"], fork=c["fork_id"])
+def with_count(e, n): return dict(e, record=dict(e["record"], answerer_count=n))
+def withheld_answers(e):
+    e = json.loads(json.dumps(e))
+    for a in e["record"]["answers"]: a["answerer"] = None
+    return e
 def fentry(c, answers=(), counted=None):
     return {"schemaVersion": "gamecult.fork.entry.v0", "card": c, "record": record(counted, list(answers), c["options_hash"], c["fork_id"])}
+def withheld(e):
+    """The non-decider twin of a decider-view entry: ids withheld, counts kept (fork-card.md, Reader views)."""
+    e = json.loads(json.dumps(e)); e["card"]["deciders"] = []
+    for a in e["record"]["answers"]: a["answerer"] = None
+    return e
 q5 = fcard(5); q4 = fcard(4); q2 = fcard(2)
 q3 = fcard(3, "closed", ruling="cultlib-gaps:resolution:question.q3.n1", ruled_from=["n1"]); q1 = fcard(1, "closed", ruling="cultlib-gaps:resolution:question.q1.n1")
 a5 = da("Counted", None, None, fbody(q5, "no", NOTE), srv("n1", OP, T(2)))
 a3 = da("Counted", None, None, fbody(q3, "yes", NOTE), srv("n1", OP, T(2)))
 r3 = da("Refused", None, "fork_closed", fbody(q3, "no", NOTE), srv("n2", HM, T(4), "Steward"))
 ENTRIES = [fentry(q5, [a5], "n1"), fentry(q4), fentry(q3, [a3, r3], "n1"), fentry(q2), fentry(q1)]
+a5b = da("Revision", "n1", None, fbody(q5, "yes", NOTE), srv("n2", OP, T(4)))
+TWICE = fentry(q5, [a5, a5b], "n1")                                                 # two answers, one account
 q0 = fcard(0)
+WENTRIES = [withheld(e) for e in ENTRIES]
+MIXED = json.loads(json.dumps(WENTRIES[2])); MIXED["record"]["answers"][0]["answerer"] = OP     # one answer named among nils
 ORDER0 = [fentry(fcard(3)), fentry(fcard(2)), fentry(fcard(1)), fentry(q0)]   # a Mind whose oldest card has order 0
 q4b = dict(fcard(4), fork_id="gamecult-chat:question:q4b")                      # a second card on order 4 in the same Mind
 def order_shared(entries):
@@ -420,6 +439,7 @@ LISTS = [
  {"name": "recorded_only_paged", "ordinal": 412, "entries": ENTRIES, "steps": [lstep(ENTRIES, 412, lreq(status="recorded", limit=1)), lstep(ENTRIES, 412, lreq(status="recorded", cursor="c3", limit=1))]},
  {"name": "limit_zero_is_the_count_and_stamp_only", "ordinal": 412, "entries": ENTRIES, "steps": [lstep(ENTRIES, 412, lreq(limit=0))]},
  {"name": "order_zero_is_legal_but_no_cursor_names_it", "ordinal": 9, "entries": ORDER0, "steps": [lstep(ORDER0, 9, lreq(limit=3)), lstep(ORDER0, 9, lreq(cursor="c1", limit=3))]},
+ {"name": "non_decider_page", "ordinal": 412, "entries": WENTRIES, "twin": "all_forks_one_page", "steps": [lstep(WENTRIES, 412, lreq(limit=50))]},
  {"name": "a_mind_with_no_forks", "ordinal": 7, "entries": [], "steps": [lstep([], 7, lreq(mind="nibu", limit=10))]},
 ]
 # A page may stop short of `limit` when the next entry would pass the receiver's response budget; a list whose first
@@ -550,6 +570,7 @@ fork = {
                      {"name": "raised_at_nil", "message": card(raised_at=None), "messagePackHex": hx(card(raised_at=None))},
                      {"name": "depends_at_both_caps", "message": card(depends=["a"] * 7 + ["\u00e9" * 500]), "messagePackHex": hx(card(depends=["a"] * 7 + ["\u00e9" * 500]))},
                      {"name": "closed_without_a_ruling_the_question_was_withdrawn", "message": card(status="closed"), "messagePackHex": hx(card(status="closed"))},
+                     {"name": "withheld_deciders", "message": card(deciders=[], decider_count=2), "messagePackHex": hx(card(deciders=[], decider_count=2))},
                      {"name": "deciders_at_the_cap_of_64", "message": card(deciders=DECIDERS_64), "messagePackHex": hx(card(deciders=DECIDERS_64))}],
            "invalid": [bad(n, w, m) for n, w, m in [
                ("depends_nine_lines", "depends holds at most 8 lines (the stored question's limit)", card(depends=["a"] * 9)),
@@ -557,7 +578,13 @@ fork = {
                ("depends_line_1001_bytes", "rule: one byte over the limit (500 two-byte characters and one more; not expressible in the schema)", card(depends=["\u00e9" * 500 + "a"])),
                ("depends_line_over_1000_bytes", "rule: a depends line is at most 1000 UTF-8 bytes (the stored Line limit; not expressible in the schema)", card(depends=["\u00e9" * 501])),
                ("one_option", "two or more options", card(options=[OPT[0]], recommendation="yes")),
-               ("no_deciders", "a fork with no decider cannot be answered", card(deciders=[])),
+               ("decider_count_zero", "a fork with no decider cannot be answered; an empty deciders list now means withheld, so the count refuses it", card(deciders=[], decider_count=0)),
+               ("decider_count_missing", "map-mode writes every key: decider_count is required", {k: v for k, v in card().items() if k != "decider_count"}),
+               ("decider_count_65", "decider_count is at most 64 (Bifrost's per-call list)", card(deciders=[], decider_count=65)),
+               ("decider_count_string", "decider_count is an integer", card(deciders=[], decider_count="2")),
+               ("decider_count_null", "decider_count is never nil: it states the count even when the ids are withheld", card(deciders=[], decider_count=None)),
+               ("decider_count_fewer_than_the_ids", "rule R-card: a card that shows deciders shows all of them, so the count equals the ids (not expressible in the schema)", card(deciders=[OP, HM], decider_count=1)),
+               ("decider_count_more_than_the_ids_shown", "rule R-card: a visible list must be whole; a partial list is no view (not expressible in the schema)", card(deciders=[OP, HM], decider_count=3)),
                ("null_recommendation", "every card recommends an option", dict(card(), recommendation=None)),
                ("unknown_key", "closed document", dict(card(), note="x")),
                ("option_with_a_label", "options are {id,text}; the old format's display label is not a member (fork-card.md, Old format)", card(options=[dict(OPT[0], label="Yes"), OPT[1]])),
@@ -566,7 +593,7 @@ fork = {
                ("duplicate_option_ids", "rule: option ids are unique (not expressible in the schema)", card(options=[OPT[0], dict(OPT[1], id=OPT[0]["id"])])),
                ("recommendation_not_an_option", "rule: recommendation is an option id (not expressible in the schema)", card(recommendation="maybe")),
                ("leans_not_an_option", "rule: leans is nil or an option id (not expressible in the schema)", card(leans="maybe")),
-               ("duplicate_deciders", "rule: deciders are unique (not expressible in the schema)", card(deciders=[OP, OP])),
+               ("duplicate_deciders", "rule: deciders are unique (not expressible in the schema)", card(deciders=[OP, OP], decider_count=2)),
                ("ruled_from_on_an_open_card", "rule: a ruling that answers a fork closes it, so an open card cites no answer in ruled_from (not expressible in the schema)", card(ruled_from=["n1"])),
                ("open_card_names_a_ruling", "rule: only a closed card names a ruling (not expressible in the schema)", card(ruling="cultlib-gaps:resolution:question.slot-mark-consent.n1")),
                ("ruled_from_without_a_ruling", "rule: ruled_from lists answers a ruling was admitted from, so it needs the ruling (not expressible in the schema)", card(status="closed", ruled_from=["n1"])),
@@ -574,7 +601,7 @@ fork = {
                ("raised_at_epoch_integer", "raised_at is an RFC3339 instant string or nil, not epoch milliseconds", card(raised_at=1762767000000)),
                ("raised_at_date_only", "raised_at is an instant with a time and a Z, not a date", card(raised_at="2026-11-10")),
                ("raised_at_missing", "map-mode writes every key: raised_at is required, nil when unknown", {k: v for k, v in card().items() if k != "raised_at"}),
-               ("deciders_65", "deciders holds at most 64 (Huginn's bound)", card(deciders=DECIDERS_64 + ["00000041-0000-4000-8000-000000000041"])),
+               ("deciders_65", "deciders holds at most 64 (Huginn's bound)", card(deciders=DECIDERS_64 + ["00000041-0000-4000-8000-000000000041"], decider_count=65)),
            ]]},
   "request": {"valid": [{"name": n, "message": m, "messagePackHex": hx(m)} for n, m in
                        [("choice_and_note", x1), ("choice_alone", pick), ("note_alone_clear_pick", words), ("retraction", retraction("n1")),
@@ -600,6 +627,7 @@ fork = {
            ]]},
   "deskAnswer": {"valid": [{"name": n, "message": m, "messagePackHex": hx(m)} for n, m in
                            [("counted", CNT), ("revision", REV), ("retraction", da("Retraction", "n1", None, retraction("n1"), sr("n8"))),
+                            ("withheld_answerer", dict(CNT, answerer=None)),
                             ("refused_stale", da("Refused", None, "stale_fork", stale_body(), sx1)),
                             ("refused_closed_retraction_names_its_target", da("Refused", None, "fork_closed", retraction("n1"), sr("n9")))]],
                  "invalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
@@ -616,6 +644,8 @@ fork = {
                    ("outcome_lower_case", "outcome tags are Counted, Revision, Retraction, Refused", dict(CNT, outcome="counted")),
                    ("no_answerer", "answerer is stamped on every stored answer", dict(CNT, answerer="")),
                  ]]},
+  "resultsInvalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
+    ("answer_result_with_a_nil_answerer", "rule R-answer-result: the answer is the sender's own, stamped with their account; a nil answerer exists only inside a record shown to a non-decider (not expressible in the schema)", dict(result(dict(CNT, answerer=None)), counted_answer_id="n1"))]],
   "results": [{"name": r["name"], "httpStatus": r["httpStatus"], "message": r["message"], "messagePackHex": hx(r["message"])} for r in STORED_REFUSALS],
   "doorRefusals": [{"name": c, "httpStatus": HTTP[c], "message": refusal_doc(c), "messagePackHex": hx(refusal_doc(c))} for c in TAIL] + [{"name": "fork_too_large", "httpStatus": HTTP["fork_too_large"], "message": SHORT_PAGES[1]["steps"][0]["refusal"], "messagePackHex": SHORT_PAGES[1]["steps"][0]["refusalHex"]}],
   "unavailable": [{"name": "second_door_down", "httpStatus": 503, "message": unavailable_doc(30), "messagePackHex": hx(unavailable_doc(30))},
@@ -635,20 +665,34 @@ fork = {
                       ("fork_id_empty", "a read names a fork", {"schemaVersion": "gamecult.fork.read_request.v0", "mind": "gamecult-chat", "fork_id": ""}),
                       ("mind_empty", "a read names a Mind", {"schemaVersion": "gamecult.fork.read_request.v0", "mind": "", "fork_id": FID}),
                       ("mind_missing", "map-mode writes every key; the Mind is the route's", {"schemaVersion": "gamecult.fork.read_request.v0", "fork_id": FID})]]},
-    "entry": {"valid": [{"name": n, "message": e, "messagePackHex": hx(e)} for n, e in [("open_no_answers", ENTRIES[1]), ("open_counted", ENTRIES[0]), ("closed_with_ruling_and_a_refusal", ENTRIES[2])]],
+    "entry": {"valid": [{"name": n, "message": e, "messagePackHex": hx(e)} for n, e in [("open_no_answers", ENTRIES[1]), ("open_counted", ENTRIES[0]), ("closed_with_ruling_and_a_refusal", ENTRIES[2])]]
+                       + [dict({"name": n, "message": e, "messagePackHex": hx(e)}, twin=t) for n, e, t in [("withheld_open_counted", WENTRIES[0], "open_counted"), ("withheld_closed_with_ruling_and_a_refusal", WENTRIES[2], "closed_with_ruling_and_a_refusal"), ("withheld_no_answers", WENTRIES[1], "open_no_answers")]],
               "invalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
                 ("entry_without_record", "an entry holds the card and its record", {k: v for k, v in ENTRIES[0].items() if k != "record"}),
                 ("record_of_another_fork", "rule: the record names the card's fork (not expressible in the schema)", dict(ENTRIES[0], record=dict(ENTRIES[0]["record"], fork_id="gamecult-chat:question:q9"))),
                 ("record_under_another_hash", "rule: the record is under the card's options_hash (not expressible in the schema)", dict(ENTRIES[0], record=dict(ENTRIES[0]["record"], options_hash=STALE_H))),
                 ("counted_answer_not_derived", "rule: counted_answer_id is the first live Counted or Revision answer under the card's hash (not expressible in the schema)", dict(ENTRIES[0], record=dict(ENTRIES[0]["record"], counted_answer_id=None))),
+                ("answerer_count_missing", "map-mode writes every key: answerer_count is required", dict(ENTRIES[0], record={k: v for k, v in ENTRIES[0]["record"].items() if k != "answerer_count"})),
+                ("answerer_count_negative", "answerer_count is not negative", with_count(ENTRIES[0], -1)),
+                ("answerer_count_null", "answerer_count is never nil: a decider and a non-decider read the same number", with_count(ENTRIES[0], None)),
+                ("answerer_count_disagrees_with_the_ids", "rule R-record: in the decider view answerer_count is the number of distinct answerers (two here, not three; not expressible in the schema)", with_count(ENTRIES[2], 3)),
+                ("answerer_count_counts_answers_not_people", "rule R-record: two answers by one account are one answerer (not expressible in the schema)", with_count(TWICE, 2)),
+                ("withheld_card_with_a_named_answerer_among_nils", "rule R-entry: a withheld card beside one named answerer, even among nils (not expressible in the schema)", MIXED),
+                ("withheld_count_over_the_answers", "rule R-record: withheld answers are at most as many answerers as answers (two answers, count 3; not expressible in the schema)", with_count(WENTRIES[2], 3)),
+                ("withheld_count_zero_over_answers", "rule R-record: with at least one answer the count is at least 1 (not expressible in the schema)", with_count(WENTRIES[0], 0)),
+                ("withheld_count_over_no_answers", "rule R-record: with no answers the count is 0 in both views (not expressible in the schema)", with_count(WENTRIES[1], 1)),
+                ("decider_card_with_withheld_answers", "rule R-entry: a card that shows deciders is the decider view, so every answerer is named (not expressible in the schema)", withheld_answers(ENTRIES[0])),
+                ("withheld_card_with_named_answers", "rule R-entry, the leak: a card with deciders withheld beside an answer that still names its account (not expressible in the schema)", dict(ENTRIES[0], card=WENTRIES[0]["card"])),
                 ("card_hash_wrong", "rule: the server computes options_hash and a client recomputes it; a card with another hash is no card", dict(ENTRIES[1], card=dict(ENTRIES[1]["card"], options_hash=STALE_H), record=dict(ENTRIES[1]["record"], options_hash=STALE_H)))]]},
     "listInvalid": [dict(bad(n, w, m), messagePackHex=hx(m)) for n, w, m in [
       ("next_cursor_malformed", "a cursor is c<N>", dict(LISTS[0]["steps"][0]["response"], next_cursor="more")),
       ("stamp_malformed", "a stamp is s<N>", dict(LISTS[0]["steps"][0]["response"], stamp="412")),
-      ("count_negative", "counts are not negative", dict(LISTS[0]["steps"][0]["response"], open_count=-1))]]
+      ("count_negative", "counts are not negative", dict(LISTS[0]["steps"][0]["response"], open_count=-1)),
+      ("a_page_mixes_views", "rule R-list: a page is one reader's view, so every entry agrees on whether the deciders are shown (not expressible in the schema)",
+       dict(LISTS[1]["steps"][0]["response"], forks=[WENTRIES[0]] + LISTS[1]["steps"][0]["response"]["forks"][1:]))]]
       + [dict(bad("two_cards_share_one_order", "rule: order is a unique rank per Mind; the refusal names both fork ids (not expressible in the schema)", DUP_LIST),
               messagePackHex=hx(DUP_LIST), refusal=order_shared(DUP_LIST["forks"])[0])],
-    "listScenarios": [{"name": l["name"], "ordinal": l["ordinal"], "entries": l["entries"], "steps": l["steps"]} for l in LISTS],
+    "listScenarios": [dict({"name": l["name"], "ordinal": l["ordinal"], "entries": l["entries"], "steps": l["steps"]}, **({"twin": l["twin"]} if "twin" in l else {})) for l in LISTS],
     "listShortPages": SHORT_PAGES,
     "readTooLarge": READ_TOO_LARGE,
     "answerTooLarge": ANSWER_TOO_LARGE,

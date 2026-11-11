@@ -90,7 +90,7 @@ const jstr = (s: string): string => {
 };
 type Option = { id: string; text: string };
 type Shown = { title: string; context: string; options: Option[]; recommendation: string; depends: string[] };
-type Card = Shown & { fork_id: string; leans: string | null; raised_at: string | null; deciders: string[]; status: string; ruling: string | null; ruled_from: string[]; options_hash: string };
+type Card = Shown & { fork_id: string; leans: string | null; raised_at: string | null; deciders: string[]; decider_count: number; status: string; ruling: string | null; ruled_from: string[]; options_hash: string };
 // RFC 8785 over the five shown members, every string NFC-normalised first; keys sorted; no numbers in the member set.
 const nfc = (s: string): string => s.normalize("NFC");
 const canonical = (c: Shown): Buffer =>
@@ -104,6 +104,7 @@ const cardRuleErrors = (c: Card): string[] => {
   if (!ids.includes(c.recommendation)) errors.push("recommendation is not an option");
   if (c.leans !== null && !ids.includes(c.leans)) errors.push("leans is not an option");
   if (new Set(c.deciders).size !== c.deciders.length) errors.push("duplicate deciders");
+  if (c.deciders.length > 0 && c.deciders.length !== c.decider_count) errors.push("R-card: shown deciders are not exactly decider_count ids");
   if (c.depends.some((d) => Buffer.byteLength(d, "utf8") > 1000)) errors.push("a depends line is over 1000 UTF-8 bytes");
   if (c.status === "open" && c.ruling !== null) errors.push("an open card names a ruling");
   if (c.ruling === null && c.ruled_from.length > 0) errors.push("ruled_from without a ruling");
@@ -125,6 +126,10 @@ test("fork card: options hash is SHA-256 of the canonical JSON, computed here, a
   for (const raised_at of [null, "2027-01-02T03:04:05.123Z"]) {
     const stamped: Card = { ...card0, raised_at };
     assert.equal(optionsHash(stamped), card0.options_hash, "raised_at stays outside the hash");
+  }
+  for (const [deciders, decider_count] of [[[], 2], [card0.deciders, 64]] as const) {
+    const shown: Card = { ...card0, deciders: [...deciders], decider_count };
+    assert.equal(optionsHash(shown), card0.options_hash, "decider_count and the emptiness of deciders stay outside the hash");
   }
   assert.equal(byName.get("heimdall_E_decomposed_equals_D"), byName.get("heimdall_D_nfc_escapes_astral"), "an NFD and an NFC spelling hash alike");
   for (const moved of ["heimdall_B_recommendation_changed", "heimdall_C_option_order_changed", "heimdall_F_option_id_changed", "heimdall_G_depends_emptied", "option_text_changed",
@@ -176,7 +181,7 @@ test("fork card: mutating any shown member, an option id included, changes the h
     assert.notEqual(optionsHash(copy), base, `mutation ${i}`);
   }
   const hidden = structuredClone(card);
-  hidden.fork_id = "other:question:id"; hidden.leans = "yes"; hidden.deciders = ["x"]; hidden.status = "closed"; hidden.ruled_from = ["n1"];
+  hidden.fork_id = "other:question:id"; hidden.leans = "yes"; hidden.deciders = []; hidden.decider_count = 7; hidden.status = "closed"; hidden.ruled_from = ["n1"];
   assert.equal(optionsHash(hidden), base, "fork_id and the unshown members stay outside the hash");
 });
 
@@ -200,6 +205,11 @@ test("fork card: documents validate and encode to the vector bytes", () => {
     assert.ok(check(forkSchema, "answerResult", v.message), v.name);
     assert.equal(hexOf(v.message), v.messagePackHex, v.name);
     assert.equal(v.message.card !== null, v.name === "stale_fork", "only a stale refusal shows the new fork");
+    assert.deepEqual(resultRuleErrors(v.message), [], v.name);
+  }
+  for (const v of fork.resultsInvalid) {
+    assert.ok(!check(forkSchema, "answerResult", v.message) || resultRuleErrors(v.message).length > 0, `${v.name}: ${v.why}`);
+    assert.equal(hexOf(v.message), v.messagePackHex, v.name);
   }
   for (const v of fork.unavailable) {
     assert.ok(check(forkSchema, "unavailable", v.message), v.name);
@@ -228,12 +238,16 @@ test("fork card: every negative is refused by the schema or a stated rule", () =
   }
 });
 
+// R-answer-result: the answer in an answer_result is the sender's own, stamped with their account, never nil (nil exists only in a record shown to a non-decider).
+const resultRuleErrors = (r: { answer: { answerer: string | null } }): string[] => (r.answer.answerer === null ? ["R-answer-result: the answerer is nil"] : []);
+
 // Rules a JSON Schema cannot say: a note is at most 4000 UTF-8 bytes (maxLength counts code points and is only the looser bound).
 const noteRuleErrors = (def: string, message: any): string[] => {
   const note = def === "answerRequest" ? message?.answer?.note : def === "deskAnswer" ? message?.note : null;
   return note != null && Buffer.byteLength(note, "utf8") > 4000 ? ["note is over 4000 UTF-8 bytes"] : [];
 };
 
+const OP_ID = "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f";
 const TAILS: Record<string, string> = {
   unauthenticated: "a verified session is required",
   body_forbidden_field: "answerer and authority are set by the receiver",
@@ -305,7 +319,7 @@ function judge(start: Card, steps: { kind: string; body: Record<string, any> | n
     }
     responses.push(down && reached ? unavailable() : response);
   }
-  return { responses, record: { schemaVersion: "gamecult.fork.record.v0", fork_id: card.fork_id, options_hash: optionsHash(card), counted_answer_id: counted(), answers } };
+  return { responses, record: { schemaVersion: "gamecult.fork.record.v0", fork_id: card.fork_id, options_hash: optionsHash(card), counted_answer_id: counted(), answerer_count: new Set(answers.map((a) => a.answerer)).size, answers } };
 }
 
 test("fork card: every scenario replays to the vector's responses and record, bytes included", () => {
@@ -317,6 +331,7 @@ test("fork card: every scenario replays to the vector's responses and record, by
     assert.deepEqual(record, sc.record, sc.name);
     assert.ok(check(forkSchema, "record", record), sc.name);
     assert.equal(hexOf(record), sc.recordHex, sc.name);
+    for (const s of sc.steps) if (s.response?.answer) assert.deepEqual(resultRuleErrors(s.response), [], sc.name);
     for (const s of sc.steps) if (s.response) assert.ok(check(forkSchema, "answerResult", s.response) || check(forkSchema, "refusal", s.response) || check(forkSchema, "unavailable", s.response), sc.name);
   }
 });
@@ -383,14 +398,33 @@ test("fork card: operator authority needs a cited Counted answer record", () => 
 });
 
 // ---- transport: list, read, auth (fork-card.md "Transport") ----
-const entryRuleErrors = (e: { card: Card; record: { fork_id: string; options_hash: string; counted_answer_id: string | null; answers: Record<string, any>[] } }): string[] => {
+type Entry = { card: Card; record: { fork_id: string; options_hash: string; counted_answer_id: string | null; answerer_count: number; answers: Record<string, any>[] } };
+const entryRuleErrors = (e: Entry): string[] => {
   const errors = cardRuleErrors(e.card);
   if (e.record.fork_id !== e.card.fork_id) errors.push("record of another fork");
   if (e.record.options_hash !== e.card.options_hash) errors.push("record under another hash");
   const counted = e.record.answers.find((a) => (a.outcome === "Counted" || a.outcome === "Revision") && a.options_hash === e.card.options_hash
     && !e.record.answers.some((r) => r.outcome === "Retraction" && r.retracts === a.answer_id));
   if ((counted?.answer_id ?? null) !== e.record.counted_answer_id) errors.push("counted_answer_id is not derived");
+  // R-record: named answerers are counted by distinct id, nil ones by a bound
+  const named = e.record.answers.filter((a) => a.answerer !== null).length, total = e.record.answers.length, n = e.record.answerer_count;
+  if (total === 0 && n !== 0) errors.push("R-record: no answers and a count other than 0");
+  else if (named === total && total > 0 && n !== new Set(e.record.answers.map((a) => a.answerer)).size) errors.push("R-record: answerer_count is not the distinct answerers");
+  else if (named === 0 && total > 0 && (n < 1 || n > total)) errors.push("R-record: a withheld count outside 1..answers");
+  // R-entry: the card's view and the record's view agree, so a withheld card never rides beside a named account
+  if (e.card.deciders.length > 0 && named < total) errors.push("R-entry: a decider-view card with withheld answerers");
+  if (e.card.deciders.length === 0 && named > 0) errors.push("R-entry: a withheld card beside a named answerer");
   return errors;
+};
+// R-list: all entries of one page are one reader's view
+const viewRuleErrors = (forks: { card: Card }[]): string[] => (new Set(forks.map((f) => f.card.deciders.length > 0)).size > 1 ? ["R-list: a page mixes views"] : []);
+// The non-decider twin of a decider-view entry: ids withheld, counts kept.
+const withheld = (e: Entry): Entry => ({ ...e, card: { ...e.card, deciders: [] }, record: { ...e.record, answers: e.record.answers.map((a) => ({ ...a, answerer: null })) } });
+const idsOf = (e: Entry): string[] => [...e.card.deciders, ...e.record.answers.map((a) => a.answerer as string)];
+const bytesHaveNoId = (hex: string, ids: string[], name: string): void => {
+  const bytes = Buffer.from(hex, "hex");
+  assert.ok(ids.length > 0, name);
+  for (const id of ids) assert.ok(!bytes.includes(Buffer.from(id, "utf8")), `${name}: the withheld bytes carry ${id}`);
 };
 
 // Order is a unique rank per Mind: the refusal names both fork ids, the first holder and the second.
@@ -470,6 +504,13 @@ test("fork transport: requests and entries validate and encode to the vector byt
     for (const v of t[section].valid) {
       assert.ok(check(forkSchema, def, v.message), v.name);
       if (def === "entry") assert.deepEqual(entryRuleErrors(v.message), [], v.name);
+      if (def === "entry" && v.twin !== undefined) {
+        const twin = t.entry.valid.find((x: any) => x.name === v.twin);
+        assert.deepEqual(v.message, withheld(twin.message), `${v.name}: the twin of ${v.twin}`);
+        assert.equal(v.message.record.answerer_count, twin.message.record.answerer_count, "a decider and a non-decider read the same count");
+        bytesHaveNoId(v.messagePackHex, idsOf(twin.message), v.name);
+        assert.ok(twin.messagePackHex.includes(Buffer.from(idsOf(twin.message)[0], "utf8").toString("hex").toUpperCase()), "the decider view does carry the ids");
+      }
       assert.equal(hexOf(v.message), v.messagePackHex, v.name);
     }
     for (const v of t[section].invalid) {
@@ -478,9 +519,10 @@ test("fork transport: requests and entries validate and encode to the vector byt
     }
   }
   for (const v of t.listInvalid) {
-    const refused = !check(forkSchema, "list", v.message) || orderErrors(v.message.forks.map((f: any) => f.card)).length > 0;
+    const refused = !check(forkSchema, "list", v.message) || orderErrors(v.message.forks.map((f: any) => f.card)).length > 0 || viewRuleErrors(v.message.forks).length > 0;
     assert.ok(refused, `${v.name}: ${v.why}`);
     if (v.refusal !== undefined) assert.deepEqual(orderErrors(v.message.forks.map((f: any) => f.card)), [v.refusal], v.name);
+    if (v.name === "a_page_mixes_views") assert.equal(viewRuleErrors(v.message.forks).length, 1, v.name);
     assert.equal(hexOf(v.message), v.messagePackHex, v.name);
   }
 });
@@ -489,12 +531,26 @@ test("fork transport: every list request replays to the vector's response, newes
   for (const sc of fork.transport.listScenarios) {
     for (const e of sc.entries) assert.deepEqual(entryRuleErrors(e), [], sc.name);
     assert.deepEqual(orderErrors(sc.entries.map((e: any) => e.card)), [], sc.name);
+    if (sc.twin !== undefined) {
+      // the non-decider page is the decider page with the ids withheld: counts, order, cursor and stamp equal, byte for byte but the withheld members
+      const twin = fork.transport.listScenarios.find((x: any) => x.name === sc.twin);
+      assert.deepEqual(sc.entries, twin.entries.map(withheld), sc.name);
+      assert.equal(sc.steps.length, twin.steps.length);
+      sc.steps.forEach((step: any, i: number) => {
+        const other = twin.steps[i].response;
+        assert.deepEqual(step.response, { ...other, forks: other.forks.map(withheld) }, sc.name);
+        assert.ok(twin.entries.length > 0 && step.response.forks.length > 0);
+        bytesHaveNoId(step.responseHex, twin.entries.flatMap(idsOf), sc.name);
+      });
+      assert.ok(twin.steps[0].responseHex.includes(Buffer.from(OP_ID, "utf8").toString("hex").toUpperCase()), "the decider page does carry the ids");
+    }
     let previous: { next_cursor: string | null } | null = null;
     for (const step of sc.steps) {
       const response = judgeList(sc.entries, sc.ordinal, step.request);
       assert.deepEqual(response, step.response, sc.name);
       assert.ok(check(forkSchema, "list", response), sc.name);
       assert.equal(hexOf(response), step.responseHex, sc.name);
+      assert.deepEqual(viewRuleErrors(response.forks), [], sc.name);
       const orders = response.forks.map((f: any) => f.card.order);
       assert.deepEqual(orders, [...orders].sort((a: number, b: number) => b - a), sc.name);
       if (previous !== null) assert.equal(step.request.cursor, previous.next_cursor, `${sc.name}: the second request follows the first page's cursor`);
