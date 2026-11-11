@@ -3266,6 +3266,7 @@ impl CultCache {
                 ));
             }
             require_payload_depth(entry)?;
+            self.refuse_claimed_id(entry)?;
             let Some(home) = self.home_index(&entry.r#type)? else {
                 continue;
             };
@@ -3307,6 +3308,7 @@ impl CultCache {
 
     pub fn put_envelope<T: DatabaseEntry>(&mut self, entry: CultCacheEnvelope) -> Result<T> {
         let parsed = self.validate_envelope::<T>(&entry)?;
+        self.refuse_claimed_id(&entry)?;
         self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
         self.refuse_retype(&self.entries, &self.foreign, &entry)?;
         let change = self.judge_unique(&[&entry])?;
@@ -3343,6 +3345,7 @@ impl CultCache {
             ));
         }
         require_payload_depth(&entry)?;
+        self.refuse_claimed_id(&entry)?;
         self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
         self.refuse_retype(&self.entries, &self.foreign, &entry)?;
         let change = self.judge_unique(&[&entry])?;
@@ -3435,6 +3438,7 @@ impl CultCache {
                 ));
             }
             self.home_index(&entry.r#type)?;
+            self.refuse_claimed_id(&entry)?;
             self.refuse_retype(&loaded, &self.foreign, &entry)?;
             loaded.insert(entry_id(&entry), entry);
         }
@@ -3580,6 +3584,22 @@ impl CultCache {
             }
         }
         Ok(())
+    }
+
+    /// An admitted envelope's schema id may not name another registered type: the pull resolves a record's type from that id
+    /// (`resolve_registered_type`), so admitting it would store one type that every reload serves as the other, at a key this
+    /// cache may not hold (another writer's record, or a fresh key). Admission asks the pull's own lookup. An id that names no
+    /// registered type (a dynamic or versioned id) is the envelope's own. Store-level writers called directly trust the id.
+    fn refuse_claimed_id(&self, entry: &CultCacheEnvelope) -> Result<()> {
+        let known_types: BTreeSet<String> = self.definitions.keys().cloned().collect();
+        match resolve_registered_type(&known_types, &self.schema_name_definitions, entry.schema_id.as_deref(), &entry.r#type) {
+            Some(resolved) if resolved != entry.r#type => Err(anyhow::Error::new(SchemaConflictError {
+                schema_id: schema_identity(entry).to_string(),
+                schema_names: vec![resolved, entry.r#type.clone()],
+                record_key: entry.key.clone(),
+            })),
+            _ => Ok(()),
+        }
     }
 
     fn refuse_second_globals(&self, entries: &BTreeMap<(String, String), CultCacheEnvelope>) -> Result<()> {
@@ -4427,11 +4447,12 @@ mod tests {
         Ok(())
     }
 
-    /// An envelope of one type stamped with another type's schema id is still that type: ownership is the written type's own
-    /// id, never the id its envelope claims (C# `WrittenOwns` reads the written entry's catalog entry). Refused at a key the
-    /// other type holds on every envelope path, with and without a store, and in an SoA image.
+    /// Two types whose envelopes carry one schema id (an id naming no registered type, so admission passes it) are still two
+    /// types: ownership is the written type's own id, never the id an envelope claims (C# `WrittenOwns` reads the written
+    /// entry's catalog entry). Refused at a key the other type holds on every envelope path, with and without a store, and in
+    /// an SoA image.
     #[test]
-    fn retype_an_envelope_claiming_the_held_types_id_is_still_a_second_type() -> Result<()> {
+    fn retype_envelopes_sharing_one_claimed_id_are_still_two_types() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("cache.cc");
         for stored in [false, true] {
@@ -4441,10 +4462,12 @@ mod tests {
                 cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
                 cache.pull_all_backing_stores()?;
             }
-            cache.put("shared", &settings_one())?;
+            let (mut settings, _) = cache.prepare_entry("shared", &settings_one())?;
+            settings.schema_id = Some("dynamic.shared.v1".to_string());
+            cache.put_raw_envelope(settings.clone())?;
             let before = (cache.snapshot(), if stored { fs::read(&path)? } else { Vec::new() });
             let (mut stamped, _) = cache.prepare_entry("shared", &note_one())?;
-            stamped.schema_id = Some(Settings::TYPE.to_string());
+            stamped.schema_id = settings.schema_id.clone();
             for error in [
                 cache.put_envelope::<Note>(stamped.clone()).unwrap_err(),
                 cache.put_raw_envelope(stamped.clone()).unwrap_err(),
@@ -4454,7 +4477,6 @@ mod tests {
             }
             assert_eq!((cache.snapshot(), if stored { fs::read(&path)? } else { Vec::new() }), before, "stored {stored}");
 
-            let (settings, _) = cache.prepare_entry("shared", &settings_one())?;
             let error = cache.load_soa(CultCacheSoaTable::from_envelopes(vec![settings, stamped])).unwrap_err();
             assert_eq!(retype_refusal(&error).record_key, "shared");
             assert_eq!(cache.snapshot(), before.0);
