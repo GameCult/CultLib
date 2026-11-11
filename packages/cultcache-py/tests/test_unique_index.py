@@ -475,12 +475,14 @@ class VectorTests(unittest.TestCase):
             "tests.unique_item": "sha256:93bb890de83069061af696b23f94fd32fb3c2dad3c91ee645e8add56085f1882",
             "tests.uq_pair": "sha256:2538cceafb6dcbce22ef11b932ecb804af5f96bc3aaedff692a52d3640433e60",
             "tests.uq_alias": "sha256:77a77a394ebd8bf71e14b9b6f2cea4978c25d4e705fd12364f660edbf6c63b1f",
+            "tests.uq_wide": "sha256:b79eecd11eed5e456902f095d2748da7f59125c4c8972b0da7dddc81d07fc03f",
             "tests.uq_alpha": "sha256:53aeaf2ea9b25e85ade6b15fc04c7653e7b206c87e258f1aa74dd32a840a1389",
             "tests.uq_beta": "sha256:45ed62a64c91f6d815d3ec975c4a4a1b2ce07b6e7262a32d828673cf10899586",
         }
         aliases = {
             "tests.uq_pair": {"Sku": "sku", "Alt": "second"},
             "tests.uq_alias": {"Sku": "sku", "alt": "second"},
+            "tests.uq_wide": {"\uff21": "sku", "\U00010400": "second"},  # U+FF21 and U+10400: code-unit order puts the astral alias first
         }
         documents = {
             name: define_database_entry_type(
@@ -535,7 +537,7 @@ class VectorTests(unittest.TestCase):
                     self.assertEqual(str(caught.exception), refusal(k1, k2, schema, alias))
                     self.assertEqual(path.read_bytes() if path.exists() else b"", before)
                 walked += 1
-        self.assertEqual(walked, 31)
+        self.assertEqual(walked, 35)
 
 
 class ListStore(RecordingStore):

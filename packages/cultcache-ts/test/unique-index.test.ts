@@ -359,11 +359,12 @@ test("vectors duplicate-store.cc and blank-store.cc hold their verdicts", async 
 
 // refusals.msgpack: rows [label, ops, refusal] written by the C# reference. TypeScript has no batch commit
 // (variants:idea:unique-index-runtimes.ts-batch-commit), so it performs every row whose commits each hold one record:
-// 5, 8-13, 19-22, 24, 25, 27, 29, 31, 32 and 33 of the README (18).
+// 5, 8-13, 19-22, 24, 25, 27, 29, 31, 32, 33, 35 and 37 of the README (20).
 const REFUSAL_SCHEMAS: [string, string, string, Record<string, "sku" | "second">][] = [
   ["unique_item", "tests.unique_item", "sha256:93bb890de83069061af696b23f94fd32fb3c2dad3c91ee645e8add56085f1882", { Sku: "sku" }],
   ["uq_pair", "tests.uq_pair", "sha256:2538cceafb6dcbce22ef11b932ecb804af5f96bc3aaedff692a52d3640433e60", { Sku: "sku", Alt: "second" }],
   ["uq_alias", "tests.uq_alias", "sha256:77a77a394ebd8bf71e14b9b6f2cea4978c25d4e705fd12364f660edbf6c63b1f", { Sku: "sku", alt: "second" }],
+  ["uq_wide", "tests.uq_wide", "sha256:b79eecd11eed5e456902f095d2748da7f59125c4c8972b0da7dddc81d07fc03f", { "\uFF21": "sku", "\u{10400}": "second" }],
   ["uq_alpha", "tests.uq_alpha", "sha256:53aeaf2ea9b25e85ade6b15fc04c7653e7b206c87e258f1aa74dd32a840a1389", { Sku: "sku" }],
   ["uq_beta", "tests.uq_beta", "sha256:45ed62a64c91f6d815d3ec975c4a4a1b2ce07b6e7262a32d828673cf10899586", { Sku: "sku" }],
 ];
@@ -424,7 +425,7 @@ test("vectors refusals.msgpack: every row TS can perform", async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
-  assert.equal(walked, 18);
+  assert.equal(walked, 20);
 });
 
 test("a refused load leaves the cache's prior state as it was, and a later good load still works", async () => {

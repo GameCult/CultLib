@@ -19,14 +19,15 @@ reviewed commit. Other runtimes are held to the same canonical text and the same
   `" "` and `item:d` holds Sku `U+0085`. Written through a role Sku.
 - `blank-store.cc`: the same, only `item:c` and `item:d`.
 - `pair-store.cc`, `surrogate-store.cc`, `types-store.cc`, `repull-before.cc`, `repull-after.cc`, `alias-store.cc`,
-  `key-case-store.cc`, `key-punctuation-store.cc`, `surrogate-groups-store.cc`, `holder-case-store.cc`, `cross-schema-store.cc`, `distinct-values-store.cc`, `normal-keys-store.cc`: single-file stores written like
+  `key-case-store.cc`, `key-punctuation-store.cc`, `surrogate-groups-store.cc`, `holder-case-store.cc`, `cross-schema-store.cc`, `distinct-values-store.cc`, `normal-keys-store.cc`, `normal-three-store.cc`, `wide-store.cc`: single-file stores written like
   `duplicate-store.cc`, through roles, for the rows of `refusals.msgpack` that open or pull them. Schemas
   `tests.unique_item`, `tests.uq_pair` (Sku and Alt both unique), `tests.uq_alias` (Sku and `alt` both unique),
-  `tests.uq_alpha` and `tests.uq_beta`, each slots `[0: Sku string, 1: second string]`, schema version the name plus
+  `tests.uq_wide` (Sku and Alt both unique, aliases U+FF21 and U+10400), `tests.uq_alpha` and `tests.uq_beta`, each slots `[0: Sku string, 1: second string]`, schema version the name plus
   `.v1`. The schema ids C# writes in the store catalogs and on every record:
   - `tests.unique_item`: `sha256:93bb890de83069061af696b23f94fd32fb3c2dad3c91ee645e8add56085f1882`
   - `tests.uq_pair`: `sha256:2538cceafb6dcbce22ef11b932ecb804af5f96bc3aaedff692a52d3640433e60`
   - `tests.uq_alias`: `sha256:77a77a394ebd8bf71e14b9b6f2cea4978c25d4e705fd12364f660edbf6c63b1f`
+  - `tests.uq_wide`: `sha256:b79eecd11eed5e456902f095d2748da7f59125c4c8972b0da7dddc81d07fc03f`
   - `tests.uq_alpha`: `sha256:53aeaf2ea9b25e85ade6b15fc04c7653e7b206c87e258f1aa74dd32a840a1389`
   - `tests.uq_beta`: `sha256:45ed62a64c91f6d815d3ec975c4a4a1b2ce07b6e7262a32d828673cf10899586`
 - `outcomes.msgpack`: rows `[file, unique alias or nil, open|refused, k1 or nil, k2 or nil]`. Opening `file` with that
@@ -51,7 +52,7 @@ last succeeds and the last refuses with exactly the RULE text built from those f
 byte-identical. Schemas are those of the store files above; `second` is `Category` (plain) except in `tests.uq_pair`
 and `tests.uq_alias`, where it is `Alt` (unique, alias `Alt` and `alt` respectively).
 
-The 13 rows of the spec are a floor; rows 14-33 extend it with orderings that a code-point, case-insensitive or
+The 13 rows of the spec are a floor; rows 14-37 extend it with orderings that a code-point, case-insensitive or
 culture compare would flip. Rows, in file order: 1 batch-later-value-staged-first, 2 batch-surrogate-keys, 3
 batch-interleaved-types, 4 batch-two-aliases, 5 held-then-landing, 6 held-in-the-least-group, 7 swap-off-a-held-value,
 8 load-two-aliases, 9 load-surrogate-keys, 10 load-interleaved-types, 11 repull-held-pair, 12 load-repull-after, 13
@@ -63,17 +64,20 @@ load-surrogate-groups, 23 batch-holders-by-case (`a` and `A` holding one value: 
 load-value-in-two-schemas, 28 batch-distinct-values (`S`, `s`, `S `, ` S`, U+00E9, `e`+U+0301, U+FF33 are seven values: success), 29
 load-distinct-values, 30 batch-keys-by-normal-form (keys U+00E9 and `e`+U+0301 holding one value are two holders, `e`+U+0301 first),
 31 load-keys-by-normal-form, 32 put-onto-a-held-pair (held `m` and landing `a` share Sku and Alt in `tests.uq_pair`, one record per
-commit: `Alt` is named before `Sku`), 33 put-onto-a-held-alias-pair (the same in `tests.uq_alias`: `Sku` before `alt`).
-Rows 19-22, 24, 27, 29 and 31 open a store holding the records of rows 18, 14, 15, 17, 23, 26, 28 and 30, so a runtime with no batch
+commit: `Alt` is named before `Sku`), 33 put-onto-a-held-alias-pair (the same in `tests.uq_alias`: `Sku` before `alt`), 34 batch-three-holders-normal-form
+(keys `e`+U+0302, `f` and U+00E9 holding one value: the two least by code unit, `e`+U+0302 and `f`, are named; an NFC, NFD or culture sort of the keys names another pair), 35
+load-three-holders-normal-form, 36 batch-alias-code-unit (two records each holding the same value under both aliases of `tests.uq_wide`, U+FF21 and U+10400: by UTF-16 code
+unit U+10400 (D801 DC00) precedes U+FF21, by code point it follows it, so the refusal names alias U+10400), 37 load-alias-code-unit.
+Rows 19-22, 24, 27, 29, 31, 35 and 37 open a store holding the records of rows 18, 14, 15, 17, 23, 26, 28, 30, 34 and 36, so a runtime with no batch
 commit still walks alias and cross-group key order.
 
 A runtime performs every row its API can perform and asserts the count it walks. These are the counts a runtime must
 assert, not a statement of which runtimes walk them today:
 
-- C# and Rust: all 33.
-- Python: 31, every row but 3 and 26 (`put_envelopes` takes one type, so no batch of two types).
-- TypeScript: 18, the rows with no multi-record commit: 5, 8, 9, 10, 11, 12, 13, 19, 20, 21, 22, 24, 25, 27, 29, 31, 32 and 33
-  (no batch commit, so no row 1-4, 6, 7, 14-18, 23, 26, 28 or 30; `variants:idea:unique-index-runtimes.ts-batch-commit`).
+- C# and Rust: all 37.
+- Python: 35, every row but 3 and 26 (`put_envelopes` takes one type, so no batch of two types).
+- TypeScript: 20, the rows with no multi-record commit: 5, 8, 9, 10, 11, 12, 13, 19, 20, 21, 22, 24, 25, 27, 29, 31, 32, 33, 35 and 37
+  (no batch commit, so no row 1-4, 6, 7, 14-18, 23, 26, 28, 30, 34 or 36; `variants:idea:unique-index-runtimes.ts-batch-commit`).
 
 Not pinned: the schema-name tiebreak. Record keys are unique across a whole cache, so two types never hold the same key and
 two groups can never tie on alias and key pair; the final `schema` comparison cannot decide a refusal.

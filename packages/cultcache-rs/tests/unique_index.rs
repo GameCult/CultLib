@@ -98,6 +98,15 @@ struct UqAlias {
     #[cultcache(key = 1, index = "alt")]
     alt: String,
 }
+/// Aliases U+FF21 and U+10400: UTF-16 puts the astral alias first (D801 DC00 < FF21), code-point order the other way.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "uq_wide", schema = "tests.uq_wide")]
+struct UqWide {
+    #[cultcache(key = 0, index = "\u{FF21}")]
+    sku: String,
+    #[cultcache(key = 1, index = "\u{10400}")]
+    alt: String,
+}
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "uq_alpha", schema = "tests.uq_alpha")]
 struct UqAlpha {
@@ -601,6 +610,7 @@ fn vectors_refusals_hold_the_rule() {
                     opened.register_entry_type::<Unique>().unwrap();
                     opened.register_entry_type::<UqPair>().unwrap();
                     opened.register_entry_type::<UqAlias>().unwrap();
+                    opened.register_entry_type::<UqWide>().unwrap();
                     opened.register_entry_type::<UqAlpha>().unwrap();
                     opened.register_entry_type::<UqBeta>().unwrap();
                     opened.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
@@ -623,6 +633,7 @@ fn vectors_refusals_hold_the_rule() {
                                 "tests.unique_item" => cache.prepare_entry(key, &Unique { sku, category: second }).map(|(envelope, _)| envelope),
                                 "tests.uq_pair" => cache.prepare_entry(key, &UqPair { sku, alt: second }).map(|(envelope, _)| envelope),
                                 "tests.uq_alias" => cache.prepare_entry(key, &UqAlias { sku, alt: second }).map(|(envelope, _)| envelope),
+                                "tests.uq_wide" => cache.prepare_entry(key, &UqWide { sku, alt: second }).map(|(envelope, _)| envelope),
                                 "tests.uq_alpha" => cache.prepare_entry(key, &UqAlpha { sku, second }).map(|(envelope, _)| envelope),
                                 "tests.uq_beta" => cache.prepare_entry(key, &UqBeta { sku, second }).map(|(envelope, _)| envelope),
                                 other => panic!("{label}: unexpected schema {other}"),
@@ -653,7 +664,7 @@ fn vectors_refusals_hold_the_rule() {
         }
         walked += 1;
     }
-    assert_eq!(walked, 33);
+    assert_eq!(walked, 37);
 }
 
 // A pull replaces the holder table with the stored image's: a value another writer changed is released, not kept.

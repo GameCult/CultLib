@@ -316,6 +316,12 @@ namespace GameCult.Caching.Tests
                 EmittedDocumentTypes.Emit("UqVecAliasIndex", "tests.uq_alias", "tests.uq_alias.v1",
                     new EmittedDocumentTypes.Field[] { new("Sku", typeof(string), 0, Index: "Sku"), new("Alt", typeof(string), 1, Index: "alt") }),
                 "Alt"),
+            new("tests.uq_wide",
+                EmittedDocumentTypes.Emit("UqVecWideRole", "tests.uq_wide", "tests.uq_wide.v1",
+                    new EmittedDocumentTypes.Field[] { new("Sku", typeof(string), 0, Role: "\uFF21"), new("Alt", typeof(string), 1, Role: "\U00010400") }),
+                EmittedDocumentTypes.Emit("UqVecWideIndex", "tests.uq_wide", "tests.uq_wide.v1",
+                    new EmittedDocumentTypes.Field[] { new("Sku", typeof(string), 0, Index: "\uFF21"), new("Alt", typeof(string), 1, Index: "\U00010400") }),
+                "Alt"),
             Plain("Alpha", "tests.uq_alpha"),
             Plain("Beta", "tests.uq_beta"),
         };
@@ -333,6 +339,7 @@ namespace GameCult.Caching.Tests
         private const string Item = "tests.unique_item";
         private const string Pair = "tests.uq_pair";
         private const string Alias = "tests.uq_alias";
+        private const string Wide = "tests.uq_wide";
         private const string Alpha = "tests.uq_alpha";
         private const string Beta = "tests.uq_beta";
 
@@ -357,6 +364,10 @@ namespace GameCult.Caching.Tests
         private static readonly Rec[] DistinctValueRecords = Items_(
             ("k:1", "S"), ("k:2", "s"), ("k:3", "S "), ("k:4", "\u00E9"), ("k:5", "e\u0301"), ("k:6", "\uFF33"), ("k:7", " S"));
         private static readonly Rec[] NormalKeyRecords = Items_(("\u00E9", "S"), ("e\u0301", "S"));
+        // Three holders of one value: code-unit order is e+U+0302, f, U+00E9; NFC would order f, U+00E9, e+U+0302 and NFD U+00E9, e+U+0302, f.
+        private static readonly Rec[] ThreeHolderRecords = Items_(("e\u0302", "S"), ("f", "S"), ("\u00E9", "S"));
+        // Both records violate both aliases: by code unit U+10400 (D801 DC00) precedes U+FF21, by code point U+FF21 does.
+        private static readonly Rec[] WideRecords = { new("item:a", Wide, "S", "X"), new("item:b", Wide, "S", "X") };
         private static readonly Rec[] KeyPunctuationRecords = Items_(("_", "S"), ("a", "S"), ("Z", "T"), ("b", "T"));
         private static readonly Rec[] SurrogateGroupRecords = Items_(("\uE000", "S"), ("\uE000b", "S"), ("\U0001F600", "T"), ("\U0001F600b", "T"));
 
@@ -368,7 +379,7 @@ namespace GameCult.Caching.Tests
             ("surrogate-groups-store.cc", SurrogateGroupRecords),
             ("holder-case-store.cc", HolderCaseRecords),
             ("cross-schema-store.cc", CrossSchemaRecords), ("distinct-values-store.cc", DistinctValueRecords),
-            ("normal-keys-store.cc", NormalKeyRecords),
+            ("normal-keys-store.cc", NormalKeyRecords), ("normal-three-store.cc", ThreeHolderRecords), ("wide-store.cc", WideRecords),
         };
 
         private static readonly Refusal SurrogateRefusal = new("k\U0001F600", "k\uE000", Item, "Sku");
@@ -379,6 +390,8 @@ namespace GameCult.Caching.Tests
         private static readonly Refusal KeyCaseRefusal = new("B", "C", Item, "Sku");
         private static readonly Refusal HolderCaseRefusal = new("A", "a", Item, "Sku");
         private static readonly Refusal NormalKeyRefusal = new("e\u0301", "\u00E9", Item, "Sku");
+        private static readonly Refusal ThreeHolderRefusal = new("e\u0302", "f", Item, "Sku");
+        private static readonly Refusal WideRefusal = new("item:a", "item:b", Wide, "\U00010400");
         private static readonly Refusal KeyPunctuationRefusal = new("Z", "b", Item, "Sku");
         private static readonly Refusal SurrogateGroupRefusal = new("\U0001F600", "\U0001F600b", Item, "Sku");
 
@@ -430,6 +443,12 @@ namespace GameCult.Caching.Tests
                 new Refusal("a", "m", Pair, "Alt")),
             new("put-onto-a-held-alias-pair", new[] { Open(), Commit(new Rec("m", Alias, "S", "X")), Commit(new Rec("a", Alias, "S", "X")) },
                 new Refusal("a", "m", Alias, "Sku")),
+            // Rows 34-35: three holders of one value; the two least by code unit are named, which no NFC, NFD or culture sort of the keys yields.
+            new("batch-three-holders-normal-form", new[] { Open(), Commit(ThreeHolderRecords) }, ThreeHolderRefusal),
+            new("load-three-holders-normal-form", new[] { Open("normal-three-store.cc") }, ThreeHolderRefusal),
+            // Rows 36-37: two records violating two aliases, U+FF21 and U+10400; aliases compare by code unit, so U+10400 is named.
+            new("batch-alias-code-unit", new[] { Open(), Commit(WideRecords) }, WideRefusal),
+            new("load-alias-code-unit", new[] { Open("wide-store.cc") }, WideRefusal),
         };
 
         private static byte[] RefusalStoreBytes(Rec[] records)
@@ -623,7 +642,7 @@ namespace GameCult.Caching.Tests
             }
 
             Assert.That(failed, Is.Empty, "rows that failed");
-            Assert.That(walked, Is.EqualTo(33));
+            Assert.That(walked, Is.EqualTo(37));
         }
     }
 }
