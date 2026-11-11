@@ -352,6 +352,11 @@ namespace GameCult.Caching.Tests
         private static readonly Rec[] RepullAfter = Items_(("item:a1", "A"), ("item:b1", "B"), ("item:b2", "B"), ("item:c1", "A"));
         private static readonly Rec[] KeyCaseRecords = Items_(("a", "S"), ("z", "S"), ("B", "T"), ("C", "T"));
         private static readonly Rec[] HolderCaseRecords = Items_(("a", "S"), ("A", "S"));
+        private static readonly Rec[] CrossSchemaRecords = { new("x:1", Alpha, "P"), new("y:1", Beta, "P") };
+        // Distinct under any trim, case-fold, NFC or NFKC of the value: 'S' and 's', 'S' and 'S ', NFC and NFD, fullwidth S.
+        private static readonly Rec[] DistinctValueRecords = Items_(
+            ("k:1", "S"), ("k:2", "s"), ("k:3", "S "), ("k:4", "\u00E9"), ("k:5", "e\u0301"), ("k:6", "\uFF33"), ("k:7", " S"));
+        private static readonly Rec[] NormalKeyRecords = Items_(("\u00E9", "S"), ("e\u0301", "S"));
         private static readonly Rec[] KeyPunctuationRecords = Items_(("_", "S"), ("a", "S"), ("Z", "T"), ("b", "T"));
         private static readonly Rec[] SurrogateGroupRecords = Items_(("\uE000", "S"), ("\uE000b", "S"), ("\U0001F600", "T"), ("\U0001F600b", "T"));
 
@@ -362,6 +367,8 @@ namespace GameCult.Caching.Tests
             ("key-case-store.cc", KeyCaseRecords), ("key-punctuation-store.cc", KeyPunctuationRecords),
             ("surrogate-groups-store.cc", SurrogateGroupRecords),
             ("holder-case-store.cc", HolderCaseRecords),
+            ("cross-schema-store.cc", CrossSchemaRecords), ("distinct-values-store.cc", DistinctValueRecords),
+            ("normal-keys-store.cc", NormalKeyRecords),
         };
 
         private static readonly Refusal SurrogateRefusal = new("k\U0001F600", "k\uE000", Item, "Sku");
@@ -371,6 +378,7 @@ namespace GameCult.Caching.Tests
         private static readonly Refusal RepullRefusal = new("item:a1", "item:c1", Item, "Sku");
         private static readonly Refusal KeyCaseRefusal = new("B", "C", Item, "Sku");
         private static readonly Refusal HolderCaseRefusal = new("A", "a", Item, "Sku");
+        private static readonly Refusal NormalKeyRefusal = new("e\u0301", "\u00E9", Item, "Sku");
         private static readonly Refusal KeyPunctuationRefusal = new("Z", "b", Item, "Sku");
         private static readonly Refusal SurrogateGroupRefusal = new("\U0001F600", "\U0001F600b", Item, "Sku");
 
@@ -410,6 +418,18 @@ namespace GameCult.Caching.Tests
             new("load-holders-by-case", new[] { Open("holder-case-store.cc") }, HolderCaseRefusal),
             // Row 25: the held `a` is replaced only by the exact key `a`, never by `A`.
             new("batch-replaced-by-case", new[] { Open(), Commit(Items_(("a", "S"))), Commit(Items_(("A", "S"))) }, HolderCaseRefusal),
+            // Rows 26-31: identity is exact. One value in two schemas is two groups; values differing in case, trailing or leading space, normalisation form or width are two values; keys differing only by normalisation form are two holders.
+            new("batch-value-in-two-schemas", new[] { Open(), Commit(CrossSchemaRecords) }, null),
+            new("load-value-in-two-schemas", new[] { Open("cross-schema-store.cc") }, null),
+            new("batch-distinct-values", new[] { Open(), Commit(DistinctValueRecords) }, null),
+            new("load-distinct-values", new[] { Open("distinct-values-store.cc") }, null),
+            new("batch-keys-by-normal-form", new[] { Open(), Commit(NormalKeyRecords) }, NormalKeyRefusal),
+            new("load-keys-by-normal-form", new[] { Open("normal-keys-store.cc") }, NormalKeyRefusal),
+            // Rows 32-33: one landing record sharing two unique aliases with a held one; the least alias by code unit is named ('Alt' before 'Sku'; 'Sku' before 'alt').
+            new("put-onto-a-held-pair", new[] { Open(), Commit(new Rec("m", Pair, "S", "X")), Commit(new Rec("a", Pair, "S", "X")) },
+                new Refusal("a", "m", Pair, "Alt")),
+            new("put-onto-a-held-alias-pair", new[] { Open(), Commit(new Rec("m", Alias, "S", "X")), Commit(new Rec("a", Alias, "S", "X")) },
+                new Refusal("a", "m", Alias, "Sku")),
         };
 
         private static byte[] RefusalStoreBytes(Rec[] records)
@@ -603,7 +623,7 @@ namespace GameCult.Caching.Tests
             }
 
             Assert.That(failed, Is.Empty, "rows that failed");
-            Assert.That(walked, Is.EqualTo(25));
+            Assert.That(walked, Is.EqualTo(33));
         }
     }
 }
