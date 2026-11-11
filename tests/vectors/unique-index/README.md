@@ -18,10 +18,11 @@ reviewed commit. Other runtimes are held to the same canonical text and the same
   stored-at pinned to `2026-01-01T00:00:00Z`. Records `item:a` and `item:b` both hold Sku `S-1`; `item:c` holds Sku
   `" "` and `item:d` holds Sku `U+0085`. Written through a role Sku.
 - `blank-store.cc`: the same, only `item:c` and `item:d`.
-- `pair-store.cc`, `surrogate-store.cc`, `types-store.cc`, `repull-before.cc`, `repull-after.cc`: single-file stores
+- `pair-store.cc`, `surrogate-store.cc`, `types-store.cc`, `repull-before.cc`, `repull-after.cc`, `alias-store.cc`: single-file stores
   written like `duplicate-store.cc`, through roles, for the rows of `refusals.msgpack` that open or pull them. Schemas
-  `tests.unique_item`, `tests.uq_pair` (Sku and Alt both unique), `tests.uq_alpha` and `tests.uq_beta`, each slots
-  `[0: Sku string, 1: second string]`.
+  `tests.unique_item`, `tests.uq_pair` (Sku and Alt both unique), `tests.uq_alias` (Sku and `alt` both unique),
+  `tests.uq_alpha` and `tests.uq_beta`, each slots `[0: Sku string, 1: second string]`; schema ids are the schema name
+  plus `.v1` (`tests.unique_item.v1`, `tests.uq_pair.v1`, `tests.uq_alias.v1`, `tests.uq_alpha.v1`, `tests.uq_beta.v1`).
 - `outcomes.msgpack`: rows `[file, unique alias or nil, open|refused, k1 or nil, k2 or nil]`. Opening `file` with that
   alias a unique index (nil: a role, no unique alias) yields the verdict. A refusal reads, byte for byte,
   `Records <k1> and <k2> (tests.unique_item) both hold unique index '<alias>'; an index value names one record.`
@@ -44,6 +45,17 @@ last succeeds and the last refuses with exactly the RULE text built from those f
 byte-identical. Schemas are those of the store files above; `second` is `Category` (plain) except in `tests.uq_pair`,
 where it is `Alt` (unique).
 
-A runtime performs every row its API can perform and asserts the count it walked: C# and Rust 13; Python 12 (not
-`batch-interleaved-types`: `put_envelopes` takes one type); TypeScript 7 (`held-then-landing` and the five load and
-re-pull rows 8-13: no batch commit, `variants:idea:unique-index-runtimes.ts-batch-commit`).
+The 13 rows of the spec are a floor; rows 14-19 extend it with orderings that a code-point, case-insensitive or
+culture compare would flip. Rows, in file order: 1 batch-later-value-staged-first, 2 batch-surrogate-keys, 3
+batch-interleaved-types, 4 batch-two-aliases, 5 held-then-landing, 6 held-in-the-least-group, 7 swap-off-a-held-value,
+8 load-two-aliases, 9 load-surrogate-keys, 10 load-interleaved-types, 11 repull-held-pair, 12 load-repull-after, 13
+commit-onto-a-loaded-holder, 14 batch-key-case (`B` before `a`), 15 batch-key-punctuation (`Z` before `_` before `a`),
+16 batch-key-case-in-a-group, 17 batch-surrogate-groups (U+1F600 before U+E000, the reverse of code-point order), 18
+batch-alias-case (alias `Sku` before `alt`), 19 load-alias-case.
+
+A runtime performs every row its API can perform and asserts the count it walked:
+
+- C# and Rust: all 19.
+- Python: 18, every row but 3 (`put_envelopes` takes one type).
+- TypeScript: 8, rows 5, 8, 9, 10, 11, 12, 13 and 19 (no batch commit, so no row 1-4, 6, 7 or 14-18;
+  `variants:idea:unique-index-runtimes.ts-batch-commit`).

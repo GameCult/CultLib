@@ -310,6 +310,12 @@ namespace GameCult.Caching.Tests
                 EmittedDocumentTypes.Emit("UqVecPairIndex", "tests.uq_pair", "tests.uq_pair.v1",
                     new EmittedDocumentTypes.Field[] { new("Sku", typeof(string), 0, Index: "Sku"), new("Alt", typeof(string), 1, Index: "Alt") }),
                 "Alt"),
+            new("tests.uq_alias",
+                EmittedDocumentTypes.Emit("UqVecAliasRole", "tests.uq_alias", "tests.uq_alias.v1",
+                    new EmittedDocumentTypes.Field[] { new("Sku", typeof(string), 0, Role: "Sku"), new("Alt", typeof(string), 1, Role: "alt") }),
+                EmittedDocumentTypes.Emit("UqVecAliasIndex", "tests.uq_alias", "tests.uq_alias.v1",
+                    new EmittedDocumentTypes.Field[] { new("Sku", typeof(string), 0, Index: "Sku"), new("Alt", typeof(string), 1, Index: "alt") }),
+                "Alt"),
             Plain("Alpha", "tests.uq_alpha"),
             Plain("Beta", "tests.uq_beta"),
         };
@@ -326,6 +332,7 @@ namespace GameCult.Caching.Tests
 
         private const string Item = "tests.unique_item";
         private const string Pair = "tests.uq_pair";
+        private const string Alias = "tests.uq_alias";
         private const string Alpha = "tests.uq_alpha";
         private const string Beta = "tests.uq_beta";
 
@@ -340,18 +347,20 @@ namespace GameCult.Caching.Tests
         {
             new("b:1", Alpha, "P"), new("a:1", Beta, "P"), new("b:2", Alpha, "P"), new("a:2", Beta, "P")
         };
+        private static readonly Rec[] AliasRecords = { new("item:a", Alias, "S", "X"), new("item:b", Alias, "S", "Y"), new("item:c", Alias, "T", "Y") };
         private static readonly Rec[] RepullBefore = Items_(("item:a1", "A"), ("item:b1", "C"));
         private static readonly Rec[] RepullAfter = Items_(("item:a1", "A"), ("item:b1", "B"), ("item:b2", "B"), ("item:c1", "A"));
 
         private static readonly (string File, Rec[] Records)[] RefusalStores =
         {
             ("pair-store.cc", PairRecords), ("surrogate-store.cc", SurrogateRecords), ("types-store.cc", TypeRecords),
-            ("repull-before.cc", RepullBefore), ("repull-after.cc", RepullAfter),
+            ("repull-before.cc", RepullBefore), ("repull-after.cc", RepullAfter), ("alias-store.cc", AliasRecords),
         };
 
         private static readonly Refusal SurrogateRefusal = new("k\U0001F600", "k\uE000", Item, "Sku");
         private static readonly Refusal TypesRefusal = new("a:1", "a:2", Beta, "Sku");
         private static readonly Refusal PairRefusal = new("item:b", "item:c", Pair, "Alt");
+        private static readonly Refusal AliasRefusal = new("item:a", "item:b", Alias, "Sku");
         private static readonly Refusal RepullRefusal = new("item:a1", "item:c1", Item, "Sku");
 
         private static readonly Case[] Cases =
@@ -373,6 +382,17 @@ namespace GameCult.Caching.Tests
             new("load-repull-after", new[] { Open("repull-after.cc") }, RepullRefusal),
             new("commit-onto-a-loaded-holder", new[] { Open("repull-before.cc"), Commit(Items_(("item:z", "A"))) },
                 new Refusal("item:a1", "item:z", Item, "Sku")),
+            // Rows 14-19 extend the spec's floor of 13: orderings a code-point, case-insensitive or culture compare would flip.
+            new("batch-key-case", new[] { Open(), Commit(Items_(("a", "S"), ("z", "S"), ("B", "T"), ("C", "T"))) },
+                new Refusal("B", "C", Item, "Sku")),
+            new("batch-key-punctuation", new[] { Open(), Commit(Items_(("_", "S"), ("a", "S"), ("Z", "T"), ("b", "T"))) },
+                new Refusal("Z", "b", Item, "Sku")),
+            new("batch-key-case-in-a-group", new[] { Open(), Commit(Items_(("a", "S"), ("B", "S"))) },
+                new Refusal("B", "a", Item, "Sku")),
+            new("batch-surrogate-groups", new[] { Open(), Commit(Items_(("\uE000", "S"), ("\uE000b", "S"), ("\U0001F600", "T"), ("\U0001F600b", "T"))) },
+                new Refusal("\U0001F600", "\U0001F600b", Item, "Sku")),
+            new("batch-alias-case", new[] { Open(), Commit(AliasRecords) }, AliasRefusal),
+            new("load-alias-case", new[] { Open("alias-store.cc") }, AliasRefusal),
         };
 
         private static byte[] RefusalStoreBytes(Rec[] records)
@@ -560,23 +580,7 @@ namespace GameCult.Caching.Tests
                 }
             }
 
-            Assert.That(walked, Is.EqualTo(13));
-        }
-
-        // Not a vector row (the cross-runtime rows are fixed by the spec): keys order by code unit, so "B" precedes "a".
-        [Test]
-        public void RefusalOrdersKeysByCodeUnitNotByCase()
-        {
-            using var cache = CultCacheMessagePack.Create(
-                Path.Combine(Path.GetTempPath(), $"cultlib-uidxc-{Guid.NewGuid():N}.cc"),
-                new CultCacheOpenOptions { Registry = CultDocumentRegistry.ForTypes(new[] { ItemIndex }) });
-            var refused = Assert.Throws<InvalidOperationException>(() => cache.Commit(batch =>
-            {
-                foreach (var (key, sku) in new[] { ("a", "S"), ("z", "S"), ("B", "T"), ("C", "T") })
-                    batch.Upsert(ItemIndex, EmittedDocumentTypes.New(ItemIndex, ("Sku", sku), ("Category", "")), new CultRecordKey(key));
-            }))!;
-            Assert.That(refused.Message, Is.EqualTo(
-                "Records B and C (tests.unique_item) both hold unique index 'Sku'; an index value names one record."));
+            Assert.That(walked, Is.EqualTo(19));
         }
     }
 }
