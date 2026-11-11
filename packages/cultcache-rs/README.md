@@ -21,8 +21,14 @@ CultCache is a domain cache with persistence adapters.
 
 - `CultCache` is the query and mutation surface.
 - Domain structs implement `DatabaseEntry`.
-- Entries are stored behind a `type::key` identity, so multiple entry types
-  can share a logical key without colliding.
+- A cache holds one record per key whatever its type. Records are held per
+  `(type, key)`, but a write of a second type under a key the cache holds, or a
+  key a store carries foreign, is refused with `SchemaConflictError` naming the
+  key (no store needed); retyping a key is a delete, then an add. A store
+  record no registered type claims loads: the cache does not serve it, lists it
+  in `foreign_records()`, lays it back byte for byte through every write
+  including `put_prepared_batch`, and refuses a write or delete at its key.
+  Registering a type that claims its schema id picks it up at the next pull.
 - Each payload is encoded directly from the known `DatabaseEntry` type into
   MessagePack bytes.
 - Backing stores are adapters, not the public data model.
@@ -458,7 +464,7 @@ That is the Rust version of the original trick:
 
 - C# refuses to store objects outside the `DatabaseEntry` root type.
 - Runtime-visible `DatabaseEntry` subclasses get dedicated formatters.
-- Unknown or unregistered types are rejected.
+- A write of an unregistered type is rejected; a stored record of an unregistered type is carried as foreign, not decoded.
 - MessagePack payload bytes deserialize through known concrete formatters, not
   an open-world type loader or generic structured-value bridge.
 

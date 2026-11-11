@@ -123,6 +123,7 @@ fn walk(row: &Row, as_batch: bool) -> Result<(), String> {
     let mut cache: Option<CultCache> = None;
     let mut refused: Option<anyhow::Error> = None;
     let mut refused_key: Option<String> = None;
+    let mut shared_key: Option<String> = None;
     let mut wrote = false;
     for (index, op) in ops.iter().enumerate() {
         let last = index == ops.len() - 1;
@@ -160,6 +161,7 @@ fn walk(row: &Row, as_batch: bool) -> Result<(), String> {
                     .and_then(|()| cache.pull_all_backing_stores());
                 if attach.is_err() && last && shared.len() == 1 {
                     refused_key = Some(shared[0].clone());
+                    shared_key = refused_key.clone();
                     assert_eq!(std::fs::read(&attached).unwrap(), std::fs::read(vectors().join(file)).unwrap(), "{label}: a refused attach leaves the store as it was");
                 }
                 attach
@@ -187,7 +189,8 @@ fn walk(row: &Row, as_batch: bool) -> Result<(), String> {
     if let Some(error) = &refused {
         if let Some(conflict) = error.downcast_ref::<SchemaConflictError>() {
             refused_key = Some(conflict.record_key.clone());
-            assert_eq!(text(&last[last.len() - if text(&last[0]) == "put" { 2 } else { 1 }]), conflict.record_key, "{label}: the refusal names the key written or removed");
+            let named = if text(&last[0]) == "attach" { shared_key.clone().unwrap() } else { text(&last[2]).to_string() };
+            assert_eq!(named, conflict.record_key, "{label}: the refusal names the key written, removed or shared");
         }
         let key = refused_key.clone().unwrap_or_default();
         assert!(format!("{error:#}").contains(&key) && !key.is_empty(), "{label}: the refusal names the key: {error:#}");
