@@ -701,6 +701,7 @@ checked by the operator in the editor.
 - Run `MintElementIds` once over `GameData/Aetheria.cc`.
 - AetherDb migrations skip variants or use the variant API (Q1a).
 - Re-author the families listed in section 6.
+- Hull families live in each ship's own `.cc`, not in `GameData/Aetheria.cc`, because hulls are mod-owned packages (Nibu's ruling about her data, 2026-11-11, #minds).
 
 ### C5. CultNet deltas (C# reference)
 
