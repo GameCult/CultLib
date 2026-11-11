@@ -7,6 +7,7 @@ using System.Linq;
 using GameCult.Caching.MessagePack;
 using MessagePack;
 using NUnit.Framework;
+using NUnit.Framework.Constraints;
 using static GameCult.Caching.Tests.ElementIdTests;
 
 namespace GameCult.Caching.Tests
@@ -61,6 +62,39 @@ namespace GameCult.Caching.Tests
                 .Select(line => line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
                 .Select(cells => new TestCaseData(cells[0], cells[CSharp] == "reads").SetName($"{cells[0]} {cells[CSharp]}"));
 
+        // The row `@directory` has no bytes: the walker makes an empty directory at the store path, and a runtime must refuse it untouched.
+        private const string DirectoryRow = "@directory";
+
+        private static byte[] Place(string path, string vector)
+        {
+            if (vector != DirectoryRow)
+            {
+                var bytes = File.ReadAllBytes(Path.Combine(VectorRoot(), vector));
+                File.WriteAllBytes(path, bytes);
+                return bytes;
+            }
+
+            if (File.Exists(path))
+                File.Delete(path);
+            Directory.CreateDirectory(path);
+            return Array.Empty<byte>();
+        }
+
+        // A directory at the store path is refused as IOException ("not a store file", CultCache.cs): not a store that is unreadable.
+        private static IResolveConstraint Refusal(string vector) =>
+            vector == DirectoryRow ? Throws.TypeOf<IOException>() : Throws.TypeOf<CultStoreUnreadableException>();
+
+        private static void AssertUntouched(string path, string vector, byte[] bytes, string message)
+        {
+            if (vector == DirectoryRow)
+            {
+                Assert.That(Directory.Exists(path), message);
+                Assert.That(Directory.EnumerateFileSystemEntries(path), Is.Empty, message);
+            }
+            else
+                Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes), message);
+        }
+
         private static bool HoldsAVariant(byte[] bytes) =>
             CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes).Records.Any(record => record.Variant != null);
 
@@ -90,14 +124,17 @@ namespace GameCult.Caching.Tests
         public void OpenReadsExactlyTheFilesTheVectorsSayItReads(string vector, bool reads)
         {
             var path = Path.Combine(_directory, "open.cc");
-            File.WriteAllBytes(path, File.ReadAllBytes(Path.Combine(VectorRoot(), vector)));
+            var bytes = Place(path, vector);
 
             void Open() => CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry }).Dispose();
 
             if (reads)
                 Assert.DoesNotThrow(Open);
             else
-                Assert.That(Open, Throws.TypeOf<CultStoreUnreadableException>().With.Property(nameof(CultStoreUnreadableException.Path)).EqualTo(path));
+            {
+                Assert.That(Open, vector == DirectoryRow ? Refusal(vector) : Throws.TypeOf<CultStoreUnreadableException>().With.Property(nameof(CultStoreUnreadableException.Path)).EqualTo(path));
+                AssertUntouched(path, vector, bytes, "a store this runtime cannot open was changed by the attempt");
+            }
         }
 
         [TestCaseSource(nameof(Vectors))]
@@ -105,8 +142,7 @@ namespace GameCult.Caching.Tests
         {
             var path = Seed("flush.cc");
             using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
-            var bytes = File.ReadAllBytes(Path.Combine(VectorRoot(), vector));
-            File.WriteAllBytes(path, bytes);
+            var bytes = Place(path, vector);
             var store = cache.BackingStores[0];
 
             if (reads && HoldsAVariant(bytes))
@@ -126,8 +162,8 @@ namespace GameCult.Caching.Tests
                 return;
             }
 
-            Assert.That(() => store.PushAll(), Throws.TypeOf<CultStoreUnreadableException>());
-            Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes), "a file this runtime cannot read was rewritten");
+            Assert.That(() => store.PushAll(), Refusal(vector));
+            AssertUntouched(path, vector, bytes, "a file this runtime cannot read was rewritten");
         }
 
         [TestCaseSource(nameof(Vectors))]
@@ -135,8 +171,7 @@ namespace GameCult.Caching.Tests
         {
             var path = Seed("commit.cc");
             using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
-            var bytes = File.ReadAllBytes(Path.Combine(VectorRoot(), vector));
-            File.WriteAllBytes(path, bytes);
+            var bytes = Place(path, vector);
 
             if (reads && HoldsAVariant(bytes))
             {
@@ -153,8 +188,8 @@ namespace GameCult.Caching.Tests
                 return;
             }
 
-            Assert.That(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"))), Throws.TypeOf<CultStoreUnreadableException>());
-            Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes), "a file this runtime cannot read was rewritten");
+            Assert.That(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"))), Refusal(vector));
+            AssertUntouched(path, vector, bytes, "a file this runtime cannot read was rewritten");
         }
 
         private string DirectoryStore(string name)
@@ -679,7 +714,7 @@ namespace GameCult.Caching.Tests
         [Test]
         public void EveryVectorInTheFolderHasAManifestRow()
         {
-            var rows = Vectors().Select(row => (string)row.Arguments[0]).Where(name => !name.StartsWith("..", StringComparison.Ordinal)).OrderBy(name => name, StringComparer.Ordinal);
+            var rows = Vectors().Select(row => (string)row.Arguments[0]).Where(name => !name.StartsWith("..", StringComparison.Ordinal) && name != DirectoryRow).OrderBy(name => name, StringComparer.Ordinal);
             var files = Directory.GetFiles(VectorRoot(), "*.bin").Select(Path.GetFileName).OrderBy(name => name, StringComparer.Ordinal);
             Assert.That(rows, Is.EqualTo(files));
         }

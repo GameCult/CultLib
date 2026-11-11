@@ -16,6 +16,8 @@ namespace GameCult.Mesh.Tests;
 public sealed class CultMeshSingleFileReadabilityTests
 {
     private const int CSharp = 1;
+    // The row `@directory` has no bytes: the walker makes an empty directory at the store path, and the write must refuse it untouched.
+    private const string DirectoryRow = "@directory";
     private string _root = null!;
 
     [SetUp]
@@ -67,8 +69,15 @@ public sealed class CultMeshSingleFileReadabilityTests
         foreach (var (name, write) in writes)
         {
             var path = Path.Combine(_root, name.Replace(' ', '-') + ".cc");
-            var bytes = File.ReadAllBytes(Path.Combine(VectorRoot(), vector));
-            File.WriteAllBytes(path, bytes);
+            var isDirectory = vector == DirectoryRow;
+            var bytes = Array.Empty<byte>();
+            if (isDirectory)
+                Directory.CreateDirectory(path);
+            else
+            {
+                bytes = File.ReadAllBytes(Path.Combine(VectorRoot(), vector));
+                File.WriteAllBytes(path, bytes);
+            }
 
             if (reads)
             {
@@ -96,8 +105,18 @@ public sealed class CultMeshSingleFileReadabilityTests
                 continue;
             }
 
-            Assert.That(() => write(path), Throws.TypeOf<CultStoreUnreadableException>(), name);
-            File.ReadAllBytes(path).Should().Equal(bytes, name + " rewrote a file this runtime cannot read");
+            // A directory at the path is refused as IOException ("not a store file"), not as an unreadable store.
+            if (isDirectory)
+                Assert.That(() => write(path), Throws.TypeOf<IOException>(), name);
+            else
+                Assert.That(() => write(path), Throws.TypeOf<CultStoreUnreadableException>(), name);
+            if (isDirectory)
+            {
+                Directory.Exists(path).Should().BeTrue(name + " replaced a directory");
+                Directory.EnumerateFileSystemEntries(path).Should().BeEmpty(name + " wrote into a directory");
+            }
+            else
+                File.ReadAllBytes(path).Should().Equal(bytes, name + " rewrote a file this runtime cannot read");
         }
     }
 
@@ -115,7 +134,7 @@ public sealed class CultMeshSingleFileReadabilityTests
     [Test]
     public void EveryVectorInTheFolderHasAManifestRow()
     {
-        var rows = Vectors().Select(row => (string)row.Arguments[0]).Where(name => !name.StartsWith("..", StringComparison.Ordinal)).OrderBy(name => name, StringComparer.Ordinal);
+        var rows = Vectors().Select(row => (string)row.Arguments[0]).Where(name => !name.StartsWith("..", StringComparison.Ordinal) && name != DirectoryRow).OrderBy(name => name, StringComparer.Ordinal);
         var files = Directory.GetFiles(VectorRoot(), "*.bin").Select(Path.GetFileName).OrderBy(name => name, StringComparer.Ordinal);
         rows.Should().Equal(files);
     }
