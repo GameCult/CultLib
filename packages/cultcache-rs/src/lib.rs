@@ -168,7 +168,10 @@ pub trait DatabaseEntry: Serialize + DeserializeOwned + Clone + Send + 'static {
     fn cult_name(&self) -> Option<String> {
         None
     }
-    /// Each `#[cultcache(index)]` member as (alias, value), which `get_by_index` finds the record by.
+    /// The `#[cultcache(index)]` aliases. Each is unique: within one type no two records hold one non-blank value of it.
+    const UNIQUE_INDEXES: &'static [&'static str] = &[];
+    /// Each `#[cultcache(index)]` member as (alias, value): a unique lookup, so a non-blank value names one record of
+    /// the type, which `get_by_index` finds it by.
     fn cult_indexes(&self) -> Vec<(&'static str, String)> {
         Vec::new()
     }
@@ -192,6 +195,13 @@ impl<T: CultLookupValue> CultLookupValue for Option<T> {
     }
 }
 
+/// C# renders a boolean `True` or `False`; the index text is shared across runtimes.
+impl CultLookupValue for bool {
+    fn lookup_value(&self) -> Option<String> {
+        Some(if *self { "True" } else { "False" }.to_string())
+    }
+}
+
 macro_rules! lookup_value_by_display {
     ($($ty:ty),* $(,)?) => {$(
         impl CultLookupValue for $ty {
@@ -202,7 +212,7 @@ macro_rules! lookup_value_by_display {
     )*};
 }
 
-lookup_value_by_display!(bool, char, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
+lookup_value_by_display!(char, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
 
 /// A global type already holds a record under another key; a second would leave `get_global` with two answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2719,7 +2729,41 @@ pub struct CultCache {
     globals: BTreeSet<String>,
     schema_name_definitions: BTreeMap<String, String>,
     entries: BTreeMap<(String, String), CultCacheEnvelope>,
+    /// Derived from `entries` by the uniqueness judge: (type, alias, value) -> the one key holding that value. It
+    /// decides nothing; `get_by_index` reads it.
+    index_holders: IndexHolders,
+    /// Per registered type with `UNIQUE_INDEXES`: decodes a payload as that type and returns its non-blank index
+    /// values. Registration data, so the judge decodes only indexed types.
+    projectors: BTreeMap<String, IndexProjector>,
     stores: Vec<CultCacheStoreRegistration>,
+}
+
+type IndexProjector = fn(&[u8]) -> Result<Vec<(&'static str, String)>>;
+type IndexSlot = (String, String, String);
+type IndexHolders = BTreeMap<IndexSlot, String>;
+
+fn project_indexes<T: DatabaseEntry>(payload: &[u8]) -> Result<Vec<(&'static str, String)>> {
+    let mut held = decode_payload::<T>(payload)?.cult_indexes();
+    held.retain(|(_, value)| !value.trim().is_empty());
+    Ok(held)
+}
+
+/// What an admission does to the holder map: slots it releases (still held by the key that held them) and slots it takes.
+#[derive(Default)]
+struct IndexChange {
+    released: Vec<(IndexSlot, String)>,
+    taken: Vec<(IndexSlot, String)>,
+}
+
+impl IndexChange {
+    fn apply(self, holders: &mut IndexHolders) {
+        for (slot, key) in self.released {
+            if holders.get(&slot) == Some(&key) {
+                holders.remove(&slot);
+            }
+        }
+        holders.extend(self.taken);
+    }
 }
 
 impl CultCache {
@@ -2729,6 +2773,8 @@ impl CultCache {
             globals: BTreeSet::new(),
             schema_name_definitions: BTreeMap::new(),
             entries: BTreeMap::new(),
+            index_holders: BTreeMap::new(),
+            projectors: BTreeMap::new(),
             stores: Vec::new(),
         }
     }
@@ -2761,6 +2807,11 @@ impl CultCache {
             self.globals.insert(T::TYPE.to_string());
         } else {
             self.globals.remove(T::TYPE);
+        }
+        if T::UNIQUE_INDEXES.is_empty() {
+            self.projectors.remove(T::TYPE);
+        } else {
+            self.projectors.insert(T::TYPE.to_string(), project_indexes::<T>);
         }
         self.schema_name_definitions
             .insert(T::SCHEMA_NAME.to_string(), T::TYPE.to_string());
@@ -2869,7 +2920,9 @@ impl CultCache {
             }
         }
         self.refuse_second_globals(&loaded)?;
+        let holders = self.judge_image(&loaded)?;
         self.entries = loaded;
+        self.index_holders = holders;
         Ok(())
     }
 
@@ -2973,20 +3026,18 @@ impl CultCache {
         self.find_record::<T>(|document| document.cult_name().as_deref() == Some(name))
     }
 
-    /// The record whose `#[cultcache(index)]` member `alias` holds `value`. A blank value is not indexed, so it finds
-    /// nothing. Records of one type sharing a value find the one with the smallest key (ordinal), whatever order they
-    /// were written or loaded in; removing it finds the next.
+    /// The record whose `#[cultcache(index)]` member `alias` holds `value`: at most one, since an index is unique. A
+    /// blank value is not indexed, so it finds nothing; neither does an alias `T` does not declare.
     pub fn get_by_index<T: DatabaseEntry>(&self, alias: &str, value: &str) -> Result<Option<T>> {
         self.require_entry_type::<T>()?;
-        if value.trim().is_empty() {
+        if value.trim().is_empty() || !T::UNIQUE_INDEXES.contains(&alias) {
             return Ok(None);
         }
-        self.find_record::<T>(|document| {
-            document
-                .cult_indexes()
-                .iter()
-                .any(|(held_alias, held_value)| *held_alias == alias && held_value == value)
-        })
+        let slot = (T::TYPE.to_string(), alias.to_string(), value.to_string());
+        match self.index_holders.get(&slot) {
+            Some(key) => self.get::<T>(key),
+            None => Ok(None),
+        }
     }
 
     /// The first record of `T`, in key order, that `matches`.
@@ -3029,10 +3080,12 @@ impl CultCache {
     pub fn put<T: DatabaseEntry>(&mut self, key: impl Into<String>, value: &T) -> Result<T> {
         let (entry, parsed) = self.prepare_entry(key, value)?;
         self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
+        let change = self.judge_unique(&[&entry])?;
         if let Some(home) = self.home_index(T::TYPE)? {
             self.stores[home].store.push(&entry)?;
         }
         self.entries.insert(entry_id(&entry), entry);
+        change.apply(&mut self.index_holders);
         Ok(parsed)
     }
 
@@ -3141,6 +3194,7 @@ impl CultCache {
             next.insert(entry_id(entry), entry.clone());
         }
         self.refuse_second_globals(&next)?;
+        let change = self.judge_unique(&staged.iter().collect::<Vec<_>>())?;
         if let Some(store_index) = store_index {
             // The home store receives its own records only: those it already
             // holds in this cache plus the staged ones.
@@ -3154,16 +3208,19 @@ impl CultCache {
                 .push_all(&snapshot, PushAllOptions::default())?;
         }
         self.entries = next;
+        change.apply(&mut self.index_holders);
         Ok(())
     }
 
     pub fn put_envelope<T: DatabaseEntry>(&mut self, entry: CultCacheEnvelope) -> Result<T> {
         let parsed = self.validate_envelope::<T>(&entry)?;
         self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
+        let change = self.judge_unique(&[&entry])?;
         if let Some(home) = self.home_index(T::TYPE)? {
             self.stores[home].store.push(&entry)?;
         }
         self.entries.insert(entry_id(&entry), entry);
+        change.apply(&mut self.index_holders);
         Ok(parsed)
     }
 
@@ -3193,10 +3250,12 @@ impl CultCache {
         }
         require_payload_depth(&entry)?;
         self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
+        let change = self.judge_unique(&[&entry])?;
         if let Some(home) = self.home_index(&entry.r#type)? {
             self.stores[home].store.push(&entry)?;
         }
         self.entries.insert(entry_id(&entry), entry);
+        change.apply(&mut self.index_holders);
         Ok(())
     }
 
@@ -3250,7 +3309,9 @@ impl CultCache {
         if let Some(home) = self.home_index(T::TYPE)? {
             self.stores[home].store.delete(&entry)?;
         }
+        let released = self.projected_slots(&entry)?;
         self.entries.remove(&id);
+        IndexChange { released, taken: Vec::new() }.apply(&mut self.index_holders);
         Ok(true)
     }
 
@@ -3279,8 +3340,84 @@ impl CultCache {
             loaded.insert(entry_id(&entry), entry);
         }
         self.refuse_second_globals(&loaded)?;
+        let holders = self.judge_image(&loaded)?;
         self.entries = loaded;
+        self.index_holders = holders;
         Ok(())
+    }
+
+    /// The slots an envelope holds: its type's non-blank index values, each held by its key.
+    fn projected_slots(&self, entry: &CultCacheEnvelope) -> Result<Vec<(IndexSlot, String)>> {
+        let Some(project) = self.projectors.get(&entry.r#type) else {
+            return Ok(Vec::new());
+        };
+        let held = project(&entry.payload).with_context(|| {
+            format!("failed to project the unique indexes of CultCache entry {:?} at key {:?}", entry.r#type, entry.key)
+        })?;
+        Ok(held
+            .into_iter()
+            .map(|(alias, value)| ((entry.r#type.clone(), alias.to_string(), value), entry.key.clone()))
+            .collect())
+    }
+
+    /// The one index rule (C# `RefuseIndexSharing`), judged on the result of an admission: within one type and one
+    /// unique alias, no two records hold one non-blank value. The holders of a value are the held key (unless this
+    /// admission rewrites it) plus every landing key projecting it; two distinct holders refuse, naming both keys
+    /// (ordinal) and the alias, never the value. A key landing twice lands as its last envelope.
+    fn judge_unique(&self, landing: &[&CultCacheEnvelope]) -> Result<IndexChange> {
+        self.judge_against(&self.index_holders, landing, true)
+    }
+
+    /// Judges a whole image against an empty holder map and returns the map it installs.
+    fn judge_image(&self, image: &BTreeMap<(String, String), CultCacheEnvelope>) -> Result<IndexHolders> {
+        let landing: Vec<_> = image.values().collect();
+        let mut holders = IndexHolders::new();
+        self.judge_against(&holders, &landing, false)?.apply(&mut holders);
+        Ok(holders)
+    }
+
+    fn judge_against(&self, held: &IndexHolders, landing: &[&CultCacheEnvelope], replacing: bool) -> Result<IndexChange> {
+        let mut last: BTreeMap<(&str, &str), &CultCacheEnvelope> = BTreeMap::new();
+        for entry in landing {
+            last.insert((entry.r#type.as_str(), entry.key.as_str()), entry);
+        }
+        let mut change = IndexChange::default();
+        let mut groups: Vec<(IndexSlot, BTreeSet<String>)> = Vec::new();
+        let mut at: BTreeMap<IndexSlot, usize> = BTreeMap::new();
+        for entry in last.values() {
+            if !self.projectors.contains_key(&entry.r#type) {
+                continue;
+            }
+            if replacing && let Some(old) = self.entries.get(&entry_id(entry)) {
+                change.released.extend(self.projected_slots(old)?);
+            }
+            for (slot, key) in self.projected_slots(entry)? {
+                let index = *at.entry(slot.clone()).or_insert_with(|| {
+                    groups.push((slot, BTreeSet::new()));
+                    groups.len() - 1
+                });
+                groups[index].1.insert(key);
+            }
+        }
+        groups.sort_by(|left, right| left.0.1.cmp(&right.0.1));
+        for (slot, mut holders) in groups {
+            if let Some(held_key) = held.get(&slot)
+                && !last.contains_key(&(slot.0.as_str(), held_key.as_str()))
+            {
+                holders.insert(held_key.clone());
+            }
+            let mut ordered = holders.iter();
+            if let (Some(first), Some(second)) = (ordered.next(), ordered.next()) {
+                return Err(anyhow!(
+                    "Records {first} and {second} ({}) both hold unique index '{}'; an index value names one record.",
+                    self.definitions.get(&slot.0).copied().unwrap_or(&slot.0),
+                    slot.1
+                ));
+            }
+            let key = holders.into_iter().next().expect("a group holds at least one key");
+            change.taken.push((slot, key));
+        }
+        Ok(change)
     }
 
     fn refuse_second_global(

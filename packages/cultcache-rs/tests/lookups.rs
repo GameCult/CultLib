@@ -11,7 +11,7 @@ use cultcache_rs::{
 struct Item {
     #[cultcache(key = 0, name)]
     name: String,
-    #[cultcache(key = 1, index)]
+    #[cultcache(key = 1)]
     category: String,
     #[cultcache(key = 2, index = "sku")]
     code: Option<String>,
@@ -39,7 +39,7 @@ struct Gadget {
 struct Zed {
     #[cultcache(key = 0, name)]
     name: String,
-    #[cultcache(key = 1, index)]
+    #[cultcache(key = 1)]
     category: String,
     #[cultcache(key = 2, index = "sku")]
     code: Option<String>,
@@ -110,7 +110,6 @@ fn a_record_is_found_by_name_and_by_index_after_a_reopen() {
     let reopened = reopened(&path);
     let by_name = reopened.get_by_name::<Item>("Potion").unwrap().unwrap();
     assert_eq!(by_name.value, 50);
-    assert_eq!(reopened.get_by_index::<Item>("category", "Consumable").unwrap(), Some(by_name.clone()));
     assert_eq!(reopened.get_by_index::<Item>("sku", "P-1").unwrap(), Some(by_name));
 }
 
@@ -121,31 +120,32 @@ fn a_missing_name_or_value_is_none_and_an_unregistered_type_is_refused() {
 
     assert_eq!(cache.get_by_name::<Item>("B").unwrap(), None);
     assert_eq!(cache.get_by_name::<Item>("a").unwrap(), None, "names compare ordinally");
-    assert_eq!(cache.get_by_index::<Item>("category", "other").unwrap(), None);
-    assert_eq!(cache.get_by_index::<Item>("nosuchalias", "cat").unwrap(), None);
+    assert_eq!(cache.get_by_index::<Item>("sku", "other").unwrap(), None);
+    assert_eq!(cache.get_by_index::<Item>("nosuchalias", "a-1").unwrap(), None);
+    assert_eq!(cache.get_by_index::<Item>("category", "cat").unwrap(), None, "category is a grouping, not an index");
     assert_eq!(cache.get_by_index::<Item>("code", "a-1").unwrap(), None, "the alias is sku, not the member name");
 
     let bare = CultCache::new();
     assert!(bare.get_by_name::<Item>("A").is_err());
-    assert!(bare.get_by_index::<Item>("category", "cat").is_err());
+    assert!(bare.get_by_index::<Item>("sku", "a-1").is_err());
     assert!(bare.get_global::<Settings>().is_err());
 }
 
 #[test]
 fn an_index_without_an_alias_is_named_by_its_member() {
     let mut cache = cache();
-    cache.put("item:a", &item("A", "cat", None)).unwrap();
-    assert!(cache.get_by_index::<Item>("category", "cat").unwrap().is_some());
+    cache.put("numbered:1", &Numbered { id: 1, owner: 7 }).unwrap();
+    assert!(cache.get_by_index::<Numbered>("owner", "7").unwrap().is_some());
 }
 
 // A blank name is no name; a blank index value is not indexed; a nil member holds no value.
 #[test]
 fn blank_and_nil_values_are_not_found() {
     let mut cache = cache();
-    cache.put("item:blank", &item("", "  ", None)).unwrap();
+    cache.put("item:blank", &item("", "  ", Some("  "))).unwrap();
     assert_eq!(cache.get_by_name::<Item>("").unwrap(), None);
-    assert_eq!(cache.get_by_index::<Item>("category", "  ").unwrap(), None);
-    assert_eq!(cache.get_by_index::<Item>("category", "").unwrap(), None);
+    assert_eq!(cache.get_by_index::<Item>("sku", "  ").unwrap(), None);
+    assert_eq!(cache.get_by_index::<Item>("sku", "").unwrap(), None);
     assert_eq!(cache.get_by_index::<Item>("sku", "").unwrap(), None);
 
     // Only emptiness voids a name: whitespace is a name, as in C# (Length > 0).
@@ -156,14 +156,14 @@ fn blank_and_nil_values_are_not_found() {
 #[test]
 fn lookups_never_cross_types() {
     let mut cache = cache();
-    cache.put("item:a", &item("same", "same", None)).unwrap();
+    cache.put("item:a", &item("same", "same", Some("same"))).unwrap();
     cache.put("gadget:a", &Gadget { name: "same".into(), category: "same".into() }).unwrap();
     cache.put("zed:a", &Zed { name: "same".into(), category: "same".into(), code: None, value: 0 }).unwrap();
 
     assert_eq!(cache.get_by_name::<Gadget>("same").unwrap().unwrap().name, "same");
     cache.delete::<Item>("item:a").unwrap();
     assert_eq!(cache.get_by_name::<Item>("same").unwrap(), None);
-    assert_eq!(cache.get_by_index::<Item>("category", "same").unwrap(), None);
+    assert_eq!(cache.get_by_index::<Item>("sku", "same").unwrap(), None);
     assert!(cache.get_by_name::<Gadget>("same").unwrap().is_some());
     assert!(cache.get_by_index::<Gadget>("category", "same").unwrap().is_some());
 }
@@ -171,17 +171,17 @@ fn lookups_never_cross_types() {
 #[test]
 fn a_name_and_index_follow_a_rewritten_record_and_leave_a_removed_one() {
     let mut cache = cache();
-    cache.put("item:a", &item("old", "c1", None)).unwrap();
-    cache.put("item:a", &item("new", "c2", None)).unwrap();
+    cache.put("item:a", &item("old", "cat", Some("c1"))).unwrap();
+    cache.put("item:a", &item("new", "cat", Some("c2"))).unwrap();
 
     assert_eq!(cache.get_by_name::<Item>("old").unwrap(), None, "a stale name is not found");
-    assert_eq!(cache.get_by_index::<Item>("category", "c1").unwrap(), None, "a stale value is not found");
+    assert_eq!(cache.get_by_index::<Item>("sku", "c1").unwrap(), None, "a stale value is not found");
     assert!(cache.get_by_name::<Item>("new").unwrap().is_some());
-    assert!(cache.get_by_index::<Item>("category", "c2").unwrap().is_some());
+    assert!(cache.get_by_index::<Item>("sku", "c2").unwrap().is_some());
 
     cache.delete::<Item>("item:a").unwrap();
     assert_eq!(cache.get_by_name::<Item>("new").unwrap(), None);
-    assert_eq!(cache.get_by_index::<Item>("category", "c2").unwrap(), None);
+    assert_eq!(cache.get_by_index::<Item>("sku", "c2").unwrap(), None);
 }
 
 #[test]
@@ -191,33 +191,6 @@ fn non_string_members_are_found_by_their_text() {
     cache.put("numbered:1", &Numbered { id: 42, owner }).unwrap();
     assert!(cache.get_by_name::<Numbered>("42").unwrap().is_some());
     assert!(cache.get_by_index::<Numbered>("owner", "161").unwrap().is_some());
-}
-
-// VariantTests.RemovingTheHolderADuplicateValueFindsLeavesTheOtherFindable: records sharing a value find the one with
-// the smallest key, whatever the write order, live and after a reopen; removing the holder finds the other.
-#[test]
-fn records_sharing_a_value_find_the_smallest_key_and_removing_it_finds_the_next() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("shared.cc");
-    {
-        let mut cache = stored_cache(&path);
-        cache.put("item:p2", &item("p2", "x", None)).unwrap();
-        cache.put("item:p1", &item("p1", "x", None)).unwrap();
-        let found = |cache: &CultCache| cache.get_by_index::<Item>("category", "x").unwrap().map(|found| found.name);
-        assert_eq!(found(&cache).as_deref(), Some("p1"), "the smallest key, though written second");
-        assert_eq!(reopened(&path).get_by_index::<Item>("category", "x").unwrap().unwrap().name, "p1");
-
-        cache.delete::<Item>("item:p1").unwrap();
-        assert_eq!(found(&cache).as_deref(), Some("p2"), "removing the holder finds the other one");
-
-        cache.put("item:p1", &item("p1", "x", None)).unwrap();
-        assert_eq!(found(&cache).as_deref(), Some("p1"));
-        cache.delete::<Item>("item:p2").unwrap();
-        assert_eq!(found(&cache).as_deref(), Some("p1"), "removing the other changes nothing");
-        cache.delete::<Item>("item:p1").unwrap();
-        assert_eq!(found(&cache), None);
-    }
-    assert_eq!(reopened(&path).get_by_index::<Item>("category", "x").unwrap(), None);
 }
 
 #[test]

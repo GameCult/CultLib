@@ -69,8 +69,9 @@ fn database_entry_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
             }
         }
     });
-    let index_members = slots.iter().filter_map(|slot| slot.index.as_ref().map(|alias| (alias, &slot.ident)));
-    let index_pushes = index_members.map(|(alias, member)| {
+    let index_members: Vec<_> = slots.iter().filter_map(|slot| slot.index.as_ref().map(|alias| (alias, &slot.ident))).collect();
+    let index_aliases: Vec<_> = index_members.iter().map(|(alias, _)| *alias).collect();
+    let index_pushes = index_members.iter().map(|(alias, member)| {
         quote! {
             if let ::std::option::Option::Some(value) = ::cultcache_rs::CultLookupValue::lookup_value(&self.#member) {
                 held.push((#alias, value));
@@ -78,6 +79,9 @@ fn database_entry_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
         }
     });
     let index_pushes: Vec<_> = index_pushes.collect();
+    let unique_indexes = (!index_aliases.is_empty()).then(|| {
+        quote! { const UNIQUE_INDEXES: &'static [&'static str] = &[#(#index_aliases),*]; }
+    });
     let indexes_fn = (!index_pushes.is_empty()).then(|| {
         quote! {
             fn cult_indexes(&self) -> ::std::vec::Vec<(&'static str, ::std::string::String)> {
@@ -93,6 +97,7 @@ fn database_entry_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
             const TYPE: &'static str = #entry_type;
             const SCHEMA_NAME: &'static str = #schema_name;
             const GLOBAL: bool = #global;
+            #unique_indexes
             #name_fn
             #indexes_fn
         }
@@ -443,7 +448,8 @@ struct CultCacheSlot {
     bytes: bool,
     /// `#[cultcache(name)]`: the member `get_by_name` finds the record by.
     name: bool,
-    /// `#[cultcache(index)]` or `#[cultcache(index = "alias")]`: the alias `get_by_index` finds the record by.
+    /// `#[cultcache(index)]` or `#[cultcache(index = "alias")]`: a unique lookup. Within one type no two records hold one
+    /// non-blank value of the alias; `get_by_index` finds the record by it.
     index: Option<String>,
 }
 
