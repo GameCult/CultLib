@@ -13,7 +13,7 @@ only in git history.
 - `#[cultcache(index)]` means unique, as in C# `RefuseIndexSharing`: within one type and one alias no two records hold one non-blank value. A put, batch, push or load that would make two records hold a value is refused, naming both keys and the alias, and a store that already holds a duplicate does not open. A grouping index is no longer expressible; a consumer that relied on shared values must drop the `index` and look up by another way.
 - `bool` index and lookup text renders `True` / `False`, as C# does, where it rendered `true` / `false`.
 - `DatabaseEntry::UNIQUE_INDEXES` replaces `cult_indexes` as the one index declaration and changes type (its members are the unique aliases); a hand implementation overriding `cult_indexes` no longer compiles.
-- `register_entry_type` over a type that already holds records re-judges them under the new declaration (unique indexes and the global rule) and refuses, changing nothing, when they violate it or cannot be decoded.
+- `register_entry_type` over a type that already holds records re-judges them under the new declaration (unique indexes and the global rule) and refuses, changing nothing, when they violate it. A declaration with an index also refuses when a held record cannot be decoded as the new type; a declaration without one does not read the records, so it does not.
 
 ### Added
 

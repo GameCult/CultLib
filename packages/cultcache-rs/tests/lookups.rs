@@ -241,14 +241,45 @@ fn registering_a_type_global_over_two_held_records_is_refused_and_changes_nothin
     assert_eq!(cache.get_all_with_keys::<LooseSettings>().unwrap().len(), 3, "still ordinary");
 }
 
-// One held record may become the global; dropping the rule again restores the ordinary type.
+// One held record may become the global; a second is then refused as a second global.
 #[test]
 fn registering_a_type_global_over_one_held_record_is_admitted() {
     let mut cache = CultCache::new();
     cache.register_entry_type::<LooseSettings>().unwrap();
     cache.put("a", &LooseSettings { value: "one".into() }).unwrap();
     cache.register_entry_type::<Settings>().unwrap();
-    assert!(cache.put("b", &Settings { value: "two".into() }).is_err(), "a second global is refused");
+    let refusal = cache.put("b", &Settings { value: "two".into() }).unwrap_err();
+    assert!(refusal.downcast_ref::<CultCacheSecondGlobal>().is_some(), "{refusal:#}");
+}
+
+/// A global with an indexed member, and the same type and schema declaring that member as an integer.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "indexed_global", schema = "tests.indexed_global", global)]
+struct IndexedGlobal {
+    #[cultcache(key = 0, index = "V")]
+    v: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "indexed_global", schema = "tests.indexed_global", global)]
+struct RetypedGlobal {
+    #[cultcache(key = 0, index = "V")]
+    v: i64,
+}
+
+// A refused re-registration over an already-global type leaves it global: the rule keeps refusing a second record.
+#[test]
+fn a_refused_reregistration_leaves_a_global_type_global() {
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<IndexedGlobal>().unwrap();
+    cache.put("a", &IndexedGlobal { v: "x".into() }).unwrap();
+
+    assert!(cache.register_entry_type::<RetypedGlobal>().is_err(), "the held text cannot be decoded as an integer");
+
+    let refusal = cache.put("b", &IndexedGlobal { v: "y".into() }).unwrap_err();
+    assert!(refusal.downcast_ref::<CultCacheSecondGlobal>().is_some(), "{refusal:#}");
+    assert_eq!(cache.get_global::<IndexedGlobal>().unwrap(), Some(IndexedGlobal { v: "x".into() }));
+    assert_eq!(cache.get_by_index::<IndexedGlobal>("V", "x").unwrap(), cache.get::<IndexedGlobal>("a").unwrap());
 }
 
 #[test]
