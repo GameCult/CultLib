@@ -36,6 +36,16 @@ class WatchByIndexTests(unittest.TestCase):
                     self.assertEqual(misheard, [])
                     self.assertIsNone(node.database.get_by_index(document, "price", str_text))
 
+    def test_a_watch_hears_a_record_leaving_a_value_by_the_canonical_text(self) -> None:
+        document = define_database_entry_type("mesh.leaving", [("price", 0)], indexes={"price": "price"})
+        node = CultMesh.create_node(runtime_id="mesh-watch-leaving")
+        node.database.register_document(document)
+        node.database.put(document, "item:1", {"price": 2.0})
+        heard: list[str] = []
+        node.database.watch_by_index(document, "price", "2", lambda change: heard.append(change.record_key))
+        node.database.put(document, "item:1", {"price": 3.0})
+        self.assertEqual(heard, ["item:1"])
+
     def test_a_blank_value_is_never_indexed_so_never_watched(self) -> None:
         document = define_database_entry_type("mesh.blank", [("sku", 0)], indexes={"sku": "sku"})
         node = CultMesh.create_node(runtime_id="mesh-watch-blank")

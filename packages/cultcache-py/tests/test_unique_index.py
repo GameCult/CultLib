@@ -544,6 +544,41 @@ class BatchAndOrderTests(unittest.TestCase):
             cache.pull_all_backing_stores()
         self.assertEqual(str(caught.exception), refusal("s:1", "s:2", "second", "alpha"))
 
+    def test_aliases_sort_by_utf16_code_unit_not_code_point(self) -> None:
+        astral, bmp = "k\U0001F600", "k\uff01"  # code points: bmp < astral; UTF-16 units: D83D < FF01
+        document = item_doc(indexes={bmp: "sku", astral: "serial"}, roles={})
+        cache = cache_of(document)
+        rows = [Item(sku="S", serial="T"), Item(sku="S", serial="T")]
+        with self.assertRaises(CultCacheError) as caught:
+            cache.put_envelopes(document, [envelope(document, f"item:{n}", row) for n, row in enumerate(rows)])
+        self.assertEqual(str(caught.exception), refusal("item:0", "item:1", "item", astral))
+
+    def test_a_load_judges_records_in_the_order_the_file_yields_them(self) -> None:
+        alpha, beta = item_doc("alpha", indexes={"k": "sku"}, roles={}), item_doc("beta", indexes={"k": "sku"}, roles={})
+        loose_alpha, loose_beta = item_doc("alpha", indexes={}, roles={}), item_doc("beta", indexes={}, roles={})
+        store = ListStore(
+            [
+                envelope(loose_alpha, "a:0", Item(sku="Q")),
+                envelope(loose_beta, "b:1", Item(sku="S")),
+                envelope(loose_beta, "b:2", Item(sku="S")),
+                envelope(loose_alpha, "a:1", Item(sku="P")),
+                envelope(loose_alpha, "a:2", Item(sku="P")),
+            ]
+        )
+        cache = cache_of(alpha, beta, store=store)
+        with self.assertRaises(CultCacheError) as caught:
+            cache.pull_all_backing_stores()
+        self.assertEqual(str(caught.exception), refusal("b:1", "b:2", "beta", "k"))
+
+    def test_register_index_refuses_an_alias_the_definition_declares_as_a_role(self) -> None:
+        document = item_doc()
+        cache = cache_of(document)
+        with self.assertRaises(CultCacheError):
+            cache.register_index(document, "group", "group")
+        cache.put_envelopes(
+            document, [envelope(document, "item:1", Item(group="guide")), envelope(document, "item:2", Item(group="guide"))]
+        )
+
 
 class LoadFreshnessTests(unittest.TestCase):
     def test_a_load_is_judged_on_the_file_alone_not_against_the_held_map(self) -> None:
