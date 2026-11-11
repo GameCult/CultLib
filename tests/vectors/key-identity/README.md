@@ -20,16 +20,18 @@ Registering a type that declares its schema id claims it at the next load.
   - `tests.ki_beta`: `sha256:dee4b727cf2ee04e61ab635ff0c5f3dca7345a411dc5f1018e583ab16009cf94`
   - `tests.ki_gamma`: `sha256:fbc26e351e00c9e7185e8de171c7486aba707c229c949f0aae6b889288af5f6d`
 - `foreign-store.cc`: a single-file store, alpha `a` at key `j`, gamma `g` at key `k`, stored-at pinned to
-  `2026-01-01T00:00:00Z`. `catalog-store.cc`: alpha `a` at `k`. `run-store.cc`: beta `b` at `k` (row 11).
+  `2026-01-01T00:00:00Z`. `catalog-store.cc`: alpha `a` at `qx`. `run-store.cc`: beta `b` at `qx` (row 11). The row-11 key is `qx` because it must
+  occur in the refusal's message only as the key, never inside a schema name (`k` is inside `ki_alpha`).
 - `rows.msgpack`: an array of `[label, registered, ops, expect]`.
   - `registered`: the types the cache registers, a subset of `[alpha, beta, gamma]`.
   - `ops`, in order: `[open, file-or-nil-or-memory]` (a cache on a fresh copy of the vector file; nil is a fresh path with no
     file; the string `memory` is a cache with no store), `[attach, file, [home types]]` (route one more store, a fresh copy
     of the vector file, to those home types, and pull every store), `[reopen]` (dispose, then a new cache on the same path),
     `[put, type, key, text]`, `[delete, type, key]` (each one commit).
-  - `expect` is `[refusal, held, file, foreign, kept]`. Every op but the last succeeds; the last succeeds or refuses.
+  - `expect` is `[refusal, held, file, foreign, kept]`. Every op but the last succeeds; the last succeeds or refuses, and in the generator only a schema conflict (or, for an attach, an invalid-operation refusal) counts as a refusal: any other exception fails the run.
     `refusal` is nil or `[key]`: a typed schema-conflict refusal naming the key for a put or a delete (rows 1, 3, 5, 8, 9),
-    and for row 11 any refusal whose message names the key, the store file it was refused from left byte-identical.
+    and for row 11 any refusal (an invalid-operation error, not a schema conflict) whose message opens `Record <key> is held by` and
+    contains the key only as a delimited token (not inside a schema name or other word); the key in `expect` is read out of that message, the store file it was refused from left byte-identical.
     `held` is the cache's records, sorted by type then key, as `[type, key, text]`. `file` is the store file's records after
     the ops, sorted by key, as `[key, schema name]`, nil for a cache with no store. `foreign` is the keys the cache lists as
     foreign, sorted. `kept` is the foreign keys whose stored record (schema id, stored-at, payload) after the ops equals the
@@ -40,7 +42,7 @@ Registering a type that declares its schema id claims it at the next load.
 1 retype-refused-held-in-file, 2 retype-by-remove-then-add, 3 retype-refused-memory-cache, 4 same-type-replaces, 5
 retype-refused-after-reload, 6 foreign-loads, 7 foreign-kept-by-a-write, 8 foreign-key-write-refused, 9
 foreign-key-delete-refused, 10 foreign-claimed-by-a-later-registration (registered `[alpha, gamma]`: row 6's store loads
-with nothing foreign), 11 key-in-two-stores-refused.
+with nothing foreign), 11 key-in-two-stores-refused, 12 same-type-replaces-memory-cache (a cache with no store replaces a same-type record: admitted).
 
-Every runtime walks 11 rows and asserts the count; none is exempt (every row is single-record ops). A leaf never registers
+Every runtime walks 12 rows and asserts the count; none is exempt (every row is single-record ops). A leaf never registers
 gamma in rows 6 and 8; only row 10 does.

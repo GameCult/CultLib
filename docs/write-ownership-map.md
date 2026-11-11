@@ -40,7 +40,7 @@ Probes: scratch tests in this worktree, removed. C# filtered runs on Starfire (o
 | P5 cache {A,B}: remove, then add in a second commit | C | n/a | n/a | n/a |
 | P6 N2 over an N1 record (undeclared name drift), cache {N2} / cacheless reg {N2} | C restamped / C restamped | not probed | not probed | C (cache) |
 
-The C#-written probe the leaves are held to is `tests/vectors/key-identity` (11 rows: retype, foreign carry, key in two stores), walked by
+The C#-written probe the leaves are held to is `tests/vectors/key-identity` (12 rows: retype, foreign carry, key in two stores), walked by
 `KeyIdentityVectorTests`; each leaf cut corrects its own column above.
 
 What this establishes:

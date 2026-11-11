@@ -4,6 +4,7 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
 using MessagePack;
@@ -58,14 +59,15 @@ namespace GameCult.Caching.Tests
             new("foreign-key-delete-refused", A, new[] { Open("foreign-store.cc"), Delete("alpha", "k") }),
             new("foreign-claimed-by-a-later-registration", new[] { "alpha", "gamma" }, new[] { Open("foreign-store.cc") }),
             new("key-in-two-stores-refused", AB, new[] { Open("memory"), Attach("catalog-store.cc", "alpha"), Attach("run-store.cc", "beta") }),
+            new("same-type-replaces-memory-cache", A, new[] { Open("memory"), Put("alpha", "k", "a"), Put("alpha", "k", "b") }),
         };
 
         // The stores C# writes: [file name, registered types, (type, key, text) records]. Never typed by a runtime.
         private static readonly (string File, string[] Registered, (string Type, string Key, string Text)[] Records)[] Stores =
         {
             ("foreign-store.cc", new[] { "alpha", "gamma" }, new[] { ("alpha", "j", "a"), ("gamma", "k", "g") }),
-            ("catalog-store.cc", new[] { "alpha" }, new[] { ("alpha", "k", "a") }),
-            ("run-store.cc", new[] { "beta" }, new[] { ("beta", "k", "b") }),
+            ("catalog-store.cc", new[] { "alpha" }, new[] { ("alpha", "qx", "a") }),
+            ("run-store.cc", new[] { "beta" }, new[] { ("beta", "qx", "b") }),
         };
 
         private static CultDocumentRegistry RegistryOf(IEnumerable<string> names) => CultDocumentRegistry.ForTypes(names.Select(name => Types[name]).ToArray());
@@ -101,6 +103,9 @@ namespace GameCult.Caching.Tests
             snapshot.SchemaCatalog.Single(entry => entry.SchemaId == record.SchemaId).SchemaName;
 
         private static string Short(string schemaName) => Types.Single(pair => pair.Key == schemaName.Replace("tests.ki_", "")).Key;
+
+        // The key as a delimited token: not a piece of a longer word, schema name or path.
+        private static bool Delimited(string message, string key) => Regex.IsMatch(message, $@"(?<![A-Za-z0-9_]){Regex.Escape(key)}(?![A-Za-z0-9_])");
 
         private static string RecordBytes(CultPersistedRecord record) => $"{record.SchemaId}|{record.StoredAt}|{Convert.ToBase64String(record.Payload)}";
 
@@ -154,7 +159,6 @@ namespace GameCult.Caching.Tests
                                 }
                                 catch (InvalidOperationException) when (shared.Length == 1)
                                 {
-                                    refusedKey = shared[0];
                                     Assert.That(File.ReadAllBytes(attached), Is.EqualTo(VectorFiles.Committed(Vector, op.File!)), "a refused attach leaves the store as it was");
                                     throw;
                                 }
@@ -171,7 +175,8 @@ namespace GameCult.Caching.Tests
                                 throw new InvalidOperationException(op.Kind);
                         }
                     }
-                    catch (Exception failure) when (i == row.Ops.Length - 1 && (failure is CultSchemaConflictException || failure is InvalidOperationException))
+                    catch (Exception failure) when (i == row.Ops.Length - 1 &&
+                                                   (failure is CultSchemaConflictException || (op.Kind == "attach" && failure is InvalidOperationException)))
                     {
                         refusal = failure;
                     }
@@ -183,8 +188,20 @@ namespace GameCult.Caching.Tests
                     Assert.That(row.Ops[^1].Key, Is.EqualTo(conflict.RecordKey), $"{row.Label}: the refusal names the key written or removed");
                 }
 
+                if (refusal is InvalidOperationException && refusal is not CultSchemaConflictException)
+                {
+                    // The key is read out of the refusal's own text, not taken from the row: the second-store refusal opens "Record <key> is held by".
+                    var named = Regex.Match(refusal.Message, @"^Record (\S+) is held by");
+                    Assert.That(named.Success, Is.True, $"{row.Label}: the refusal opens by naming a key: {refusal.Message}");
+                    refusedKey = named.Groups[1].Value;
+                    var shared = Snapshot(VectorFiles.Committed(Vector, "run-store.cc")).Records.Select(record => record.Key).ToArray();
+                    Assert.That(shared, Does.Contain(refusedKey), $"{row.Label}: the key the refusal names is the shared one");
+                    Assert.That(Regex.Matches(refusal.Message, Regex.Escape(refusedKey)).Count, Is.EqualTo(Regex.Matches(refusal.Message, $@"(?<![A-Za-z0-9_]){Regex.Escape(refusedKey)}(?![A-Za-z0-9_])").Count),
+                        $"{row.Label}: the key occurs in the refusal only as a delimited token, never inside a schema name or other text");
+                }
+
                 if (refusal != null)
-                    Assert.That(refusal.Message, Does.Contain(refusedKey ?? "").And.Not.Contain("\"\""), $"{row.Label}: the refusal names the key");
+                    Assert.That(Delimited(refusal.Message, refusedKey ?? "\0"), Is.True, $"{row.Label}: the refusal names the key as a token");
 
                 var heldNow = cache!.AllStoredDocuments
                     .Select(stored => new[] { Short(stored.Descriptor.SchemaName), stored.Key.Value, (string)EmittedDocumentTypes.Read(stored.Document, "Text")! })
@@ -348,7 +365,7 @@ namespace GameCult.Caching.Tests
             }
 
             Assert.That(failed, Is.Empty);
-            Assert.That(walked, Is.EqualTo(11), "rows walked");
+            Assert.That(walked, Is.EqualTo(12), "rows walked");
         }
     }
 }
