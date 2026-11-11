@@ -77,7 +77,20 @@ namespace GameCult.Networking
             {
                 if (_disposed) return;
                 foreach (var entry in _requests.ToArray())
-                    Reconcile(entry.Key, entry.Value);
+                {
+                    // Reconcile can run after the cache has admitted a commit and before Watch has seen it, so its diff can carry
+                    // changed values; it is held and sent as one commit of its own, as Watch's is, for the replica to judge whole.
+                    var outbox = _outbox = new CommitOutbox(Guid.NewGuid().ToString("N"));
+                    try
+                    {
+                        Reconcile(entry.Key, entry.Value);
+                    }
+                    finally
+                    {
+                        _outbox = null;
+                        outbox.Send(entry.Key.Peer);
+                    }
+                }
             }
         }
 

@@ -32,23 +32,22 @@ export function defineDocumentType<TSchema extends CultCacheSchema>(
     throw new Error(`CultCache document type "${definition.type}" declares an invalid name accessor.`);
   }
 
-  if (Array.isArray(definition.indexes)) {
-    const seen = new Set<string>();
-    for (const index of definition.indexes) {
-      if (!index.name || index.name.trim().length === 0) {
-        throw new Error(`CultCache document type "${definition.type}" declares an index with an empty name.`);
-      }
-      if (seen.has(index.name)) {
-        throw new Error(`CultCache document type "${definition.type}" declares duplicate index "${index.name}".`);
-      }
-      seen.add(index.name);
-    }
-  } else if (definition.indexes) {
-    for (const name of Object.keys(definition.indexes)) {
+  const declared = new Set<string>();
+  for (const [kind, set] of [["index", definition.indexes], ["role", definition.roles]] as const) {
+    const names = new Set<string>();
+    for (const name of Array.isArray(set) ? set.map((entry) => entry.name) : set ? Object.keys(set) : []) {
       if (!name || name.trim().length === 0) {
-        throw new Error(`CultCache document type "${definition.type}" declares an index with an empty name.`);
+        throw new Error(`CultCache document type "${definition.type}" declares ${kind === "index" ? "an index" : "a role"} with an empty name.`);
       }
+      if (names.has(name)) {
+        throw new Error(`CultCache document type "${definition.type}" declares duplicate ${kind} "${name}".`);
+      }
+      if (kind === "role" && declared.has(name)) {
+        throw new Error(`CultCache document type "${definition.type}" declares "${name}" as both an index and a role; an index already names its role.`);
+      }
+      names.add(name);
     }
+    for (const name of names) declared.add(name);
   }
 
   if (definition.members) {
@@ -138,10 +137,13 @@ export function resolveDocumentMembers(definition: AnyCultCacheDocumentDefinitio
     return definition.members ?? [];
   }
   const codec = definition.codec;
-  const indexAlias = (slotName: string) =>
-    !Array.isArray(definition.indexes) && definition.indexes
-      ? Object.entries(definition.indexes).find(([, accessor]) => accessor === slotName)?.[0] ?? null
-      : null;
+  const indexAlias = (slotName: string) => {
+    for (const set of [definition.indexes, definition.roles]) {
+      const alias = !Array.isArray(set) && set ? Object.entries(set).find(([, accessor]) => accessor === slotName)?.[0] : undefined;
+      if (alias !== undefined) return alias;
+    }
+    return null;
+  };
   return codec.members.map((member, index) => ({
     ...member,
     isName: (definition.name as unknown) === codec.names[index],

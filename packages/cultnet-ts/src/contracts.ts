@@ -424,6 +424,10 @@ export interface CultNetDatabaseChangeRawMessage {
   document?: CultNetRawDocumentRecord;
   recordKey?: string;
   schemaId?: string;
+  /** Opaque, one subscription: changes sharing a commitId are the changes of one commit. */
+  commitId?: string | null;
+  /** How many changes the commit carries, at least two. The C# server sends null on a change outside a grouped commit. */
+  commitCount?: number | null;
 }
 
 export interface CultNetSchemaDescriptor {
@@ -1395,6 +1399,15 @@ function validateDatabaseChangeRawMessage(
     throw new Error(
       "Validation failed for cultnet.database_change_raw.v0: /changeKind: must be added, updated, or removed",
     );
+  }
+
+  if (candidate.commitId !== undefined && candidate.commitId !== null &&
+      (typeof candidate.commitId !== "string" || candidate.commitId.length === 0)) {
+    throw new Error("Validation failed for cultnet.database_change_raw.v0: /commitId: must be a non-empty string");
+  }
+  if (candidate.commitCount !== undefined && candidate.commitCount !== null &&
+      (typeof candidate.commitCount !== "number" || !Number.isInteger(candidate.commitCount) || candidate.commitCount < 2)) {
+    throw new Error("Validation failed for cultnet.database_change_raw.v0: /commitCount: must be an integer of at least 2");
   }
 
   if (candidate.changeKind === "removed") {

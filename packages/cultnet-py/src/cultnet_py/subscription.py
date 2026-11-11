@@ -15,6 +15,10 @@ class CultNetDatabaseChange:
     raw_document: CultNetRawDocumentRecord | None = None
     schema_id: str | None = None
     record_key: str | None = None
+    commit_id: str | None = None
+    """Set on every change of one multi-record commit, the same for all of them; None outside one (C# writes nil)."""
+    commit_count: int | None = None
+    """How many changes the commit holds (>= 2); None outside one. Carried data: Python applies no batch."""
 
     @classmethod
     def from_wire(cls, message: dict[str, Any]) -> "CultNetDatabaseChange":
@@ -31,6 +35,12 @@ class CultNetDatabaseChange:
         if raw_document is not None:
             schema_id = schema_id or raw_document.schema_id
             record_key = record_key or raw_document.record_key
+        commit_id = message.get("commitId")
+        if commit_id is not None and not (isinstance(commit_id, str) and commit_id):
+            raise ValueError(f"database change commitId must be a non-empty string, received {commit_id!r}")
+        commit_count = message.get("commitCount")
+        if commit_count is not None and (isinstance(commit_count, bool) or not isinstance(commit_count, int) or commit_count < 2):
+            raise ValueError(f"database change commitCount must be an integer of at least 2, received {commit_count!r}")
         return cls(
             message_id=str(message.get("messageId") or ""),
             subscription_id=str(message.get("subscriptionId") or ""),
@@ -39,6 +49,8 @@ class CultNetDatabaseChange:
             raw_document=raw_document,
             schema_id=schema_id,
             record_key=record_key,
+            commit_id=commit_id,
+            commit_count=commit_count,
         )
 
     def to_wire(self) -> dict[str, Any]:
@@ -56,6 +68,10 @@ class CultNetDatabaseChange:
             wire["schemaId"] = self.schema_id
         if self.record_key is not None:
             wire["recordKey"] = self.record_key
+        if self.commit_id is not None:
+            wire["commitId"] = self.commit_id
+        if self.commit_count is not None:
+            wire["commitCount"] = self.commit_count
         return wire
 
 

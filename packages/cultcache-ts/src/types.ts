@@ -59,7 +59,19 @@ export interface CultCacheDocumentDefinition<TSchema extends CultCacheSchema = C
   members?: readonly CultCacheSchemaCatalogMember[];
   global?: boolean;
   name?: CultCacheDocumentAccessor<InferCultCacheSchemaValue<TSchema>>;
+  /**
+   * Unique lookup aliases. A non-blank value names one record of the type: a write that would leave two records holding
+   * one value, and a store that already holds two, is refused naming both keys and the alias. Blank values (absent,
+   * empty, or only whitespace) are never indexed. `getByIndex` and `getKeyByIndex` answer from these.
+   */
   indexes?:
+    | Readonly<Record<string, CultCacheDocumentAccessor<InferCultCacheSchemaValue<TSchema>>>>
+    | readonly CultCacheDocumentIndexDefinition<InferCultCacheSchemaValue<TSchema>>[];
+  /**
+   * Selection and reference aliases: the member's catalog `indexAlias`. A role implies nothing about uniqueness, many
+   * records may share a value, and it is never indexed for lookup. An alias is declared in `indexes` or `roles`, not both.
+   */
+  roles?:
     | Readonly<Record<string, CultCacheDocumentAccessor<InferCultCacheSchemaValue<TSchema>>>>
     | readonly CultCacheDocumentIndexDefinition<InferCultCacheSchemaValue<TSchema>>[];
   formatter?: CultCacheDocumentFormatter<InferCultCacheSchemaValue<TSchema>>;

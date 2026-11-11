@@ -73,7 +73,7 @@ store.
 - `register_document_type(...)`
 - `register_registry(...)`
 - `register_name_lookup(...)`
-- `register_index(...)`
+- `register_index(...)` (a unique index)
 - `add_backing_store(...)`
 - `add_generic_store(...)`
 - `pull_all_backing_stores()`
@@ -94,6 +94,33 @@ store.
 - `delete(...)`
 - `delete_global(...)`
 - `snapshot()`
+
+## Indexes And Roles
+
+`indexes=` are unique lookups (variants:ruling:unique-indexes; C# `[CultIndex]`): within one document type and one alias
+no two records hold one non-blank value, judged on the result of every write (a batch is judged whole, so a swap inside
+one `put_envelopes` lands) and of every load and `register_index`. A refusal is a `CultCacheError`,
+`Records <k1> and <k2> (<schema name>) both hold unique index '<alias>'; an index value names one record.`, keys in
+ordinal order, never the value; it writes nothing, and a refused load or registration installs nothing. The contract is
+the verdict; the text is informational. Blank values (absent, empty, or only C# `White_Space` characters) are never
+indexed and never conflict. Two types may share an alias and a value. Values compare as the C# canonical text: strings as
+is (never trimmed), `True`/`False`, integers as digits, a non-integral float as its exact decimal expansion, NaN and
+infinities no value.
+
+`roles=` name selection aliases (C# `[CultRole]`): many records may share a value, nothing is indexed or refused,
+`get_by_index` on a role answers `None`, and the member's catalog `index_alias` is the same either way, so catalog bytes
+do not move. An alias is declared in one of the two. `CultMeshDatabase.watch_by_index` reads `indexes` only.
+
+Migrating an existing `indexes` key, per key, before bumping:
+
+1. Nothing looks records up by the key (`get_by_index`, `get_key_by_index`, `node.get_by_index`, `watch_by_index`): move it to `roles`.
+2. Something looks it up: it stays unique only when two live records can never hold one non-blank value (the record key
+   is derived from that value alone, or it is an outside identity: email, sku, external id). Enums, statuses, kinds,
+   categories, parent or foreign ids, shared hashes and timestamps are roles; select them with `get_all` plus a filter.
+3. Open each real `.cc` once with the new definitions. A refusal names both keys and the alias and writes nothing.
+
+Misclassifying: a role declared unique makes a store that holds a shared value refuse to open until the key is
+reclassified; a unique key declared a role answers no lookups and stops refusing duplicates.
 
 ## Persistence Model
 
