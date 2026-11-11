@@ -142,7 +142,7 @@ namespace GameCult.Caching.Tests
         public void TheHexRefusalNamesTheDerivedFormForReadableIds()
         {
             var refusal = Assert.Throws<CultElementIdException>(() => Assign(new HHasIds { Items = { new EIded { Id = "root" } } }, "r", deterministic: false))!;
-            Assert.That(refusal.Message, Does.Contain("12 lowercase hex").And.Contain("[CultElementId(nameof(Member))]"));
+            Assert.That(refusal.Message, Does.Contain("12 lowercase hex").And.Contain("[CultElementId(nameof(Member))]").And.Contain("trailing keyed string member").And.Contain("existing readable id"));
         }
 
         [Test]

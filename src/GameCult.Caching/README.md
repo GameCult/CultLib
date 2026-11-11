@@ -228,6 +228,60 @@ the text of that member (a string or number on the same type, unique within its
 list), and a derived id may be any text. A readable name set by hand on a
 non-derived list id is refused; the same member outside a list is unconstrained.
 
+### A type that already has a readable id
+
+If the element type already has a readable string id (`Name`, `Slug`, a catalog
+key), leave it as it is. Add a trailing keyed string member marked
+`[CultElementId(nameof(ExistingId))]`; the element id is derived from the
+existing member on load or first write, and then persisted:
+
+```csharp
+[MessagePackObject]
+public sealed class Recipe
+{
+    [Key(0)] public string Name = string.Empty;        // existing readable id
+    [Key(1)] public int Yield;
+    [Key(2)] [CultElementId(nameof(Name))] public string ElementId = string.Empty; // new, last
+}
+```
+
+Marking `Name` itself `[CultElementId]` is refused (`Name` is not 12 lowercase
+hex), and that is deliberate:
+
+- Minted and hand-written ids share one grammar, 12 lowercase hex, so they can
+  never collide; a derived id is the one readable form and is checked for
+  uniqueness within its list.
+- An id the consumer can edit is not a stable override address. Variants address
+  an element by its id, so a field that is renamed in place would silently move
+  the overrides to a different element, or to none.
+- A derived id is persisted once. Renaming `Name` later does not change
+  `ElementId`, so the element and every override that addresses it stay put.
+  `ElementId` is the address; `Name` goes back to being ordinary data.
+
+Adopting the recipe on data that already exists: the existing member becomes an
+id source, so it must be non-empty and unique within its list. A record with a
+duplicate value and an empty one both refuse to load
+(`CultElementIdException`), so clean such data first.
+
+Take the next free `[Key]` slot, after the highest key on the type (and above
+the subclasses' keys on a union base).
+
+## Store format and rollback
+
+A store that holds an element id is written as `cultcache.store.v3` (a directory
+store as `cultcache.store.v5.directory-content-addressed-pages`, `v4` otherwise).
+A single-file store that holds a variant but no id is `v2`, and a store with
+neither stays `v1`. The mark follows content: a whole-store write that leaves no
+element holding an id drops it.
+
+Refusal by name depends on the store kind and the pin. A **directory** store (`v5`) is refused by every Unity pin from `cultlib-unity-v1.0.57` and `caching-unity-v1.2.0` on (the earliest tags of each line whose `DirectoryMessagePackBackingStore` reads only the `v4` stamp: "only ... is readable"). A **single-file** store (`v3`) is refused only from `cultlib-unity-v2.0.0` and `caching-unity-v2.0.0`: `cultlib-unity-v1.0.61` and `caching-unity-v1.4.0` read the header string and never compare it. The NuGet line (`cultlib-v1.0.32`, the last `cultlib-v` tag) refuses neither: its directory store writes `cultcache.store.v1.directory` and never checks the stamp on read. Rolling back a single-file store to any of those pins reads it silently, drops the ids, and can rewrite the elements without them. That is the dangerous case.
+
+Rolling a consumer back after it has written a v3 or v5 store is therefore
+one-way. The only carry-back is narrow and lossy: a whole-store write that leaves
+no id anywhere in the store (every record rewritten without list elements) writes
+the store unmarked again, and the ids are gone. Otherwise restore from a copy
+taken before upgrading. Upgrade every reader before any writer.
+
 ## Persistence discipline
 
 Persistence stays manual by default. Mutations mark the cache and attached

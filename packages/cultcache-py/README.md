@@ -139,6 +139,10 @@ used by the TypeScript, Rust, and C# runtimes:
 
 Large corpora should use a sharded store or a real database. A single snapshot file is a scalpel, not a forklift.
 
+## Store format and rollback
+
+A store whose elements hold an id is marked `cultcache.store.v3` by the C# runtime. This runtime reads and writes a v3 single-file store, keeps the header it read and carries the ids through a rewrite; it never drops the mark, so it has no carry-back. A cultcache-py from before element ids refuses a v3 store by name, so rolling back to it after a store has been written as v3 is one-way: restore from a copy taken before upgrading, and upgrade every reader before any writer. (The C# line is different: CultLib 1.x does not refuse; see the GameCult.Caching README.)
+
 ## DatabaseEntry Slot Contract
 
 For cross-runtime cache entries, use `define_database_entry_type(...)` instead

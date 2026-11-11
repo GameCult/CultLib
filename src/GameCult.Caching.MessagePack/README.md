@@ -59,6 +59,10 @@ await cache.PullAllBackingStoresAsync();
 - The raw CultNet document lane should treat these payload bytes as already
   blessed, not decode and re-encode them for sport.
 
+## Store format and rollback
+
+A store whose elements hold an id is marked `cultcache.store.v3` (a directory store `v5`); the single-file and directory stores here write the mark from content. See the Store format and rollback section of the GameCult.Caching README. Refusal by name depends on the store kind and the pin. A **directory** store (`v5`) is refused by every Unity pin from `cultlib-unity-v1.0.57` and `caching-unity-v1.2.0` on (the earliest tags of each line whose `DirectoryMessagePackBackingStore` reads only the `v4` stamp: "only ... is readable"). A **single-file** store (`v3`) is refused only from `cultlib-unity-v2.0.0` and `caching-unity-v2.0.0`: `cultlib-unity-v1.0.61` and `caching-unity-v1.4.0` read the header string and never compare it. The NuGet line (`cultlib-v1.0.32`, the last `cultlib-v` tag) refuses neither: its directory store writes `cultcache.store.v1.directory` and never checks the stamp on read. Rolling back a single-file store to any of those pins reads it silently, drops the ids, and can rewrite the elements without them. That is the dangerous case. The only carry-back is narrow and lossy (a whole-store write that leaves no id in the store drops the mark and the ids); otherwise restore from a copy taken before upgrading, and upgrade every reader before any writer.
+
 ## MessagePack source generator
 
 NuGet consumers get `[assembly: MessagePackAssumedFormattable(typeof(CultRecordRef<>))]` from the package, so a
