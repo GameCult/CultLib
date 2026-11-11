@@ -90,7 +90,7 @@ const jstr = (s: string): string => {
 };
 type Option = { id: string; text: string };
 type Shown = { title: string; context: string; options: Option[]; recommendation: string; depends: string[] };
-type Card = Shown & { fork_id: string; leans: string | null; deciders: string[]; status: string; ruling: string | null; ruled_from: string[]; options_hash: string };
+type Card = Shown & { fork_id: string; leans: string | null; raised_at: string | null; deciders: string[]; status: string; ruling: string | null; ruled_from: string[]; options_hash: string };
 // RFC 8785 over the five shown members, every string NFC-normalised first; keys sorted; no numbers in the member set.
 const nfc = (s: string): string => s.normalize("NFC");
 const canonical = (c: Shown): Buffer =>
@@ -121,6 +121,11 @@ test("fork card: options hash is SHA-256 of the canonical JSON, computed here, a
   const byName = new Map<string, string>(fork.optionsHash.map((h: { name: string; sha256: string }) => [h.name, h.sha256]));
   const base = byName.get("heimdall_A_five_members")!;
   assert.equal(byName.get("hidden_members_do_not_move_it"), base);
+  const card0 = fork.card.valid[0].message as Card;
+  for (const raised_at of [null, "2027-01-02T03:04:05.123Z"]) {
+    const stamped: Card = { ...card0, raised_at };
+    assert.equal(optionsHash(stamped), card0.options_hash, "raised_at stays outside the hash");
+  }
   assert.equal(byName.get("heimdall_E_decomposed_equals_D"), byName.get("heimdall_D_nfc_escapes_astral"), "an NFD and an NFC spelling hash alike");
   for (const moved of ["heimdall_B_recommendation_changed", "heimdall_C_option_order_changed", "heimdall_F_option_id_changed", "heimdall_G_depends_emptied", "option_text_changed",
                        "title_changed", "context_changed", "depends_order_changed", "depends_order_changed_reversed"]) {

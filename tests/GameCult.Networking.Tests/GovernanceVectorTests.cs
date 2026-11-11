@@ -258,8 +258,10 @@ namespace GameCult.Networking.Tests
                 Assert.That(HashOf(copy), Is.Not.EqualTo(baseline), $"mutation {i}");
             }
             var hidden = Clone(card);
-            hidden["fork_id"] = "other:question:id"; hidden["leans"] = "yes"; hidden["status"] = "closed"; hidden["ruled_from"] = new JsonArray("n1");
+            hidden["fork_id"] = "other:question:id"; hidden["leans"] = "yes"; hidden["status"] = "closed"; hidden["ruled_from"] = new JsonArray("n1"); hidden["raised_at"] = "2027-01-02T03:04:05.123Z";
             Assert.That(HashOf(hidden), Is.EqualTo(baseline), "fork_id and the unshown members stay outside the hash");
+            hidden["raised_at"] = null;
+            Assert.That(HashOf(hidden), Is.EqualTo(baseline), "a nil raised_at stays outside the hash");
         }
 
         [Test]
