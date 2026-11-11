@@ -408,6 +408,8 @@ namespace GameCult.Caching.Tests
             // Rows 23-24: two holders of one value that differ only by case are two holders; a case-folding dedupe would see one.
             new("batch-holders-by-case", new[] { Open(), Commit(HolderCaseRecords) }, HolderCaseRefusal),
             new("load-holders-by-case", new[] { Open("holder-case-store.cc") }, HolderCaseRefusal),
+            // Row 25: the held `a` is replaced only by the exact key `a`, never by `A`.
+            new("batch-replaced-by-case", new[] { Open(), Commit(Items_(("a", "S"))), Commit(Items_(("A", "S"))) }, HolderCaseRefusal),
         };
 
         private static byte[] RefusalStoreBytes(Rec[] records)
@@ -528,6 +530,7 @@ namespace GameCult.Caching.Tests
             var count = reader.ReadArrayHeader();
             Assert.That(count, Is.EqualTo(Cases.Length));
             var walked = 0;
+            var failed = new List<string>();
             for (var i = 0; i < count; i++)
             {
                 Assert.That(reader.ReadArrayHeader(), Is.EqualTo(3));
@@ -588,6 +591,10 @@ namespace GameCult.Caching.Tests
 
                     walked++;
                 }
+                catch (AssertionException failure)
+                {
+                    failed.Add($"{label}: {failure.Message}");
+                }
                 finally
                 {
                     cache?.Dispose();
@@ -595,7 +602,8 @@ namespace GameCult.Caching.Tests
                 }
             }
 
-            Assert.That(walked, Is.EqualTo(24));
+            Assert.That(failed, Is.Empty, "rows that failed");
+            Assert.That(walked, Is.EqualTo(25));
         }
     }
 }

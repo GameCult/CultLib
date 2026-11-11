@@ -51,20 +51,24 @@ last succeeds and the last refuses with exactly the RULE text built from those f
 byte-identical. Schemas are those of the store files above; `second` is `Category` (plain) except in `tests.uq_pair`
 and `tests.uq_alias`, where it is `Alt` (unique, alias `Alt` and `alt` respectively).
 
-The 13 rows of the spec are a floor; rows 14-24 extend it with orderings that a code-point, case-insensitive or
+The 13 rows of the spec are a floor; rows 14-25 extend it with orderings that a code-point, case-insensitive or
 culture compare would flip. Rows, in file order: 1 batch-later-value-staged-first, 2 batch-surrogate-keys, 3
 batch-interleaved-types, 4 batch-two-aliases, 5 held-then-landing, 6 held-in-the-least-group, 7 swap-off-a-held-value,
 8 load-two-aliases, 9 load-surrogate-keys, 10 load-interleaved-types, 11 repull-held-pair, 12 load-repull-after, 13
 commit-onto-a-loaded-holder, 14 batch-key-case (`B` before `a`), 15 batch-key-punctuation (`Z` before `_` before `a`),
 16 batch-key-case-in-a-group, 17 batch-surrogate-groups (U+1F600 before U+E000, the reverse of code-point order), 18
 batch-alias-case (alias `Sku` before `alt`), 19 load-alias-case, 20 load-key-case, 21 load-key-punctuation, 22
-load-surrogate-groups, 23 batch-holders-by-case (`a` and `A` holding one value: `A` before `a`), 24 load-holders-by-case.
+load-surrogate-groups, 23 batch-holders-by-case (`a` and `A` holding one value: `A` before `a`), 24 load-holders-by-case, 25 batch-replaced-by-case (held `a`, then a commit of `A` on its value: `A` does not replace `a`).
 Rows 19-22 and 24 open a store holding the records of rows 18, 14, 15, 17 and 23, so a runtime with no batch
 commit still walks alias and cross-group key order.
 
-A runtime performs every row its API can perform and asserts the count it walked:
+A runtime performs every row its API can perform and asserts the count it walks. These are the counts a runtime must
+assert, not a statement of which runtimes walk them today:
 
-- C# and Rust: all 24.
-- Python: 23, every row but 3 (`put_envelopes` takes one type).
-- TypeScript: 12, rows 5, 8, 9, 10, 11, 12, 13, 19, 20, 21, 22 and 24 (no batch commit, so no row 1-4, 6, 7, 14-18 or 23;
-  `variants:idea:unique-index-runtimes.ts-batch-commit`).
+- C# and Rust: all 25.
+- Python: 24, every row but 3 (`put_envelopes` takes one type).
+- TypeScript: 12, the rows that only open or pull a store: 5, 8, 9, 10, 11, 12, 13, 19, 20, 21, 22 and 24 (no batch commit, so no
+  row 1-4, 6, 7, 14-18, 23 or 25; `variants:idea:unique-index-runtimes.ts-batch-commit`).
+
+Not pinned: the schema-name tiebreak. Record keys are unique across a whole cache, so two types never hold the same key and
+two groups can never tie on alias and key pair; the final `schema` comparison cannot decide a refusal.
