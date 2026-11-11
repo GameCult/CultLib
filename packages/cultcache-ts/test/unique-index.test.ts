@@ -381,8 +381,18 @@ test("a refused load leaves the cache's prior state as it was, and a later good 
   }
 });
 
-test("registerIndex over held duplicates installs nothing", async () => {
+test("registerIndex refuses a name the definition declares as a role", async () => {
   const document = item("item", "roles");
+  const cache = memory(document);
+  await cache.put(document, "a", { sku: "S", group: "g" });
+  await cache.put(document, "b", { sku: "S", group: "h" });
+  await assert.rejects(cache.registerIndex(document, "sku", "sku"), { message: /declared as a role; a role is never a unique index/u });
+  assert.equal(cache.getKeyByIndex(document, "sku", "S"), undefined);
+  await cache.put(document, "c", { sku: "S", group: "i" });
+});
+
+test("registerIndex over held duplicates installs nothing", async () => {
+  const document = item("item", "none");
   const cache = memory(document);
   await cache.put(document, "a", { sku: "S", group: "g" });
   await cache.put(document, "b", { sku: "S", group: "h" });
@@ -468,7 +478,7 @@ test("a load judges every unique alias: a store collision on the second alias re
 });
 
 test("registerIndex of a second unique alias judges it, naming the two smallest keys whatever order they were written in", async () => {
-  const document = pair({ indexes: { a: "a" }, roles: { b: "b" } });
+  const document = pair({ indexes: { a: "a" } });
   const cache = memory(document);
   await cache.put(document, "z", { a: "1", b: "s" });
   await cache.put(document, "m", { a: "2", b: "s" });

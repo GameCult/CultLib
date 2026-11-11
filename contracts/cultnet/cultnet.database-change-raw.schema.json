@@ -10,17 +10,29 @@
     "messageId": { "type": "string", "minLength": 1 },
     "subscriptionId": { "type": "string", "minLength": 1 },
     "changeKind": { "enum": ["added", "updated", "removed"] },
-    "document": { "$ref": "./cultnet.raw-document-record.schema.json" },
-    "recordKey": { "type": "string", "minLength": 1 },
-    "schemaId": { "type": "string", "minLength": 1 },
+    "document": {
+      "oneOf": [{ "type": "null" }, { "$ref": "./cultnet.raw-document-record.schema.json" }]
+    },
+    "recordKey": { "type": ["string", "null"], "minLength": 1 },
+    "schemaId": { "type": ["string", "null"], "minLength": 1 },
     "commitId": { "type": ["string", "null"], "minLength": 1 },
     "commitCount": { "type": ["integer", "null"], "minimum": 2 }
   },
-  "allOf": [
+  "oneOf": [
     {
-      "if": { "properties": { "changeKind": { "const": "removed" } } },
-      "then": { "required": ["recordKey", "schemaId"] },
-      "else": { "required": ["document"] }
+      "properties": {
+        "changeKind": { "const": "removed" },
+        "recordKey": { "type": "string" },
+        "schemaId": { "type": "string" }
+      },
+      "required": ["recordKey", "schemaId"]
+    },
+    {
+      "properties": {
+        "changeKind": { "enum": ["added", "updated"] },
+        "document": { "$ref": "./cultnet.raw-document-record.schema.json" }
+      },
+      "required": ["document"]
     }
   ]
 }
