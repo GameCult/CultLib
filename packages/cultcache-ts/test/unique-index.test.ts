@@ -359,7 +359,7 @@ test("vectors duplicate-store.cc and blank-store.cc hold their verdicts", async 
 
 // refusals.msgpack: rows [label, ops, refusal] written by the C# reference. TypeScript has no batch commit
 // (variants:idea:unique-index-runtimes.ts-batch-commit), so it performs every row whose commits each hold one record:
-// 5, 8-13 and 19-22 of the README.
+// 5, 8-13, 19-22 and 24 of the README.
 const REFUSAL_SCHEMAS: [string, string, string, Record<string, "sku" | "second">][] = [
   ["unique_item", "tests.unique_item", "sha256:93bb890de83069061af696b23f94fd32fb3c2dad3c91ee645e8add56085f1882", { Sku: "sku" }],
   ["uq_pair", "tests.uq_pair", "sha256:2538cceafb6dcbce22ef11b932ecb804af5f96bc3aaedff692a52d3640433e60", { Sku: "sku", Alt: "second" }],
@@ -424,7 +424,7 @@ test("vectors refusals.msgpack: every row TS can perform", async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
-  assert.equal(walked, 11);
+  assert.equal(walked, 12);
 });
 
 test("a refused load leaves the cache's prior state as it was, and a later good load still works", async () => {
