@@ -487,12 +487,16 @@ function decodeCatalogEntry(value: unknown): CultCacheSchemaCatalogEntry {
     throw new Error(`CultCache schema catalog entry "${schemaId}" has invalid members.`);
   }
 
+  if (typeof canonicalSchemaJson !== "string") {
+    throw new Error(`CultCache schema catalog entry "${schemaId}" has an invalid canonical schema.`);
+  }
+
   return {
     schemaId,
     schemaName,
     schemaVersion: isNonEmptyString(schemaVersion) ? schemaVersion : `${schemaName}.v1`,
     contentHash: isNonEmptyString(contentHash) ? contentHash : schemaId,
-    canonicalSchemaJson: typeof canonicalSchemaJson === "string" ? canonicalSchemaJson : "",
+    canonicalSchemaJson,
     compatibleSchemaIds,
     members: members.map(decodeCatalogMember),
   };
