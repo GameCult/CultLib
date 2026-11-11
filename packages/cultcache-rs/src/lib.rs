@@ -4425,6 +4425,64 @@ mod tests {
         Ok(())
     }
 
+    /// An envelope of one type stamped with another type's schema id is still that type: ownership is the written type's own
+    /// id, never the id its envelope claims (C# `WrittenOwns` reads the written entry's catalog entry). Refused at a key the
+    /// other type holds on every envelope path, with and without a store, and in an SoA image.
+    #[test]
+    fn retype_an_envelope_claiming_the_held_types_id_is_still_a_second_type() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("cache.cc");
+        for stored in [false, true] {
+            let mut cache = CultCache::new();
+            cache.register_registry(TestEntries)?;
+            if stored {
+                cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+                cache.pull_all_backing_stores()?;
+            }
+            cache.put("shared", &settings_one())?;
+            let before = (cache.snapshot(), if stored { fs::read(&path)? } else { Vec::new() });
+            let (mut stamped, _) = cache.prepare_entry("shared", &note_one())?;
+            stamped.schema_id = Some(Settings::TYPE.to_string());
+            for error in [
+                cache.put_envelope::<Note>(stamped.clone()).unwrap_err(),
+                cache.put_raw_envelope(stamped.clone()).unwrap_err(),
+                cache.put_prepared_batch(vec![stamped.clone()]).unwrap_err(),
+            ] {
+                assert_eq!(retype_refusal(&error).record_key, "shared", "stored {stored}");
+            }
+            assert_eq!((cache.snapshot(), if stored { fs::read(&path)? } else { Vec::new() }), before, "stored {stored}");
+
+            let (settings, _) = cache.prepare_entry("shared", &settings_one())?;
+            let error = cache.load_soa(CultCacheSoaTable::from_envelopes(vec![settings, stamped])).unwrap_err();
+            assert_eq!(retype_refusal(&error).record_key, "shared");
+            assert_eq!(cache.snapshot(), before.0);
+        }
+        Ok(())
+    }
+
+    /// A store that holds two records at one key, one stamped with the other's schema id, is refused at the pull: both resolve
+    /// to one type, and the cache would otherwise keep whichever came last.
+    #[test]
+    fn retype_a_store_holding_two_records_at_one_key_refuses_the_pull() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("cache.redb");
+        let mut cache = CultCache::new();
+        cache.register_registry(TestEntries)?;
+        let (settings, _) = cache.prepare_entry("shared", &settings_one())?;
+        let (mut stamped, _) = cache.prepare_entry("shared", &note_one())?;
+        stamped.schema_id = Some(Settings::TYPE.to_string());
+        {
+            let mut store = RedbMessagePackBackingStore::new(&path)?;
+            store.push(&settings)?;
+            store.push(&stamped)?;
+        }
+        cache.add_generic_backing_store(RedbMessagePackBackingStore::new(&path)?)?;
+        let error = cache.pull_all_backing_stores().unwrap_err();
+        assert_eq!(retype_refusal(&error).record_key, "shared");
+        assert!(cache.snapshot().is_empty());
+        Ok(())
+    }
+
     #[test]
     fn retype_two_stores_holding_one_key_refuse_the_pull_and_admit_nothing() -> Result<()> {
         let temp = tempfile::tempdir()?;
