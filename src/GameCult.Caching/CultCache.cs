@@ -3495,10 +3495,11 @@ namespace GameCult.Caching
             }
         }
 
-        // The one index rule, judged on the commit's result whatever the write order: within one document type and one
-        // [CultIndex] alias, no two records hold one non-blank value. The holders of a value are the held key (unless this
-        // admission replaces or evicts it) plus every landing key projecting it; two distinct holders refuse, naming both
-        // keys and the index and never the value. One pass over what lands, one lookup per (index, value).
+        // The one index rule, a function of the state the admission would leave and never of staging, file or pull order:
+        // within one document type and one [CultIndex] alias, no two records hold one non-blank value. The holders of a
+        // value are the held key (unless this admission replaces or evicts it) plus every landing key projecting it. Over
+        // every (type, alias, value) held at two or more distinct keys, the refusal names the least by (alias, its least
+        // key, its second-least key, schema name), each compared by UTF-16 code unit, and never names the value.
         private void RefuseIndexSharing(VariantPlan plan, IReadOnlyList<CultStoredDocument> evicted)
         {
             var landing = plan.Admitted.Concat(plan.Dependents).ToList();
@@ -3520,17 +3521,34 @@ namespace GameCult.Caching
                 }
             }
 
-            foreach (var ((index, value), landedKeys) in landed.OrderBy(pair => pair.Key.Index.Alias, StringComparer.Ordinal))
+            (string Alias, string First, string Second, string Schema)? least = null;
+            foreach (var ((index, value), landedKeys) in landed)
             {
                 var holders = landedKeys.AsEnumerable();
                 if (_indexes.TryGetValue(index, out var held) && held.TryGetValue(value, out var heldKey) && !replaced.Contains(heldKey))
                     holders = holders.Append(heldKey);
                 var distinct = holders.Distinct(StringComparer.Ordinal).OrderBy(key => key, StringComparer.Ordinal).Take(2).ToArray();
-                if (distinct.Length > 1)
-                    throw new InvalidOperationException(
-                        $"Records {distinct[0]} and {distinct[1]} ({schemaNames[index.Type]}) " +
-                        $"both hold unique index '{index.Alias}'; an index value names one record.");
+                if (distinct.Length < 2)
+                    continue;
+                var candidate = (index.Alias, distinct[0], distinct[1], schemaNames[index.Type]);
+                if (least == null || CompareRefusals(candidate, least.Value) < 0)
+                    least = candidate;
             }
+
+            if (least is { } pair)
+                throw new InvalidOperationException(
+                    $"Records {pair.First} and {pair.Second} ({pair.Schema}) " +
+                    $"both hold unique index '{pair.Alias}'; an index value names one record.");
+        }
+
+        private static int CompareRefusals(
+            (string Alias, string First, string Second, string Schema) left,
+            (string Alias, string First, string Second, string Schema) right)
+        {
+            var order = StringComparer.Ordinal.Compare(left.Alias, right.Alias);
+            if (order == 0) order = StringComparer.Ordinal.Compare(left.First, right.First);
+            if (order == 0) order = StringComparer.Ordinal.Compare(left.Second, right.Second);
+            return order != 0 ? order : StringComparer.Ordinal.Compare(left.Schema, right.Schema);
         }
 
         private static InvalidOperationException CycleRefusal(IEnumerable<string> keys) =>
