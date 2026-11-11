@@ -228,6 +228,54 @@ the text of that member (a string or number on the same type, unique within its
 list), and a derived id may be any text. A readable name set by hand on a
 non-derived list id is refused; the same member outside a list is unconstrained.
 
+### A type that already has a readable id
+
+If the element type already has a readable string id (`Name`, `Slug`, a catalog
+key), leave it as it is. Add a trailing keyed string member marked
+`[CultElementId(nameof(ExistingId))]`; the element id is derived from the
+existing member the first time the element is written, and then persisted:
+
+```csharp
+[MessagePackObject]
+public sealed class Recipe
+{
+    [Key(0)] public string Name = string.Empty;        // existing readable id
+    [Key(1)] public int Yield;
+    [Key(2)] [CultElementId(nameof(Name))] public string ElementId = string.Empty; // new, last
+}
+```
+
+Marking `Name` itself `[CultElementId]` is refused (`Name` is not 12 lowercase
+hex), and that is deliberate:
+
+- Minted and hand-written ids share one grammar, 12 lowercase hex, so they can
+  never collide; a derived id is the one readable form and is checked for
+  uniqueness within its list.
+- An id the consumer can edit is not a stable override address. Variants address
+  an element by its id, so a field that is renamed in place would silently move
+  the overrides to a different element, or to none.
+- A derived id is persisted once. Renaming `Name` later does not change
+  `ElementId`, so the element and every override that addresses it stay put.
+  `ElementId` is the address; `Name` goes back to being ordinary data.
+
+Take the next free `[Key]` slot, after the highest key on the type (and above
+the subclasses' keys on a union base).
+
+## Store format and rollback
+
+A store that holds an element id is written as `cultcache.store.v3` (a directory
+store as `cultcache.store.v5.directory-content-addressed-pages`, its `v4` form
+otherwise). A single-file store that holds a variant but no id is `v2`, and a store with
+neither stays `v1` (`v4` for a directory). Any CultLib from before element ids refuses a v3 or v5 store by name.
+That refusal is on purpose, since an older reader would skip the id slots and
+rewrite the elements without them.
+
+Rolling a consumer back to an older CultLib pin after it has written a v3 or v5
+store is therefore one-way. There is no carry-back: a whole-store write drops the
+mark only when nothing in the store holds an id, and a type with a
+`[CultElementId]` member always writes one. Restore from a copy taken before
+upgrading. Upgrade every reader before any writer.
+
 ## Persistence discipline
 
 Persistence stays manual by default. Mutations mark the cache and attached

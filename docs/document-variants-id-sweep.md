@@ -4,6 +4,8 @@ Data for the per-consumer sweep in docs/document-variants-cut.md, C2. Every obje
 
 Method: a static scan of `F:\Projects\<consumer>` C# files for types marked `[CultDocument(`, walked through keyed members, base classes, dictionary values and `[Union]` subtypes. Read-only; no consumer was edited. Worktree copies (`Aetheria-catalog`, `CultLib-*`, and so on) are excluded. Struct elements are values and need no id. Non-C# consumers carry the id as an ordinary member and are not listed. The scan is text-based: a document registered without a literal `[CultDocument(` attribute, or a type whose members lack an integer `[Key]`, is missed, so the sweep pass should confirm each repo by registering its types once.
 
+A type that already has a readable string id keeps it and adds a trailing keyed string member marked `[CultElementId(nameof(ExistingId))]`; see the Element ids section of `src/GameCult.Caching/README.md`.
+
 Lines: `Type  file:line  (via Owner.Member)`, paths relative to the consumer root.
 
 
