@@ -143,6 +143,8 @@ use serde::de::DeserializeOwned;
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -929,7 +931,8 @@ fn store_header(bytes: &[u8]) -> StoreHeader {
 }
 
 /// A write the catalog cannot describe: records of different types under one schema id. This writer derives one entry per carried
-/// schema id from its records, so that is its only conflict. Nothing is written. It names the id, the two names and a record key.
+/// schema id from its records, so that is its only conflict besides a single-file write that would put a second type under a
+/// key the store already holds (the key is the record's identity there). Nothing is written. It names the id, the two names and a record key.
 #[derive(Debug)]
 pub struct SchemaConflictError {
     pub schema_id: String,
@@ -1476,6 +1479,7 @@ impl SingleFileMessagePackBackingStore {
     }
 
     fn write_all_unlocked(&self, entries: &[CultCacheEnvelope]) -> Result<()> {
+        require_one_record_per_key(entries)?;
         let failed = |kind| CultCacheStoreWriteFailed {
             path: self.path.clone(),
             kind,
@@ -1745,6 +1749,7 @@ impl CacheBackingStore for SingleFileMessagePackBackingStore {
     fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
         self.with_exclusive_lock(|| {
             let mut entries = self.read_all_unlocked()?;
+            // A write replaces the record of its own type under its key; a second type under the key reaches the commit guard.
             entries.retain(|candidate| entry_id(candidate) != entry_id(entry));
             entries.push(entry.clone());
             entries.sort_by_key(entry_id);
@@ -1768,7 +1773,13 @@ impl CacheBackingStore for SingleFileMessagePackBackingStore {
                 return Ok(());
             }
 
-            let mut entries = entries.to_vec();
+            // Of same-type entries sharing a key the last one given is the record; a second type under a key reaches the
+            // commit guard.
+            let mut by_id = BTreeMap::<(String, String), &CultCacheEnvelope>::new();
+            for entry in entries {
+                by_id.insert(entry_id(entry), entry);
+            }
+            let mut entries: Vec<CultCacheEnvelope> = by_id.into_values().cloned().collect();
             entries.sort_by_key(entry_id);
             self.write_all_unlocked(&entries)
         })
@@ -3709,7 +3720,41 @@ impl DiskStore {
 /// The legacy envelope array: an array of envelope maps. Its acceptance is the one verdict on an array whose first slot
 /// is not a store header, for reading it and for replacing it.
 fn decode_legacy_envelopes(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
-    decode_grown(bytes).context("failed to decode legacy CultCache envelope array")
+    let envelopes: Vec<CultCacheEnvelope> =
+        decode_grown(bytes).context("failed to decode legacy CultCache envelope array")?;
+    require_unique_keys(&envelopes)?;
+    Ok(envelopes)
+}
+
+/// A record's identity in a store is its key string alone, compared ordinal: a store holding a key twice is unreadable,
+/// whatever the format of the file that holds it.
+fn require_unique_keys(envelopes: &[CultCacheEnvelope]) -> Result<()> {
+    let mut keys = HashSet::<&str>::new();
+    for envelope in envelopes {
+        if !keys.insert(envelope.key.as_str()) {
+            bail!("CultCache record {:?} appears more than once", envelope.key);
+        }
+    }
+    Ok(())
+}
+
+/// The commit guard every single-file write passes: a store holds one record per key, so a snapshot about to be written
+/// may not hold a key twice. Two types under a key are a retype, refused with the key and both types (retyping is
+/// remove-then-add); the same type twice is a malformed snapshot. Nothing is written.
+fn require_one_record_per_key(entries: &[CultCacheEnvelope]) -> Result<()> {
+    let mut held = HashMap::<&str, &CultCacheEnvelope>::new();
+    for entry in entries {
+        let Some(first) = held.insert(entry.key.as_str(), entry) else { continue };
+        if first.r#type == entry.r#type {
+            bail!("CultCache snapshot holds record {:?} of type {:?} more than once", entry.key, entry.r#type);
+        }
+        return Err(anyhow::Error::new(SchemaConflictError {
+            schema_id: entry.schema_id.clone().unwrap_or_else(|| entry.r#type.clone()),
+            schema_names: vec![first.r#type.clone(), entry.r#type.clone()],
+            record_key: entry.key.clone(),
+        }));
+    }
+    Ok(())
 }
 
 /// Decodes a store whose header the caller has already read as a readable one: its envelopes and its catalog.
@@ -3748,6 +3793,7 @@ fn decode_store_snapshot(bytes: &[u8]) -> Result<(Vec<CultCacheEnvelope>, Vec<Pe
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    require_unique_keys(&envelopes)?;
     Ok((envelopes, snapshot.1))
 }
 
@@ -4219,32 +4265,158 @@ mod tests {
         Ok(())
     }
 
+    fn settings_one() -> Settings {
+        Settings { theme: "green".to_string(), retries: 1 }
+    }
+
+    fn note_one() -> Note {
+        Note { title: "same key".to_string(), body: "different type".to_string() }
+    }
+
+    fn retype_refusal(error: &anyhow::Error) -> &SchemaConflictError {
+        error.downcast_ref::<SchemaConflictError>().unwrap_or_else(|| panic!("{error:#}"))
+    }
+
+    fn reloaded(path: &Path) -> Result<Vec<CultCacheEnvelope>> {
+        SingleFileMessagePackBackingStore::new(path).pull_all()
+    }
+
     #[test]
-    fn entry_identity_is_polymorphic_by_type_and_key() -> Result<()> {
+    fn a_second_type_under_a_stored_key_is_refused_and_the_store_and_cache_stay() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let store_path = temp.path().join("cache.cc");
         let mut cache = CultCache::new();
         cache.register_registry(TestEntries)?;
         cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
 
-        cache.put(
-            "shared",
-            &Settings {
-                theme: "green".to_string(),
-                retries: 1,
-            },
-        )?;
-        cache.put(
-            "shared",
-            &Note {
-                title: "same key".to_string(),
-                body: "different type".to_string(),
-            },
-        )?;
-
-        assert_eq!(cache.snapshot().len(), 2);
-        assert_eq!(cache.get_required::<Note>("shared")?.title, "same key");
+        cache.put("shared", &settings_one())?;
+        let before = std::fs::read(&store_path)?;
+        let error = cache.put("shared", &note_one()).unwrap_err();
+        assert_eq!(retype_refusal(&error).record_key, "shared");
+        assert_eq!(std::fs::read(&store_path)?, before, "the refused write changed the file");
+        assert_eq!(cache.snapshot().len(), 1);
         assert_eq!(cache.get_required::<Settings>("shared")?.theme, "green");
+        assert!(cache.get::<Note>("shared")?.is_none());
+
+        // Retyping is remove-then-add, and what was written reads back.
+        assert!(cache.delete::<Settings>("shared")?);
+        cache.put("shared", &note_one())?;
+        let held = reloaded(&store_path)?;
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].r#type, Note::TYPE);
+
+        // The same type under the key replaces it.
+        cache.put("shared", &Note { title: "again".to_string(), body: String::new() })?;
+        let held = reloaded(&store_path)?;
+        assert_eq!(held.len(), 1);
+        assert_eq!(cache.get_required::<Note>("shared")?.title, "again");
+        Ok(())
+    }
+
+    #[test]
+    fn a_batch_holding_a_second_type_under_a_key_is_refused_whole() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("batch.cc");
+        let mut cache = CultCache::new();
+        cache.register_registry(TestEntries)?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
+        cache.put("kept", &settings_one())?;
+        let before = std::fs::read(&store_path)?;
+
+        let (settings, _) = cache.prepare_entry("shared", &settings_one())?;
+        let (note, _) = cache.prepare_entry("shared", &note_one())?;
+        let error = cache.put_prepared_batch(vec![settings.clone(), note.clone()]).unwrap_err();
+        assert_eq!(retype_refusal(&error).record_key, "shared");
+        assert_eq!(std::fs::read(&store_path)?, before);
+        assert_eq!(cache.snapshot().len(), 1);
+
+        // The store's own batch write refuses it too, in either order.
+        let mut store = SingleFileMessagePackBackingStore::new(&store_path);
+        for batch in [[settings.clone(), note.clone()], [note, settings]] {
+            let error = store.push_all(&batch, PushAllOptions::default()).unwrap_err();
+            assert_eq!(retype_refusal(&error).record_key, "shared");
+            assert_eq!(std::fs::read(&store_path)?, before);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_stores_own_push_refuses_a_second_type_under_a_key() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("push.cc");
+        let mut cache = CultCache::new();
+        cache.register_registry(TestEntries)?;
+        let (settings, _) = cache.prepare_entry("shared", &settings_one())?;
+        let (note, _) = cache.prepare_entry("shared", &note_one())?;
+        let mut store = SingleFileMessagePackBackingStore::new(&store_path);
+        store.push(&settings)?;
+        let before = std::fs::read(&store_path)?;
+        let error = store.push(&note).unwrap_err();
+        let mut names = retype_refusal(&error).schema_names.clone();
+        names.sort();
+        assert_eq!(names, vec![Note::TYPE.to_string(), Settings::TYPE.to_string()]);
+        assert_eq!(std::fs::read(&store_path)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn no_single_file_writer_commits_a_second_type_under_a_held_key() -> Result<()> {
+        let mut cache = CultCache::new();
+        cache.register_registry(TestEntries)?;
+        let (held, _) = cache.prepare_entry("k", &settings_one())?;
+        let (other_key, _) = cache.prepare_entry("c", &settings_one())?;
+        let (note, _) = cache.prepare_entry("k", &note_one())?;
+        let absent_note = CultCacheExpectedEnvelope { key: "k".to_string(), r#type: Note::TYPE.to_string(), current: None };
+        type Writer = fn(&mut SingleFileMessagePackBackingStore, &[CultCacheEnvelope; 3], &CultCacheExpectedEnvelope) -> Result<bool>;
+        let writers: Vec<(&str, Writer)> = vec![
+            ("push", |s, e, _| s.push(&e[2]).map(|()| true)),
+            ("push_all", |s, e, _| s.push_all(&[e[0].clone(), e[2].clone()], PushAllOptions::default()).map(|()| true)),
+            ("insert_entry_if_absent", |s, e, _| s.insert_entry_if_absent(e[2].clone())),
+            ("compare_exchange", |s, e, x| s.compare_exchange(std::slice::from_ref(x), &[e[2].clone()])),
+            ("compare_and_swap_batch", |s, e, _| s.compare_and_swap_batch(&[], vec![e[2].clone()])),
+            ("append_if_snapshot_unchanged", |s, e, _| s.append_if_snapshot_unchanged(&[e[0].clone(), e[1].clone()], vec![e[2].clone()])),
+            ("replace_and_append_if_snapshot_unchanged", |s, e, _| {
+                s.replace_and_append_if_snapshot_unchanged(&[e[0].clone(), e[1].clone()], vec![e[2].clone()])
+            }),
+            ("replace_and_delete_if_snapshot_unchanged", |s, e, _| {
+                s.replace_and_delete_if_snapshot_unchanged(&[e[0].clone(), e[1].clone()], vec![e[2].clone()], std::slice::from_ref(&e[1]))
+            }),
+            ("compare_exchange_snapshot", |s, e, _| s.compare_exchange_snapshot(&[e[1].clone(), e[0].clone()], &[e[0].clone(), e[2].clone()])),
+            ("try_compare_exchange_snapshot", |s, e, _| {
+                s.try_compare_exchange_snapshot(&[e[1].clone(), e[0].clone()], &[e[0].clone(), e[2].clone()]).map(|_| true)
+            }),
+        ];
+        let envelopes = [held.clone(), other_key.clone(), note];
+        for (name, write) in writers {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.cc");
+            let mut store = SingleFileMessagePackBackingStore::new(&path);
+            store.push_all(&[held.clone(), other_key.clone()], PushAllOptions::default())?;
+            let before = std::fs::read(&path)?;
+            let error = write(&mut store, &envelopes, &absent_note).expect_err(name);
+            assert_eq!(retype_refusal(&error).record_key, "k", "{name}");
+            assert_eq!(std::fs::read(&path)?, before, "{name} changed the file");
+            assert!(store.pull_all().is_ok(), "{name}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_legacy_array_with_a_key_under_two_types_is_not_decodable() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("legacy.cc");
+        let record = |kind: &str| {
+            CultCacheEnvelope {
+                key: "a".to_string(),
+                r#type: kind.to_string(),
+                payload: rmp_serde::to_vec(&Vec::<u8>::new()).unwrap(),
+                stored_at: "2026-01-01T00:00:00Z".to_string(),
+                schema_id: None,
+            }
+        };
+        std::fs::write(&store_path, rmp_serde::to_vec_named(&vec![record("old.one"), record("old.two")])?)?;
+        let error = SingleFileMessagePackBackingStore::new(&store_path).pull_all().unwrap_err();
+        assert_eq!(unreadable_kind(&error), Some(CultCacheStoreUnreadableKind::Undecodable), "{error:#}");
         Ok(())
     }
 
@@ -5907,6 +6079,26 @@ mod tests {
         Ok(())
     }
 
+
+    // The writer keeps one record per key: another type under a held key is refused and the file stays; the same type replaces.
+    #[test]
+    fn a_write_of_another_type_under_an_existing_key_is_refused_and_the_same_type_replaces() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.msgpack");
+        let mut store = SingleFileMessagePackBackingStore::new(&path);
+        let mut other = snapshot_envelope("k", b"two");
+        other.r#type = "snapshot.other".to_string();
+        other.schema_id = Some("snapshot.other".to_string());
+        store.push(&snapshot_envelope("k", b"one"))?;
+        let before = std::fs::read(&path)?;
+        assert!(store.push(&other).unwrap_err().downcast_ref::<SchemaConflictError>().is_some());
+        assert!(store.push_all(&[snapshot_envelope("k", b"one"), other.clone()], PushAllOptions::default()).is_err());
+        assert_eq!(std::fs::read(&path)?, before);
+        store.push(&snapshot_envelope("k", b"three"))?;
+        let read = store.pull_all()?;
+        assert_eq!((read.len(), read[0].payload.as_slice()), (1, b"three".as_slice()));
+        Ok(())
+    }
 
     // A file is replaced by a rewrite exactly when this runtime's own reader opens it: one verdict per file, asked by open,
     // push_all and push alike. The bytes and every runtime's verdict are tests/vectors/document-variants-c2a/readability.

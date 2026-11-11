@@ -74,6 +74,18 @@ namespace GameCult.Caching.Tests
             return path;
         }
 
+        [Test]
+        public void ADuplicateKeyIsRefusedNamingTheKeyAndTheFile()
+        {
+            var path = Path.Combine(_directory, "dup.cc");
+            File.WriteAllBytes(path, File.ReadAllBytes(Path.Combine(VectorRoot(), "dup-key-same-schema-v3.bin")));
+
+            Assert.That(() => CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry }),
+                Throws.TypeOf<CultStoreUnreadableException>()
+                    .With.Property(nameof(CultStoreUnreadableException.Path)).EqualTo(path)
+                    .And.Message.Contains("more than once"));
+        }
+
         [TestCaseSource(nameof(Vectors))]
         public void OpenReadsExactlyTheFilesTheVectorsSayItReads(string vector, bool reads)
         {
