@@ -18,43 +18,16 @@ namespace GameCult.Caching.Tests
     // compares them byte for byte. Other runtimes are held to the same text and the same verdicts.
     public class UniqueIndexVectorTests
     {
-        private const string WriteVariable = "CULTCACHE_WRITE_VECTORS";
-        private static readonly DateTimeOffset StoredAt = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
-        private static bool Writing => Environment.GetEnvironmentVariable(WriteVariable) == "1";
+        private static readonly DateTimeOffset StoredAt = VectorFiles.StoredAt;
+        private static bool Writing => VectorFiles.Writing;
 
-        private static string VectorDirectory()
-        {
-            for (var dir = new DirectoryInfo(TestContext.CurrentContext.TestDirectory); dir != null; dir = dir.Parent)
-            {
-                var vectors = Path.Combine(dir.FullName, "tests", "vectors");
-                if (Directory.Exists(vectors)) return Path.Combine(vectors, "unique-index");
-            }
-
-            throw new DirectoryNotFoundException($"tests/vectors not found above {TestContext.CurrentContext.TestDirectory}.");
-        }
+        private static string VectorDirectory() => VectorFiles.Directory("unique-index");
 
         private static string VectorPath(string name) => Path.Combine(VectorDirectory(), name);
 
-        private static void Check(string name, byte[] reference)
-        {
-            var path = VectorPath(name);
-            if (Writing)
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                File.WriteAllBytes(path, reference);
-                return;
-            }
+        private static void Check(string name, byte[] reference) => VectorFiles.Check("unique-index", name, reference);
 
-            Assert.That(File.Exists(path), Is.True, $"vector {name} is committed");
-            Assert.That(Convert.ToHexString(reference), Is.EqualTo(Convert.ToHexString(File.ReadAllBytes(path))), $"vector {name}");
-        }
-
-        private static byte[] Committed(string name)
-        {
-            var path = VectorPath(name);
-            Assert.That(File.Exists(path), Is.True, $"vector {name} is committed");
-            return File.ReadAllBytes(path);
-        }
+        private static byte[] Committed(string name) => VectorFiles.Committed("unique-index", name);
 
         // ---- values.msgpack: [label, kind, value, text-or-nil] ----
 
