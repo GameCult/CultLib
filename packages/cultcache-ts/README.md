@@ -232,7 +232,9 @@ are never indexed for lookup, so `getByIndex` on a role answers `undefined`. An 
 Apply per key, and do it BEFORE the CultLib checkout your tools load is rebuilt or updated. A consumer that loads
 CultLib at run time (Bifrost reads `$VOIDBOT_CULTLIB_ROOT`, else the sibling `../CultLib` dist) has no pin to hold: its
 next start after the checkout moves is the bump. A consumer that pins a version applies this before it bumps the pin.
-Moving an `indexes` key to `roles` is safe on the old CultLib too, so the consumer edit lands first:
+Moving an `indexes` key to `roles` is safe on the old CultLib too when the definition lists `members` explicitly (an old
+codec definition without `members` derives `indexAlias` from `indexes` only, so a moved key would lose its catalog alias),
+so the consumer edit lands first:
 
 1. Nothing looks records up by the key (`getByIndex`, `getKeyByIndex`, `getIdByIndex`; Python `get_by_index`,
    `get_key_by_index`, `node.get_by_index`, `watch_by_index`; Rust `get_by_index`): it is a role. Move it to `roles`;
