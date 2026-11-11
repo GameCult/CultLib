@@ -33,8 +33,8 @@ Probes: scratch tests in this worktree, removed. C# filtered runs on Starfire (o
 
 | Probe | C# | TypeScript | Rust | Python |
 |---|---|---|---|---|
-| P1 cache {A,B}: B at k, then A at k | **C**: B's record replaced, k now A's id | R `SchemaConflictError` (cultcache-ts: one record per key) | C, both live at k | R `SchemaConflictError`, A's write refused, B kept (was C, both live) |
-| P2 cache {A} only, store holds B at k, write A at k | R `CultSchemaConflictException` (B is foreign, carried) | R `SchemaConflictError` at write (foreign loads, carried; cultcache-ts) | R at load, same | R `SchemaConflictError` (B is foreign, carried; the load admits it; was R at load) |
+| P1 cache {A,B}: B at k, then A at k | **C**: B's record replaced, k now A's id | R `SchemaConflictError` (cultcache-ts: one record per key) | R `SchemaConflictError` naming k, A not written (leaf cut) | R `SchemaConflictError`, A's write refused, B kept (was C, both live) |
+| P2 cache {A} only, store holds B at k, write A at k | R `CultSchemaConflictException` (B is foreign, carried) | R `SchemaConflictError` at write (foreign loads, carried; cultcache-ts) | R `SchemaConflictError` (B loads as foreign, carried; leaf cut) | R `SchemaConflictError` (B is foreign, carried; the load admits it; was R at load) |
 | P3 cacheless `WriteDocument<A>` over B, registry null / {A} / {A,B} | R / R / R | no cacheless write | no cacheless write | no cacheless write |
 | P4 cache {A,B}: remove k and upsert A at k in one batch | C (k is A's) | n/a | n/a | n/a |
 | P5 cache {A,B}: remove, then add in a second commit | C | n/a | n/a | n/a |
@@ -55,10 +55,12 @@ What this establishes:
 - Retype as remove plus add already works in the cache (P4, P5); the cut adds no new primitive.
 - Directory store: its own judge (`DirectoryMessagePackBackingStore.cs:287-306`) asks `Registry.Owns` for every key,
   upserts included. It must take the same per-key rule.
-- TypeScript, Rust, Python: records are keyed by `(type, key)` (Rust `entries: BTreeMap<(String, String), _>`,
-  `lib.rs:2659`; TS `#entryId(definition.type, key)`, `cult-cache.ts:323`; Python sorts and stores by `(type, key)`).
-  A write of A at k never meets B's record: both live at k (P1). None carries a foreign record; a store holding an
-  unregistered type does not load (P2). So no leaf has a "write meets another type's record" path to fix. Bringing the
+- TypeScript, Python (and Rust before its leaf cut): records are keyed by `(type, key)` (TS `#entryId(definition.type, key)`,
+  `cult-cache.ts:323`; Python sorts and stores by `(type, key)`).
+  A write of A at k never meets B's record: both live at k (P1). Neither carries a foreign record; a store holding an
+  unregistered type does not load (P2). Rust, after the leaf cut, keeps its `(type, key)` map but its one judge
+  (`refuse_retype`) refuses a second registered type at a held key on every write path, pull and SoA load, whatever schema
+  id an envelope claims, and carries an unregistered type's records as foreign; it walks the vector's 12 rows. So no leaf has a "write meets another type's record" path to fix. Bringing the
   ruling to the leaves first needs C#'s key identity (one record per key) and C#'s foreign carry, which are parity changes
   of the leaves' store model, not a write-ownership rule. Owned by the new follow-up `variants:follow_up:leaf-key-identity-parity`.
 - Interop (unproven): a Python store holding A and B at k fails C# decode first on payload encoding (Python's

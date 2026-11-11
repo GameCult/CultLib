@@ -19,6 +19,9 @@ Registering a type that declares its schema id claims it at the next load.
   - `tests.ki_alpha`: `sha256:b20703a98f49c253898404ab50ba2c630720f0b8a5e1a41614d5650be22799fe`
   - `tests.ki_beta`: `sha256:dee4b727cf2ee04e61ab635ff0c5f3dca7345a411dc5f1018e583ab16009cf94`
   - `tests.ki_gamma`: `sha256:fbc26e351e00c9e7185e8de171c7486aba707c229c949f0aae6b889288af5f6d`
+  The Rust writer names a catalog entry it writes by the record's type, which for these types is the id, where C# names it by
+  schema name; the Rust walker (`packages/cultcache-rs/tests/key_identity_vector.rs`) maps each of the three ids, and only
+  those, back to its schema name before comparing `file`, so the verdict is compared and the spelling divergence is not.
 - `foreign-store.cc`: a single-file store, alpha `a` at key `j`, gamma `g` at key `k`, stored-at pinned to
   `2026-01-01T00:00:00Z`. `catalog-store.cc`: alpha `a` at `qx`. `run-store.cc`: beta `b` at `qx` (row 11). The row-11 key is `qx` because it must
   occur in the refusal's message only as the key, never inside a schema name (`k` is inside `ki_alpha`).
