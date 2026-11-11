@@ -11,10 +11,10 @@ and OpenSSL license notices are included under `Third Party Notices`.
 Build it with `scripts/build-unity-package.ps1`. Do not edit generated plugin
 assemblies in the package output.
 
-Install version `2.0.0` through Unity Package Manager with:
+Install version `3.0.0` through Unity Package Manager with:
 
 ```text
-https://github.com/GameCult/CultLib.git?path=/unity/org.gamecult.cultlib#cultlib-unity-v2.0.0
+https://github.com/GameCult/CultLib.git?path=/unity/org.gamecult.cultlib#cultlib-unity-v3.0.0
 ```
 
 The package depends on `org.gamecult.cultmath` (exactly 0.5.1) and does not
