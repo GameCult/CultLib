@@ -36,3 +36,4 @@ dup-key-other-schema-v3.bin refuses refuses refuses refuses
 dup-key-different-payload-v3.bin refuses refuses refuses refuses
 distinct-keys-case-v3.bin reads reads reads reads
 distinct-keys-nfd-v3.bin reads reads reads reads
+../../document-variants-c0/current-catalog-bad-canonical.msgpack refuses refuses refuses refuses

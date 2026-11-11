@@ -2582,6 +2582,21 @@ test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", 
   }
 });
 
+// One key is held once: a record pushed under a key replaces the stored record under that key, whatever its type, so the writer cannot
+// emit a store its own reader refuses.
+test("SingleFileMessagePackBackingStore push replaces the stored record under a key whatever the type", async () => {
+  const seed = CultCache.builder().withDocumentType(ownsId).withDocumentType(listsId).build();
+  await seed.put(ownsId, "k", { name: "owner" });
+  await seed.put(listsId, "k", { name: "lister" });
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-push-key-")), "store.msgpack");
+  const store = new SingleFileMessagePackBackingStore(file);
+  await store.push(seed.getRequiredEnvelope(ownsId, "k"));
+  await store.push(seed.getRequiredEnvelope(listsId, "k"));
+  const records = (decode(await readFile(file)) as unknown[][])[2] as unknown[][];
+  assert.deepEqual(records.map((record) => [record[0], record[1]]), [["k", "id.lister"]]);
+  assert.equal((await store.pullAll()).length, 1);
+});
+
 // Owner beats lister: a definition that owns an id and one that lists it as compatible register together in either order. A record
 // under the id is the owner's, and a lister's only when nothing owns it; two listers and no owner name no single definition.
 const ownsId = defineDocumentType({ type: "tests.owns", schema: z.object({ name: z.string() }), schemaId: "id.owned", schemaName: "tests.owns" });

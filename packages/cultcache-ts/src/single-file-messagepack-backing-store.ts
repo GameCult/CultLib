@@ -204,8 +204,9 @@ type DecodedSnapshot = {
 };
 
 function encodeSnapshot(supplied: CultCacheEnvelope[], arrived: CultCacheEnvelope[], format: StoreFormat): unknown[] {
-  const replaced = new Set(supplied.map((entry) => `${entry.type}::${entry.key}`));
-  const kept = arrived.filter((entry) => !replaced.has(`${entry.type}::${entry.key}`));
+  // A key is held once: a supplied record replaces the arrived record under its key whatever the type.
+  const replaced = new Set(supplied.map((entry) => entry.key));
+  const kept = arrived.filter((entry) => !replaced.has(entry.key));
   const entries = [...kept, ...supplied];
   const catalog = catalogEntriesFor([
     ...kept.map((envelope) => ({ envelope, registered: false })),
@@ -449,6 +450,13 @@ function decodeSnapshot(decoded: unknown): DecodedSnapshot | undefined {
   }
 
   const records = recordsRaw.map(decodeRecord);
+  const seen = new Set<string>();
+  for (const { key } of records) {
+    if (seen.has(key)) {
+      throw new Error(`CultCache record "${key}" appears more than once.`);
+    }
+    seen.add(key);
+  }
   return { format: decoded[0], catalogBySchemaId, records };
 }
 
@@ -479,12 +487,16 @@ function decodeCatalogEntry(value: unknown): CultCacheSchemaCatalogEntry {
     throw new Error(`CultCache schema catalog entry "${schemaId}" has invalid members.`);
   }
 
+  if (typeof canonicalSchemaJson !== "string") {
+    throw new Error(`CultCache schema catalog entry "${schemaId}" has an invalid canonical schema.`);
+  }
+
   return {
     schemaId,
     schemaName,
     schemaVersion: isNonEmptyString(schemaVersion) ? schemaVersion : `${schemaName}.v1`,
     contentHash: isNonEmptyString(contentHash) ? contentHash : schemaId,
-    canonicalSchemaJson: typeof canonicalSchemaJson === "string" ? canonicalSchemaJson : "",
+    canonicalSchemaJson,
     compatibleSchemaIds,
     members: members.map(decodeCatalogMember),
   };
