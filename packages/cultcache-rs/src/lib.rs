@@ -2804,33 +2804,40 @@ impl CultCache {
                 existing_type
             ));
         }
-        // The projector decides what the held records hold, so a changed declaration re-derives the holder table over
-        // them; a held violation (or a record the new type cannot decode) refuses the registration and changes nothing.
+        // The declaration decides what the held records hold (index projector, global flag), so a changed declaration
+        // re-judges them; a held violation (or a record the new type cannot decode) refuses the registration and
+        // changes nothing.
         let previous = self.projectors.get(T::TYPE).copied();
+        let was_global = self.globals.contains(T::TYPE);
         if T::UNIQUE_INDEXES.is_empty() {
             self.projectors.remove(T::TYPE);
         } else {
             self.projectors.insert(T::TYPE.to_string(), project_indexes::<T>);
         }
+        if T::GLOBAL {
+            self.globals.insert(T::TYPE.to_string());
+        } else {
+            self.globals.remove(T::TYPE);
+        }
         let held_type = self.entries.range((T::TYPE.to_string(), String::new())..).next().is_some_and(|((held, _), _)| held == T::TYPE);
         if held_type {
-            match self.judge_image(&self.entries) {
+            match self.refuse_second_globals(&self.entries).and_then(|()| self.judge_image(&self.entries)) {
                 Ok(holders) => self.index_holders = holders,
                 Err(refusal) => {
                     match previous {
                         Some(project) => self.projectors.insert(T::TYPE.to_string(), project),
                         None => self.projectors.remove(T::TYPE),
                     };
+                    if was_global {
+                        self.globals.insert(T::TYPE.to_string());
+                    } else {
+                        self.globals.remove(T::TYPE);
+                    }
                     return Err(refusal);
                 }
             }
         }
         self.definitions.insert(T::TYPE.to_string(), T::SCHEMA_NAME);
-        if T::GLOBAL {
-            self.globals.insert(T::TYPE.to_string());
-        } else {
-            self.globals.remove(T::TYPE);
-        }
         self.schema_name_definitions
             .insert(T::SCHEMA_NAME.to_string(), T::TYPE.to_string());
         Ok(())

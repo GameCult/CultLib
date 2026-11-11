@@ -611,6 +611,51 @@ fn registering_an_index_over_colliding_held_records_is_refused_and_changes_nothi
     assert_eq!(cache.get_by_index::<Unique>("Sku", "S").unwrap(), None);
 }
 
+/// The same type and schema declaring Sku as an integer: the held text cannot be decoded as one.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "unique_item", schema = "tests.unique_item")]
+struct Retyped {
+    #[cultcache(key = 0, index = "Sku")]
+    sku: i64,
+}
+
+/// A refused re-registration leaves the previous declaration in force: it keeps judging, so a later duplicate is refused.
+#[test]
+fn a_refused_reregistration_keeps_the_previous_index_judging() {
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<Unique>().unwrap();
+    cache.put("a", &unique("S")).unwrap();
+    cache.put("b", &unique("T")).unwrap();
+
+    // A different declaration over the same type (Category is the unique alias) collides on held records.
+    #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+    #[cultcache(type = "unique_item", schema = "tests.unique_item")]
+    struct ByCat {
+        #[cultcache(key = 0)]
+        sku: String,
+        #[cultcache(key = 1, index = "Cat")]
+        category: String,
+    }
+    assert!(cache.register_entry_type::<ByCat>().is_err(), "a and b both hold category c");
+
+    assert!(cache.put("z", &unique("S")).is_err(), "the previous index still judges");
+    assert_eq!(cache.get_by_index::<Unique>("Sku", "S").unwrap(), cache.get::<Unique>("a").unwrap());
+    cache.put("z", &unique("U")).unwrap();
+}
+
+// A held record the new declaration cannot decode refuses the registration; the unindexed declaration stays.
+#[test]
+fn registering_an_index_over_an_undecodable_held_record_is_refused_and_changes_nothing() {
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<Twin>().unwrap();
+    cache.put("a", &Twin { sku: "S".into(), category: "x".into() }).unwrap();
+
+    assert!(cache.register_entry_type::<Retyped>().is_err());
+
+    cache.put("b", &Twin { sku: "S".into(), category: "y".into() }).unwrap();
+    assert_eq!(cache.get_all_with_keys::<Twin>().unwrap().len(), 2, "no index judges the duplicate");
+}
+
 // Dropping the declaration releases the holders.
 #[test]
 fn registering_without_the_index_releases_the_holders() {

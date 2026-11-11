@@ -48,7 +48,7 @@ struct Zed {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
-#[cultcache(type = "settings", global)]
+#[cultcache(type = "settings", schema = "tests.settings", global)]
 struct Settings {
     #[cultcache(key = 0)]
     value: String,
@@ -215,6 +215,40 @@ fn a_global_is_none_until_written_and_survives_a_reopen() {
         assert_eq!(seed.get_global::<Settings>().unwrap(), Some(settings("durable authority")));
     }
     assert_eq!(reopened(&path).get_global::<Settings>().unwrap(), Some(settings("durable authority")));
+}
+
+/// `Settings` as an ordinary type: the same type id and schema, no global rule.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "settings", schema = "tests.settings")]
+struct LooseSettings {
+    #[cultcache(key = 0)]
+    value: String,
+}
+
+// Declaring a held type global judges the records it holds: two are already a second, so the registration is
+// refused and the type stays ordinary.
+#[test]
+fn registering_a_type_global_over_two_held_records_is_refused_and_changes_nothing() {
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<LooseSettings>().unwrap();
+    cache.put("a", &LooseSettings { value: "one".into() }).unwrap();
+    cache.put("b", &LooseSettings { value: "two".into() }).unwrap();
+
+    let refusal = cache.register_entry_type::<Settings>().unwrap_err();
+    assert!(refusal.downcast_ref::<CultCacheSecondGlobal>().is_some(), "{refusal:#}");
+
+    cache.put("c", &LooseSettings { value: "three".into() }).unwrap();
+    assert_eq!(cache.get_all_with_keys::<LooseSettings>().unwrap().len(), 3, "still ordinary");
+}
+
+// One held record may become the global; dropping the rule again restores the ordinary type.
+#[test]
+fn registering_a_type_global_over_one_held_record_is_admitted() {
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<LooseSettings>().unwrap();
+    cache.put("a", &LooseSettings { value: "one".into() }).unwrap();
+    cache.register_entry_type::<Settings>().unwrap();
+    assert!(cache.put("b", &Settings { value: "two".into() }).is_err(), "a second global is refused");
 }
 
 #[test]
