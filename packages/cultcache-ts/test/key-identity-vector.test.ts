@@ -9,7 +9,7 @@ import { decode, encode } from "@msgpack/msgpack";
 import { z } from "zod";
 
 import { CultCache } from "../src/cult-cache";
-import { defineDocumentType, documentPayloadBytes } from "../src/document";
+import { defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "../src/document";
 import { SingleFileMessagePackBackingStore, readSingleFileStore } from "../src/single-file-messagepack-backing-store";
 import { SchemaConflictError } from "../src/store-format";
 import type { AnyCultCacheDocumentDefinition, CultCacheEnvelope } from "../src/types";
@@ -88,10 +88,12 @@ test("vectors rows.msgpack: every row's refusal, held records, file, foreign lis
       let failed = false;
       let beforeBytes: Buffer | undefined;
       let beforeCache: CultCacheEnvelope[] = [];
+      let beforeAttached: Buffer[] = [];
       for (const [index, op] of ops.entries()) {
         const last = index === ops.length - 1;
         if (last) {
-          beforeCache = cache.snapshot();
+          beforeCache = cache?.snapshot() ?? [];
+          beforeAttached = await Promise.all(attached.map((copy) => readFile(copy)));
           beforeBytes = path !== undefined ? await readFile(path) : undefined;
         }
         try {
@@ -138,9 +140,8 @@ test("vectors rows.msgpack: every row's refusal, held records, file, foreign lis
         const [key] = refusal;
         if (label === "key-in-two-stores-refused") {
           assert.ok((refused as Error).message.includes(key), `${label}: the refusal names the key`);
-          for (const copy of attached) {
-            assert.ok(sameRecord(stored(copy).get(key), stored(copy).get(key)));
-          }
+          assert.deepEqual(cache.snapshot(), beforeCache, `${label}: the earlier pulled state survives`);
+          assert.deepEqual(await Promise.all(attached.slice(0, beforeAttached.length).map((copy) => readFile(copy))), beforeAttached, `${label}: the attached files are byte-identical`);
         } else {
           assert.ok(refused instanceof SchemaConflictError, `${label}: a typed schema conflict, got ${String(refused)}`);
           assert.equal((refused as SchemaConflictError).recordKey, key, `${label}: names the key`);
@@ -181,4 +182,85 @@ test("vectors rows.msgpack: every row's refusal, held records, file, foreign lis
   }
   assert.deepEqual(failures, [], "every row holds its verdict");
   assert.equal(walked, 11);
+});
+
+// Beyond the vector: what the walker's string-typed rows cannot say.
+const CANARY = "CANARY-ki-77c1";
+const plain = (type: string, schemaId: string, compatibleSchemaIds?: string[]) =>
+  defineDocumentType({ type, schemaId, schemaName: type, schemaVersion: `${type}.v1`, schema: z.object({ v: z.string() }), ...(compatibleSchemaIds ? { compatibleSchemaIds } : {}) });
+
+test("a refusal names the key and schemas and never echoes the written value", async () => {
+  const alpha = plain("cn.alpha", "cn.alpha.v1");
+  const beta = plain("cn.beta", "cn.beta.v1");
+  const cache = CultCache.builder().withDocumentType(alpha).withDocumentType(beta).build();
+  await cache.put(alpha, "k", { v: "first" });
+  await assert.rejects(cache.put(beta, "k", { v: CANARY }), (error: Error) => {
+    assert.ok(error instanceof SchemaConflictError && error.recordKey === "k");
+    assert.ok(!error.message.includes(CANARY));
+    return true;
+  });
+  assert.deepEqual(cache.get(alpha, "k"), { v: "first" });
+  assert.equal(cache.get(beta, "k"), undefined);
+  await assert.rejects(cache.putEnvelope(beta, { key: "k", type: "cn.beta", payload: documentPayloadFromBytes(encode({ v: CANARY })), storedAt: "2026-01-01T00:00:00Z" }), SchemaConflictError);
+  assert.equal(cache.snapshot().length, 1);
+});
+
+test("a type that owns the held record's id replaces it: one record at the key, no second type held", async () => {
+  const old = plain("cn.old", "cn.id.v1");
+  const renamed = plain("cn.new", "cn.id.v2", ["cn.id.v2", "cn.id.v1"]);
+  const cache = CultCache.builder().withDocumentType(old).withDocumentType(renamed).build();
+  await cache.put(old, "k", { v: "a" });
+  await cache.put(renamed, "k", { v: "b" });
+  assert.deepEqual(cache.snapshot().map((e) => [e.type, e.key]), [["cn.new", "k"]]);
+  assert.equal(cache.get(old, "k"), undefined);
+});
+
+test("a store carrying an unregistered record loads, lists it sorted, keeps it through writes of other keys, and a later registration claims it", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ki-"));
+  try {
+    const path = join(dir, "s.cc");
+    await copyFile(join(vectors, "foreign-store.cc"), path);
+    const open = (...names: string[]) => {
+      let builder = CultCache.builder();
+      for (const name of names) builder = builder.withDocumentType(types[name]!);
+      return builder.withGenericStore(new SingleFileMessagePackBackingStore(path)).build();
+    };
+    const cache = open("alpha");
+    await cache.pullAllBackingStores();
+    const record = stored(path).get("k")!;
+    assert.deepEqual(cache.foreignRecords(), [
+      { key: "k", schemaId: "sha256:fbc26e351e00c9e7185e8de171c7486aba707c229c949f0aae6b889288af5f6d", schemaName: "tests.ki_gamma", storedAt: record.storedAt },
+    ]);
+    await cache.put(types.alpha!, "z", { text: "z" } as never);
+    await cache.delete(types.alpha!, "j");
+    assert.ok(sameRecord(stored(path).get("k"), record), "the foreign record's stored bytes survive");
+    assert.equal(await cache.delete(types.alpha!, "nobody"), false);
+
+    const claimed = open("alpha", "gamma");
+    await claimed.pullAllBackingStores();
+    assert.deepEqual(claimed.foreignRecords(), []);
+    assert.equal(claimed.snapshot().length, 2);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a foreign key one store carries and another holds under a registered type refuses the load and admits nothing", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ki-"));
+  try {
+    const foreign = join(dir, "foreign.cc");
+    const catalog = join(dir, "catalog.cc");
+    await copyFile(join(vectors, "catalog-store.cc"), catalog);
+    const writer = CultCache.builder().withDocumentType(types.gamma!).withGenericStore(new SingleFileMessagePackBackingStore(foreign)).build();
+    await writer.put(types.gamma!, "k", { text: "g" } as never);
+    const cache = CultCache.builder().withDocumentType(types.alpha!).build();
+    await cache.addBackingStore(new SingleFileMessagePackBackingStore(catalog), types.alpha!);
+    await cache.pullAllBackingStores();
+    await cache.addBackingStore(new SingleFileMessagePackBackingStore(foreign));
+    await assert.rejects(cache.pullAllBackingStores(), /held by two stores/u);
+    assert.deepEqual(cache.snapshot().map((e) => e.key), ["k"], "the earlier pulled state survives");
+    assert.deepEqual(cache.foreignRecords(), []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

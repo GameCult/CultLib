@@ -9,7 +9,7 @@ import {
 } from "./document";
 import { resolveDocumentFormatter } from "./document-formatter";
 import type { DocumentPayload } from "./document";
-import { SchemaConflictError } from "./store-format";
+import { SchemaConflictError, schemaIdForEnvelope, writtenOwns } from "./store-format";
 import type {
   AnyCultCacheDocumentDefinition,
   CacheBackingStore,
@@ -64,6 +64,17 @@ type HydratedState = {
   // delete of that global removes it from the home store. Remove once no store holds a global under
   // a key other than GLOBAL_KEY.
   readonly legacyGlobals: Map<string, CultCacheEnvelope>;
+  // The records the last pull found that no registered type claims. Derived from the pull and replaced with the state; it
+  // decides nothing but the refusal of a write or a removal at its keys.
+  readonly foreign: CultCacheForeignRecord[];
+};
+
+/** A record a store carries that no registered type claims: the cache does not serve it, keeps its bytes, and refuses a write or a removal at its key. */
+export type CultCacheForeignRecord = {
+  readonly key: string;
+  readonly schemaId: string;
+  readonly schemaName: string;
+  readonly storedAt: string;
 };
 
 // Lookups for every held record of one type under candidate accessors, derived before anything is installed.
@@ -81,6 +92,7 @@ function emptyHydratedState(): HydratedState {
     indexToKeyMaps: new Map(),
     globalKeys: new Map(),
     legacyGlobals: new Map(),
+    foreign: [],
   };
 }
 
@@ -280,11 +292,14 @@ export class CultCache {
         for (const entry of entries) {
           const registered = this.#resolveDefinitionForEnvelope(entry);
           if (!registered) {
-            throw new Error(
-              entry.schemaId
-                ? `No schema is registered for persisted schema id "${entry.schemaId}".`
-                : `No schema is registered for persisted document type "${entry.type}".`,
-            );
+            // A store may hold what this cache has no type for; it is carried, not served, and not a reason to refuse the load.
+            next.foreign.push({
+              key: entry.key,
+              schemaId: schemaIdForEnvelope(entry),
+              schemaName: entry.catalogEntry?.schemaName ?? entry.type,
+              storedAt: entry.storedAt,
+            });
+            continue;
           }
 
           const type = registered.definition.type;
@@ -313,7 +328,18 @@ export class CultCache {
             }
           }
           const hydrated = this.#admitEntry(next, registered, admitted, value);
+          const other = this.#heldUnderOtherType(next, type, hydrated.key);
+          if (other !== undefined) {
+            throw new Error(`CultCache record "${hydrated.key}" is held by two stores, as type "${other.type}" and as type "${type}".`);
+          }
           this.#installEntry(next, registered, hydrated);
+        }
+      }
+
+      for (const record of next.foreign) {
+        const other = [...this.#definitions.keys()].map((type) => next.entries.get(this.#entryId(type, record.key))).find((held) => held !== undefined);
+        if (other !== undefined) {
+          throw new Error(`CultCache record "${record.key}" is held by two stores, as type "${other.type}" and as schema "${record.schemaName}".`);
         }
       }
 
@@ -553,6 +579,11 @@ export class CultCache {
     });
   }
 
+  // What the last pull found that no registered type claims, by key ordinal. A later registration claims a record at the next pull.
+  foreignRecords(): readonly CultCacheForeignRecord[] {
+    return [...this.#hydrated.foreign].sort((left, right) => compareOrdinal(left.key, right.key));
+  }
+
   snapshot(): CultCacheEnvelope[] {
     return [...this.#hydrated.entries.values()].map((entry) => this.#toEnvelope(entry));
   }
@@ -662,6 +693,7 @@ export class CultCache {
   // is touched; once the store accepts, applying to the cache has no fallible step.
   async #writeNow(registered: RegisteredDefinition, entry: CultCacheEnvelope, value: unknown): Promise<void> {
     const home = this.#homeStore(entry.type);
+    const retyped = this.#refuseRetype(entry);
     const hydrated = this.#admitEntry(this.#hydrated, registered, entry, value);
     this.#refuseIndexSharing(this.#hydrated, entry.type, registered.catalogEntry.schemaName, entry.key, hydrated.lookups);
     const legacy = this.#hydrated.legacyGlobals.get(entry.type);
@@ -670,7 +702,52 @@ export class CultCache {
       await this.#retireLegacyGlobal(home, legacy, entry);
     }
     this.#hydrated.legacyGlobals.delete(entry.type);
+    if (retyped !== undefined) {
+      // The record the write restamped (it owns the held id) is the same record: one key, one held type.
+      this.#removeEntry(this.#hydrated, this.#definitions.get(retyped.type)!, retyped);
+    }
     this.#installEntry(this.#hydrated, registered, hydrated);
+  }
+
+  // The one key-identity judge of the cache: may this write land at its key, given what the cache holds there under
+  // every registered type and the keys its stores carry foreign. The store judges the file with the same predicate
+  // (writtenOwns); this judges the cache, which a store-less cache has no other judge for. Returns the held record of
+  // another type the write owns and so replaces, if any. A refusal names the key and schemas, never a payload.
+  #refuseRetype(entry: CultCacheEnvelope): HydratedEntry | undefined {
+    this.#refuseForeignKey(entry.key, entry.type, "written");
+    const held = this.#heldUnderOtherType(this.#hydrated, entry.type, entry.key);
+    if (held === undefined || writtenOwns(entry, schemaIdForEnvelope(held))) {
+      return held;
+    }
+    throw new SchemaConflictError(
+      schemaIdForEnvelope(entry),
+      [held.type, entry.type],
+      entry.key,
+      `CultCache holds record "${entry.key}" as type "${held.type}", so type "${entry.type}" cannot be written under the same key; remove the record first.`,
+    );
+  }
+
+  #refuseForeignKey(key: string, type: string, what: "written" | "removed"): void {
+    const foreign = this.#hydrated.foreign.find((record) => record.key === key);
+    if (foreign !== undefined) {
+      throw new SchemaConflictError(
+        foreign.schemaId,
+        [foreign.schemaName],
+        key,
+        `CultCache store carries record "${key}" as schema "${foreign.schemaName}" (${foreign.schemaId}), which no registered type claims, so type "${type}" cannot be ${what} at that key.`,
+      );
+    }
+  }
+
+  // The record another registered type holds at the key, if any.
+  #heldUnderOtherType(state: HydratedState, type: string, key: string): HydratedEntry | undefined {
+    for (const other of this.#definitions.keys()) {
+      const held = other === type ? undefined : state.entries.get(this.#entryId(other, key));
+      if (held !== undefined) {
+        return held;
+      }
+    }
+    return undefined;
   }
 
   // The first write of a global loaded from a legacy key removes that record in the same write. If the
@@ -691,6 +768,9 @@ export class CultCache {
     const registered = this.#requireDefinition(definition);
     const entry = this.#hydrated.entries.get(this.#entryId(definition.type, key));
     if (!entry) {
+      // variants:ruling:unheld-removal-refused-at-commit: a key a store carries foreign is refused, a key held under
+      // another type or by nobody is the existing false.
+      this.#refuseForeignKey(key, definition.type, "removed");
       return false;
     }
 

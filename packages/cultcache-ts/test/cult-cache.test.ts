@@ -266,10 +266,10 @@ test("CultCache fails closed on unknown or illegal persisted polymorphic state",
     ]))
     .build();
 
-  await assert.rejects(
-    async () => cacheWithUnknownType.pullAllBackingStores(),
-    /No schema is registered for persisted document type "forbidden"\./,
-  );
+  // A record no registered type claims is carried, not a reason to refuse the load.
+  await cacheWithUnknownType.pullAllBackingStores();
+  assert.deepEqual(cacheWithUnknownType.snapshot(), []);
+  assert.deepEqual(cacheWithUnknownType.foreignRecords().map((record) => [record.key, record.schemaName]), [["mystery", "forbidden"]]);
 
   const cacheWithDuplicateGlobal = CultCache.builder()
     .withDocumentType(settingsDocument)

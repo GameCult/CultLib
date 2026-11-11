@@ -1,5 +1,7 @@
 import { decode } from "@msgpack/msgpack";
 
+import type { CultCacheEnvelope } from "./types";
+
 export const STORE_FORMAT_VERSION = "cultcache.store.v1";
 
 /**
@@ -150,4 +152,20 @@ export function requireStoreSlots(decoded: unknown[]): void {
   if (decoded.length !== STORE_SLOTS) {
     throw new Error(`CultCache store has ${decoded.length} top-level slots; this runtime reads ${STORE_SLOTS} (header, schema catalog, records).`);
   }
+}
+
+/** The schema id a record is stored under: the one it carries, else its type. */
+export function schemaIdForEnvelope(entry: CultCacheEnvelope): string {
+  return entry.schemaId ?? entry.type;
+}
+
+/**
+ * As C# WrittenOwns' declared half: the written type owns the stored schema id when its catalog entry carries that id as its own
+ * or lists it compatible, so a type renamed under a stable id restamps the record it already holds. (The C# half that lets an
+ * undeclared older id of the same schema name through when it reads whole is not ported; a same-named type keeps passing.)
+ * The one predicate of the key-identity rule: the store judges the file with it and the cache judges what it holds.
+ */
+export function writtenOwns(written: CultCacheEnvelope, storedId: string): boolean {
+  const entry = written.catalogEntry;
+  return entry !== undefined && (entry.schemaId === storedId || (entry.compatibleSchemaIds ?? []).includes(storedId));
 }
