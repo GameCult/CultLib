@@ -1604,17 +1604,88 @@ class CultCacheTests(unittest.TestCase):
                         self.assertIsNotNone(refused.exception.__cause__, f"{vector} {operation}")
                         self.assertEqual(store_path.read_bytes(), content, f"{vector} {operation} rewrote a file it cannot read")
 
-    def test_a_supplied_record_replaces_an_arrived_one_by_key_alone(self) -> None:
+    @staticmethod
+    def _rec(type: str, key: str, second: int = 0) -> CultCacheEnvelope:
+        return CultCacheEnvelope(key=key, type=type, payload=b"\x90", stored_at=f"2026-09-30T00:00:0{second}Z")
+
+    def test_a_supplied_record_replaces_an_arrived_one_of_the_same_type_by_key(self) -> None:
         import msgpack  # type: ignore
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "store.msgpack"
             store = SingleFileMessagePackBackingStore(path)
-            store.push(CultCacheEnvelope(key="k", type="first", payload=b"\x90", stored_at="2026-09-30T00:00:00Z"))
-            store.push(CultCacheEnvelope(key="k", type="second", payload=b"\x90", stored_at="2026-09-30T00:00:01Z"))
+            store.push(self._rec("first", "k"))
+            store.push(self._rec("first", "k", 1))
+            store.push_all([self._rec("first", "k", 2), self._rec("first", "k", 3)])
             records = msgpack.unpackb(path.read_bytes(), raw=False)[2]
             self.assertEqual([record[0] for record in records], ["k"])
-            self.assertEqual([envelope.type for envelope in store.pull_all()], ["second"])
+            self.assertEqual([(e.type, e.stored_at) for e in store.pull_all()], [("first", "2026-09-30T00:00:03Z")])
+
+    def test_a_write_that_would_retype_a_key_is_refused_and_leaves_the_file(self) -> None:
+        from cultcache_py import SchemaConflictError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            store = SingleFileMessagePackBackingStore(path)
+            store.push(self._rec("first", "k"))
+            content = path.read_bytes()
+            for run in (
+                lambda: store.push(self._rec("second", "k", 1)),
+                lambda: store.push_all([self._rec("other", "j"), self._rec("second", "k", 1)]),
+            ):
+                with self.assertRaises(SchemaConflictError) as refused:
+                    run()
+                self.assertEqual(refused.exception.record_key, "k")
+                self.assertEqual(refused.exception.schema_names, ["first"])
+                self.assertIn("would retype the key", str(refused.exception))
+                self.assertEqual(path.read_bytes(), content)
+            # Retyping is a removal and an add.
+            store.delete("first", "k")
+            store.push(self._rec("second", "k", 1))
+            self.assertEqual([e.type for e in SingleFileMessagePackBackingStore(path).pull_all()], ["second"])
+
+    def test_a_batch_naming_one_key_under_two_types_is_refused_whole(self) -> None:
+        from cultcache_py import SchemaConflictError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            store = SingleFileMessagePackBackingStore(path)
+            with self.assertRaises(SchemaConflictError):
+                store.push_all([self._rec("first", "k"), self._rec("second", "k", 1)])
+            self.assertFalse(path.exists())
+
+    def test_a_cache_put_of_a_second_type_under_a_key_is_refused_and_persists_nothing_new(self) -> None:
+        from cultcache_py import SchemaConflictError
+
+        other = define_document_type("other", encode=lambda item: asdict(item), decode=lambda raw: Item(**raw))
+        document = item_doc()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+
+            def build() -> CultCache:
+                cache = (
+                    CultCache.builder()
+                    .register_document_type(document)
+                    .register_document_type(other)
+                    .add_generic_store(SingleFileMessagePackBackingStore(path))
+                    .build()
+                )
+                cache.pull_all_backing_stores()
+                return cache
+
+            cache = build()
+            cache.put(document, "shared", Item(name="A", category="c", value=1))
+            content = path.read_bytes()
+            with self.assertRaises(SchemaConflictError):
+                cache.put(other, "shared", Item(name="B", category="c", value=2))
+            self.assertEqual(path.read_bytes(), content)
+            self.assertIsNone(cache.get(other, "shared"))
+            reloaded = build()
+            self.assertEqual(reloaded.get_required(document, "shared").value, 1)
+            self.assertIsNone(reloaded.get(other, "shared"))
+            cache.delete(document, "shared")
+            cache.put(other, "shared", Item(name="B", category="c", value=2))
+            self.assertEqual(build().get_required(other, "shared").value, 2)
 
     def test_a_catalog_entry_with_a_non_string_canonical_schema_is_unreadable(self) -> None:
         # Direct probe of the c0 vector; its manifest row is added by the TS cut.
