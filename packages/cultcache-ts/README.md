@@ -218,7 +218,9 @@ const playerDocument = defineDocumentType({
 `indexes` are unique (variants:ruling:unique-indexes; C# `[CultIndex]`, Rust `#[cultcache(index)]`). Within one type
 and one alias no two records hold one non-blank value, judged on the result of every write and of every load; a
 refusal reads `Records <k1> and <k2> (<schema name>) both hold unique index '<alias>'; an index value names one record.`
-(keys in ordinal order, never the value), and writes nothing. A blank value (absent, empty, or only whitespace) is
+(keys in ordinal order, never the value), and writes nothing. The contract is the verdict, which stores and writes are
+refused; the text is informational. On a load TS judges record by record in file order and names the first collision
+it meets, where C# judges the whole store, so the two runtimes can name different pairs of one store. A blank value (absent, empty, or only whitespace) is
 never indexed and never conflicts. Two types may share an alias and a value. Index values are compared as the C#
 reference renders them: strings as is (never trimmed), `True`/`False`, integers as digits, a non-integral number as
 its exact decimal expansion; NaN and infinities have no value. `roles` name selection and reference aliases (the
@@ -227,7 +229,10 @@ are never indexed for lookup, so `getByIndex` on a role answers `undefined`. An 
 
 ### Migrating an existing `indexes` key
 
-Apply per key, here and in a consumer repo at its pin bump:
+Apply per key, and do it BEFORE the CultLib checkout your tools load is rebuilt or updated. A consumer that loads
+CultLib at run time (Bifrost reads `$VOIDBOT_CULTLIB_ROOT`, else the sibling `../CultLib` dist) has no pin to hold: its
+next start after the checkout moves is the bump. A consumer that pins a version applies this before it bumps the pin.
+Moving an `indexes` key to `roles` is safe on the old CultLib too, so the consumer edit lands first:
 
 1. Nothing looks records up by the key (`getByIndex`, `getKeyByIndex`, `getIdByIndex`; Python `get_by_index`,
    `get_key_by_index`, `node.get_by_index`, `watch_by_index`; Rust `get_by_index`): it is a role. Move it to `roles`;
@@ -237,7 +242,7 @@ Apply per key, here and in a consumer repo at its pin bump:
    record key is derived from that value alone, or the value is an outside identity (email, sku, external id).
    Enums, statuses, kinds, categories, parent or foreign ids, shared hashes and timestamps are roles; a lookup on
    one already answered an arbitrary record, so move it to a selection (`any_of`) or `getAll` plus a filter.
-3. Before bumping, open each real `.cc` once with the new definitions. A refusal names both keys and the alias and
+3. Before the checkout moves, open each real `.cc` once with the new definitions. A refusal names both keys and the alias and
    writes nothing.
 
 Misclassifying costs differently each way. A role declared unique: the second record holding a shared value is
@@ -245,8 +250,10 @@ refused at commit, and a store already holding one refuses to open, so that stor
 reclassified (loud, names both keys and the alias). A unique key declared a role: lookups by it answer nothing and
 duplicates stop being refused.
 
-The Bifrost TS stores (at 781e6ea) call no lookup anywhere, so by rule 1 every key is a role and no key becomes unique;
-the edit deletes each `indexes` block, the catalog unchanged:
+The Bifrost TS stores (at 781e6ea) call no lookup anywhere, so by rule 1 every key is a role and no key becomes unique.
+All six definitions list `members` explicitly, each with its `indexAlias`, so the edit is deleting each `indexes` block:
+the catalog is unchanged and the edit is safe on the CultLib it loads today. It must land before that checkout is
+updated:
 
 | Definition | Keys | Verdict |
 |---|---|---|

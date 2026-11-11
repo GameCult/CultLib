@@ -12,7 +12,7 @@ All notable changes to `@gamecult/cultcache-ts` are recorded here, following
   text (booleans `True`/`False`, integers as digits, doubles as the exact expansion, blank values never indexed), so
   an empty string is no longer a value. `registerIndex` over held duplicates installs nothing. A new `roles` map names
   the many-row selection aliases (never indexed for lookup, same catalog `indexAlias`). The per-key migration rule is
-  in the README; classify every key before bumping.
+  in the README; classify every key before the CultLib your tools load is updated. The refusal verdict is the contract, its text is informational.
 
 ### Changed
 
