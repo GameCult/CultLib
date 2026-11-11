@@ -19,7 +19,11 @@ discovery, sessions, local server) build on it, mirroring `cultcache-rs` /
   `[format, schemaCatalog, records]`
 - records store raw MessagePack payload bytes under schema-catalog identity
 - payloads decode only through the registered document definition for that type
-- unknown persisted types fail closed
+- a cache holds one record per key whatever its type: a write of a second type at a held key is refused with
+  `SchemaConflictError` (in memory too), and two stores holding one key refuse the load
+- a store record no registered type claims loads and is carried as foreign: `cache.foreign_records()` lists it, the store
+  keeps its bytes through every write, a write or removal at its key is refused, and registering a type that declares its
+  schema id claims it at the next load
 - global documents are singleton-style per type
 - one home store per document type: a store added with `add_backing_store`
   owns its types, otherwise the generic store is the home; a type claimed by a

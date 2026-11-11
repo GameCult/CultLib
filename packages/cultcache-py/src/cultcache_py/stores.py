@@ -245,7 +245,7 @@ def _derive_catalog(records: list[tuple[CultCacheEnvelope, bool]]) -> list[CultC
     return [entry for entry, _ in chosen.values()]
 
 
-def _retyped(held: CultCacheEnvelope, written: CultCacheEnvelope) -> SchemaConflictError:
+def retyped(held: CultCacheEnvelope, written: CultCacheEnvelope) -> SchemaConflictError:
     """The refusal of a write that would put a second type under a key the store already holds (C# CacheBackingStore.Retyped)."""
     return SchemaConflictError(
         _schema_id_for(held),
@@ -258,7 +258,7 @@ def _retyped(held: CultCacheEnvelope, written: CultCacheEnvelope) -> SchemaConfl
     )
 
 
-def _written_owns(held: CultCacheEnvelope, written: CultCacheEnvelope) -> bool:
+def written_owns(held: CultCacheEnvelope, written: CultCacheEnvelope) -> bool:
     """Whether a write of `written` may replace `held` at its key (C# WrittenOwns): the written type's entry declares the held
     record's schema id (its own id or one it lists compatible), or it is the type of the same schema name. The same-name half
     stands in for C#'s "reads the published entry whole": this runtime does not compare shapes, so it never refuses a
@@ -277,8 +277,8 @@ def _encode_snapshot(
     landing: dict[str, CultCacheEnvelope] = {}
     for envelope in supplied:
         for held in (landing.get(envelope.key), held_by_key.get(envelope.key)):
-            if held is not None and not _written_owns(held, envelope):
-                raise _retyped(held, envelope)
+            if held is not None and not written_owns(held, envelope):
+                raise retyped(held, envelope)
         landing[envelope.key] = envelope
     supplied = list(landing.values())
     replaced = set(landing)

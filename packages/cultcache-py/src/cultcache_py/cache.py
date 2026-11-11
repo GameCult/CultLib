@@ -9,7 +9,7 @@ from typing import Any, Callable, Generic, Iterable, TypeVar
 
 from .backing_store import BackingStore, CultCacheEnvelope
 from .documents import DocumentDefinition, extract_value
-from .stores import SchemaConflictError
+from .stores import SchemaConflictError, retyped, written_owns
 
 T = TypeVar("T")
 F = TypeVar("F", bound=Callable[..., Any])
@@ -120,6 +120,20 @@ class _State:
     # of that global removes it from the home store. Remove once no store holds a global under a key
     # other than GLOBAL_KEY.
     legacy_global_keys: dict[str, str] = field(default_factory=dict)
+    # The records the last pull read that no registered type claims, sorted by key. Derived from the pull and swapped with the
+    # rest of the state, written nowhere else; it decides only refusals at its keys. A store keeps their bytes.
+    foreign: list["ForeignRecord"] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ForeignRecord:
+    """A record a store holds that no registered type claims: the cache does not serve it, refuses a write or a removal at its
+    key, and a store keeps its bytes. Registering a type that declares its schema id claims it at the next load."""
+
+    key: str
+    schema_id: str
+    schema_name: str
+    stored_at: str
 
 
 @dataclass(frozen=True)
@@ -322,15 +336,23 @@ class CultCache:
         loaded_legacy_global_keys: dict[str, str] = {}
         routes, generic = self._state.stores_by_type, self._state.generic_store
         seen_globals: set[str] = set()
+        foreign: list[ForeignRecord] = []
+        type_at_key: dict[str, tuple[str, int]] = {}  # one record per key across every store: its type (or schema name) and store
         stores: list[BackingStore] = []
         for candidate in [*self._state.stores_by_type.values(), self._state.generic_store]:
             if candidate is not None and all(candidate is not store for store in stores):
                 stores.append(candidate)
-        for store in stores:
+        for position, store in enumerate(stores):
             for envelope in store.pull_all():
                 document = self._resolve_document_for_envelope(envelope)
                 if document is None:
-                    raise CultCacheError(f"Unknown persisted document type: {envelope.type}")
+                    entry = envelope.catalog_entry
+                    held_name = entry.schema_name if entry is not None else envelope.type
+                    self._claim_key(type_at_key, envelope.key, held_name, position)
+                    foreign.append(
+                        ForeignRecord(envelope.key, envelope.schema_id or envelope.type, held_name, envelope.stored_at)
+                    )
+                    continue
                 if envelope.type != document.type:
                     envelope = CultCacheEnvelope(
                         key=envelope.key,
@@ -353,6 +375,7 @@ class CultCache:
                     if envelope.key != GLOBAL_KEY:
                         loaded_legacy_global_keys[envelope.type] = envelope.key
                         envelope = replace(envelope, key=GLOBAL_KEY)
+                self._claim_key(type_at_key, envelope.key, envelope.type, position)
                 envelope = self._stamped(document, envelope)
                 value = document.decode_payload(envelope.payload)
                 loaded_values.setdefault(envelope.type, {})[envelope.key] = value
@@ -369,7 +392,28 @@ class CultCache:
             self._state.indexes,
             self._state.lookup_keys,
             self._state.legacy_global_keys,
-        ) = (loaded_values, loaded_envelopes, loaded_names, loaded_indexes, loaded_lookup_keys, loaded_legacy_global_keys)
+            self._state.foreign,
+        ) = (
+            loaded_values,
+            loaded_envelopes,
+            loaded_names,
+            loaded_indexes,
+            loaded_lookup_keys,
+            loaded_legacy_global_keys,
+            sorted(foreign, key=lambda record: _utf16_order(record.key)),
+        )
+
+    @staticmethod
+    def _claim_key(type_at_key: dict[str, tuple[str, int]], key: str, type: str, store: int) -> None:
+        """A key holds one record whatever its type, across every store a load reads. The refusal names the key and both types,
+        never a payload."""
+        held, held_store = type_at_key.setdefault(key, (type, store))
+        if held != type or held_store != store:
+            raise CultCacheError(f"Record {key!r} is held by both {held} and {type}: a key holds one record; the load admitted nothing.")
+
+    def foreign_records(self) -> list[ForeignRecord]:
+        """The records the last load read that no registered type claims, sorted by key (UTF-16 code-unit order)."""
+        return list(self._state.foreign)
 
     def get(self, document: DocumentDefinition[T], key: str) -> T | None:
         self._assert_registered(document)
@@ -497,6 +541,7 @@ class CultCache:
             (envelope, value, self._lookup_keys_for(value, name_extractor, index_extractors))
             for envelope, value in records
         ]
+        displaced = self._refuse_retype(document, [envelope for envelope, _ in records])
         self._refuse_index_sharing(
             [(type, envelope.key, keys) for envelope, _, keys in admitted],
             self._state.indexes,
@@ -515,6 +560,8 @@ class CultCache:
         values = self._state.values.setdefault(type, {})
         envelopes = self._state.envelopes.setdefault(type, {})
         lookup_keys = self._state.lookup_keys.setdefault(type, {})
+        for other, key in displaced:
+            self._drop(other, key)
         for envelope, value, keys in admitted:
             self._remove_lookups(type, envelope.key)
             values[envelope.key] = value
@@ -524,6 +571,39 @@ class CultCache:
                 self._state.names[(type, keys.name)] = envelope.key
             for index, index_value in keys.indexes.items():
                 self._state.indexes[(type, index, index_value)] = envelope.key
+
+    def _refuse_retype(self, document: DocumentDefinition[Any], written: list[CultCacheEnvelope]) -> list[tuple[str, str]]:
+        """The one key-identity judge (variants:ruling:cache-refuses-retype): a key holds one record whatever its type, so a write
+        may not land at a key this cache holds another type's record at, unless the written type owns that record's schema id
+        (the single-file store's commit guard asks the same question of the file), and may not land at a key a store carries
+        foreign. Returns the (type, key) records an owning write replaces; refuses, changing nothing, otherwise."""
+        replaced: list[tuple[str, str]] = []
+        foreign = {record.key: record for record in self._state.foreign}
+        for envelope in written:
+            carried = foreign.get(envelope.key)
+            if carried is not None:
+                raise self._foreign_refusal(carried)
+            for other, held_envelopes in self._state.envelopes.items():
+                held = held_envelopes.get(envelope.key)
+                if other == document.type or held is None:
+                    continue
+                if not written_owns(held, envelope) or self._store_for_type(other) is not self._store_for_type(document.type):
+                    raise retyped(held, envelope)
+                replaced.append((other, envelope.key))
+        return replaced
+
+    @staticmethod
+    def _foreign_refusal(record: ForeignRecord) -> SchemaConflictError:
+        return SchemaConflictError(
+            record.schema_id,
+            [record.schema_name],
+            record.key,
+            message=(
+                f"Record {record.key!r} is held by the store as a {record.schema_name} (schema id {record.schema_id!r}) that no "
+                "registered type claims; a write or removal there would replace what this cache cannot read. Register the type "
+                "that owns the schema id, or remove the record with the runtime that wrote it."
+            ),
+        )
 
     @staticmethod
     def _retire_legacy_global(store: BackingStore, type: str, legacy_key: str) -> None:
@@ -564,19 +644,27 @@ class CultCache:
 
     def _delete(self, document: DocumentDefinition[Any], key: str) -> None:
         self._assert_registered(document)
+        if key not in self._state.envelopes.get(document.type, {}):
+            carried = next((record for record in self._state.foreign if record.key == key), None)
+            if carried is not None:
+                raise self._foreign_refusal(carried)
         store = self._store_for_type(document.type)
         legacy_key = self._state.legacy_global_keys.get(document.type) if key == GLOBAL_KEY else None
         if store is not None:
             store.delete(document.type, key if legacy_key is None else legacy_key)
         if legacy_key is not None:
             del self._state.legacy_global_keys[document.type]
-        self._remove_lookups(document.type, key)
+        self._drop(document.type, key)
+
+    def _drop(self, type: str, key: str) -> None:
+        """Removes the held record and its lookups from the cache's maps; the store is the caller's."""
+        self._remove_lookups(type, key)
         for by_type in (self._state.values, self._state.envelopes, self._state.lookup_keys):
-            held = by_type.get(document.type)
+            held = by_type.get(type)
             if held is not None:
                 held.pop(key, None)
                 if not held:
-                    by_type.pop(document.type, None)
+                    by_type.pop(type, None)
 
     @_mutating
     def delete_global(self, document: DocumentDefinition[Any]) -> None:

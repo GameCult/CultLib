@@ -137,3 +137,86 @@ class KeyIdentityVectorTests(unittest.TestCase):
             for key in kept:
                 self.assertIsNotNone(stored(vector, key))
                 self.assertEqual(stored(path, key), stored(vector, key))
+
+
+def alpha_beta(*names: str, store=None) -> CultCache:
+    made = CultCache.builder()
+    for name in names:
+        made.register_document_type(DOCUMENTS[name])
+    if store is not None:
+        made.add_generic_store(store)
+    return made.build()
+
+
+class KeyIdentityTests(unittest.TestCase):
+    def test_every_write_path_refuses_a_second_type_and_never_echoes_the_payload(self) -> None:
+        alpha, beta = DOCUMENTS["alpha"], DOCUMENTS["beta"]
+        for name in ("put", "put_envelope", "put_envelopes"):
+            with self.subTest(path=name):
+                cache = alpha_beta("alpha", "beta")
+                cache.put(alpha, "k", {"text": "held"})
+                envelope = cache.get_envelope(alpha, "k")
+                other = type(envelope).create(
+                    key="k", type=beta.type, payload=beta.encode_payload({"text": "CANARY"}), schema_id=IDS["beta"]
+                )
+                writes = {
+                    "put": lambda: cache.put(beta, "k", {"text": "CANARY"}),
+                    "put_envelope": lambda: cache.put_envelope(beta, other),
+                    "put_envelopes": lambda: cache.put_envelopes(beta, [other]),
+                }
+                with self.assertRaises(SchemaConflictError) as caught:
+                    writes[name]()
+                self.assertEqual(caught.exception.record_key, "k")
+                self.assertNotIn("CANARY", str(caught.exception))
+                self.assertEqual(cache.get(alpha, "k"), {"text": "held"})
+                self.assertIsNone(cache.get(beta, "k"))
+
+    def test_two_routed_stores_holding_one_key_refuse_the_pull_and_keep_the_earlier_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            one, two = Path(tmp) / "one.cc", Path(tmp) / "two.cc"
+            shutil.copyfile(VECTORS / "catalog-store.cc", one)
+            shutil.copyfile(VECTORS / "run-store.cc", two)
+            cache = alpha_beta("alpha", "beta")
+            cache.add_backing_store(SingleFileMessagePackBackingStore(one), [DOCUMENTS["alpha"].type])
+            cache.pull_all_backing_stores()
+            cache.add_backing_store(SingleFileMessagePackBackingStore(two), [DOCUMENTS["beta"].type])
+            with self.assertRaises(Exception) as caught:
+                cache.pull_all_backing_stores()
+            self.assertIn("'k'", str(caught.exception))
+            self.assertEqual(cache.get(DOCUMENTS["alpha"], "k"), {"text": "a"})
+            self.assertIsNone(cache.get(DOCUMENTS["beta"], "k"))
+
+    def test_a_foreign_record_is_listed_and_its_bytes_survive_writes_and_removals_elsewhere(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.cc"
+            shutil.copyfile(VECTORS / "foreign-store.cc", path)
+            before = stored(path, "k")
+            cache = alpha_beta("alpha", store=SingleFileMessagePackBackingStore(path))
+            cache.pull_all_backing_stores()
+            [record] = cache.foreign_records()
+            self.assertEqual((record.key, record.schema_id, record.schema_name), ("k", IDS["gamma"], "tests.ki_gamma"))
+            self.assertEqual(record.stored_at, before[1])
+            cache.put(DOCUMENTS["alpha"], "m", {"text": "m"})
+            cache.delete(DOCUMENTS["alpha"], "j")
+            self.assertEqual(stored(path, "k"), before)
+            self.assertEqual(file_records(path), [["k", "tests.ki_gamma"], ["m", "tests.ki_alpha"]])
+            claimed = alpha_beta("alpha", "gamma", store=SingleFileMessagePackBackingStore(path))
+            claimed.pull_all_backing_stores()
+            self.assertEqual(claimed.foreign_records(), [])
+            self.assertEqual(claimed.get(DOCUMENTS["gamma"], "k"), {"text": "g"})
+
+    def test_the_foreign_list_is_sorted_by_utf16_code_unit_and_replaced_by_the_next_pull(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.cc"
+            store = SingleFileMessagePackBackingStore(path)
+            gamma = DOCUMENTS["gamma"]
+            writer = alpha_beta("gamma", store=store)
+            for key in ("\U00010400", "Ａ", "b", "B"):
+                writer.put(gamma, key, {"text": "x"})
+            cache = alpha_beta("alpha", store=SingleFileMessagePackBackingStore(path))
+            cache.pull_all_backing_stores()
+            self.assertEqual([record.key for record in cache.foreign_records()], ["B", "b", "\U00010400", "Ａ"])
+            for key in ("B", "b", "\U00010400", "Ａ"):
+                writer.delete(gamma, key)
+            cache.pull_all_backing_stores()
+            self.assertEqual(cache.foreign_records(), [])

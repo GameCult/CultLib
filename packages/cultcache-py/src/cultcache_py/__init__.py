@@ -1,7 +1,7 @@
 ﻿from .backing_store import BackingStore, CultCacheEnvelope
 from .backing_store import CultCacheSchemaCatalogEntry, CultCacheSchemaCatalogMember
 from . import leaves
-from .cache import CultCache, CultCacheBuilder
+from .cache import CultCache, CultCacheBuilder, ForeignRecord
 from .documents import (
     MAX_PAYLOAD_DEPTH,
     MAX_SLOT_KEY,
@@ -29,6 +29,7 @@ __all__ = [
     "CultCacheSchemaCatalogMember",
     "DatabaseEntryField",
     "DocumentDefinition",
+    "ForeignRecord",
     "JsonLinesBackingStore",
     "MAX_PAYLOAD_DEPTH",
     "MAX_SLOT_KEY",
