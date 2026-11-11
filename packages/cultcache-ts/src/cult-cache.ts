@@ -47,6 +47,7 @@ type EntryLookups = {
 };
 
 type HydratedEntry = CultCacheEnvelope & {
+  catalogEntry: NonNullable<CultCacheEnvelope["catalogEntry"]>;
   value: unknown;
   lookups: EntryLookups;
 };
@@ -315,6 +316,16 @@ export class CultCache {
           this.#installEntry(next, registered, hydrated);
         }
       }
+
+      // Judged whole, once: the refusal names the least violation of the state this load would leave, whatever the
+      // order of the stores and of the entries in them.
+      refuseLeastIndexSharing(function* () {
+        for (const entry of next.entries.values()) {
+          for (const [alias, value] of entry.lookups.indexes) {
+            yield { type: entry.type, schemaName: entry.catalogEntry.schemaName, alias, value, key: entry.key };
+          }
+        }
+      }());
 
       this.#hydrated = next;
     });
@@ -652,6 +663,7 @@ export class CultCache {
   async #writeNow(registered: RegisteredDefinition, entry: CultCacheEnvelope, value: unknown): Promise<void> {
     const home = this.#homeStore(entry.type);
     const hydrated = this.#admitEntry(this.#hydrated, registered, entry, value);
+    this.#refuseIndexSharing(this.#hydrated, entry.type, registered.catalogEntry.schemaName, entry.key, hydrated.lookups);
     const legacy = this.#hydrated.legacyGlobals.get(entry.type);
     await home?.push(entry);
     if (home && legacy) {
@@ -903,7 +915,6 @@ export class CultCache {
     }
 
     const lookups = this.#lookupsFor(registered.nameAccessor, registered.indexAccessors, value);
-    this.#refuseIndexSharing(state, entry.type, registered.catalogEntry.schemaName, entry.key, lookups);
     return {
       ...entry,
       payload: this.#cloneBytes(entry.payload),
@@ -995,7 +1006,6 @@ export class CultCache {
     const entryLookups: Array<[HydratedEntry, EntryLookups]> = [];
     const nameMap = nameAccessor ? new Map<string, string>() : undefined;
     const indexMaps = new Map<string, Map<string, string>>();
-    const sharing = new Map<string, string[]>();
     for (const indexName of indexAccessors.keys()) {
       indexMaps.set(indexName, new Map());
     }
@@ -1008,21 +1018,16 @@ export class CultCache {
       }
       for (const [indexName, indexValue] of lookups.indexes) {
         const map = indexMaps.get(indexName)!;
-        const holder = map.get(indexValue);
-        if (holder === undefined) {
-          map.set(indexValue, entry.key);
-        } else {
-          sharing.set(`${indexName}\u0000${indexValue}`, [...(sharing.get(`${indexName}\u0000${indexValue}`) ?? [holder]), entry.key]);
-        }
+        if (!map.has(indexValue)) map.set(indexValue, entry.key);
       }
     }
 
-    // Judged whole: any value held by two records refuses, naming the two smallest of its keys. Held records already
-    // passed the judge for every alias installed before, so only the alias being registered can be shared here.
-    for (const [id, keys] of sharing) {
-      keys.sort(compareOrdinal);
-      throw indexSharingRefusal(keys[0], keys[1], schemaName, id.slice(0, id.indexOf("\u0000")));
-    }
+    // Judged whole, by the same judge as a load: the least violation of the state the registration would leave.
+    refuseLeastIndexSharing(function* () {
+      for (const [entry, lookups] of entryLookups) {
+        for (const [alias, value] of lookups.indexes) yield { type, schemaName, alias, value, key: entry.key };
+      }
+    }());
 
     return { entryLookups, nameMap, indexMaps };
   }
@@ -1097,6 +1102,34 @@ export class CultCache {
 
 function compareOrdinal(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
+}
+
+// The whole-state judge (variants:question:unique-index-refusal-pair-rule): over every (type, alias, value) held at two
+// or more distinct keys, throws for the one least by (alias, least key, second-least key, schema name), each compared by
+// UTF-16 code unit. A function of the state, never of the order the rows arrive in.
+function refuseLeastIndexSharing(rows: Iterable<{ type: string; schemaName: string; alias: string; value: string; key: string }>): void {
+  const groups = new Map<string, { schemaName: string; alias: string; keys: string[] }>();
+  for (const { type, schemaName, alias, value, key } of rows) {
+    const id = JSON.stringify([type, alias, value]);
+    const group = groups.get(id);
+    if (group) group.keys.push(key);
+    else groups.set(id, { schemaName, alias, keys: [key] });
+  }
+  let least: { schemaName: string; alias: string; first: string; second: string } | undefined;
+  for (const { schemaName, alias, keys } of groups.values()) {
+    if (keys.length < 2) continue;
+    keys.sort(compareOrdinal);
+    const candidate = { schemaName, alias, first: keys[0], second: keys[1] };
+    if (!least || compareLeast(candidate, least) < 0) least = candidate;
+  }
+  if (least) throw indexSharingRefusal(least.first, least.second, least.schemaName, least.alias);
+}
+
+function compareLeast(
+  a: { schemaName: string; alias: string; first: string; second: string },
+  b: { schemaName: string; alias: string; first: string; second: string },
+): number {
+  return compareOrdinal(a.alias, b.alias) || compareOrdinal(a.first, b.first) || compareOrdinal(a.second, b.second) || compareOrdinal(a.schemaName, b.schemaName);
 }
 
 function indexSharingRefusal(keyA: string, keyB: string, schemaName: string, alias: string): Error {

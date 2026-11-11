@@ -119,14 +119,6 @@ test("a removed or changed holder releases its value", async () => {
   assert.equal(cache.getKeyByIndex(document, "sku", "T"), "a");
 });
 
-test("the keys in a refusal are in ordinal order whichever one lands second", async () => {
-  const document = item("item");
-  const cache = memory(document);
-  await cache.put(document, "m", { sku: "S" });
-  await assert.rejects(cache.put(document, "z", { sku: "S" }), { message: refusal("m", "z", "tests.item", "sku") });
-  await assert.rejects(cache.put(document, "B", { sku: "S" }), { message: refusal("B", "m", "tests.item", "sku") });
-});
-
 // The C# White_Space set, and nothing else, is blank. Every UTF-16 code unit is judged, so a rule written for a few
 // characters (or for JavaScript's \s, which counts U+FEFF and omits U+0085) cannot pass.
 const CSHARP_WHITE_SPACE = (code: number) =>
@@ -365,6 +357,76 @@ test("vectors duplicate-store.cc and blank-store.cc hold their verdicts", async 
   }
 });
 
+// refusals.msgpack: rows [label, ops, refusal] written by the C# reference. TypeScript has no batch commit
+// (variants:idea:unique-index-runtimes.ts-batch-commit), so it performs every row whose commits each hold one record:
+// 5, 8-13, 19-22, 24, 25, 27, 29, 31, 32 and 33 of the README (18).
+const REFUSAL_SCHEMAS: [string, string, string, Record<string, "sku" | "second">][] = [
+  ["unique_item", "tests.unique_item", "sha256:93bb890de83069061af696b23f94fd32fb3c2dad3c91ee645e8add56085f1882", { Sku: "sku" }],
+  ["uq_pair", "tests.uq_pair", "sha256:2538cceafb6dcbce22ef11b932ecb804af5f96bc3aaedff692a52d3640433e60", { Sku: "sku", Alt: "second" }],
+  ["uq_alias", "tests.uq_alias", "sha256:77a77a394ebd8bf71e14b9b6f2cea4978c25d4e705fd12364f660edbf6c63b1f", { Sku: "sku", alt: "second" }],
+  ["uq_alpha", "tests.uq_alpha", "sha256:53aeaf2ea9b25e85ade6b15fc04c7653e7b206c87e258f1aa74dd32a840a1389", { Sku: "sku" }],
+  ["uq_beta", "tests.uq_beta", "sha256:45ed62a64c91f6d815d3ec975c4a4a1b2ce07b6e7262a32d828673cf10899586", { Sku: "sku" }],
+];
+
+type RefusalOp = ["open", string | null] | ["pull", string] | ["commit", [string, string, string, string][]];
+
+test("vectors refusals.msgpack: every row TS can perform", async () => {
+  const rows = decode(await readFile(join(vectors, "refusals.msgpack"))) as [string, RefusalOp[], [string, string, string, string] | null][];
+  const definitions = new Map(
+    REFUSAL_SCHEMAS.map(([type, schemaName, schemaId, indexes]) => [
+      schemaName,
+      defineDocumentType({
+        type,
+        schemaId,
+        schemaName,
+        schemaVersion: `${schemaName}.v1`,
+        schema: z.object({ sku: z.string(), second: z.string() }),
+        codec: codecs.slots<{ sku: string; second: string }>({ 0: ["sku", codecs.string], 1: ["second", codecs.string] }, `Uq${type}`),
+        indexes,
+      }),
+    ]),
+  );
+  const dir = await mkdtemp(join(tmpdir(), "uidx-refusals-"));
+  let walked = 0;
+  try {
+    for (const [label, ops, refused] of rows) {
+      if (ops.some((op) => op[0] === "commit" && op[1].length > 1)) continue;
+      const file = join(dir, `${walked}.cc`);
+      let cache: CultCache | undefined;
+      const perform = async (op: RefusalOp) => {
+        if (op[0] === "open") {
+          if (op[1] !== null) await copyFile(join(vectors, op[1]), file);
+          let builder = CultCache.builder().withGenericStore(new SingleFileMessagePackBackingStore(file));
+          for (const definition of definitions.values()) builder = builder.withDocumentType(definition);
+          cache = builder.build();
+          await cache.pullAllBackingStores();
+        } else if (op[0] === "pull") {
+          await copyFile(join(vectors, op[1]), file);
+          await cache!.pullAllBackingStores();
+        } else {
+          for (const [key, schema, sku, second] of op[1]) await cache!.put(definitions.get(schema)!, key, { sku, second });
+        }
+      };
+      for (const op of ops.slice(0, -1)) await perform(op);
+      const last = ops[ops.length - 1];
+      if (refused === null) {
+        await perform(last);
+      } else {
+        const [k1, k2, schema, alias] = refused;
+        const before = last[0] === "commit" || (last[0] === "open" && last[1] === null)
+          ? (existsSync(file) ? await readFile(file) : Buffer.alloc(0))
+          : await readFile(join(vectors, last[1]!));
+        await assert.rejects(perform(last), { message: refusal(k1, k2, schema, alias) }, label);
+        assert.deepEqual(existsSync(file) ? await readFile(file) : Buffer.alloc(0), before, `${label}: the file is untouched`);
+      }
+      walked++;
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+  assert.equal(walked, 18);
+});
+
 test("a refused load leaves the cache's prior state as it was, and a later good load still works", async () => {
   const dir = await mkdtemp(join(tmpdir(), "uidx-load-"));
   try {
@@ -486,29 +548,4 @@ test("registerIndex of a second unique alias judges it, naming the two smallest 
   await assert.rejects(cache.registerIndex(document, "b", "b"), { message: refusal("m", "q", "tests.pair", "b") });
   assert.equal(cache.getKeyByIndex(document, "a", "1"), "z", "the alias already installed is intact");
   assert.equal(cache.getKeyByIndex(document, "b", "s"), undefined);
-});
-
-test("verdict parity: the same stores are refused whatever the load order, and the first collision refuses (text is informational)", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "uidx-verdict-"));
-  try {
-    // Three records, one pair colliding; whichever position the pair has in the file, the store is refused and a clean store opens.
-    const roles = pair({ roles: { a: "a" } });
-    for (const [name, values, refused] of [
-      ["pair-first", ["s", "s", "t"], true],
-      ["pair-last", ["t", "s", "s"], true],
-      ["pair-split", ["s", "t", "s"], true],
-      ["distinct", ["r", "s", "t"], false],
-    ] as const) {
-      const file = join(dir, `${name}.cc`);
-      const writer = CultCache.builder().withDocumentType(roles).withGenericStore(new SingleFileMessagePackBackingStore(file)).build();
-      for (const [i, a] of values.entries()) await writer.put(roles, `r${i}`, { a });
-      const unique = pair({ indexes: { a: "a" } });
-      const reader = CultCache.builder().withDocumentType(unique).withGenericStore(new SingleFileMessagePackBackingStore(file)).build();
-      if (refused) await assert.rejects(reader.pullAllBackingStores(), /both hold unique index 'a'/u, name);
-      else await reader.pullAllBackingStores();
-      assert.equal(reader.snapshot().length, refused ? 0 : 3, name);
-    }
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
 });
