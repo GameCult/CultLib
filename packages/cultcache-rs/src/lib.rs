@@ -4462,6 +4462,43 @@ mod tests {
         Ok(())
     }
 
+    /// An envelope whose schema id names another registered type is refused at admission, whether or not this cache holds the
+    /// key: a stale cache (another writer put Settings at the key after this pull) and a fresh key both, on every envelope path
+    /// and in an SoA image, the store unchanged. The pull resolves a record's type from that id, so admitting it would store a
+    /// Note that every reload serves as Settings.
+    #[test]
+    fn retype_an_envelope_claiming_another_registered_types_id_is_refused_at_admission() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("cache.cc");
+        let open = || -> Result<CultCache> {
+            let mut cache = CultCache::new();
+            cache.register_registry(TestEntries)?;
+            cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+            cache.pull_all_backing_stores()?;
+            Ok(cache)
+        };
+        let mut stale = open()?;
+        open()?.put("held-elsewhere", &settings_one())?;
+        let before = fs::read(&path)?;
+        for key in ["held-elsewhere", "fresh"] {
+            let (mut stamped, _) = stale.prepare_entry(key, &note_one())?;
+            stamped.schema_id = Some(Settings::TYPE.to_string());
+            for error in [
+                stale.put_envelope::<Note>(stamped.clone()).unwrap_err(),
+                stale.put_raw_envelope(stamped.clone()).unwrap_err(),
+                stale.put_prepared_batch(vec![stamped.clone()]).unwrap_err(),
+                stale.load_soa(CultCacheSoaTable::from_envelopes(vec![stamped.clone()])).unwrap_err(),
+            ] {
+                let refusal = retype_refusal(&error);
+                assert_eq!((refusal.record_key.as_str(), refusal.schema_id.as_str()), (key, Settings::TYPE), "{error:#}");
+            }
+        }
+        assert!(stale.snapshot().is_empty());
+        assert_eq!(fs::read(&path)?, before, "nothing reached the store");
+        assert_eq!(open()?.get_required::<Settings>("held-elsewhere")?, settings_one());
+        Ok(())
+    }
+
     /// A store that holds two records at one key, one stamped with the other's schema id, is refused at the pull: both resolve
     /// to one type, and the cache would otherwise keep whichever came last.
     #[test]
