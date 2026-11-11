@@ -637,6 +637,8 @@ fork = {
               messagePackHex=hx(DUP_LIST), refusal=order_shared(DUP_LIST["forks"])[0])],
     "listScenarios": [{"name": l["name"], "ordinal": l["ordinal"], "entries": l["entries"], "steps": l["steps"]} for l in LISTS],
     "listShortPages": SHORT_PAGES,
+    "doorFaults": [{"name": f"{r}_door_answers_request_id_conflict_the_client_sees_unavailable", "route": r, "doorCode": "request_id_conflict", "clientCode": "unavailable", "httpStatus": 503} for r in ("read", "list")]
+                  + [{"name": "answer_door_answers_request_id_conflict_the_client_sees_it", "route": "answer", "doorCode": "request_id_conflict", "clientCode": "request_id_conflict", "httpStatus": HTTP["request_id_conflict"]}],
     "mindRoutes": {"minds": MINDS, "forks": MIND_FORKS, "cases": MINDCASES, "sameResponse": SAME_RESPONSE},
     "authCases": [{"name": a[0], "route": a[1], "token": a[2], "expect": a[3], "huginn_down": len(a) > 4} for a in AUTH],
   },

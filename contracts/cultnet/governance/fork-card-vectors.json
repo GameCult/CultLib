@@ -7505,6 +7505,29 @@
         ]
       }
     ],
+    "doorFaults": [
+      {
+        "name": "read_door_answers_request_id_conflict_the_client_sees_unavailable",
+        "route": "read",
+        "doorCode": "request_id_conflict",
+        "clientCode": "unavailable",
+        "httpStatus": 503
+      },
+      {
+        "name": "list_door_answers_request_id_conflict_the_client_sees_unavailable",
+        "route": "list",
+        "doorCode": "request_id_conflict",
+        "clientCode": "unavailable",
+        "httpStatus": 503
+      },
+      {
+        "name": "answer_door_answers_request_id_conflict_the_client_sees_it",
+        "route": "answer",
+        "doorCode": "request_id_conflict",
+        "clientCode": "request_id_conflict",
+        "httpStatus": 409
+      }
+    ],
     "mindRoutes": {
       "minds": {
         "gamecult-chat": "huginn-gamecult-chat.sock",

@@ -544,6 +544,15 @@ test("fork transport: a page may stop short of limit, and a first entry past the
   assert.deepEqual(covered, [3, 2, 1, 0, 2, 1, 0, 1]);
 });
 
+test("fork transport: a door request_id_conflict is a fault on read and list (503 unavailable) and a refusal only on the answer", () => {
+  assert.deepEqual(fork.transport.doorFaults.map((c: any) => c.route), ["read", "list", "answer"]);
+  for (const c of fork.transport.doorFaults) {
+    const got = c.route === "answer" ? c.doorCode : c.doorCode === "request_id_conflict" ? "unavailable" : c.doorCode;
+    assert.equal(c.clientCode, got, c.name);
+    assert.equal(c.httpStatus, got === "unavailable" ? fork.unavailable[0].httpStatus : fork.doorRefusals.find((r: any) => r.name === got).httpStatus, c.name);
+  }
+});
+
 test("fork transport: auth is bearer, then audience, then scope, and a votes token touches nothing", () => {
   const codes = (forkSchema.$defs.refusal.properties.code as { enum: string[] }).enum;
   const seen = new Set<string>();

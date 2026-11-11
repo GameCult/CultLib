@@ -742,6 +742,20 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void ForkTransport_ADoorRequestIdConflict_IsAFaultOnReadAndList_AndARefusalOnlyOnTheAnswer()
+        {
+            var cases = Fork["transport"]!["doorFaults"]!.AsArray();
+            Assert.That(cases.Select(c => S(c!["route"])), Is.EqualTo(new[] { "read", "list", "answer" }));
+            foreach (var c in cases)
+            {
+                var got = S(c!["route"]) == "answer" ? S(c["doorCode"]) : "unavailable";
+                Assert.That(S(c["clientCode"]), Is.EqualTo(got), S(c["name"]));
+                var status = got == "unavailable" ? 503 : Fork["doorRefusals"]!.AsArray().Single(r => S(r!["name"]) == got)!["httpStatus"]!.GetValue<int>();
+                Assert.That(c["httpStatus"]!.GetValue<int>(), Is.EqualTo(status), S(c["name"]));
+            }
+        }
+
+        [Test]
         public void ForkTransport_Auth_BearerThenAudienceThenScope_AVotesTokenTouchesNothing()
         {
             var schema = JsonNode.Parse(File.ReadAllText(Path.Combine(RepoRoot(), "contracts", "cultnet", ForkSchema)))!;
