@@ -66,7 +66,10 @@ What this establishes:
   hold (a fresh key, or one another writer filled after this cache's pull) the single-file store's commit guard judges by
   the stored and claimed schema ids, so an envelope claiming another registered type's id is refused earlier, at every
   envelope admission (`refuse_claimed_id`, the pull's own `resolve_registered_type` lookup); an id naming no registered type
-  passes. Store-level writers called directly (`push`, `insert_entry_if_absent`, compare-and-swap) trust the claimed id.
+  passes, trusted as claimed: an envelope under such an id can replace another writer's record stored under it at a key
+  this cache does not hold, or be served as another type by a reader that registers the type the id names (Soul g8a, g8c,
+  open: which ids a Rust type owns is not declared to CultCache). Store-level writers called directly (`push`,
+  `insert_entry_if_absent`, compare-and-swap) trust the claimed id.
   The cache carries an unregistered type's records as foreign and walks the vector's 12 rows.
 - Interop (unproven): a Python store holding A and B at k fails C# decode first on payload encoding (Python's
   lambda-defined document wrote JSON payloads), so what C# does with two records at one key was not reached.
