@@ -5,6 +5,7 @@ A file may be replaced by a flush or a commit exactly when the runtime's own rea
 covers open, flush and commit. Each vector is the bytes named; the trailing and truncated ones are cut from v3-base.
 """
 import pathlib
+import unicodedata
 
 import msgpack
 
@@ -12,6 +13,13 @@ here = pathlib.Path(__file__).resolve().parent
 whole = (here.parent / "v3-base.msgpack").read_bytes()
 pack = lambda value: msgpack.packb(value, use_bin_type=True)
 base = msgpack.unpackb(whole, raw=False)
+# A second published schema, and a record of it under the key alpha.
+other_entry = ["vectors.other", "vectors.other", "vectors.other.v1", "vectors.other", '{"schemaName":"vectors.other","schemaVersion":"vectors.other.v1","members":[]}', ["vectors.other"], []]
+other_record = ["alpha", "vectors.other"] + base[2][0][2:]
+# The same visible key as U+00E9 (NFC) and U+0065 U+0301 (NFD): equal after normalisation, unequal ordinally.
+nfc, nfd = "\u00e9", "e\u0301"
+assert unicodedata.normalize("NFC", nfd) == unicodedata.normalize("NFC", nfc) and nfc != nfd
+assert "Alpha".casefold() == "alpha" and "Alpha" != "alpha"
 
 vectors = {
     "zero-byte": b"",
@@ -55,6 +63,16 @@ vectors = {
     "variant-slot-v3": pack([base[0], base[1], base[2] + [["gamma"] + base[2][0][1:3] + [b"", ["alpha", [[0, [[0, ""]], "", "gamma"]]]]]]),
     # v3-base with a fourth top-level slot after the records.
     "extra-top-slot": pack(base + [0]),
+    # A store holding two records under one key is unreadable, whatever else they agree or differ on. Every record names a
+    # schema the catalog publishes, so the shared key is the only defect.
+    "dup-key-same-schema-v3": pack([base[0], base[1], base[2] + [base[2][0]]]),
+    # Two records under one key, each naming a different published schema: the key alone is the identity.
+    "dup-key-other-schema-v3": pack([base[0], base[1] + [other_entry], [base[2][0], other_record, base[2][1]]]),
+    # alpha twice with different payload bytes: last-wins would silently pick one.
+    "dup-key-different-payload-v3": pack([base[0], base[1], base[2] + [base[2][0][:3] + [b"\x92\xa5alpha\x09"]]]),
+    # Keys are ordinal strings: no case folding and no Unicode normalisation, so these are distinct keys and the store reads.
+    "distinct-keys-case-v3": pack([base[0], base[1], base[2] + [["Alpha"] + base[2][0][1:]]]),
+    "distinct-keys-nfd-v3": pack([base[0], base[1], [[nfc] + base[2][0][1:], [nfd] + base[2][1][1:]]]),
 }
 vectors["legacy-trailing"] = vectors["legacy-envelopes"] + b"\x01\x02\x03"
 for name, data in vectors.items():
