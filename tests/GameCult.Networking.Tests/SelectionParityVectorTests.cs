@@ -586,11 +586,11 @@ namespace GameCult.Networking.Tests
             public string Name = string.Empty;
 
             [Key(1)]
-            [CultIndex("kind")]
+            [CultRole("kind")]
             public string Kind = string.Empty;
 
             [Key(2)]
-            [CultIndex("mass")]
+            [CultRole("mass")]
             public float Mass;
         }
 
@@ -631,7 +631,7 @@ namespace GameCult.Networking.Tests
             public string Name = string.Empty;
 
             [Key(1)]
-            [CultIndex("narrow_ref")]
+            [CultRole("narrow_ref")]
             [CultReference(typeof(ParityLeafA))]
             public CultRecordRef<ParityLeafA> NarrowRef;
         }

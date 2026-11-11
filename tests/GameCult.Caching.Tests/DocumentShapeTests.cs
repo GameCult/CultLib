@@ -394,7 +394,7 @@ namespace GameCult.Caching.Tests
         public class Gear
         {
             [Key(0)] [CultName] public string Name { get; set; } = "";
-            [Key(1)] [CultIndex("slot")] public string Slot { get; set; } = "";
+            [Key(1)] [CultRole("slot")] public string Slot { get; set; } = "";
         }
 
         [CultDocument("shape.weapon", "shape.weapon.v1")]

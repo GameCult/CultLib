@@ -142,17 +142,17 @@ namespace GameCult.Mesh
 
         /// <summary>Artifact kind, such as asset, build, or package.</summary>
         [Key(1)]
-        [CultIndex]
+        [CultRole]
         public string Kind { get; set; } = CultMeshCdnArtifactKinds.Asset;
 
         /// <summary>Caller-defined artifact version.</summary>
         [Key(2)]
-        [CultIndex]
+        [CultRole]
         public string Version { get; set; } = string.Empty;
 
         /// <summary>SHA-256 hash of the full materialized artifact.</summary>
         [Key(3)]
-        [CultIndex]
+        [CultRole]
         public string ContentHash { get; set; } = string.Empty;
 
         /// <summary>Full materialized artifact size.</summary>

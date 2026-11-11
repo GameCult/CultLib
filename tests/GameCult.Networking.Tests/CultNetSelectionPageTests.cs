@@ -130,7 +130,7 @@ namespace GameCult.Networking.Tests
             public string Name = string.Empty;
 
             [Key(1)]
-            [CultIndex("kind")]
+            [CultRole("kind")]
             public string Kind = string.Empty;
         }
 

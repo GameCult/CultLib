@@ -20,14 +20,14 @@ namespace GameCult.Mesh
         /// Stable fact identifier.
         /// </summary>
         [Key(0)]
-        [CultIndex]
+        [CultRole]
         public string FactId { get; set; } = string.Empty;
 
         /// <summary>
         /// Shard containing the simulation.
         /// </summary>
         [Key(1)]
-        [CultIndex]
+        [CultRole]
         public string ShardId { get; set; } = string.Empty;
 
         /// <summary>
@@ -40,21 +40,21 @@ namespace GameCult.Mesh
         /// Simulation frame or tick.
         /// </summary>
         [Key(3)]
-        [CultIndex]
+        [CultRole]
         public long Frame { get; set; }
 
         /// <summary>
         /// Subject the fact is about.
         /// </summary>
         [Key(4)]
-        [CultIndex]
+        [CultRole]
         public string SubjectId { get; set; } = string.Empty;
 
         /// <summary>
         /// Fact kind, such as hit, collision, or ownership.
         /// </summary>
         [Key(5)]
-        [CultIndex]
+        [CultRole]
         public string ClaimKind { get; set; } = string.Empty;
 
         /// <summary>

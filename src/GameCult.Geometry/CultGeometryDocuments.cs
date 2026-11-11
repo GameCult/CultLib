@@ -32,7 +32,7 @@ namespace GameCult.Geometry
         public string DomainId { get; set; } = string.Empty;
 
         [Key(1)]
-        [CultIndex]
+        [CultRole]
         public string RootKey { get; set; } = string.Empty;
 
         [Key(2)]
@@ -164,7 +164,7 @@ namespace GameCult.Geometry
         public CultRecordRef<CultGeometryDomainDocument> DomainKey { get; set; }
 
         [Key(2)]
-        [CultIndex]
+        [CultRole]
         public string WorkerGroup { get; set; } = string.Empty;
 
         [Key(3)]
@@ -326,7 +326,7 @@ namespace GameCult.Geometry
         public CultRecordRef<CultGeometrySelectedCutManifest> CutKey { get; set; }
 
         [Key(2)]
-        [CultIndex]
+        [CultRole]
         public string SelectedCutId { get; set; } = string.Empty;
 
         [Key(3)]

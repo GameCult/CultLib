@@ -580,7 +580,7 @@ namespace GameCult.Caching.Tests
             {
                 cache.Override<VariantGear>(nameof(VariantGear.Name), "laser big")
             })));
-            Assert.That(inherited.Message, Does.Contain(BigKey.Value).And.Contain(BaseKey.Value).And.Contain("code").And.Contain("l1"));
+            Assert.That(inherited.Message, Does.Contain(BigKey.Value).And.Contain(BaseKey.Value).And.Contain("code").And.Not.Contain("l1"), "the value is not echoed");
 
             var explicitly = Refused(() => cache.Commit(batch => batch.UpsertVariant(BigKey, BaseKey, new[]
             {
@@ -631,7 +631,7 @@ namespace GameCult.Caching.Tests
                 SeedBig(cache);
 
                 var refused = Refused(() => cache.Commit(batch => batch.Upsert(typeof(VariantGear), Other("laser big"), other)));
-                Assert.That(refused.Message, Does.Contain(other.Value).And.Contain(BigKey.Value).And.Contain("code").And.Contain("laser big"));
+                Assert.That(refused.Message, Does.Contain(other.Value).And.Contain(BigKey.Value).And.Contain("code").And.Not.Contain("laser big"));
 
                 var single = Assert.ThrowsAsync<InvalidOperationException>(
                     () => cache.UpsertAsync(Other("laser big"), new CultRecordHandle<VariantGear>(other)))!;
@@ -660,7 +660,7 @@ namespace GameCult.Caching.Tests
                 cache.Commit(batch => batch.Upsert(typeof(VariantGear), Other("laser big"), other));
 
                 var refused = Refused(() => SeedBig(cache));
-                Assert.That(refused.Message, Does.Contain(BigKey.Value).And.Contain(other.Value).And.Contain("code").And.Contain("laser big"));
+                Assert.That(refused.Message, Does.Contain(BigKey.Value).And.Contain(other.Value).And.Contain("code").And.Not.Contain("laser big"));
                 Assert.That(cache.Get(BigKey), Is.Null, "nothing landed");
 
                 // The same batch, either staging order: the result is what is judged.
@@ -685,8 +685,9 @@ namespace GameCult.Caching.Tests
                 }));
                 Assert.That(sameBatchVariantFirst.Message, Does.Contain(BigKey.Value).And.Contain("taker"));
 
-                // Plain-vs-plain sharing is not this rule's business.
-                Assert.DoesNotThrow(() => cache.Commit(batch => batch.Upsert(typeof(VariantGear), Other("l1"), new CultRecordKey("twin"))));
+                // Plain-vs-plain sharing is the same rule.
+                var plain = Refused(() => cache.Commit(batch => batch.Upsert(typeof(VariantGear), Other("l1"), new CultRecordKey("twin"))));
+                Assert.That(plain.Message, Does.Contain("twin").And.Contain(BaseKey.Value));
             }
 
             using var reopened = Open(path);
@@ -819,7 +820,7 @@ namespace GameCult.Caching.Tests
             using var a = Open(path);
             using (var b = Open(path))
                 b.Commit(batch => batch.Upsert(typeof(VariantGear), Other("zc"), z));
-            a.Commit(batch => batch.Upsert(typeof(VariantGear), Other("yc"), new CultRecordKey("y")));
+            a.Commit(batch => batch.Upsert(typeof(VariantOther), new VariantOther { Name = "yc" }, new CultRecordKey("y")));
 
             var conflict = Assert.Throws<CultWriteConflictException>(() => SeedBig(a))!;
 
@@ -1100,21 +1101,7 @@ namespace GameCult.Caching.Tests
             Assert.That(reloaded.Get<VariantGear>(BigKey)!.Tags, Is.EqualTo(new[] { "beam", "pierce" }));
         }
 
-        // ---- the held index is truthful: every holder of a value, so no rule judges a variant against a lossy view ----
-
         private static VariantGear Named(string name, string code) => new() { Name = name, Power = 1, Code = code };
-
-        private static CultRecordKey[] SharedCodePair(CultCache cache)
-        {
-            var p1 = new CultRecordKey("p1");
-            var p2 = new CultRecordKey("p2");
-            cache.Commit(batch =>
-            {
-                batch.Upsert(typeof(VariantGear), Named("p1", "x"), p1);
-                batch.Upsert(typeof(VariantGear), Named("p2", "x"), p2);
-            });
-            return new[] { p1, p2 };
-        }
 
         private static void VariantOnCode(CultCache cache, string code) =>
             cache.Commit(batch => batch.UpsertVariant(BigKey, BaseKey, new[]
@@ -1122,73 +1109,6 @@ namespace GameCult.Caching.Tests
                 cache.Override<VariantGear>(nameof(VariantGear.Name), "laser big"),
                 cache.Override<VariantGear>(nameof(VariantGear.Code), code)
             }));
-
-        [Test]
-        public void RemovingTheHolderADuplicateValueFindsLeavesTheOtherFindable()
-        {
-            var path = PathOf("gear.cc");
-            using (var cache = Open(path))
-            {
-                var pair = SharedCodePair(cache);
-                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p1"), "the smallest key");
-
-                cache.Remove(pair[0]);
-                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p2"), "removing the holder finds the other one");
-
-                cache.Commit(batch => batch.Upsert(typeof(VariantGear), Named("p1", "x"), pair[0]));
-                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p1"));
-                cache.Remove(pair[1]);
-                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p1"), "removing the other changes nothing");
-                cache.Remove(pair[0]);
-                Assert.That(cache.GetByIndex<VariantGear>("code", "x"), Is.Null);
-                cache.BackingStores[0].PushAll();
-            }
-
-            using var reopened = Open(path);
-            Assert.That(reopened.GetByIndex<VariantGear>("code", "x"), Is.Null);
-        }
-
-        [Test]
-        public void AVariantOnAValueAPlainRecordStillHoldsAfterItsTwinWasRemovedIsRefusedAndTheStoreReopens()
-        {
-            var path = PathOf("gear.cc");
-            using (var cache = Open(path))
-            {
-                SeedBase(cache);
-                var pair = SharedCodePair(cache);
-                cache.Remove(pair[1]);
-
-                var refused = Refused(() => VariantOnCode(cache, "x"));
-                Assert.That(refused.Message, Does.Contain(BigKey.Value).And.Contain("p1").And.Contain("code").And.Contain("'x'"));
-                Assert.That(cache.Get(BigKey), Is.Null, "nothing landed");
-                cache.BackingStores[0].PushAll();
-            }
-
-            using var reopened = Open(path);
-            Assert.That(reopened.Get(BigKey), Is.Null);
-            Assert.That(reopened.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p1"));
-        }
-
-        [Test]
-        public void AVariantOnAValueAPlainRecordStillHoldsAfterItsTwinChangedItsValueIsRefusedAndTheStoreReopens()
-        {
-            var path = PathOf("gear.cc");
-            using (var cache = Open(path))
-            {
-                SeedBase(cache);
-                var pair = SharedCodePair(cache);
-                cache.Commit(batch => batch.Upsert(typeof(VariantGear), Named("p2", "y"), pair[1]));
-
-                var refused = Refused(() => VariantOnCode(cache, "x"));
-                Assert.That(refused.Message, Does.Contain(BigKey.Value).And.Contain("p1").And.Contain("'x'"));
-                Assert.DoesNotThrow(() => VariantOnCode(cache, "z"), "an unshared value is fine");
-                cache.BackingStores[0].PushAll();
-            }
-
-            using var reopened = Open(path);
-            Assert.That(reopened.GetByIndex<VariantGear>("code", "z")!.Name, Is.EqualTo("laser big"));
-            Assert.That(reopened.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p1"));
-        }
 
         // ---- a merge onto the file is judged on the set the file will hold ----
 
@@ -1218,7 +1138,7 @@ namespace GameCult.Caching.Tests
                 var conflict = Assert.Throws<CultWriteConflictException>(Write)!;
                 Assert.That(conflict.ChangedKeys, Does.Contain(BigKey.Value));
                 var refused = Refused(Write);
-                Assert.That(refused.Message, Does.Contain(other.Value).And.Contain(BigKey.Value).And.Contain("code").And.Contain("shared"), "the retry is judged by Resolve");
+                Assert.That(refused.Message, Does.Contain(other.Value).And.Contain(BigKey.Value).And.Contain("code").And.Not.Contain("shared"), "the retry is judged by Resolve");
                 Assert.That(b.Get(other), Is.Null, "nothing landed in memory");
             }
 
@@ -1408,24 +1328,24 @@ namespace GameCult.Caching.Tests
         {
             var path = PathOf("gear.cc");
             var other = new CultRecordKey("other");
-            var narrow = CultDocumentRegistry.ForTypes(new[] { typeof(VariantGear) });
+            var narrow = CultDocumentRegistry.ForTypes(new[] { typeof(VariantOther) });
             using (var seed = Open(path))
                 SeedBase(seed);
 
             using (var a = Open(path))
             using (var b = Open(path, registry: narrow))
             {
-                a.Commit(batch => batch.Upsert(typeof(VariantOther), new VariantOther { Name = "foreign" }, new CultRecordKey("foreign")));
+                a.Commit(batch => batch.Upsert(typeof(VariantGear), Named("foreign", "foreign-code"), new CultRecordKey("foreign")));
                 Assert.That(b.Commit(batch =>
                 {
                     batch.Expect(other, null);
-                    batch.Upsert(typeof(VariantGear), Named("other", "fine"), other);
+                    batch.Upsert(typeof(VariantOther), new VariantOther { Name = "fine" }, other);
                 }), Is.True);
             }
 
             using var reopened = Open(path);
-            Assert.That(reopened.Get<VariantGear>(other), Is.Not.Null);
-            Assert.That(reopened.Get<VariantOther>(new CultRecordKey("foreign")), Is.Not.Null, "the other writer's record survives the merge");
+            Assert.That(reopened.Get<VariantOther>(other), Is.Not.Null);
+            Assert.That(reopened.Get<VariantGear>(new CultRecordKey("foreign")), Is.Not.Null, "the other writer's record survives the merge");
         }
 
         [Test]
@@ -1445,28 +1365,6 @@ namespace GameCult.Caching.Tests
                     batch.Expect(other, null);
                     batch.Upsert(typeof(VariantGear), Named("other", "shared"), other);
                 }));
-            }
-        }
-
-        [Test]
-        public void PlainDuplicatesFindTheSmallestKeyLiveAfterAFlushAndAfterAReopen()
-        {
-            var path = PathOf("gear.cc");
-            using (var cache = Open(path))
-            {
-                cache.Commit(batch => batch.Upsert(typeof(VariantGear), Named("nb", "x"), new CultRecordKey("b")));
-                cache.Commit(batch => batch.Upsert(typeof(VariantGear), Named("na", "x"), new CultRecordKey("a")));
-                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("na"), "live");
-                cache.BackingStores[0].PushAll();
-                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("na"), "after a flush");
-            }
-
-            using (var reopened = Open(path))
-            {
-                Assert.That(reopened.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("na"), "after a reopen");
-                reopened.Remove(new CultRecordKey("a"));
-                reopened.Commit(batch => batch.Upsert(typeof(VariantGear), Named("na", "x"), new CultRecordKey("a")));
-                Assert.That(reopened.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("na"), "rewriting the smaller key does not change the choice");
             }
         }
 

@@ -493,11 +493,11 @@ namespace GameCult.Networking.Tests
             public string Name = string.Empty;
 
             [Key(1)]
-            [CultIndex("mass")]
+            [CultRole("mass")]
             public float Mass;
 
             [Key(2)]
-            [CultIndex("kind")]
+            [CultRole("kind")]
             public string Kind = string.Empty;
         }
 

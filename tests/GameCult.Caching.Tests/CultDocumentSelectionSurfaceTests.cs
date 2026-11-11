@@ -226,8 +226,8 @@ namespace GameCult.Caching.Tests
         public void DuplicateIndexAliasOnTwoDifferentlyNamedMembersIsRefusedByName()
         {
             var type = Document("DupAlias");
-            Field(type, "First", typeof(string), Key(0), IndexAttr("shared"));
-            Field(type, "Second", typeof(string), Key(1), IndexAttr("shared"));
+            Field(type, "First", typeof(string), Key(0), RoleAttr("shared"));
+            Field(type, "Second", typeof(string), Key(1), RoleAttr("shared"));
             var message = Assert.Throws<InvalidOperationException>(() => CultDocumentRegistry.ForTypes(new[] { type.CreateType()! }))!.Message;
 
             Assert.That(message, Does.Contain("DupAlias"));
@@ -236,7 +236,7 @@ namespace GameCult.Caching.Tests
             Assert.That(message, Does.Contain("shared"));
         }
 
-        // R-AL/SM-6: a plain data member's bare name (it declares no [CultIndex], so its role in
+        // R-AL/SM-6: a plain data member's bare name (it declares no [CultRole], so its role in
         // ReferencesOf/ReferenceMembers falls back to its own MemberName) colliding with a reference
         // member's explicit alias. D10 above only groups members that declare an alias and misses
         // this; before the fix this registered without error and then every hop through the
@@ -246,7 +246,7 @@ namespace GameCult.Caching.Tests
         {
             var type = Document("OwnerCollision");
             Field(type, "Owner", typeof(string), Key(0));
-            Field(type, "Ref", typeof(CultRecordRef<FixtureLeafA>), Key(1), IndexAttr("Owner"));
+            Field(type, "Ref", typeof(CultRecordRef<FixtureLeafA>), Key(1), RoleAttr("Owner"));
             var message = Assert.Throws<InvalidOperationException>(() => CultDocumentRegistry.ForTypes(new[] { type.CreateType()! }))!.Message;
 
             Assert.That(message, Does.Contain("OwnerCollision"));
@@ -295,8 +295,8 @@ namespace GameCult.Caching.Tests
         private static CustomAttributeBuilder Key(int slot) =>
             new(typeof(KeyAttribute).GetConstructor(new[] { typeof(int) })!, new object[] { slot });
 
-        private static CustomAttributeBuilder IndexAttr(string alias) =>
-            new(typeof(CultIndexAttribute).GetConstructor(new[] { typeof(string) })!, new object?[] { alias });
+        private static CustomAttributeBuilder RoleAttr(string alias) =>
+            new(typeof(CultRoleAttribute).GetConstructor(new[] { typeof(string) })!, new object?[] { alias });
 
         private static CustomAttributeBuilder ReferenceAttr(Type? targetType, bool many) =>
             new(typeof(CultReferenceAttribute).GetConstructor(new[] { typeof(Type), typeof(bool) })!, new object?[] { targetType, many });
@@ -308,7 +308,7 @@ namespace GameCult.Caching.Tests
             public string Name = string.Empty;
 
             [Key(1)]
-            [CultIndex("mass")]
+            [CultRole("mass")]
             public float Mass;
         }
 
@@ -325,7 +325,7 @@ namespace GameCult.Caching.Tests
         public sealed class FixtureLeafB : FixtureMiddle
         {
             [Key(2)]
-            [CultIndex("weight")]
+            [CultRole("weight")]
             public decimal? Weight;
         }
 
@@ -341,19 +341,19 @@ namespace GameCult.Caching.Tests
             public string Name = string.Empty;
 
             [Key(1)]
-            [CultIndex("big_integer")]
+            [CultRole("big_integer")]
             public long BigInteger;
 
             [Key(2)]
-            [CultIndex("trimmed_decimal")]
+            [CultRole("trimmed_decimal")]
             public decimal TrimmedDecimal;
 
             [Key(3)]
-            [CultIndex("wide_double")]
+            [CultRole("wide_double")]
             public double WideDouble;
 
             [Key(4)]
-            [CultIndex("tiny_double")]
+            [CultRole("tiny_double")]
             public double TinyDouble;
         }
 

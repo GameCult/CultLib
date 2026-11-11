@@ -581,7 +581,7 @@ namespace GameCult.Networking.Tests
                 return instance;
             }
 
-            // A plain data member "Owner" with no [CultIndex] (its role falls back to its bare name)
+            // A plain data member "Owner" with no [CultRole] (its role falls back to its bare name)
             // and a reference member whose alias is explicitly "Owner" - the exact shape Soul probed.
             var ownerMember = MakeMember(typeof(GuardProbeShape).GetField(nameof(GuardProbeShape.Owner))!,
                 typeof(string), 0, indexAlias: null, isReference: false, targetType: null);
