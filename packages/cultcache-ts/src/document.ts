@@ -131,6 +131,12 @@ export function encodeDocumentPayload(definition: AnyCultCacheDocumentDefinition
   return documentPayloadFromBytes(bytes);
 }
 
+// Whether the definition declares `name` as a role alias (either `roles` form).
+export function declaresRole(definition: AnyCultCacheDocumentDefinition, name: string): boolean {
+  const roles = definition.roles;
+  return Array.isArray(roles) ? roles.some((entry) => entry.name === name) : roles ? Object.hasOwn(roles, name) : false;
+}
+
 // The schema members of a document: the ones it declares, else those its codec derives, else none.
 export function resolveDocumentMembers(definition: AnyCultCacheDocumentDefinition): readonly CultCacheSchemaCatalogMember[] {
   if (definition.members || !definition.codec) {

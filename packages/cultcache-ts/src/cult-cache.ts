@@ -1,4 +1,5 @@
 import {
+  declaresRole,
   decodeDocumentPayload,
   documentPayloadBytes,
   documentPayloadFromBytes,
@@ -238,6 +239,10 @@ export class CultCache {
     return this.#serial(() => {
       if (!indexName || indexName.trim().length === 0) {
         throw new Error(`CultCache index names for type "${definition.type}" must be non-empty.`);
+      }
+
+      if (declaresRole(definition, indexName)) {
+        throw new Error(`Index "${indexName}" of ${definition.type} is declared as a role; a role is never a unique index.`);
       }
 
       const registered = this.#requireDefinition(definition);
