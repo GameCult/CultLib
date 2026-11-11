@@ -317,7 +317,7 @@ class CultCache:
         structures, running every check and every user extractor; the cache's state is replaced
         only once that build finishes, so a refused load admits nothing."""
         loaded_values: dict[str, dict[str, Any]] = {}
-        read_order: dict[tuple[str, str], Any] = {}  # (type, key) -> value, in the order the stores yielded them
+        read_values: dict[tuple[str, str], Any] = {}  # (type, key) -> value, one per key, the last read wins; the judge is order-free
         loaded_envelopes: dict[str, dict[str, CultCacheEnvelope]] = {}
         loaded_legacy_global_keys: dict[str, str] = {}
         routes, generic = self._state.stores_by_type, self._state.generic_store
@@ -356,10 +356,10 @@ class CultCache:
                 envelope = self._stamped(document, envelope)
                 value = document.decode_payload(envelope.payload)
                 loaded_values.setdefault(envelope.type, {})[envelope.key] = value
-                read_order[(envelope.type, envelope.key)] = value
+                read_values[(envelope.type, envelope.key)] = value
                 loaded_envelopes.setdefault(envelope.type, {})[envelope.key] = envelope
         loaded_names, loaded_indexes, loaded_lookup_keys = self._derive_lookups(
-            [(type, key, value) for (type, key), value in read_order.items()], self._state.name_extractors, self._state.index_extractors
+            [(type, key, value) for (type, key), value in read_values.items()], self._state.name_extractors, self._state.index_extractors
         )
         # Plain attribute assignments: nothing fallible runs once the swap begins.
         (
@@ -627,7 +627,7 @@ class CultCache:
         name_extractors: dict[str, str | Any],
         index_extractors: dict[str, dict[str, str | Any]],
     ) -> tuple[_Names, _Indexes, _LookupKeysByType]:
-        """Builds name and index lookups for the given (type, key, value) records, judged in the order given, in fresh dicts, touching no cache state."""
+        """Builds name and index lookups for the given (type, key, value) records, judged whole and order-free, in fresh dicts, touching no cache state."""
         names: _Names = {}
         indexes: _Indexes = {}
         lookup_keys: _LookupKeysByType = {}
@@ -636,7 +636,7 @@ class CultCache:
             keys = self._lookup_keys_for(value, name_extractors.get(type), index_extractors.get(type, {}))
             lookup_keys.setdefault(type, {})[key] = keys
             landing.append((type, key, keys))
-        # Judged whole, over every type at once and on the file alone (never against what the cache held): a held value can
+        # Judged whole and order-free, over every type at once and on the file alone (never against what the cache held): a held value can
         # have been mutated in place since it was admitted, and another process may have moved a value between records.
         self._refuse_index_sharing(landing, {}, ())
         for type in lookup_keys:
@@ -653,28 +653,35 @@ class CultCache:
         held: dict[tuple[str, str, str], str],
         replaced: Iterable[tuple[str, str]],
     ) -> None:
-        """The one index rule (variants:ruling:unique-indexes), in the order of C# RefuseIndexSharing: within one type and one
-        unique alias, no two records hold one non-blank value, judged on the result. The holders of a value are the landing
-        keys projecting it (in landing order) plus the held key unless this admission replaces it; two distinct holders
-        refuse, naming the two smallest keys (UTF-16 code-unit order) and the alias, never the value. Aliases are judged in
-        UTF-16 order, values in the order they landed."""
+        """The one index rule (variants:ruling:unique-indexes): within one type and one unique alias, no two records hold one
+        non-blank value, judged on the state the admission would leave and never on staging, file or pull order. The holders
+        of a value are the landing keys projecting it plus the held key unless this admission replaces it. Of every
+        (type, alias, value) with two or more distinct holders, the refusal names the least by (alias, its least key, its
+        second-least key, schema name), each compared by UTF-16 code unit, never the value."""
         released = set(replaced)
         landed: dict[tuple[str, str, str], list[str]] = {}
         for type, key, keys in landing:
             for index, index_value in keys.indexes.items():
                 landed.setdefault((type, index, index_value), []).append(key)
-        for (type, index, index_value), keys in sorted(landed.items(), key=lambda item: _utf16_order(item[0][1])):
+        violations: list[tuple[bytes, bytes, bytes, bytes, str, str, str, str]] = []
+        for (type, index, index_value), keys in landed.items():
             held_key = held.get((type, index, index_value))
             if held_key is not None and (type, held_key) not in released:
                 keys = [*keys, held_key]
-            distinct = sorted(dict.fromkeys(keys), key=_utf16_order)
+            distinct = sorted(keys, key=_utf16_order)
             if len(distinct) > 1:
                 document = self._state.documents.get(type)
                 schema_name = (document.schema_name if document is not None else None) or type
-                raise CultCacheError(
-                    f"Records {distinct[0]} and {distinct[1]} ({schema_name}) both hold unique index '{index}'; "
-                    "an index value names one record."
+                violations.append(
+                    (_utf16_order(index), _utf16_order(distinct[0]), _utf16_order(distinct[1]), _utf16_order(schema_name),
+                     index, distinct[0], distinct[1], schema_name)
                 )
+        if violations:
+            *_, index, first, second, schema_name = min(violations, key=lambda violation: violation[:4])
+            raise CultCacheError(
+                f"Records {first} and {second} ({schema_name}) both hold unique index '{index}'; "
+                "an index value names one record."
+            )
 
     def _remove_lookups(self, type: str, key: str) -> None:
         """Removes the lookups the held record produced at admission, handing a name to another held
