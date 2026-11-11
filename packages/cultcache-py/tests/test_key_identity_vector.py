@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import tempfile
 import unittest
@@ -7,8 +8,11 @@ from pathlib import Path
 
 import msgpack
 
+from cultcache_py.cache import CultCacheError
 from cultcache_py import (
     CultCache,
+
+    JsonLinesBackingStore,
     SchemaConflictError,
     SingleFileMessagePackBackingStore,
     database_entry_field,
@@ -36,17 +40,14 @@ DOCUMENTS = {
 }
 LABEL_OF = {document.type: label for label, document in DOCUMENTS.items()}
 
-
 def file_records(path: Path) -> list[list[str]]:
     return sorted([envelope.key, envelope.type] for envelope in SingleFileMessagePackBackingStore(path).pull_all())
-
 
 def stored(path: Path, key: str):
     for envelope in SingleFileMessagePackBackingStore(path).pull_all():
         if envelope.key == key:
             return envelope.schema_id, envelope.stored_at, envelope.payload
     return None
-
 
 class KeyIdentityVectorTests(unittest.TestCase):
     def test_rows(self) -> None:
@@ -56,7 +57,7 @@ class KeyIdentityVectorTests(unittest.TestCase):
             with self.subTest(row=label), tempfile.TemporaryDirectory() as tmp:
                 self.walk(Path(tmp), registered, ops, expect)
                 walked += 1
-        self.assertEqual(walked, 11)
+        self.assertEqual(walked, 12)
 
     def walk(self, tmp: Path, registered: list[str], ops: list, expect: list) -> None:
         refusal, held, file, foreign, kept = expect
@@ -111,7 +112,14 @@ class KeyIdentityVectorTests(unittest.TestCase):
             with self.assertRaises((SchemaConflictError, ValueError, RuntimeError)) as caught:
                 perform(ops[-1])
             if ops[-1][0] == "attach":
-                self.assertIn(key, str(caught.exception))
+                # The key is read out of the refusal's own text (it opens "Record 'key' is held by") and occurs only as a
+                # delimited token, never inside a schema name or other word.
+                message = str(caught.exception)
+                named = re.match(r"Record '([^']*)' is held by", message)
+                self.assertIsNotNone(named, message)
+                self.assertEqual(named.group(1), key)
+                self.assertEqual(len(re.findall(rf"(?<![A-Za-z0-9_]){re.escape(key)}(?![A-Za-z0-9_])", message)), 1)
+                self.assertEqual(message.count(key), 1)
                 for path, before in state["attached"]:
                     self.assertEqual(path.read_bytes(), before)
             else:
@@ -138,7 +146,6 @@ class KeyIdentityVectorTests(unittest.TestCase):
                 self.assertIsNotNone(stored(vector, key))
                 self.assertEqual(stored(path, key), stored(vector, key))
 
-
 def alpha_beta(*names: str, store=None) -> CultCache:
     made = CultCache.builder()
     for name in names:
@@ -147,8 +154,32 @@ def alpha_beta(*names: str, store=None) -> CultCache:
         made.add_generic_store(store)
     return made.build()
 
-
 class KeyIdentityTests(unittest.TestCase):
+    def test_two_global_types_are_refused_in_one_cache_and_a_store_holding_both_does_not_load(self) -> None:
+        # C# refuses a second persisted global on pull (cultcache-store-composition.md, "Globals never invented"); the Python
+        # JSONL store and a cache with no store used to let two global types share __global__, so such a file can exist.
+        ga = define_database_entry_type(
+            "tests.ki_ga", [database_entry_field("text", 0, codec=t.string)], schema_id="sha256:" + "1" * 64, global_document=True
+        )
+        gb = define_database_entry_type(
+            "tests.ki_gb", [database_entry_field("text", 0, codec=t.string)], schema_id="sha256:" + "2" * 64, global_document=True
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.jsonl"
+            for document in (ga, gb):  # one cache per type that never pulled: how a file got two globals
+                writer = CultCache.builder().register_document_type(document).add_generic_store(JsonLinesBackingStore(path)).build()
+                writer.put_global(document, {"text": document.type})
+            both = CultCache.builder().register_document_type(ga).register_document_type(gb).add_generic_store(JsonLinesBackingStore(path)).build()
+            with self.assertRaises(CultCacheError) as caught:
+                both.pull_all_backing_stores()
+            self.assertIn("'__global__' is held by both", str(caught.exception))
+            self.assertEqual(both.snapshot(), {})
+            memory = CultCache.builder().register_document_type(ga).register_document_type(gb).build()
+            memory.put_global(ga, {"text": "a"})
+            with self.assertRaises(SchemaConflictError):
+                memory.put_global(gb, {"text": "b"})
+            self.assertEqual(memory.get_required_global(ga), {"text": "a"})
+
     def test_every_write_path_refuses_a_second_type_and_never_echoes_the_payload(self) -> None:
         alpha, beta = DOCUMENTS["alpha"], DOCUMENTS["beta"]
         for name in ("put", "put_envelope", "put_envelopes"):
@@ -182,9 +213,9 @@ class KeyIdentityTests(unittest.TestCase):
             cache.add_backing_store(SingleFileMessagePackBackingStore(two), [DOCUMENTS["beta"].type])
             with self.assertRaises(Exception) as caught:
                 cache.pull_all_backing_stores()
-            self.assertIn("'k'", str(caught.exception))
-            self.assertEqual(cache.get(DOCUMENTS["alpha"], "k"), {"text": "a"})
-            self.assertIsNone(cache.get(DOCUMENTS["beta"], "k"))
+            self.assertIn("'qx'", str(caught.exception))
+            self.assertEqual(cache.get(DOCUMENTS["alpha"], "qx"), {"text": "a"})
+            self.assertIsNone(cache.get(DOCUMENTS["beta"], "qx"))
 
     def test_a_foreign_record_is_listed_and_its_bytes_survive_writes_and_removals_elsewhere(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -220,7 +251,6 @@ class KeyIdentityTests(unittest.TestCase):
                 writer.delete(gamma, key)
             cache.pull_all_backing_stores()
             self.assertEqual(cache.foreign_records(), [])
-
 
 class OwnershipAndStoreKindTests(unittest.TestCase):
     """The cache judge answers on its own where the store has no commit guard (JSONL) or the records live in two stores."""

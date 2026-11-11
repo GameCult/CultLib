@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 from uuid import uuid4
 import msgpack
-from cultcache_py import CultCache, define_database_entry_type
+from cultcache_py import CultCache, SchemaConflictError, define_database_entry_type
 from cultnet_py.benchmark import run_benchmark
 from cultnet_py.compare_csharp import (
     DEFAULT_PARITY_THRESHOLD,
@@ -1941,6 +1941,35 @@ class CultNetTests(unittest.TestCase):
                 subscription.read_next()
         self.assertEqual(raised.exception.response["messageId"], "subscription-error")
         thread.join(2.0)
+
+    def test_replication_refuses_a_remote_record_of_another_type_at_a_held_key_and_changes_nothing(self) -> None:
+        # variants:ruling:cache-refuses-retype: a cache holds one record per key whatever its type, so a peer that reuses a
+        # key across types is refused where the record is applied; replication does not catch it.
+        first = define_database_entry_type("replica.first", [("name", 0), ("category", 1), ("value", 2, 0)], cls=Item)
+        second = define_database_entry_type("replica.second", [("name", 0), ("category", 1), ("value", 2, 0)], cls=Item)
+        cache = CultCache()
+        cache.register_document_type(first)
+        cache.register_document_type(second)
+        cache.put(first, "shared", Item("held", "", 0))
+
+        def raw(document):
+            return {
+                "schemaId": document.catalog_entry().schema_id,
+                "recordKey": "shared",
+                "storedAt": "2026-06-13T00:00:00Z",
+                "payloadEncoding": "messagepack",
+                "payload": document.encode_payload(Item("remote", "", 0)),
+            }
+
+        with self.assertRaises(SchemaConflictError):
+            apply_raw_document_record(cache, schema_document_map([first, second]), raw(second))
+        snapshot = {"schemaVersion": "cultnet.snapshot_response_raw.v0", "messageId": "s", "documents": [raw(second)]}
+        with self.assertRaises(SchemaConflictError):
+            apply_raw_snapshot(cache, [first, second], snapshot)
+        self.assertEqual(cache.get_required(first, "shared").name, "held")
+        self.assertIsNone(cache.get(second, "shared"))
+        apply_raw_document_record(cache, schema_document_map([first, second]), raw(first))  # the same type still replaces
+        self.assertEqual(cache.get_required(first, "shared").name, "remote")
 
     def test_cultnet_replication_helpers_apply_raw_snapshot_and_shard_log(self) -> None:
         document = define_database_entry_type(
