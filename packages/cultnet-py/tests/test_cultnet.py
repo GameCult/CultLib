@@ -2315,9 +2315,10 @@ class CultNetTests(unittest.TestCase):
 
         change_schema = json.loads(by_version["cultnet.database_change_raw.v0"]["schemaJson"])
         self.assertEqual(change_schema["properties"]["changeKind"]["enum"], ["added", "updated", "removed"])
-        self.assertIn("document", change_schema["properties"])
-        self.assertIn("schemaId", change_schema["properties"])
-        self.assertIn("recordKey", change_schema["properties"])
+        # The C# writer sets every key, nil where unset (a removed change's document, an added change's recordKey and schemaId).
+        self.assertEqual(change_schema["properties"]["document"]["oneOf"][0], {"type": "null"})
+        self.assertEqual(change_schema["properties"]["schemaId"], {"type": ["string", "null"], "minLength": 1})
+        self.assertEqual(change_schema["properties"]["recordKey"], {"type": ["string", "null"], "minLength": 1})
         self.assertEqual(change_schema["properties"]["commitId"], {"type": ["string", "null"], "minLength": 1})
         self.assertEqual(change_schema["properties"]["commitCount"], {"type": ["integer", "null"], "minimum": 2})
 

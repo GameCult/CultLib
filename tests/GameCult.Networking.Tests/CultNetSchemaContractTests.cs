@@ -1,5 +1,7 @@
 #nullable enable
 using System;
+using System.Buffers;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -244,6 +246,39 @@ namespace GameCult.Networking.Tests
             AssertErrorMatchesSchema(message);
             // The bytes cultnet-rs's error_message.rs message_invalid case decodes and re-encodes.
             Assert.That(Convert.ToHexString(CultNetSchemaMessageSerialization.Serialize(message)), Is.EqualTo("85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D93E6D6573736167655F696E76616C69643A2052617720707574206D65737361676573206D75737420636F6E7461696E206120646F63756D656E74206D61702EAB726F7574696E6748696E74C0A4636F6465AF6D6573736167655F696E76616C6964A764657461696C7384A56669656C64A8646F63756D656E74A576616C7565C0A461734F66C0A763757272656E74C0"));
+        }
+
+        // The C# writer sets every key (nil where unset), so a removed change carries document: nil, and an added change
+        // carries recordKey/schemaId: nil. The schema describes those bytes; it still refuses an added change with no document.
+        private static List<JsonElement> CommitVectorChanges()
+        {
+            var path = Path.Combine(RepoRoot(), "tests", "vectors", "database-change-commit", "two-change-commit.msgpack");
+            var reader = new MessagePackReader(File.ReadAllBytes(path));
+            var changes = new List<JsonElement>();
+            while (!reader.End)
+                changes.Add(JsonDocument.Parse(MessagePackSerializer.ConvertToJson(reader.ReadRaw().ToArray())).RootElement);
+            return changes;
+        }
+
+        [Test]
+        public void DatabaseChangeRaw_TheCommitVectorsRemovedChangesWithANilDocument_MatchTheSchema()
+        {
+            var validator = new MiniJsonSchemaValidator(SchemaDir());
+            var changes = CommitVectorChanges();
+            Assert.That(changes, Has.Count.EqualTo(2));
+            foreach (var change in changes)
+            {
+                Assert.That(change.GetProperty("document").ValueKind, Is.EqualTo(JsonValueKind.Null), "the C# writer wrote the key, nil");
+                validator.AssertValid(change, "cultnet.database-change-raw.schema.json");
+            }
+        }
+
+        [Test]
+        public void DatabaseChangeRaw_AnAddedChangeWithANilDocument_IsRefused()
+        {
+            var validator = new MiniJsonSchemaValidator(SchemaDir());
+            var removed = CommitVectorChanges()[0].GetRawText().Replace("\"removed\"", "\"added\"");
+            Assert.Throws<InvalidOperationException>(() => validator.AssertValid(JsonDocument.Parse(removed).RootElement, "cultnet.database-change-raw.schema.json"));
         }
 
         private static void AssertErrorMatchesSchema(CultNetErrorMessage message)

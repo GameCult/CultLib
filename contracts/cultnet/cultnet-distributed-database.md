@@ -146,6 +146,9 @@ A malformed put or delete is `message_invalid`, not a per-operation code: the pe
   commit's changes as one commit, so the replica judges the result (a swap of two unique-index values) and not the state
   between records. A replica whose cache refuses a commit is faulted, never silent. `commitId` is opaque and valid only
   within the subscription. The C# subscription server and database server tag commits; other runtimes adopt next.
+- The C# writer sets every key of a `database_change_raw` message, nil where unset: a removed change carries `document`
+  nil, an added or updated one `recordKey` and `schemaId` nil. The schema accepts those nils; an added or updated change
+  still needs a document, and a removed one a `recordKey` and `schemaId`.
 - Client-owned input documents may be predicted locally only inside explicit
   `CultNetClientAuthorityScope` declarations.
 - Predicted input state is not authoritative shared state. The shard log still
