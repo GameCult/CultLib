@@ -2582,17 +2582,24 @@ test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", 
     .filter((line) => line.length > 0 && !line.startsWith("#"))
     .map((line) => line.split(/\s+/u));
   // Every vector in the folder has a manifest row.
-  const listed = rows.map(([vector]) => vector!).filter((vector) => !vector.startsWith("..")).sort();
+  const listed = rows.map(([vector]) => vector!).filter((vector) => !vector.startsWith("..") && !vector.startsWith("@")).sort();
   assert.deepEqual((await readdir(root)).filter((name) => name.endsWith(".bin")).sort(), listed);
   const dir = await mkdtemp(join(tmpdir(), "cultcache-readability-"));
   const seed = await copyVector(dir, join(c2aVectors, "v3-base.msgpack"), "seed.msgpack");
   const envelopes = await new SingleFileMessagePackBackingStore(seed).pullAll();
   for (const [vector, , , typescript] of rows) {
     const reads = typescript === "reads";
-    const bytes = await readFile(join(root, vector));
+    // "@directory": the walker makes an empty directory at the store path; the runtime refuses to open or replace it and leaves it be.
+    const isDirectory = vector === "@directory";
+    const bytes = isDirectory ? Buffer.alloc(0) : await readFile(join(root, vector));
     for (const operation of ["pullAll", "softPushAll", "pushAll", "push", "delete"] as const) {
       const file = join(dir, `${vector.replace(/[^a-z0-9.-]/giu, "_")}.${operation}.msgpack`);
-      await writeFile(file, bytes);
+      if (isDirectory) {
+        assert.equal(typescript, "refuses", "a directory is never a store");
+        await mkdir(file);
+      } else {
+        await writeFile(file, bytes);
+      }
       const store = new SingleFileMessagePackBackingStore(file);
       const run = () =>
         operation === "pullAll"
@@ -2627,6 +2634,10 @@ test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", 
         } else {
           assert.ok(!keys.includes(envelopes[0]!.key), `${vector} ${operation}`);
         }
+      } else if (isDirectory) {
+        await assert.rejects(run, `${vector} ${operation}`);
+        assert.ok((await lstat(file)).isDirectory(), `${vector} ${operation} replaced the directory`);
+        assert.deepEqual(await readdir(file), [], `${vector} ${operation} wrote into the directory`);
       } else {
         await assert.rejects(
           run,
