@@ -351,6 +351,7 @@ namespace GameCult.Caching.Tests
         private static readonly Rec[] RepullBefore = Items_(("item:a1", "A"), ("item:b1", "C"));
         private static readonly Rec[] RepullAfter = Items_(("item:a1", "A"), ("item:b1", "B"), ("item:b2", "B"), ("item:c1", "A"));
         private static readonly Rec[] KeyCaseRecords = Items_(("a", "S"), ("z", "S"), ("B", "T"), ("C", "T"));
+        private static readonly Rec[] HolderCaseRecords = Items_(("a", "S"), ("A", "S"));
         private static readonly Rec[] KeyPunctuationRecords = Items_(("_", "S"), ("a", "S"), ("Z", "T"), ("b", "T"));
         private static readonly Rec[] SurrogateGroupRecords = Items_(("\uE000", "S"), ("\uE000b", "S"), ("\U0001F600", "T"), ("\U0001F600b", "T"));
 
@@ -360,6 +361,7 @@ namespace GameCult.Caching.Tests
             ("repull-before.cc", RepullBefore), ("repull-after.cc", RepullAfter), ("alias-store.cc", AliasRecords),
             ("key-case-store.cc", KeyCaseRecords), ("key-punctuation-store.cc", KeyPunctuationRecords),
             ("surrogate-groups-store.cc", SurrogateGroupRecords),
+            ("holder-case-store.cc", HolderCaseRecords),
         };
 
         private static readonly Refusal SurrogateRefusal = new("k\U0001F600", "k\uE000", Item, "Sku");
@@ -368,6 +370,7 @@ namespace GameCult.Caching.Tests
         private static readonly Refusal AliasRefusal = new("item:a", "item:b", Alias, "Sku");
         private static readonly Refusal RepullRefusal = new("item:a1", "item:c1", Item, "Sku");
         private static readonly Refusal KeyCaseRefusal = new("B", "C", Item, "Sku");
+        private static readonly Refusal HolderCaseRefusal = new("A", "a", Item, "Sku");
         private static readonly Refusal KeyPunctuationRefusal = new("Z", "b", Item, "Sku");
         private static readonly Refusal SurrogateGroupRefusal = new("\U0001F600", "\U0001F600b", Item, "Sku");
 
@@ -402,6 +405,9 @@ namespace GameCult.Caching.Tests
             new("load-key-case", new[] { Open("key-case-store.cc") }, KeyCaseRefusal),
             new("load-key-punctuation", new[] { Open("key-punctuation-store.cc") }, KeyPunctuationRefusal),
             new("load-surrogate-groups", new[] { Open("surrogate-groups-store.cc") }, SurrogateGroupRefusal),
+            // Rows 23-24: two holders of one value that differ only by case are two holders; a case-folding dedupe would see one.
+            new("batch-holders-by-case", new[] { Open(), Commit(HolderCaseRecords) }, HolderCaseRefusal),
+            new("load-holders-by-case", new[] { Open("holder-case-store.cc") }, HolderCaseRefusal),
         };
 
         private static byte[] RefusalStoreBytes(Rec[] records)
@@ -589,7 +595,7 @@ namespace GameCult.Caching.Tests
                 }
             }
 
-            Assert.That(walked, Is.EqualTo(22));
+            Assert.That(walked, Is.EqualTo(24));
         }
     }
 }
