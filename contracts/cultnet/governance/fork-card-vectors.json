@@ -7704,7 +7704,7 @@
     ],
     "answerTooLarge": [
       {
-        "name": "a_stale_answer_whose_card_reread_is_past_the_cap_is_fork_too_large_and_nothing_is_stored",
+        "name": "a_stale_answer_whose_card_reread_is_past_the_cap_is_fork_too_large_over_a_stored_stale_refusal",
         "entries": [
           {
             "schemaVersion": "gamecult.fork.entry.v0",
@@ -7903,7 +7903,9 @@
         },
         "refusalHex": "83AD736368656D6156657273696F6EB867616D6563756C742E666F726B2E7265667573616C2E7630A4636F6465AE666F726B5F746F6F5F6C61726765A56572726F72D950666F726B5F746F6F5F6C617267653A20666F726B2067616D6563756C742D636861743A7175657374696F6E3A713320616C6F6E6520697320706173742074686520726573706F6E736520627564676574",
         "httpStatus": 422,
-        "stored": false,
+        "outcome": "Refused",
+        "code": "stale_fork",
+        "counted": false,
         "fork_id": "gamecult-chat:question:q3"
       }
     ],

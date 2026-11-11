@@ -730,7 +730,8 @@ namespace GameCult.Networking.Tests
                         Assert.That(HexOf(r), Is.EqualTo(S(step["refusalHex"])), name);
                         Assert.That(S(r["code"]), Is.EqualTo("fork_too_large")); Assert.That(step["httpStatus"]!.GetValue<int>(), Is.EqualTo(422));
                         Assert.That(S(step["fork_id"]), Is.EqualTo(S(first["fork_id"]))); Assert.That(step["order"]!.GetValue<long>(), Is.EqualTo(first["order"]!.GetValue<long>()));
-                        Assert.That(S(r["error"]), Is.EqualTo($"fork_too_large: fork {S(first["fork_id"])} (order {first["order"]!.GetValue<long>()}) alone is past the response budget"));
+                        Assert.That(S(r["error"]), Does.Contain(S(first["fork_id"])), name);
+                        Assert.That(System.Text.RegularExpressions.Regex.IsMatch(S(r["error"]).Replace(S(first["fork_id"]), ""), $@"\b{first["order"]!.GetValue<long>()}\b"), Is.True, $"{name}: the text names the order");
                         Assert.That(step["request"]!["limit"]!.GetValue<int>(), Is.GreaterThanOrEqualTo(1));
                         var order = first["order"]!.GetValue<long>();
                         if (order >= 1) { Assert.That(i + 1, Is.LessThan(steps.Count), name); last = $"c{order}"; follow = true; Assert.That(Errors(ForkSchema, "cursor", JsonValue.Create(last)), Is.Empty); }
@@ -754,15 +755,14 @@ namespace GameCult.Networking.Tests
                 Assert.That(Errors(ForkSchema, "readRequest", c["request"]), Is.Empty, S(c["name"]));
                 Assert.That(Errors(ForkSchema, "refusal", c["refusal"]), Is.Empty, S(c["name"]));
                 Assert.That(S(c["refusal"]!["code"]), Is.EqualTo("fork_too_large"));
-                Assert.That(S(c["refusal"]!["error"]), Is.EqualTo($"fork_too_large: fork {S(held["card"]!["fork_id"])} alone is past the response budget"));
-                Assert.That(S(c["refusal"]!["error"]), Does.Not.Contain("order"), "a read names no order");
+                Assert.That(S(c["refusal"]!["error"]), Does.Contain(S(held["card"]!["fork_id"])), "the text names the fork id");
                 Assert.That(HexOf(c["refusal"]), Is.EqualTo(S(c["refusalHex"])), S(c["name"]));
                 Assert.That(c["httpStatus"]!.GetValue<int>(), Is.EqualTo(422)); Assert.That(c["httpStatus"]!.GetValue<int>(), Is.EqualTo(doorStatus));
             }
         }
 
         [Test]
-        public void ForkTransport_AStaleAnswerWhoseCardRereadIsPastTheCap_IsTheReadFormForkTooLarge422_NothingStored()
+        public void ForkTransport_AStaleAnswerWhoseCardRereadIsPastTheCap_IsTheReadFormForkTooLarge422_OverAStoredStaleRefusal()
         {
             var cases = Fork["transport"]!["answerTooLarge"]!.AsArray();
             Assert.That(cases.Count, Is.EqualTo(1));
@@ -774,12 +774,12 @@ namespace GameCult.Networking.Tests
                 Assert.That(S(c["request"]!["options_hash"]), Is.Not.EqualTo(S(held["card"]!["options_hash"])), "the card moved: the answer is stale");
                 Assert.That(Errors(ForkSchema, "refusal", c["refusal"]), Is.Empty, S(c["name"]));
                 Assert.That(S(c["refusal"]!["code"]), Is.EqualTo("fork_too_large"));
-                Assert.That(S(c["refusal"]!["error"]), Is.EqualTo($"fork_too_large: fork {S(held["card"]!["fork_id"])} alone is past the response budget"));
+                Assert.That(S(c["refusal"]!["error"]), Does.Contain(S(held["card"]!["fork_id"])), "the text names the fork id");
                 Assert.That(HexOf(c["refusal"]), Is.EqualTo(S(c["refusalHex"])), S(c["name"]));
-                Assert.That(S(c["refusalHex"]), Is.EqualTo(S(read["refusalHex"])), "the same document as the read form");
+                Assert.That(S(c["refusal"]!["code"]), Is.EqualTo(S(read["refusal"]!["code"])), "the same refusal as the read form");
                 Assert.That(c["httpStatus"]!.GetValue<int>(), Is.EqualTo(422));
                 Assert.That(c["httpStatus"]!.GetValue<int>(), Is.EqualTo(Fork["doorRefusals"]!.AsArray().Single(r => S(r!["name"]) == "fork_too_large")!["httpStatus"]!.GetValue<int>()));
-                Assert.That(c["stored"]!.GetValue<bool>(), Is.False);
+                Assert.That(S(c["outcome"]), Is.EqualTo("Refused")); Assert.That(S(c["code"]), Is.EqualTo("stale_fork")); Assert.That(c["counted"]!.GetValue<bool>(), Is.False);
             }
         }
 

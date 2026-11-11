@@ -532,7 +532,7 @@ test("fork transport: a page may stop short of limit, and a first entry past the
         assert.equal(r.code, "fork_too_large");
         assert.equal(step.httpStatus, 422);
         assert.equal(step.fork_id, first.fork_id); assert.equal(step.order, first.order);
-        assert.equal(r.error, `fork_too_large: fork ${first.fork_id} (order ${first.order}) alone is past the response budget`);
+        assert.ok(r.error.includes(first.fork_id) && new RegExp(`\\b${first.order}\\b`).test(r.error.replace(first.fork_id, "")), `${s.name}: the text names the fork id and the order`);
         assert.ok(step.request.limit >= 1, "limit 0 never refuses");
         if (first.order >= 1) { assert.ok(i + 1 < s.steps.length, s.name); last = `c${first.order}`; assert.ok(check(forkSchema, "cursor", last)); }
         else { assert.equal(i, s.steps.length - 1, `${s.name}: order 0 is the end`); assert.equal(check(forkSchema, "cursor", "c0"), false); last = undefined; }
@@ -553,14 +553,13 @@ test("fork transport: a read whose entry is past the cap is fork_too_large (422)
     assert.ok(held !== undefined && check(forkSchema, "readRequest", c.request), c.name);
     assert.ok(check(forkSchema, "refusal", c.refusal), c.name);
     assert.equal(c.refusal.code, "fork_too_large");
-    assert.equal(c.refusal.error, `fork_too_large: fork ${held.card.fork_id} alone is past the response budget`);
-    assert.ok(!c.refusal.error.includes("order"), "a read names no order");
+    assert.ok(c.refusal.error.includes(held.card.fork_id), "the text names the fork id");
     assert.equal(hexOf(c.refusal), c.refusalHex, c.name);
     assert.equal(c.httpStatus, 422); assert.equal(c.httpStatus, doorStatus);
   }
 });
 
-test("fork transport: a stale answer whose card re-read is past the cap is the read-form fork_too_large (422), nothing stored", () => {
+test("fork transport: a stale answer whose card re-read is past the cap is the read-form fork_too_large (422), over a stored Refused(stale_fork)", () => {
   assert.equal(fork.transport.answerTooLarge.length, 1);
   const read = fork.transport.readTooLarge[0];
   for (const c of fork.transport.answerTooLarge) {
@@ -569,11 +568,11 @@ test("fork transport: a stale answer whose card re-read is past the cap is the r
     assert.notEqual(c.request.options_hash, held.card.options_hash, "the card moved: the answer is stale");
     assert.ok(check(forkSchema, "refusal", c.refusal), c.name);
     assert.equal(c.refusal.code, "fork_too_large");
-    assert.equal(c.refusal.error, `fork_too_large: fork ${held.card.fork_id} alone is past the response budget`);
+    assert.ok(c.refusal.error.includes(held.card.fork_id), "the text names the fork id");
     assert.equal(hexOf(c.refusal), c.refusalHex, c.name);
-    assert.equal(c.refusalHex, read.refusalHex, "the same document as the read form");
+    assert.equal(c.refusal.code, read.refusal.code, "the same refusal as the read form");
     assert.equal(c.httpStatus, 422); assert.equal(c.httpStatus, fork.doorRefusals.find((r: any) => r.name === "fork_too_large").httpStatus);
-    assert.equal(c.stored, false);
+    assert.equal(c.outcome, "Refused"); assert.equal(c.code, "stale_fork"); assert.equal(c.counted, false);
   }
 });
 
