@@ -644,7 +644,8 @@ fn vectors_refusals_hold_the_rule() {
         match refused {
             None => result.unwrap_or_else(|error| panic!("{label}: should succeed: {error:#}")),
             Some((k1, k2, schema, alias)) => {
-                assert_eq!(error_text(result), refusal(&k1, &k2, &schema, &alias), "{label}");
+                let error = result.err().unwrap_or_else(|| panic!("{label}: should refuse"));
+                assert_eq!(format!("{error:#}"), refusal(&k1, &k2, &schema, &alias), "{label}");
                 if let Some(before) = before {
                     assert_eq!(std::fs::read(&path).unwrap(), before, "{label}: the file is byte-identical");
                 }
@@ -652,7 +653,7 @@ fn vectors_refusals_hold_the_rule() {
         }
         walked += 1;
     }
-    assert_eq!(walked, 24);
+    assert_eq!(walked, 33);
 }
 
 // A pull replaces the holder table with the stored image's: a value another writer changed is released, not kept.
