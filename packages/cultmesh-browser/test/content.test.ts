@@ -567,8 +567,14 @@ test("a size the runtime cannot allocate is too-large in both exports, not a Ran
   const count = 2 ** 15;
   const huge = { ...manifest, sizeBytes: count * int32Max, chunks: Array.from({ length: count }, (_, index) => ({ ...manifest.chunks[0]!, offset: index * int32Max, sizeBytes: int32Max })) };
   const server = double(() => { throw new Error("no request expected"); });
-  await assert.rejects(fetchVerifiedContent(ENDPOINT, huge, { fetch: server.fetch, maxBytes: size }), codeOf("too-large"));
-  await assert.rejects(fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash!, size, { fetch: server.fetch, maxBytes: size }), codeOf("too-large"));
+  // a host with overcommit hands out 64 TiB lazily, so the refusal is made certain: the runtime cannot allocate it
+  const native = globalThis.Uint8Array;
+  const refusing = new Proxy(native, { construct: (target, args, receiver) => { if (typeof args[0] === "number" && args[0] > 2 ** 40) throw new RangeError("Array buffer allocation failed"); return Reflect.construct(target, args, receiver); } });
+  globalThis.Uint8Array = refusing;
+  try {
+    await assert.rejects(fetchVerifiedContent(ENDPOINT, huge, { fetch: server.fetch, maxBytes: size }), codeOf("too-large"));
+    await assert.rejects(fetchVerifiedChunk(ENDPOINT, manifest.chunks[0]!.chunkHash!, size, { fetch: server.fetch, maxBytes: size }), codeOf("too-large"));
+  } finally { globalThis.Uint8Array = native; }
   assert.equal(server.calls.length, 0);
 });
 
