@@ -1566,6 +1566,63 @@ class CultNetTests(unittest.TestCase):
         self.assertEqual(delete_change.schema_id, "schema-note")
         self.assertEqual(delete_change.to_wire()["recordKey"], "note:1")
 
+    def test_cultnet_database_change_commit_fields(self) -> None:
+        base = {
+            "schemaVersion": "cultnet.database_change_raw.v0",
+            "messageId": "change-commit",
+            "subscriptionId": "sub-1",
+            "changeKind": "removed",
+            "schemaId": "schema-note",
+            "recordKey": "note:1",
+        }
+        grouped = CultNetDatabaseChange.from_wire({**base, "commitId": "commit-7", "commitCount": 3})
+        self.assertEqual((grouped.commit_id, grouped.commit_count), ("commit-7", 3))
+        self.assertEqual(grouped.to_wire()["commitId"], "commit-7")
+        self.assertEqual(grouped.to_wire()["commitCount"], 3)
+        self.assertEqual(CultNetDatabaseChange.from_wire(grouped.to_wire()), grouped)
+
+        for absent in (base, {**base, "commitId": None, "commitCount": None}):  # C# writes nil outside a commit
+            change = CultNetDatabaseChange.from_wire(absent)
+            self.assertIsNone(change.commit_id)
+            self.assertIsNone(change.commit_count)
+            self.assertNotIn("commitId", change.to_wire())
+            self.assertNotIn("commitCount", change.to_wire())
+
+        for field, bad in (
+            ("commitId", ""),
+            ("commitId", 7),
+            ("commitCount", 1),
+            ("commitCount", 0),
+            ("commitCount", True),
+            ("commitCount", 2.0),
+            ("commitCount", "3"),
+        ):
+            with self.subTest(field=field, bad=bad), self.assertRaisesRegex(ValueError, field):
+                CultNetDatabaseChange.from_wire({**base, field: bad})
+
+    def test_a_two_change_commit_from_the_csharp_server_parses(self) -> None:
+        # CultNetDatabaseServer.DeliverCommit (CultNetDatabaseServer.cs:791-797) tags every change of a commit with its
+        # commitId and commitCount = the number of changes delivered, so a swap of two records arrives with commitCount 2.
+        # Shaped as the C# [MessagePackObject] writes it: every key present, nil where unset.
+        swap = [
+            {
+                "schemaVersion": "cultnet.database_change_raw.v0",
+                "messageId": f"change-{index}",
+                "subscriptionId": "sub-1",
+                "changeKind": "updated",
+                "document": None,
+                "recordKey": key,
+                "schemaId": "schema-note",
+                "commitId": "9f1c0f0e4b7a4c1f9d2e",
+                "commitCount": 2,
+            }
+            for index, key in enumerate(("note:a", "note:b"))
+        ]
+        changes = [CultNetDatabaseChange.from_wire(message) for message in swap]
+        self.assertEqual([change.commit_count for change in changes], [2, 2])
+        self.assertEqual({change.commit_id for change in changes}, {"9f1c0f0e4b7a4c1f9d2e"})
+        self.assertEqual([change.to_wire()["commitCount"] for change in changes], [2, 2])
+
     def test_cultnet_raw_put_helper_carries_message_id(self) -> None:
         put = document_put_raw(
             message_id="put-1",
@@ -2272,6 +2329,8 @@ class CultNetTests(unittest.TestCase):
         self.assertIn("document", change_schema["properties"])
         self.assertIn("schemaId", change_schema["properties"])
         self.assertIn("recordKey", change_schema["properties"])
+        self.assertEqual(change_schema["properties"]["commitId"], {"type": ["string", "null"], "minLength": 1})
+        self.assertEqual(change_schema["properties"]["commitCount"], {"type": ["integer", "null"], "minimum": 2})
 
         log_schema = json.loads(by_version["cultnet.shard_log_response.v0"]["schemaJson"])
         self.assertIn("entries", log_schema["required"])
