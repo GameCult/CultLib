@@ -358,7 +358,7 @@ scen += [
  sc("R1_a_target_less_retraction_with_retracted_flipped_is_body_invalid_before_any_request_id_lookup", CARD, [X1, rf(IL_B, sr("n2"), "bad_retraction"), door(dict(IL_B, retracted=False), sr("n9"), "body_invalid")], "n1"),
 ]
 REASON_CODES = ["stale_fork", "not_a_decider", "fork_closed", "choice_invalid", "bad_retraction", "already_retracted"]
-HTTP = {"unauthenticated": 401, "body_forbidden_field": 400, "body_unknown_field": 400, "body_invalid": 400, "fork_unknown": 404, "insufficient_scope": 403, "forbidden": 403, "request_id_conflict": 409, "request_invalid": 400,
+HTTP = {"unauthenticated": 401, "body_forbidden_field": 400, "body_unknown_field": 400, "body_invalid": 400, "fork_unknown": 404, "insufficient_scope": 403, "forbidden": 403, "request_id_conflict": 409, "request_invalid": 400, "fork_too_large": 422,
         "stale_fork": 409, "not_a_decider": 403, "fork_closed": 409, "choice_invalid": 400, "bad_retraction": 400, "already_retracted": 409}
 STORED_REFUSALS = []
 for reason in REASON_CODES:
@@ -421,6 +421,28 @@ LISTS = [
  {"name": "limit_zero_is_the_count_and_stamp_only", "ordinal": 412, "entries": ENTRIES, "steps": [lstep(ENTRIES, 412, lreq(limit=0))]},
  {"name": "order_zero_is_legal_but_no_cursor_names_it", "ordinal": 9, "entries": ORDER0, "steps": [lstep(ORDER0, 9, lreq(limit=3)), lstep(ORDER0, 9, lreq(cursor="c1", limit=3))]},
  {"name": "a_mind_with_no_forks", "ordinal": 7, "entries": [], "steps": [lstep([], 7, lreq(mind="nibu", limit=10))]},
+]
+# A page may stop short of `limit` when the next entry would pass the receiver's response budget; a list whose first
+# entry alone passes it is refused `fork_too_large` (422). The budget is not in the vector: a step records what the receiver answered, and the
+# judges check it against the unbudgeted page (a nonempty strict prefix, resumed below its last entry) or against the entry the page would open with.
+def too_large_doc(c): return {"schemaVersion": "gamecult.fork.refusal.v0", "code": "fork_too_large", "error": f"fork_too_large: fork {c['fork_id']} (order {c['order']}) alone is past the response budget"}
+def read_too_large_doc(c): return {"schemaVersion": "gamecult.fork.refusal.v0", "code": "fork_too_large", "error": f"fork_too_large: fork {c['fork_id']} alone is past the response budget"}
+READ_TOO_LARGE = [{"name": "a_read_whose_entry_is_past_the_cap_is_fork_too_large_without_an_order", "ordinal": 9, "entries": ORDER0,
+                   "request": {"schemaVersion": "gamecult.fork.read_request.v0", "mind": "gamecult-chat", "fork_id": ORDER0[0]["card"]["fork_id"]},
+                   "refusal": read_too_large_doc(ORDER0[0]["card"]), "refusalHex": hx(read_too_large_doc(ORDER0[0]["card"])), "httpStatus": HTTP["fork_too_large"], "fork_id": ORDER0[0]["card"]["fork_id"]}]
+def short_step(entries, ordinal, rq, keep):
+    full = judge_list(entries, ordinal, rq); page = full["forks"][:keep]
+    assert 0 < keep < len(full["forks"])
+    r = dict(full, forks=page, next_cursor=f"c{page[-1]['card']['order']}"); return {"request": rq, "response": r, "responseHex": hx(r)}
+def large_step(entries, ordinal, rq):
+    c = judge_list(entries, ordinal, rq)["forks"][0]["card"]; r = too_large_doc(c)
+    return {"request": rq, "refusal": r, "refusalHex": hx(r), "httpStatus": HTTP["fork_too_large"], "fork_id": c["fork_id"], "order": c["order"]}
+SHORT_PAGES = [
+ {"name": "a_short_page_resumes_below_its_last_entry", "ordinal": 9, "entries": ORDER0, "steps": [short_step(ORDER0, 9, lreq(limit=3), 2), lstep(ORDER0, 9, lreq(cursor="c2", limit=3))]},
+ {"name": "a_first_entry_past_the_budget_is_fork_too_large_and_the_client_continues_below_its_order", "ordinal": 9, "entries": ORDER0,
+  "steps": [large_step(ORDER0, 9, lreq(limit=3)), lstep(ORDER0, 9, lreq(cursor="c3", limit=3))]},
+ {"name": "fork_too_large_on_order_zero_leaves_nothing_below", "ordinal": 9, "entries": ORDER0[2:],
+  "steps": [short_step(ORDER0[2:], 9, lreq(limit=5), 1), large_step(ORDER0[2:], 9, lreq(cursor="c1", limit=5))]},
 ]
 DUP_LIST = judge_list(ENTRIES + [fentry(q4b)], 412, lreq(limit=50))
 assert order_shared(DUP_LIST["forks"]) == ["order 4 is shared by gamecult-chat:question:q4 and gamecult-chat:question:q4b"]
@@ -586,7 +608,7 @@ fork = {
                    ("no_answerer", "answerer is stamped on every stored answer", dict(CNT, answerer="")),
                  ]]},
   "results": [{"name": r["name"], "httpStatus": r["httpStatus"], "message": r["message"], "messagePackHex": hx(r["message"])} for r in STORED_REFUSALS],
-  "doorRefusals": [{"name": c, "httpStatus": HTTP[c], "message": refusal_doc(c), "messagePackHex": hx(refusal_doc(c))} for c in TAIL],
+  "doorRefusals": [{"name": c, "httpStatus": HTTP[c], "message": refusal_doc(c), "messagePackHex": hx(refusal_doc(c))} for c in TAIL] + [{"name": "fork_too_large", "httpStatus": HTTP["fork_too_large"], "message": SHORT_PAGES[1]["steps"][0]["refusal"], "messagePackHex": SHORT_PAGES[1]["steps"][0]["refusalHex"]}],
   "unavailable": [{"name": "second_door_down", "httpStatus": 503, "message": unavailable_doc(30), "messagePackHex": hx(unavailable_doc(30))},
                   {"name": "second_door_down_no_hint", "httpStatus": 503, "message": unavailable_doc(None), "messagePackHex": hx(unavailable_doc(None))}],
   "rulingCites": cites,
@@ -618,6 +640,11 @@ fork = {
       + [dict(bad("two_cards_share_one_order", "rule: order is a unique rank per Mind; the refusal names both fork ids (not expressible in the schema)", DUP_LIST),
               messagePackHex=hx(DUP_LIST), refusal=order_shared(DUP_LIST["forks"])[0])],
     "listScenarios": [{"name": l["name"], "ordinal": l["ordinal"], "entries": l["entries"], "steps": l["steps"]} for l in LISTS],
+    "listShortPages": SHORT_PAGES,
+    "readTooLarge": READ_TOO_LARGE,
+    "doorFaults": [dict(c, response=r, responseHex=hx(r)) for c, r in
+                   [({"name": f"{x}_door_answers_request_id_conflict_the_client_sees_unavailable", "route": x, "doorCode": "request_id_conflict", "httpStatus": 503}, unavailable_doc(30)) for x in ("read", "list")]
+                   + [({"name": "answer_door_answers_request_id_conflict_the_client_sees_it", "route": "answer", "doorCode": "request_id_conflict", "httpStatus": HTTP["request_id_conflict"]}, refusal_doc("request_id_conflict"))]],
     "mindRoutes": {"minds": MINDS, "forks": MIND_FORKS, "cases": MINDCASES, "sameResponse": SAME_RESPONSE},
     "authCases": [{"name": a[0], "route": a[1], "token": a[2], "expect": a[3], "huginn_down": len(a) > 4} for a in AUTH],
   },

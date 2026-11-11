@@ -208,6 +208,7 @@ test("fork card: documents validate and encode to the vector bytes", () => {
     assert.ok(check(forkSchema, "refusal", v.message), v.name);
     assert.equal(hexOf(v.message), v.messagePackHex, v.name);
   }
+  assert.equal(fork.doorRefusals.find((r: { name: string }) => r.name === "fork_too_large").httpStatus, 422);
 });
 
 test("fork card: every negative is refused by the schema or a stated rule", () => {
@@ -502,6 +503,72 @@ test("fork transport: order 0 is legal, no cursor names it, and the page ending 
   assert.deepEqual(sc.steps.map((s: any) => s.response.next_cursor), ["c1", null]);
   assert.deepEqual(sc.steps[1].response.forks.map((f: any) => f.card.order), [0]);
   assert.equal(check(forkSchema, "cursor", "c0"), false);
+});
+
+test("fork transport: a page may stop short of limit, and a first entry past the budget is fork_too_large (422) continued below its order", () => {
+  const sc = fork.transport.listShortPages;
+  assert.deepEqual(sc.map((x: any) => x.name), ["a_short_page_resumes_below_its_last_entry", "a_first_entry_past_the_budget_is_fork_too_large_and_the_client_continues_below_its_order", "fork_too_large_on_order_zero_leaves_nothing_below"]);
+  assert.ok((forkSchema.$defs.refusal.properties.code as { enum: string[] }).enum.includes("fork_too_large"));
+  const covered: number[] = [];
+  for (const s of sc) {
+    let last: string | null | undefined = undefined;
+    s.steps.forEach((step: any, i: number) => {
+      if (last !== undefined) assert.equal(step.request.cursor, last, `${s.name}: the step follows the cursor or the refused order`);
+      const full = judgeList(s.entries, s.ordinal, step.request);
+      if (step.response !== undefined) {
+        const r = step.response as any, n = r.forks.length;
+        assert.ok(check(forkSchema, "list", r), s.name);
+        assert.equal(hexOf(r), step.responseHex, s.name);
+        assert.deepEqual(r.forks, full.forks.slice(0, n), `${s.name}: a prefix of the unbudgeted page`);
+        assert.ok(n >= 1, s.name);
+        assert.equal(r.next_cursor, full.next_cursor !== null || n < full.forks.length ? `c${r.forks[n - 1].card.order}` : null, s.name);
+        assert.equal(r.stamp, full.stamp); assert.equal(r.open_count, full.open_count); assert.equal(r.recorded_count, full.recorded_count);
+        covered.push(...r.forks.map((f: any) => f.card.order));
+        last = r.next_cursor;
+      } else {
+        const r = step.refusal, first = full.forks[0].card as any;
+        assert.ok(check(forkSchema, "refusal", r), s.name);
+        assert.equal(hexOf(r), step.refusalHex, s.name);
+        assert.equal(r.code, "fork_too_large");
+        assert.equal(step.httpStatus, 422);
+        assert.equal(step.fork_id, first.fork_id); assert.equal(step.order, first.order);
+        assert.equal(r.error, `fork_too_large: fork ${first.fork_id} (order ${first.order}) alone is past the response budget`);
+        assert.ok(step.request.limit >= 1, "limit 0 never refuses");
+        if (first.order >= 1) { assert.ok(i + 1 < s.steps.length, s.name); last = `c${first.order}`; assert.ok(check(forkSchema, "cursor", last)); }
+        else { assert.equal(i, s.steps.length - 1, `${s.name}: order 0 is the end`); assert.equal(check(forkSchema, "cursor", "c0"), false); last = undefined; }
+      }
+    });
+  }
+  assert.deepEqual(sc[0].steps.map((x: any) => x.response.next_cursor), ["c2", null]);
+  assert.deepEqual(sc[0].steps.map((x: any) => x.response.forks.length), [2, 2]);
+  assert.deepEqual([sc[1].steps[0].order, sc[2].steps[1].order], [3, 0]);
+  assert.deepEqual(covered, [3, 2, 1, 0, 2, 1, 0, 1]);
+});
+
+test("fork transport: a read whose entry is past the cap is fork_too_large (422), named by fork id alone", () => {
+  const doorStatus = fork.doorRefusals.find((r: any) => r.name === "fork_too_large").httpStatus;
+  assert.equal(fork.transport.readTooLarge.length, 1);
+  for (const c of fork.transport.readTooLarge) {
+    const held = c.entries.find((e: any) => e.card.fork_id === c.request.fork_id);
+    assert.ok(held !== undefined && check(forkSchema, "readRequest", c.request), c.name);
+    assert.ok(check(forkSchema, "refusal", c.refusal), c.name);
+    assert.equal(c.refusal.code, "fork_too_large");
+    assert.equal(c.refusal.error, `fork_too_large: fork ${held.card.fork_id} alone is past the response budget`);
+    assert.ok(!c.refusal.error.includes("order"), "a read names no order");
+    assert.equal(hexOf(c.refusal), c.refusalHex, c.name);
+    assert.equal(c.httpStatus, 422); assert.equal(c.httpStatus, doorStatus);
+  }
+});
+
+test("fork transport: a door request_id_conflict is a fault on read and list (503 unavailable) and a refusal only on the answer", () => {
+  assert.deepEqual(fork.transport.doorFaults.map((c: any) => c.route), ["read", "list", "answer"]);
+  for (const c of fork.transport.doorFaults) {
+    const source = c.route === "answer" ? fork.doorRefusals.find((r: any) => r.name === c.doorCode) : fork.unavailable[0];
+    assert.equal(c.responseHex, source.messagePackHex, c.name);
+    assert.equal(hexOf(c.response), c.responseHex, c.name);
+    assert.equal(c.httpStatus, source.httpStatus, c.name);
+    assert.ok(check(forkSchema, c.route === "answer" ? "refusal" : "unavailable", c.response), c.name);
+  }
 });
 
 test("fork transport: auth is bearer, then audience, then scope, and a votes token touches nothing", () => {
