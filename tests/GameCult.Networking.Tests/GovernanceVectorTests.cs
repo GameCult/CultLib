@@ -532,6 +532,20 @@ namespace GameCult.Networking.Tests
             if ((record["counted_answer_id"] is null ? null : S(record["counted_answer_id"])) != counted) yield return "counted_answer_id is not derived";
         }
 
+        // Order is a unique rank per Mind: the refusal names both fork ids, the first holder and the second.
+        private static List<string> OrderErrors(IEnumerable<JsonNode?> cards)
+        {
+            var holder = new Dictionary<long, string>();
+            var errors = new List<string>();
+            foreach (var c in cards)
+            {
+                var order = c!["order"]!.GetValue<long>();
+                if (holder.TryGetValue(order, out var first)) errors.Add($"order {order} is shared by {first} and {S(c["fork_id"])}");
+                else holder[order] = S(c["fork_id"]);
+            }
+            return errors;
+        }
+
         // The reference list judge: newest first by card order, status filter, cursor c<N> = cards below order N, a page of limit, counts over the whole set.
         private static JsonNode JudgeList(JsonArray entries, long ordinal, JsonNode request)
         {
@@ -636,7 +650,9 @@ namespace GameCult.Networking.Tests
             }
             foreach (var v in t["listInvalid"]!.AsArray())
             {
-                Assert.That(Errors(ForkSchema, "list", v!["message"]), Is.Not.Empty, $"{S(v["name"])}: {S(v["why"])}");
+                var shared = OrderErrors(v!["message"]!["forks"]!.AsArray().Select(f => f!["card"]));
+                Assert.That(Errors(ForkSchema, "list", v["message"]).Count > 0 || shared.Count > 0, Is.True, $"{S(v["name"])}: {S(v["why"])}");
+                if (v["refusal"] is not null) Assert.That(shared, Is.EqualTo(new[] { S(v["refusal"]) }), S(v["name"]));
                 Assert.That(HexOf(v["message"]), Is.EqualTo(S(v["messagePackHex"])), S(v["name"]));
             }
         }
@@ -649,6 +665,7 @@ namespace GameCult.Networking.Tests
                 var name = S(sc!["name"]);
                 var entries = sc["entries"]!.AsArray();
                 foreach (var e in entries) Assert.That(EntryRuleErrors(e!), Is.Empty, name);
+                Assert.That(OrderErrors(entries.Select(e => e!["card"])), Is.Empty, name);
                 JsonNode? previous = null;
                 foreach (var step in sc["steps"]!.AsArray())
                 {
@@ -662,6 +679,17 @@ namespace GameCult.Networking.Tests
                     previous = response;
                 }
             }
+        }
+
+        [Test]
+        public void ForkTransport_OrderZero_IsLegal_NoCursorNamesIt_AndThePageEndingAtOrderOneHandsOnToIt()
+        {
+            var sc = Fork["transport"]!["listScenarios"]!.AsArray().Single(x => S(x!["name"]) == "order_zero_is_legal_but_no_cursor_names_it")!;
+            var steps = sc["steps"]!.AsArray();
+            Assert.That(S(steps[0]!["response"]!["next_cursor"]), Is.EqualTo("c1"));
+            Assert.That(steps[1]!["response"]!["next_cursor"], Is.Null);
+            Assert.That(steps[1]!["response"]!["forks"]!.AsArray().Select(f => f!["card"]!["order"]!.GetValue<long>()), Is.EqualTo(new[] { 0L }));
+            Assert.That(Errors(ForkSchema, "cursor", JsonValue.Create("c0")), Is.Not.Empty);
         }
 
         [Test]

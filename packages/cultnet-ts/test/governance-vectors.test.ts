@@ -387,6 +387,17 @@ const entryRuleErrors = (e: { card: Card; record: { fork_id: string; options_has
   return errors;
 };
 
+// Order is a unique rank per Mind: the refusal names both fork ids, the first holder and the second.
+const orderErrors = (cards: { fork_id: string; order: number }[]): string[] => {
+  const holder = new Map<number, string>();
+  const errors: string[] = [];
+  for (const c of cards) {
+    if (holder.has(c.order)) errors.push(`order ${c.order} is shared by ${holder.get(c.order)} and ${c.fork_id}`);
+    else holder.set(c.order, c.fork_id);
+  }
+  return errors;
+};
+
 // The reference list judge: newest first by card order, status filter, cursor c<N> = cards below order N, a page of limit, counts over the whole set.
 const judgeList = (entries: { card: Card }[], ordinal: number, rq: { mind: string; status: string | null; cursor: string | null; limit: number }) => {
   const rows = [...entries].sort((a, b) => (b.card as any).order - (a.card as any).order);
@@ -461,7 +472,9 @@ test("fork transport: requests and entries validate and encode to the vector byt
     }
   }
   for (const v of t.listInvalid) {
-    assert.equal(check(forkSchema, "list", v.message), false, `${v.name}: ${v.why}`);
+    const refused = !check(forkSchema, "list", v.message) || orderErrors(v.message.forks.map((f: any) => f.card)).length > 0;
+    assert.ok(refused, `${v.name}: ${v.why}`);
+    if (v.refusal !== undefined) assert.deepEqual(orderErrors(v.message.forks.map((f: any) => f.card)), [v.refusal], v.name);
     assert.equal(hexOf(v.message), v.messagePackHex, v.name);
   }
 });
@@ -469,6 +482,7 @@ test("fork transport: requests and entries validate and encode to the vector byt
 test("fork transport: every list request replays to the vector's response, newest first, paged by the cursor", () => {
   for (const sc of fork.transport.listScenarios) {
     for (const e of sc.entries) assert.deepEqual(entryRuleErrors(e), [], sc.name);
+    assert.deepEqual(orderErrors(sc.entries.map((e: any) => e.card)), [], sc.name);
     let previous: { next_cursor: string | null } | null = null;
     for (const step of sc.steps) {
       const response = judgeList(sc.entries, sc.ordinal, step.request);
@@ -481,6 +495,13 @@ test("fork transport: every list request replays to the vector's response, newes
       previous = response;
     }
   }
+});
+
+test("fork transport: order 0 is legal, no cursor names it, and the page ending at order 1 hands on to it", () => {
+  const sc = fork.transport.listScenarios.find((x: any) => x.name === "order_zero_is_legal_but_no_cursor_names_it");
+  assert.deepEqual(sc.steps.map((s: any) => s.response.next_cursor), ["c1", null]);
+  assert.deepEqual(sc.steps[1].response.forks.map((f: any) => f.card.order), [0]);
+  assert.equal(check(forkSchema, "cursor", "c0"), false);
 });
 
 test("fork transport: auth is bearer, then audience, then scope, and a votes token touches nothing", () => {
