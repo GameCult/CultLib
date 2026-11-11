@@ -36,7 +36,7 @@ Available cache attributes:
 
 - `CultDocument(schemaName, schemaVersion)`
 - `CultName`
-- `CultIndex(alias?)`: a unique lookup. Within one document type, a non-blank value names one record; a commit that would leave two records holding one is refused, and a store holding such a pair refuses to load.
+- `CultIndex(alias?)`: a unique lookup. Within one document type, a non-blank value names one record; a commit that would leave two records holding one is refused, and a store holding such a pair refuses to load. Uniqueness is judged by a `CultCache` over the single-file store; a cacheless `WriteDocument`/`WriteRecord` of such a type is refused (also when the catalog declares an index alias the call cannot classify), and concurrent writers on a directory store are not covered (`unique-index-directory-store`). A value is culture-invariant, and a number is its canonical decimal (`1.0m` and `1.00m`, `0.0` and `-0.0` are one value).
 - `CultRole(alias?)`: a selection and reference role. Many records may share a value; it is never a lookup.
 - `CultGlobal`
 - `CultReference(targetType?, many: false)`

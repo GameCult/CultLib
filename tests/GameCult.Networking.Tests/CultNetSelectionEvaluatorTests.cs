@@ -486,6 +486,39 @@ namespace GameCult.Networking.Tests
             Assert.That(evaluation.Rows.Select(r => r.Key.Value), Is.EqualTo(new[] { "a" }));
         }
 
+        // [CultIndex] means unique and is also a selection address: a unique member filters by equality and by number like a role.
+        [Test]
+        public void AUniqueIndexMemberIsAlsoSelectable()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(SelUnique) });
+            var rows = new[]
+            {
+                Row(registry, new SelUnique { Sku = "s1", Rank = 1 }, "a", 1),
+                Row(registry, new SelUnique { Sku = "s2", Rank = 7 }, "b", 2)
+            };
+
+            var byValue = CultNetSelectionEvaluator.Select(registry, rows,
+                new CultNetSelection { Fields = new[] { new CultNetFieldPredicate { Index = "sku", Op = "any_of", Values = new[] { "s2" } } } }, asOf: 2);
+            var byNumber = CultNetSelectionEvaluator.Select(registry, rows,
+                new CultNetSelection { Fields = new[] { new CultNetFieldPredicate { Index = "rank", Op = "gt", Number = "3" } } }, asOf: 2);
+
+            Assert.That(byValue.Rows.Select(r => r.Key.Value), Is.EqualTo(new[] { "b" }));
+            Assert.That(byNumber.Rows.Select(r => r.Key.Value), Is.EqualTo(new[] { "b" }));
+        }
+
+        [CultDocument("cultnet.selection-tests.unique", "cultnet.selection-tests.unique.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        public sealed class SelUnique
+        {
+            [Key(0)]
+            [CultIndex("sku")]
+            public string Sku = string.Empty;
+
+            [Key(1)]
+            [CultIndex("rank")]
+            public int Rank;
+        }
+
         public abstract class SelFixtureMiddle
         {
             [Key(0)]

@@ -1013,7 +1013,7 @@ namespace GameCult.Caching
                 .Where(member => member.IsUnique)
                 .ToDictionary(
                     member => member.IndexAlias!,
-                    member => member.Getter,
+                    member => member.IndexValue,
                     StringComparer.Ordinal);
             var descriptorMembers = members
                 .Select(member => new CultDocumentMemberDescriptor
@@ -1883,6 +1883,10 @@ namespace GameCult.Caching
             public Func<object, string> Getter { get; set; } = default!;
             public Func<object, string?> GetterNullable { get; set; } = default!;
 
+            // What a [CultIndex] value is: culture-invariant, and a number is its canonical decimal (1.0m and 1.00m are one value,
+            // 0.0 and -0.0 are one value), so the value that decides a refusal is the value a lookup names.
+            public Func<object, string> IndexValue { get; set; } = default!;
+
             // D8/Q-J (revised 2026-09-22): non-null exactly for the closed CLR numeric set (Nullable<T>
             // unwrapped), rendered as the member's exact canonical decimal string - never a double, so
             // no CLR numeric type's range or precision is lost rendering it. docs/cultnet-selection-cut.md
@@ -1921,6 +1925,13 @@ namespace GameCult.Caching
                     IsNumeric = IsNumericClrType(memberType),
                     Getter = document => getValue(document)?.ToString() ?? string.Empty,
                     GetterNullable = document => getValue(document)?.ToString(),
+                    IndexValue = document => getValue(document) switch
+                    {
+                        null => string.Empty,
+                        var raw when IsNumericClrType(raw.GetType()) => RenderCanonicalNumber(raw) ?? string.Empty,
+                        IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
+                        var raw => raw.ToString() ?? string.Empty
+                    },
                     NumberOf = document =>
                     {
                         var raw = getValue(document);
@@ -4620,7 +4631,7 @@ namespace GameCult.Caching
         /// <param name="holdsIds">Whether the record's payload holds element ids, or null when the caller cannot tell.</param>
         /// <param name="registry">The registry the payload was encoded with. Given, the write decides the header for copied records that registry can read. It never decides ownership: the answer is the same lent or not. <paramref name="catalogEntry"/> alone owns the record at the key when it declares the stored id (its own or one it lists compatible), or when it is the type that reads the stored entry and reads it whole, so an older id of its own schema name it reads whole is its own and is restamped. Everything else is refused with the file left as it was: a record of another registered type included, whatever the registry holds, and a record it would read only by dropping persisted slots. Retyping a key is a removal and an add. It serves this call only: the store keeps no registry.</param>
         /// <remarks>The call holds the store's gate while it runs. User code it runs must not enter a cache or another store; that throws <see cref="InvalidOperationException"/>.</remarks>
-        /// <exception cref="InvalidOperationException">The store is attached to a cache; write through the cache. Also thrown when the record's type declares a <see cref="CultIndexAttribute"/> (when the registry holds that type): its records are written through a cache.</exception>
+        /// <exception cref="InvalidOperationException">The store is attached to a cache; write through the cache. Also thrown when the record's type declares a <see cref="CultIndexAttribute"/>, and when the catalog entry declares an index alias and the registry lent for the call does not hold the type (none, or another): the call cannot tell a unique index from a role, so such records are written through a cache.</exception>
         /// <exception cref="CultStoreUnreadableException">The file at the path is not a store this runtime can read.</exception>
         public void WriteRecord(CultPersistedRecord record, CultSchemaCatalogEntry catalogEntry, bool? holdsIds = null, CultDocumentRegistry? registry = null)
         {
@@ -4628,7 +4639,7 @@ namespace GameCult.Caching
             if (catalogEntry == null) throw new ArgumentNullException(nameof(catalogEntry));
             Cacheless(registry, () =>
             {
-                RefuseUniqueIndexedCacheless(AttachedRegistry, catalogEntry.SchemaId);
+                RefuseUniqueIndexedCacheless(AttachedRegistry, catalogEntry);
                 WriteOne(record, catalogEntry, holdsIds);
             });
         }
@@ -4647,7 +4658,7 @@ namespace GameCult.Caching
         /// <param name="storedAt">The stored-at stamp, or null for now.</param>
         /// <param name="registry">The registry that describes and encodes the document, or null for <see cref="CultDocumentRegistry.Shared"/>. The document type's entry is taken from it, and the registry decides the header for copied records it can read. It never decides ownership, so the answer is the same for any registry that holds the type: the document's entry owns a record whose id it declares (its own or one it lists compatible), and a record of an older id of its own schema name that it reads whole; everything else is refused, another registered type's record included, and a record it would read only by dropping persisted slots. Retyping a key is a removal and an add. It serves this call only: the store keeps no registry.</param>
         /// <remarks>The call holds the store's gate while it runs. User code it runs (property getters while the document is encoded, constructors while a copied record is read) must not enter a cache or another store; that throws <see cref="InvalidOperationException"/>, carried by the encoder's wrapper when the code ran inside it.</remarks>
-        /// <exception cref="InvalidOperationException">The store is attached to a cache; write through the cache. Also thrown when the record's type declares a <see cref="CultIndexAttribute"/> (when the registry holds that type): its records are written through a cache.</exception>
+        /// <exception cref="InvalidOperationException">The store is attached to a cache; write through the cache. Also thrown when the record's type declares a <see cref="CultIndexAttribute"/>, and when the catalog entry declares an index alias and the registry lent for the call does not hold the type (none, or another): the call cannot tell a unique index from a role, so such records are written through a cache.</exception>
         /// <exception cref="CultStoreUnreadableException">The file at the path is not a store this runtime can read.</exception>
         /// <exception cref="CultElementIdException">The document holds an element id or list a cache write refuses.</exception>
         public void WriteDocument<TDocument>(CultRecordKey key, TDocument document, string? storedAt = null, CultDocumentRegistry? registry = null)
@@ -4656,7 +4667,7 @@ namespace GameCult.Caching
             if (document == null) throw new ArgumentNullException(nameof(document));
             var resolvedRegistry = registry ?? CultDocumentRegistry.Shared;
             var catalogEntry = resolvedRegistry.GetRequired<TDocument>().ToCatalogEntry();
-            RefuseUniqueIndexedCacheless(resolvedRegistry, catalogEntry.SchemaId);
+            RefuseUniqueIndexedCacheless(resolvedRegistry, catalogEntry);
             Cacheless(resolvedRegistry, () =>
             {
                 var ids = CultElementIds.Plan(typeof(TDocument), document, key.Value, deterministic: false);
@@ -4682,12 +4693,17 @@ namespace GameCult.Caching
             });
         }
 
-        // A unique index is judged against every held record, which a cacheless write does not hold.
-        private static void RefuseUniqueIndexedCacheless(CultDocumentRegistry? registry, string schemaId)
+        // A unique index is judged against every held record, which a cacheless write does not hold. A write is refused when the
+        // registry lent for the call holds a type with a [CultIndex] under the schema id, and also when the entry declares an index
+        // alias the call cannot classify (no registry, or one not holding the type): the catalog does not say unique from role.
+        private static void RefuseUniqueIndexedCacheless(CultDocumentRegistry? registry, CultSchemaCatalogEntry entry)
         {
-            if (registry != null && registry.HoldsUniqueIndex(schemaId))
+            var unique = registry != null && registry.HoldsUniqueIndex(entry.SchemaId);
+            var unclassified = entry.Members.Any(member => member.IndexAlias != null) && (registry == null || !registry.Declared(entry.SchemaId));
+            if (unique || unclassified)
                 throw new InvalidOperationException(
-                    "A record of a type with a unique index is written through a cache; a cacheless write cannot judge uniqueness.");
+                    "A record of a type with a unique index is written through a cache; a cacheless write cannot judge uniqueness" +
+                    (unclassified ? " and the registry lent for the call does not say whether this schema's index is unique." : "."));
         }
 
         private void WriteOne(CultPersistedRecord record, CultSchemaCatalogEntry catalogEntry, bool? holdsIds)
