@@ -129,9 +129,12 @@ fn skus(cache: &CultCache) -> Vec<(String, String)> {
 
 #[test]
 fn the_derive_emits_the_unique_aliases() {
-    assert_eq!(Unique::UNIQUE_INDEXES, &["Sku"]);
-    assert_eq!(Multi::UNIQUE_INDEXES, &["B", "A"]);
-    assert!(Plain::UNIQUE_INDEXES.is_empty());
+    fn aliases<T: DatabaseEntry>() -> Vec<&'static str> {
+        T::UNIQUE_INDEXES.iter().map(|(alias, _)| *alias).collect()
+    }
+    assert_eq!(aliases::<Unique>(), ["Sku"]);
+    assert_eq!(aliases::<Multi>(), ["B", "A"]);
+    assert!(aliases::<Plain>().is_empty());
 }
 
 #[test]
@@ -556,4 +559,66 @@ fn vectors_stores_hold_their_verdicts() {
         }
         assert_eq!(std::fs::read(&path).unwrap(), before, "{file} is byte-identical");
     }
+}
+
+// A pull replaces the holder table with the stored image's: a value another writer changed is released, not kept.
+#[test]
+fn a_second_pull_replaces_the_holders_with_the_stored_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pull.cc");
+    let mut cache = cache_at(&path);
+    cache.put("a", &unique("S")).unwrap();
+
+    cache_at(&path).put("a", &unique("T")).unwrap();
+    cache.pull_all_backing_stores().unwrap();
+
+    assert_eq!(cache.get_by_index::<Unique>("Sku", "S").unwrap(), None, "the replaced value is no longer held");
+    assert_eq!(cache.get_by_index::<Unique>("Sku", "T").unwrap(), cache.get::<Unique>("a").unwrap());
+    cache.put("b", &unique("S")).unwrap();
+    assert!(cache.put("c", &unique("T")).is_err());
+}
+
+// The projector decides what held records hold: declaring an index for a type that already has records derives
+// their holders, or refuses the registration when they collide.
+#[test]
+fn registering_an_index_over_held_records_derives_their_holders() {
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<Twin>().unwrap();
+    cache.put("a", &Twin { sku: "S".into(), category: "x".into() }).unwrap();
+    cache.put("b", &Twin { sku: "T".into(), category: "x".into() }).unwrap();
+
+    cache.register_entry_type::<Unique>().unwrap();
+
+    assert_eq!(cache.get_by_index::<Unique>("Sku", "S").unwrap(), cache.get::<Unique>("a").unwrap());
+    assert!(cache.get_by_index::<Unique>("Sku", "S").unwrap().is_some());
+    assert!(cache.put("c", &unique("S")).is_err(), "a held value is refused");
+    cache.put("c", &unique("U")).unwrap();
+}
+
+#[test]
+fn registering_an_index_over_colliding_held_records_is_refused_and_changes_nothing() {
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<Twin>().unwrap();
+    cache.put("a", &Twin { sku: "S".into(), category: "x".into() }).unwrap();
+    cache.put("b", &Twin { sku: "S".into(), category: "y".into() }).unwrap();
+
+    let text = error_text(cache.register_entry_type::<Unique>());
+    assert_eq!(text, refusal("a", "b", "tests.unique_item", "Sku"));
+
+    // Still the unindexed declaration: duplicates keep landing, nothing is looked up.
+    cache.put("c", &Twin { sku: "S".into(), category: "z".into() }).unwrap();
+    assert_eq!(cache.get_all_with_keys::<Twin>().unwrap().len(), 3);
+    assert_eq!(cache.get_by_index::<Unique>("Sku", "S").unwrap(), None);
+}
+
+// Dropping the declaration releases the holders.
+#[test]
+fn registering_without_the_index_releases_the_holders() {
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<Unique>().unwrap();
+    cache.put("a", &unique("S")).unwrap();
+    cache.register_entry_type::<Twin>().unwrap();
+    assert_eq!(cache.get_by_index::<Unique>("Sku", "S").unwrap(), None, "no declaration, no holders");
+    cache.put("b", &Twin { sku: "S".into(), category: "x".into() }).unwrap();
+    assert!(cache.register_entry_type::<Unique>().is_err(), "the duplicate now written is a held violation");
 }

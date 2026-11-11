@@ -168,14 +168,13 @@ pub trait DatabaseEntry: Serialize + DeserializeOwned + Clone + Send + 'static {
     fn cult_name(&self) -> Option<String> {
         None
     }
-    /// The `#[cultcache(index)]` aliases. Each is unique: within one type no two records hold one non-blank value of it.
-    const UNIQUE_INDEXES: &'static [&'static str] = &[];
-    /// Each `#[cultcache(index)]` member as (alias, value): a unique lookup, so a non-blank value names one record of
-    /// the type, which `get_by_index` finds it by.
-    fn cult_indexes(&self) -> Vec<(&'static str, String)> {
-        Vec::new()
-    }
+    /// The `#[cultcache(index)]` members, the one declaration: each is an alias with the reader of its value. Each is
+    /// unique: within one type no two records hold one non-blank value of it, and `get_by_index` finds the record by it.
+    const UNIQUE_INDEXES: &'static [CultIndexMember<Self>] = &[];
 }
+
+/// An index alias and how to read its value from a record; `None` is no value.
+pub type CultIndexMember<T> = (&'static str, fn(&T) -> Option<String>);
 
 /// What a `#[cultcache(name)]` or `#[cultcache(index)]` member says it is called: its text, or `None` for a member
 /// that holds no value (an `Option` that is `None`). The cache treats an empty name and a blank index value as none.
@@ -2743,9 +2742,12 @@ type IndexSlot = (String, String, String);
 type IndexHolders = BTreeMap<IndexSlot, String>;
 
 fn project_indexes<T: DatabaseEntry>(payload: &[u8]) -> Result<Vec<(&'static str, String)>> {
-    let mut held = decode_payload::<T>(payload)?.cult_indexes();
-    held.retain(|(_, value)| !value.trim().is_empty());
-    Ok(held)
+    let document = decode_payload::<T>(payload)?;
+    Ok(T::UNIQUE_INDEXES
+        .iter()
+        .filter_map(|(alias, read)| read(&document).map(|value| (*alias, value)))
+        .filter(|(_, value)| !value.trim().is_empty())
+        .collect())
 }
 
 /// What an admission does to the holder map: slots it releases (still held by the key that held them) and slots it takes.
@@ -2802,16 +2804,32 @@ impl CultCache {
                 existing_type
             ));
         }
+        // The projector decides what the held records hold, so a changed declaration re-derives the holder table over
+        // them; a held violation (or a record the new type cannot decode) refuses the registration and changes nothing.
+        let previous = self.projectors.get(T::TYPE).copied();
+        if T::UNIQUE_INDEXES.is_empty() {
+            self.projectors.remove(T::TYPE);
+        } else {
+            self.projectors.insert(T::TYPE.to_string(), project_indexes::<T>);
+        }
+        let held_type = self.entries.range((T::TYPE.to_string(), String::new())..).next().is_some_and(|((held, _), _)| held == T::TYPE);
+        if held_type {
+            match self.judge_image(&self.entries) {
+                Ok(holders) => self.index_holders = holders,
+                Err(refusal) => {
+                    match previous {
+                        Some(project) => self.projectors.insert(T::TYPE.to_string(), project),
+                        None => self.projectors.remove(T::TYPE),
+                    };
+                    return Err(refusal);
+                }
+            }
+        }
         self.definitions.insert(T::TYPE.to_string(), T::SCHEMA_NAME);
         if T::GLOBAL {
             self.globals.insert(T::TYPE.to_string());
         } else {
             self.globals.remove(T::TYPE);
-        }
-        if T::UNIQUE_INDEXES.is_empty() {
-            self.projectors.remove(T::TYPE);
-        } else {
-            self.projectors.insert(T::TYPE.to_string(), project_indexes::<T>);
         }
         self.schema_name_definitions
             .insert(T::SCHEMA_NAME.to_string(), T::TYPE.to_string());
@@ -3030,7 +3048,7 @@ impl CultCache {
     /// blank value is not indexed, so it finds nothing; neither does an alias `T` does not declare.
     pub fn get_by_index<T: DatabaseEntry>(&self, alias: &str, value: &str) -> Result<Option<T>> {
         self.require_entry_type::<T>()?;
-        if value.trim().is_empty() || !T::UNIQUE_INDEXES.contains(&alias) {
+        if value.trim().is_empty() || !T::UNIQUE_INDEXES.iter().any(|(declared, _)| *declared == alias) {
             return Ok(None);
         }
         let slot = (T::TYPE.to_string(), alias.to_string(), value.to_string());
@@ -3306,10 +3324,10 @@ impl CultCache {
         let Some(entry) = self.entries.get(&id).cloned() else {
             return Ok(false);
         };
+        let released = self.projected_slots(&entry)?;
         if let Some(home) = self.home_index(T::TYPE)? {
             self.stores[home].store.delete(&entry)?;
         }
-        let released = self.projected_slots(&entry)?;
         self.entries.remove(&id);
         IndexChange { released, taken: Vec::new() }.apply(&mut self.index_holders);
         Ok(true)
