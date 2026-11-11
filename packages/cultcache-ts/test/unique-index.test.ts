@@ -550,3 +550,25 @@ test("registerIndex of a second unique alias judges it, naming the two smallest 
   assert.equal(cache.getKeyByIndex(document, "a", "1"), "z", "the alias already installed is intact");
   assert.equal(cache.getKeyByIndex(document, "b", "s"), undefined);
 });
+
+// ---- the single-put judge's two orders, which no pair-order vector row reaches from TS (a vector row's second record
+// arrives in a batch that TS cannot perform): aliases by UTF-16 code unit, then the key pair by UTF-16 code unit ----
+
+test("a put colliding on two aliases names the one least by UTF-16 code unit, not by code point", async () => {
+  // U+10400 is the surrogate pair D801 DC00, so it sorts before U+FF21 by code unit and after it by code point.
+  const document = pair({ indexes: { "Ａ": "a", "\u{10400}": "b" } });
+  const cache = memory(document);
+  await cache.put(document, "h1", { a: "s1", b: "t1" });
+  await cache.put(document, "h2", { a: "s2", b: "t2" });
+  await assert.rejects(cache.put(document, "p", { a: "s1", b: "t2" }), { message: refusal("h2", "p", "tests.pair", "\u{10400}") });
+  assert.equal(cache.get(document, "p"), undefined);
+});
+
+test("a put names its key pair by UTF-16 code unit, not by normalised form", async () => {
+  // "e" U+0302 is the NFD form of U+00EA: equal when normalised, and less by code unit.
+  const document = item("item");
+  const cache = memory(document);
+  await cache.put(document, "ê", { sku: "v" });
+  await assert.rejects(cache.put(document, "ê", { sku: "v" }), { message: refusal("ê", "ê", "tests.item", "sku") });
+  assert.equal(cache.get(document, "ê"), undefined);
+});
