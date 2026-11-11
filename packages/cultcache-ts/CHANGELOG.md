@@ -5,6 +5,15 @@ All notable changes to `@gamecult/cultcache-ts` are recorded here, following
 
 ## [Unreleased]
 
+### Breaking
+
+- `indexes` are unique, as C# `[CultIndex]`: a write or a load that leaves two records of a type holding one non-blank
+  value under one alias is refused naming both keys and the alias, and writes nothing. Index text is the C# canonical
+  text (booleans `True`/`False`, integers as digits, doubles as the exact expansion, blank values never indexed), so
+  an empty string is no longer a value. `registerIndex` over held duplicates installs nothing. A new `roles` map names
+  the many-row selection aliases (never indexed for lookup, same catalog `indexAlias`). The per-key migration rule is
+  in the README; classify every key before bumping.
+
 ### Changed
 
 - Opening a legacy (pre-v1) store is a pure read: payloads that were not bytes are normalized in memory and the
