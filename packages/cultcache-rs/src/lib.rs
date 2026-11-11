@@ -6140,16 +6140,22 @@ mod tests {
         for line in manifest.lines().filter(|line| !line.is_empty() && !line.starts_with('#')) {
             let cells: Vec<&str> = line.split_whitespace().collect();
             let (vector, reads) = (cells[0], cells[2] == "reads");
-            if !vector.starts_with("..") {
+            if !vector.starts_with("..") && !vector.starts_with('@') {
                 listed.push(vector.to_string());
             }
-            let bytes = std::fs::read(root.join(vector))?;
+            // `@directory`: the walker puts an empty directory at the store path; it is refused and left untouched.
+            let directory = vector == "@directory";
+            let bytes = if directory { Vec::new() } else { std::fs::read(root.join(vector))? };
             // A v3 store keeps its marker through a rewrite; every other file that reads is written v1.
             let header = if vector.contains("v3") { "cultcache.store.v3" } else { STORE_FORMAT_V1 };
             for operation in ["open", "soft_push_all", "push_all", "push"] {
                 let temp = tempfile::tempdir()?;
                 let path = temp.path().join("store.msgpack");
-                std::fs::write(&path, &bytes)?;
+                if directory {
+                    std::fs::create_dir(&path)?;
+                } else {
+                    std::fs::write(&path, &bytes)?;
+                }
                 let mut store = SingleFileMessagePackBackingStore::new(&path);
                 let outcome = match operation {
                     "open" => store.pull_all().map(|_| ()),
@@ -6159,6 +6165,10 @@ mod tests {
                 };
                 let what = format!("{vector} {operation}");
                 assert_eq!(outcome.is_ok(), reads, "{what}: {outcome:?}");
+                if directory {
+                    assert!(path.is_dir() && std::fs::read_dir(&path)?.next().is_none(), "{what} touched the directory");
+                    continue;
+                }
                 if operation == "soft_push_all" && reads {
                     // A soft flush leaves a store it reads byte for byte.
                     assert_eq!(std::fs::read(&path)?, bytes, "{what} rewrote a store it reads");
