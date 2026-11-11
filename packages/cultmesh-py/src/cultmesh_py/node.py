@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from cultcache_py import CultCache, CultCacheEnvelope, SingleFileMessagePackBackingStore
-from cultcache_py.cache import CultCacheError
+from cultcache_py.cache import CultCacheError, index_text
 from cultcache_py.documents import DocumentDefinition, extract_value
 from cultnet_py import (
     CultNetAppliedRecord,
@@ -520,7 +520,7 @@ class CultMeshDatabase:
             raise ValueError(f"Document type {document.type!r} has no index {index!r}")
 
         def filtered(change: CultMeshDatabaseChange) -> None:
-            if self._change_matches_extractor(change, extractor, value):
+            if self._change_matches_extractor(change, extractor, value, index_text):
                 callback(self._change_as_document(change, requested))
 
         return self.watch(filtered, document=document)
@@ -1295,10 +1295,11 @@ class CultMeshDatabase:
         change: CultMeshDatabaseChange,
         extractor: str | Callable[[Any], str | int | float | bool | None],
         expected: str,
+        render: Callable[[Any], str | None] = str,
     ) -> bool:
         return (
-            self._value_matches_extractor(change.value, extractor, expected)
-            or self._value_matches_extractor(change.previous_value, extractor, expected)
+            self._value_matches_extractor(change.value, extractor, expected, render)
+            or self._value_matches_extractor(change.previous_value, extractor, expected, render)
         )
 
     def _value_matches_extractor(
@@ -1306,11 +1307,12 @@ class CultMeshDatabase:
         value: Any | None,
         extractor: str | Callable[[Any], str | int | float | bool | None],
         expected: str,
+        render: Callable[[Any], str | None] = str,
     ) -> bool:
         if value is None:
             return False
         actual = extract_value(value, extractor)
-        return actual is not None and str(actual) == expected
+        return actual is not None and render(actual) == expected
 
     def _previous_values_for_snapshot_response(self, response: dict[str, Any]) -> dict[tuple[str, str], Any]:
         if response.get("schemaVersion") != "cultnet.snapshot_response_raw.v0":
