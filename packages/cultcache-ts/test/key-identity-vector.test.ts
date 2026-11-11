@@ -264,3 +264,32 @@ test("a foreign key one store carries and another holds under a registered type 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// The cache judge answers for what the cache holds whatever the store is: a store that never judges (it only records
+// what it is asked) is asked nothing at a foreign key, and foreign records list by key ordinal.
+test("a foreign key is refused by the cache before any store is asked, and foreign records list sorted", async () => {
+  const calls: string[] = [];
+  const record = (key: string, schemaId: string): CultCacheEnvelope => ({
+    key,
+    type: "unclaimed",
+    schemaId,
+    storedAt: "2026-01-01T00:00:00Z",
+    payload: documentPayloadFromBytes(encode(["x"])),
+  });
+  const store = {
+    pullAll: async () => [record("m", "unclaimed.m.v1"), record("b", "unclaimed.b.v1")],
+    push: async (entry: CultCacheEnvelope) => void calls.push(`push ${entry.key}`),
+    delete: async (entry: CultCacheEnvelope) => void calls.push(`delete ${entry.key}`),
+  };
+  const cache = CultCache.builder().withDocumentType(types.alpha!).withGenericStore(store).build();
+  await cache.pullAllBackingStores();
+  assert.deepEqual(cache.foreignRecords().map((r) => [r.key, r.schemaId, r.schemaName]), [["b", "unclaimed.b.v1", "unclaimed"], ["m", "unclaimed.m.v1", "unclaimed"]]);
+  await assert.rejects(cache.put(types.alpha!, "m", { text: CANARY } as never), (error: Error) => {
+    assert.ok(error instanceof SchemaConflictError && error.recordKey === "m");
+    assert.ok(!error.message.includes(CANARY));
+    return true;
+  });
+  await assert.rejects(cache.delete(types.alpha!, "b"), (error: Error) => error instanceof SchemaConflictError && error.recordKey === "b");
+  assert.equal(await cache.delete(types.alpha!, "nobody"), false);
+  assert.deepEqual(calls, []);
+});
