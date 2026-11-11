@@ -220,3 +220,67 @@ class KeyIdentityTests(unittest.TestCase):
                 writer.delete(gamma, key)
             cache.pull_all_backing_stores()
             self.assertEqual(cache.foreign_records(), [])
+
+
+class OwnershipAndStoreKindTests(unittest.TestCase):
+    """The cache judge answers on its own where the store has no commit guard (JSONL) or the records live in two stores."""
+
+    def test_a_jsonl_store_gets_no_help_from_a_disk_judge(self) -> None:
+        from cultcache_py import JsonLinesBackingStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.jsonl"
+            gamma = DOCUMENTS["gamma"]
+            alpha_beta("gamma", store=JsonLinesBackingStore(path)).put(gamma, "k", {"text": "g"})
+            before = path.read_bytes()
+            cache = alpha_beta("alpha", store=JsonLinesBackingStore(path))
+            cache.pull_all_backing_stores()
+            self.assertEqual([record.key for record in cache.foreign_records()], ["k"])
+            with self.assertRaises(SchemaConflictError):
+                cache.put(DOCUMENTS["alpha"], "k", {"text": "x"})
+            with self.assertRaises(SchemaConflictError):
+                cache.delete(DOCUMENTS["alpha"], "k")
+            self.assertEqual(path.read_bytes(), before)
+            cache.put(DOCUMENTS["alpha"], "j", {"text": "a"})  # the foreign line is carried through a write elsewhere
+            self.assertIn(b"tests.ki_gamma", path.read_bytes())
+
+    def test_a_foreign_key_in_two_stores_refuses_the_pull(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            one, two = Path(tmp) / "one.cc", Path(tmp) / "two.cc"
+            for path in (one, two):
+                alpha_beta("gamma", store=SingleFileMessagePackBackingStore(path)).put(DOCUMENTS["gamma"], "k", {"text": "g"})
+            cache = alpha_beta("alpha")
+            cache.add_backing_store(SingleFileMessagePackBackingStore(one), [DOCUMENTS["alpha"].type])
+            cache.add_backing_store(SingleFileMessagePackBackingStore(two), [DOCUMENTS["beta"].type])
+            with self.assertRaises(Exception) as caught:
+                cache.pull_all_backing_stores()
+            self.assertIn("'k'", str(caught.exception))
+
+    def test_a_type_that_owns_the_held_schema_id_replaces_the_record_and_the_key_keeps_one_type(self) -> None:
+        successor = define_database_entry_type(
+            "tests.ki_alpha2",
+            [database_entry_field("text", 0, codec=t.string)],
+            schema_id="sha256:" + "a" * 64,
+            schema_name="tests.ki_alpha2",
+            compatible_schema_ids=[IDS["alpha"]],
+        )
+        for routed in (False, True):
+            with self.subTest(routed=routed), tempfile.TemporaryDirectory() as tmp:
+                one, two = Path(tmp) / "one.cc", Path(tmp) / "two.cc"
+                made = CultCache.builder().register_document_type(DOCUMENTS["alpha"]).register_document_type(successor)
+                if routed:
+                    made.add_backing_store(SingleFileMessagePackBackingStore(one), [DOCUMENTS["alpha"].type])
+                    made.add_backing_store(SingleFileMessagePackBackingStore(two), [successor.type])
+                else:
+                    made.add_generic_store(SingleFileMessagePackBackingStore(one))
+                cache = made.build()
+                cache.put(DOCUMENTS["alpha"], "k", {"text": "old"})
+                if routed:
+                    with self.assertRaises(SchemaConflictError):  # one key would live in two stores
+                        cache.put(successor, "k", {"text": "new"})
+                    self.assertEqual(cache.get(DOCUMENTS["alpha"], "k"), {"text": "old"})
+                else:
+                    cache.put(successor, "k", {"text": "new"})
+                    self.assertIsNone(cache.get(DOCUMENTS["alpha"], "k"))
+                    self.assertEqual(cache.get(successor, "k"), {"text": "new"})
+                    self.assertEqual(file_records(one), [["k", "tests.ki_alpha2"]])
