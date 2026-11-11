@@ -43,9 +43,10 @@ from cultmesh_py import (
 
 note_doc = define_database_entry_type(
     "mesh.note",
-    [("body", 0), ("name", 1), ("kind", 2)],
+    [("body", 0), ("name", 1), ("kind", 2), ("slug", 3)],
     name="name",
-    indexes={"kind": "kind"},
+    indexes={"slug": "slug"},  # unique: no two notes hold one slug; watch_by_index and get_key_by_index look it up
+    roles={"kind": "kind"},  # many notes share a kind: a selection alias, never a lookup
 )
 node = CultMesh.start_node(
     "mesh.cc",
@@ -55,13 +56,13 @@ node = CultMesh.start_node(
 node.database.register_document(note_doc)
 unsubscribe = node.database.watch_record(note_doc, "note:1", lambda change: print(change.change_kind))
 unsubscribe_named = node.database.watch_by_name(note_doc, "intro", lambda change: print(change.record_key))
-unsubscribe_kind = node.database.watch_by_index(note_doc, "kind", "guide", lambda change: print(change.record_key))
-node.database.put(note_doc, "note:1", {"body": "hello", "name": "intro", "kind": "guide"})
+unsubscribe_slug = node.database.watch_by_index(note_doc, "slug", "intro-guide", lambda change: print(change.record_key))
+node.database.put(note_doc, "note:1", {"body": "hello", "name": "intro", "kind": "guide", "slug": "intro-guide"})
 live_note = node.database.get_required(note_doc, "note:1")
 put_message = node.database.put_raw_message(
     note_doc,
     "note:2",
-    {"body": "wire me", "name": "wire", "kind": "interop"},
+    {"body": "wire me", "name": "wire", "kind": "interop", "slug": "wire-me"},
     shard_id="interop",
     shard_epoch=1,
 )

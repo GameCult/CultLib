@@ -432,6 +432,8 @@ def wire_message_schema_properties(schema_version: str) -> dict[str, Any]:
             "document": {"$ref": "#/$defs/rawDocumentRecord"},
             "schemaId": common["schemaId"],
             "recordKey": common["recordKey"],
+            "commitId": {"type": ["string", "null"], "minLength": 1},
+            "commitCount": {"type": ["integer", "null"], "minimum": 2},
         },
         "cultnet.shard_catalog_request.v0": {
             **common,

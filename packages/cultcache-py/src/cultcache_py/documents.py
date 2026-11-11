@@ -157,6 +157,11 @@ class DocumentDefinition(Generic[T]):
     global_document: bool = False
     name: str | Extractor[T] | None = None
     indexes: dict[str, str | Extractor[T]] = field(default_factory=dict)
+    """Unique lookups (C# `[CultIndex]`): no two records of the type hold one non-blank value, judged at every commit and
+    load. `get_by_index` answers the one holder."""
+    roles: dict[str, str | Extractor[T]] = field(default_factory=dict)
+    """Selection aliases (C# `[CultRole]`): many records may share a value. Never indexed for lookup, never refuse; the
+    member's catalog `index_alias` is the same either way."""
     payload_encoder: Callable[[Any], bytes] = _json_payload_encoder
     payload_decoder: Callable[[bytes], Any] = _json_payload_decoder
     schema_id: str | None = None
@@ -189,6 +194,14 @@ class DocumentDefinition(Generic[T]):
         if self.validate:
             self.validate(value)
         return value
+
+    def __post_init__(self) -> None:
+        # Judged here so every constructor passes it: the factories, the dataclass constructor and dataclasses.replace.
+        for alias in self.roles:
+            if alias in self.indexes:
+                raise ValueError(
+                    f"Document type {self.type} declares '{alias}' as both an index and a role; an index already names its role."
+                )
 
     def catalog_entry(self) -> CultCacheSchemaCatalogEntry:
         if self._catalog_entry is not None:
@@ -241,6 +254,7 @@ def define_document_type(
     global_document: bool = False,
     name: str | Extractor[T] | None = None,
     indexes: dict[str, str | Extractor[T]] | None = None,
+    roles: dict[str, str | Extractor[T]] | None = None,
     payload_encoder: Callable[[Any], bytes] = _json_payload_encoder,
     payload_decoder: Callable[[bytes], Any] = _json_payload_decoder,
     schema_id: str | None = None,
@@ -259,6 +273,7 @@ def define_document_type(
         global_document=global_document,
         name=name,
         indexes=indexes or {},
+        roles=roles or {},
         payload_encoder=payload_encoder,
         payload_decoder=payload_decoder,
         schema_id=schema_id,
@@ -280,6 +295,7 @@ def define_database_entry_type(
     global_document: bool = False,
     name: str | Extractor[T] | None = None,
     indexes: dict[str, str | Extractor[T]] | None = None,
+    roles: dict[str, str | Extractor[T]] | None = None,
     schema_id: str | None = None,
     schema_name: str | None = None,
     schema_version: str | None = None,
@@ -296,7 +312,7 @@ def define_database_entry_type(
 
     normalized = _normalize_fields(type, fields)
     member_name_lookup = name if isinstance(name, str) else None
-    index_lookup = indexes or {}
+    index_lookup = {**(roles or {}), **(indexes or {})}
 
     def members() -> tuple[CultCacheSchemaCatalogMember, ...]:
         return tuple(
@@ -323,6 +339,7 @@ def define_database_entry_type(
         global_document=global_document,
         name=name,
         indexes=indexes,
+        roles=roles,
         payload_encoder=_pack_tree,
         payload_decoder=_messagepack_payload_decoder,
         schema_id=schema_id,
