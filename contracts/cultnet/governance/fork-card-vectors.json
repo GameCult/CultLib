@@ -2699,9 +2699,9 @@
       "message": {
         "schemaVersion": "gamecult.fork.refusal.v0",
         "code": "fork_too_large",
-        "error": "fork_too_large: fork gamecult-chat:question:q3 (order 3) alone is past the response budget; read it by id"
+        "error": "fork_too_large: fork gamecult-chat:question:q3 (order 3) alone is past the response budget"
       },
-      "messagePackHex": "83AD736368656D6156657273696F6EB867616D6563756C742E666F726B2E7265667573616C2E7630A4636F6465AE666F726B5F746F6F5F6C61726765A56572726F72D969666F726B5F746F6F5F6C617267653A20666F726B2067616D6563756C742D636861743A7175657374696F6E3A713320286F7264657220332920616C6F6E6520697320706173742074686520726573706F6E7365206275646765743B2072656164206974206279206964"
+      "messagePackHex": "83AD736368656D6156657273696F6EB867616D6563756C742E666F726B2E7265667573616C2E7630A4636F6465AE666F726B5F746F6F5F6C61726765A56572726F72D95A666F726B5F746F6F5F6C617267653A20666F726B2067616D6563756C742D636861743A7175657374696F6E3A713320286F7264657220332920616C6F6E6520697320706173742074686520726573706F6E736520627564676574"
     }
   ],
   "unavailable": [
@@ -7165,9 +7165,9 @@
             "refusal": {
               "schemaVersion": "gamecult.fork.refusal.v0",
               "code": "fork_too_large",
-              "error": "fork_too_large: fork gamecult-chat:question:q3 (order 3) alone is past the response budget; read it by id"
+              "error": "fork_too_large: fork gamecult-chat:question:q3 (order 3) alone is past the response budget"
             },
-            "refusalHex": "83AD736368656D6156657273696F6EB867616D6563756C742E666F726B2E7265667573616C2E7630A4636F6465AE666F726B5F746F6F5F6C61726765A56572726F72D969666F726B5F746F6F5F6C617267653A20666F726B2067616D6563756C742D636861743A7175657374696F6E3A713320286F7264657220332920616C6F6E6520697320706173742074686520726573706F6E7365206275646765743B2072656164206974206279206964",
+            "refusalHex": "83AD736368656D6156657273696F6EB867616D6563756C742E666F726B2E7265667573616C2E7630A4636F6465AE666F726B5F746F6F5F6C61726765A56572726F72D95A666F726B5F746F6F5F6C617267653A20666F726B2067616D6563756C742D636861743A7175657374696F6E3A713320286F7264657220332920616C6F6E6520697320706173742074686520726573706F6E736520627564676574",
             "httpStatus": 422,
             "fork_id": "gamecult-chat:question:q3",
             "order": 3
@@ -7495,9 +7495,9 @@
             "refusal": {
               "schemaVersion": "gamecult.fork.refusal.v0",
               "code": "fork_too_large",
-              "error": "fork_too_large: fork gamecult-chat:question:q0 (order 0) alone is past the response budget; read it by id"
+              "error": "fork_too_large: fork gamecult-chat:question:q0 (order 0) alone is past the response budget"
             },
-            "refusalHex": "83AD736368656D6156657273696F6EB867616D6563756C742E666F726B2E7265667573616C2E7630A4636F6465AE666F726B5F746F6F5F6C61726765A56572726F72D969666F726B5F746F6F5F6C617267653A20666F726B2067616D6563756C742D636861743A7175657374696F6E3A713020286F7264657220302920616C6F6E6520697320706173742074686520726573706F6E7365206275646765743B2072656164206974206279206964",
+            "refusalHex": "83AD736368656D6156657273696F6EB867616D6563756C742E666F726B2E7265667573616C2E7630A4636F6465AE666F726B5F746F6F5F6C61726765A56572726F72D95A666F726B5F746F6F5F6C617267653A20666F726B2067616D6563756C742D636861743A7175657374696F6E3A713020286F7264657220302920616C6F6E6520697320706173742074686520726573706F6E736520627564676574",
             "httpStatus": 422,
             "fork_id": "gamecult-chat:question:q0",
             "order": 0
@@ -7505,27 +7505,241 @@
         ]
       }
     ],
+    "readTooLarge": [
+      {
+        "name": "a_read_whose_entry_is_past_the_cap_is_fork_too_large_without_an_order",
+        "ordinal": 9,
+        "entries": [
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q3",
+              "title": "Fork 3",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 3,
+              "options_hash": "ced892eb663c22e3d7ece602708043ee545f56b9d4e4421d7f5bfaa86c418ce2"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q3",
+              "options_hash": "ced892eb663c22e3d7ece602708043ee545f56b9d4e4421d7f5bfaa86c418ce2",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          },
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q2",
+              "title": "Fork 2",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 2,
+              "options_hash": "5c7c2945e8e8689c6c928b11d7e0a033640b0c66afb7fcffb9e740c019d63e79"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q2",
+              "options_hash": "5c7c2945e8e8689c6c928b11d7e0a033640b0c66afb7fcffb9e740c019d63e79",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          },
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q1",
+              "title": "Fork 1",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 1,
+              "options_hash": "61959964bd214ea1b961554c43ec46a9faf156dd547cc50c8c16bbdcd55f223a"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q1",
+              "options_hash": "61959964bd214ea1b961554c43ec46a9faf156dd547cc50c8c16bbdcd55f223a",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          },
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q0",
+              "title": "Fork 0",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 0,
+              "options_hash": "1777bd06ffafdf6e81bed5979f37193c4b4e7c3d2504f904e9131012f0767a9d"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q0",
+              "options_hash": "1777bd06ffafdf6e81bed5979f37193c4b4e7c3d2504f904e9131012f0767a9d",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          }
+        ],
+        "request": {
+          "schemaVersion": "gamecult.fork.read_request.v0",
+          "mind": "gamecult-chat",
+          "fork_id": "gamecult-chat:question:q3"
+        },
+        "refusal": {
+          "schemaVersion": "gamecult.fork.refusal.v0",
+          "code": "fork_too_large",
+          "error": "fork_too_large: fork gamecult-chat:question:q3 alone is past the response budget"
+        },
+        "refusalHex": "83AD736368656D6156657273696F6EB867616D6563756C742E666F726B2E7265667573616C2E7630A4636F6465AE666F726B5F746F6F5F6C61726765A56572726F72D950666F726B5F746F6F5F6C617267653A20666F726B2067616D6563756C742D636861743A7175657374696F6E3A713320616C6F6E6520697320706173742074686520726573706F6E736520627564676574",
+        "httpStatus": 422,
+        "fork_id": "gamecult-chat:question:q3"
+      }
+    ],
     "doorFaults": [
       {
         "name": "read_door_answers_request_id_conflict_the_client_sees_unavailable",
         "route": "read",
         "doorCode": "request_id_conflict",
-        "clientCode": "unavailable",
-        "httpStatus": 503
+        "httpStatus": 503,
+        "response": {
+          "schemaVersion": "gamecult.fork.unavailable.v0",
+          "code": "unavailable",
+          "error": "unavailable: the outcome is not confirmed, try again with the same request_id",
+          "retryAfterSeconds": 30
+        },
+        "responseHex": "84AD736368656D6156657273696F6EBC67616D6563756C742E666F726B2E756E617661696C61626C652E7630A4636F6465AB756E617661696C61626C65A56572726F72D94D756E617661696C61626C653A20746865206F7574636F6D65206973206E6F7420636F6E6669726D65642C2074727920616761696E2077697468207468652073616D6520726571756573745F6964B1726574727941667465725365636F6E64731E"
       },
       {
         "name": "list_door_answers_request_id_conflict_the_client_sees_unavailable",
         "route": "list",
         "doorCode": "request_id_conflict",
-        "clientCode": "unavailable",
-        "httpStatus": 503
+        "httpStatus": 503,
+        "response": {
+          "schemaVersion": "gamecult.fork.unavailable.v0",
+          "code": "unavailable",
+          "error": "unavailable: the outcome is not confirmed, try again with the same request_id",
+          "retryAfterSeconds": 30
+        },
+        "responseHex": "84AD736368656D6156657273696F6EBC67616D6563756C742E666F726B2E756E617661696C61626C652E7630A4636F6465AB756E617661696C61626C65A56572726F72D94D756E617661696C61626C653A20746865206F7574636F6D65206973206E6F7420636F6E6669726D65642C2074727920616761696E2077697468207468652073616D6520726571756573745F6964B1726574727941667465725365636F6E64731E"
       },
       {
         "name": "answer_door_answers_request_id_conflict_the_client_sees_it",
         "route": "answer",
         "doorCode": "request_id_conflict",
-        "clientCode": "request_id_conflict",
-        "httpStatus": 409
+        "httpStatus": 409,
+        "response": {
+          "schemaVersion": "gamecult.fork.refusal.v0",
+          "code": "request_id_conflict",
+          "error": "request_id_conflict: this request_id was used for a different body"
+        },
+        "responseHex": "83AD736368656D6156657273696F6EB867616D6563756C742E666F726B2E7265667573616C2E7630A4636F6465B3726571756573745F69645F636F6E666C696374A56572726F72D942726571756573745F69645F636F6E666C6963743A207468697320726571756573745F696420776173207573656420666F72206120646966666572656E7420626F6479"
       }
     ],
     "mindRoutes": {

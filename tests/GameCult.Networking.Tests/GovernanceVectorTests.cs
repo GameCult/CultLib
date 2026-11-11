@@ -303,6 +303,7 @@ namespace GameCult.Networking.Tests
                 Assert.That(Errors(ForkSchema, "refusal", v!["message"]), Is.Empty, S(v["name"]));
                 Assert.That(HexOf(v["message"]), Is.EqualTo(S(v["messagePackHex"])), S(v["name"]));
             }
+            Assert.That(Fork["doorRefusals"]!.AsArray().Single(r => S(r!["name"]) == "fork_too_large")!["httpStatus"]!.GetValue<int>(), Is.EqualTo(422));
         }
 
         [Test]
@@ -729,7 +730,7 @@ namespace GameCult.Networking.Tests
                         Assert.That(HexOf(r), Is.EqualTo(S(step["refusalHex"])), name);
                         Assert.That(S(r["code"]), Is.EqualTo("fork_too_large")); Assert.That(step["httpStatus"]!.GetValue<int>(), Is.EqualTo(422));
                         Assert.That(S(step["fork_id"]), Is.EqualTo(S(first["fork_id"]))); Assert.That(step["order"]!.GetValue<long>(), Is.EqualTo(first["order"]!.GetValue<long>()));
-                        Assert.That(S(r["error"]), Is.EqualTo($"fork_too_large: fork {S(first["fork_id"])} (order {first["order"]!.GetValue<long>()}) alone is past the response budget; read it by id"));
+                        Assert.That(S(r["error"]), Is.EqualTo($"fork_too_large: fork {S(first["fork_id"])} (order {first["order"]!.GetValue<long>()}) alone is past the response budget"));
                         Assert.That(step["request"]!["limit"]!.GetValue<int>(), Is.GreaterThanOrEqualTo(1));
                         var order = first["order"]!.GetValue<long>();
                         if (order >= 1) { Assert.That(i + 1, Is.LessThan(steps.Count), name); last = $"c{order}"; follow = true; Assert.That(Errors(ForkSchema, "cursor", JsonValue.Create(last)), Is.Empty); }
@@ -742,16 +743,36 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void ForkTransport_AReadWhoseEntryIsPastTheCap_IsForkTooLarge422_NamedByForkIdAlone()
+        {
+            var doorStatus = Fork["doorRefusals"]!.AsArray().Single(r => S(r!["name"]) == "fork_too_large")!["httpStatus"]!.GetValue<int>();
+            var cases = Fork["transport"]!["readTooLarge"]!.AsArray();
+            Assert.That(cases.Count, Is.EqualTo(1));
+            foreach (var c in cases)
+            {
+                var held = c!["entries"]!.AsArray().Single(e => S(e!["card"]!["fork_id"]) == S(c["request"]!["fork_id"]))!;
+                Assert.That(Errors(ForkSchema, "readRequest", c["request"]), Is.Empty, S(c["name"]));
+                Assert.That(Errors(ForkSchema, "refusal", c["refusal"]), Is.Empty, S(c["name"]));
+                Assert.That(S(c["refusal"]!["code"]), Is.EqualTo("fork_too_large"));
+                Assert.That(S(c["refusal"]!["error"]), Is.EqualTo($"fork_too_large: fork {S(held["card"]!["fork_id"])} alone is past the response budget"));
+                Assert.That(S(c["refusal"]!["error"]), Does.Not.Contain("order"), "a read names no order");
+                Assert.That(HexOf(c["refusal"]), Is.EqualTo(S(c["refusalHex"])), S(c["name"]));
+                Assert.That(c["httpStatus"]!.GetValue<int>(), Is.EqualTo(422)); Assert.That(c["httpStatus"]!.GetValue<int>(), Is.EqualTo(doorStatus));
+            }
+        }
+
+        [Test]
         public void ForkTransport_ADoorRequestIdConflict_IsAFaultOnReadAndList_AndARefusalOnlyOnTheAnswer()
         {
             var cases = Fork["transport"]!["doorFaults"]!.AsArray();
             Assert.That(cases.Select(c => S(c!["route"])), Is.EqualTo(new[] { "read", "list", "answer" }));
             foreach (var c in cases)
             {
-                var got = S(c!["route"]) == "answer" ? S(c["doorCode"]) : "unavailable";
-                Assert.That(S(c["clientCode"]), Is.EqualTo(got), S(c["name"]));
-                var status = got == "unavailable" ? 503 : Fork["doorRefusals"]!.AsArray().Single(r => S(r!["name"]) == got)!["httpStatus"]!.GetValue<int>();
-                Assert.That(c["httpStatus"]!.GetValue<int>(), Is.EqualTo(status), S(c["name"]));
+                var source = S(c!["route"]) == "answer" ? Fork["doorRefusals"]!.AsArray().Single(r => S(r!["name"]) == S(c["doorCode"]))! : Fork["unavailable"]![0]!;
+                Assert.That(S(c["responseHex"]), Is.EqualTo(S(source["messagePackHex"])), S(c["name"]));
+                Assert.That(HexOf(c["response"]), Is.EqualTo(S(c["responseHex"])), S(c["name"]));
+                Assert.That(c["httpStatus"]!.GetValue<int>(), Is.EqualTo(source["httpStatus"]!.GetValue<int>()), S(c["name"]));
+                Assert.That(Errors(ForkSchema, S(c["route"]) == "answer" ? "refusal" : "unavailable", c["response"]), Is.Empty, S(c["name"]));
             }
         }
 

@@ -425,7 +425,11 @@ LISTS = [
 # A page may stop short of `limit` when the next entry would pass the receiver's response budget; a list whose first
 # entry alone passes it is refused `fork_too_large` (422). The budget is not in the vector: a step records what the receiver answered, and the
 # judges check it against the unbudgeted page (a nonempty strict prefix, resumed below its last entry) or against the entry the page would open with.
-def too_large_doc(c): return {"schemaVersion": "gamecult.fork.refusal.v0", "code": "fork_too_large", "error": f"fork_too_large: fork {c['fork_id']} (order {c['order']}) alone is past the response budget; read it by id"}
+def too_large_doc(c): return {"schemaVersion": "gamecult.fork.refusal.v0", "code": "fork_too_large", "error": f"fork_too_large: fork {c['fork_id']} (order {c['order']}) alone is past the response budget"}
+def read_too_large_doc(c): return {"schemaVersion": "gamecult.fork.refusal.v0", "code": "fork_too_large", "error": f"fork_too_large: fork {c['fork_id']} alone is past the response budget"}
+READ_TOO_LARGE = [{"name": "a_read_whose_entry_is_past_the_cap_is_fork_too_large_without_an_order", "ordinal": 9, "entries": ORDER0,
+                   "request": {"schemaVersion": "gamecult.fork.read_request.v0", "mind": "gamecult-chat", "fork_id": ORDER0[0]["card"]["fork_id"]},
+                   "refusal": read_too_large_doc(ORDER0[0]["card"]), "refusalHex": hx(read_too_large_doc(ORDER0[0]["card"])), "httpStatus": HTTP["fork_too_large"], "fork_id": ORDER0[0]["card"]["fork_id"]}]
 def short_step(entries, ordinal, rq, keep):
     full = judge_list(entries, ordinal, rq); page = full["forks"][:keep]
     assert 0 < keep < len(full["forks"])
@@ -637,8 +641,10 @@ fork = {
               messagePackHex=hx(DUP_LIST), refusal=order_shared(DUP_LIST["forks"])[0])],
     "listScenarios": [{"name": l["name"], "ordinal": l["ordinal"], "entries": l["entries"], "steps": l["steps"]} for l in LISTS],
     "listShortPages": SHORT_PAGES,
-    "doorFaults": [{"name": f"{r}_door_answers_request_id_conflict_the_client_sees_unavailable", "route": r, "doorCode": "request_id_conflict", "clientCode": "unavailable", "httpStatus": 503} for r in ("read", "list")]
-                  + [{"name": "answer_door_answers_request_id_conflict_the_client_sees_it", "route": "answer", "doorCode": "request_id_conflict", "clientCode": "request_id_conflict", "httpStatus": HTTP["request_id_conflict"]}],
+    "readTooLarge": READ_TOO_LARGE,
+    "doorFaults": [dict(c, response=r, responseHex=hx(r)) for c, r in
+                   [({"name": f"{x}_door_answers_request_id_conflict_the_client_sees_unavailable", "route": x, "doorCode": "request_id_conflict", "httpStatus": 503}, unavailable_doc(30)) for x in ("read", "list")]
+                   + [({"name": "answer_door_answers_request_id_conflict_the_client_sees_it", "route": "answer", "doorCode": "request_id_conflict", "httpStatus": HTTP["request_id_conflict"]}, refusal_doc("request_id_conflict"))]],
     "mindRoutes": {"minds": MINDS, "forks": MIND_FORKS, "cases": MINDCASES, "sameResponse": SAME_RESPONSE},
     "authCases": [{"name": a[0], "route": a[1], "token": a[2], "expect": a[3], "huginn_down": len(a) > 4} for a in AUTH],
   },
