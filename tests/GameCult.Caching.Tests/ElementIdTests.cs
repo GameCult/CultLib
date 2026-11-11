@@ -389,6 +389,44 @@ namespace GameCult.Caching.Tests
             Assert.That(refusal.Message, Does.Contain("'7'"));
         }
 
+        // The documented recipe for a type that already has a readable id (src/GameCult.Caching/README.md, Element ids).
+        [Test]
+        public void ATrailingMemberDerivedFromAnExistingReadableIdIsPersistedOnceAndTheStoreIsMarkedV3()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(RecipeBook) });
+            var path = PathOf("recipes.cc");
+            var key = new CultRecordKey("book");
+            using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = registry }))
+                cache.Commit(batch => batch.Upsert(typeof(RecipeBook), new RecipeBook { Recipes = { new IdRecipe { Name = "bread" }, new IdRecipe { Name = "soup" } } }, key));
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"));
+
+            using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = registry }))
+            {
+                var book = cache.Get<RecipeBook>(key)!;
+                Assert.That(book.Recipes.Select(recipe => recipe.ElementId), Is.EqualTo(new[] { "bread", "soup" }));
+                book.Recipes[0].Name = "loaf";
+                cache.Commit(batch => batch.Upsert(typeof(RecipeBook), book, key));
+            }
+
+            using var again = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = registry });
+            var reread = again.Get<RecipeBook>(key)!;
+            Assert.That(reread.Recipes.Select(recipe => recipe.Name), Is.EqualTo(new[] { "loaf", "soup" }));
+            Assert.That(reread.Recipes.Select(recipe => recipe.ElementId), Is.EqualTo(new[] { "bread", "soup" }), "renaming the source does not move the element");
+        }
+
+        [Test]
+        public void AWholeStoreWriteThatLeavesNoIdInTheStoreDropsTheMarkBackToV1()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(RecipeBook) });
+            var path = PathOf("drop.cc");
+            var key = new CultRecordKey("book");
+            using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = registry });
+            cache.Commit(batch => batch.Upsert(typeof(RecipeBook), new RecipeBook { Recipes = { new IdRecipe { Name = "bread" } } }, key));
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"));
+            cache.Commit(batch => batch.Upsert(typeof(RecipeBook), new RecipeBook(), key));
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"), "the mark follows content: no element holds an id, so the store is unmarked");
+        }
+
         // ---- C2a fix batch: the marker, refusals at load, override values, atomic minting ----
 
         private const string HexA = "aaaaaaaaaaaa";
@@ -1357,6 +1395,20 @@ namespace GameCult.Caching.Tests
         {
             [Key(0)] [CultName] public string Name { get; set; } = "";
             [Key(1)] public List<IdLabel> Labels { get; set; } = new();
+        }
+
+        [CultDocument("tests.element_id_recipe_book", "tests.element_id_recipe_book.v1")]
+        [MessagePackObject]
+        public sealed class RecipeBook
+        {
+            [Key(0)] public List<IdRecipe> Recipes { get; set; } = new();
+        }
+
+        [MessagePackObject]
+        public sealed class IdRecipe
+        {
+            [Key(0)] public string Name { get; set; } = "";
+            [Key(1)] [CultElementId(nameof(Name))] public string ElementId { get; set; } = "";
         }
 
         [MessagePackObject]

@@ -65,7 +65,7 @@ Browsers import the same names from `@gamecult/cultcache-ts/document`, which hol
 
 ## Store format and rollback
 
-A store whose records hold an element id is marked `cultcache.store.v3` (`v5` for a C# directory store). This runtime reads a v3 store and keeps the mark and the ids through a rewrite; it does not decide when a document carries ids. A CultLib or cultcache-ts from before element ids refuses a v3 or v5 store by name, so rolling back to an older pin after a store has been written that way is one-way. There is no carry-back: a whole-store write drops the mark only when no record holds an id. Restore from a copy taken before upgrading, and upgrade every reader before any writer.
+A store whose elements hold an id is marked `cultcache.store.v3` by the C# runtime. This runtime reads a v3 store, keeps the header it read and carries the ids through a rewrite; it never drops the mark, so it has no carry-back. A cultcache-ts from before element ids refuses a v3 store by name, so rolling back to it after a store has been written as v3 is one-way: restore from a copy taken before upgrading, and upgrade every reader before any writer. (The C# line is different: CultLib 1.x does not refuse; see the GameCult.Caching README.)
 
 ## `.cc` Inspection
 

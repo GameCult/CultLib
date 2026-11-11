@@ -141,7 +141,7 @@ Large corpora should use a sharded store or a real database. A single snapshot f
 
 ## Store format and rollback
 
-A store whose records hold an element id is marked `cultcache.store.v3` (`v5` for a C# directory store). This runtime reads and writes a v3 single-file store and carries ids through a rewrite. A CultLib or cultcache-py from before element ids refuses a v3 or v5 store by name, so rolling back to an older pin after a store has been written that way is one-way. There is no carry-back: a whole-store write drops the mark only when no record holds an id. Restore from a copy taken before upgrading, and upgrade every reader before any writer.
+A store whose elements hold an id is marked `cultcache.store.v3` by the C# runtime. This runtime reads and writes a v3 single-file store, keeps the header it read and carries the ids through a rewrite; it never drops the mark, so it has no carry-back. A cultcache-py from before element ids refuses a v3 store by name, so rolling back to it after a store has been written as v3 is one-way: restore from a copy taken before upgrading, and upgrade every reader before any writer. (The C# line is different: CultLib 1.x does not refuse; see the GameCult.Caching README.)
 
 ## DatabaseEntry Slot Contract
 

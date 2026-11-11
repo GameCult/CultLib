@@ -233,7 +233,7 @@ non-derived list id is refused; the same member outside a list is unconstrained.
 If the element type already has a readable string id (`Name`, `Slug`, a catalog
 key), leave it as it is. Add a trailing keyed string member marked
 `[CultElementId(nameof(ExistingId))]`; the element id is derived from the
-existing member the first time the element is written, and then persisted:
+existing member on load or first write, and then persisted:
 
 ```csharp
 [MessagePackObject]
@@ -258,23 +258,29 @@ hex), and that is deliberate:
   `ElementId`, so the element and every override that addresses it stay put.
   `ElementId` is the address; `Name` goes back to being ordinary data.
 
+Adopting the recipe on data that already exists: the existing member becomes an
+id source, so it must be non-empty and unique within its list. A record with a
+duplicate value refuses to load (`CultElementIdException`, duplicate id) and an
+empty one is refused at write, so clean such data first.
+
 Take the next free `[Key]` slot, after the highest key on the type (and above
 the subclasses' keys on a union base).
 
 ## Store format and rollback
 
 A store that holds an element id is written as `cultcache.store.v3` (a directory
-store as `cultcache.store.v5.directory-content-addressed-pages`, its `v4` form
-otherwise). A single-file store that holds a variant but no id is `v2`, and a store with
-neither stays `v1` (`v4` for a directory). Any CultLib from before element ids refuses a v3 or v5 store by name.
-That refusal is on purpose, since an older reader would skip the id slots and
-rewrite the elements without them.
+store as `cultcache.store.v5.directory-content-addressed-pages`, `v4` otherwise).
+A single-file store that holds a variant but no id is `v2`, and a store with
+neither stays `v1`. The mark follows content: a whole-store write that leaves no
+element holding an id drops it.
 
-Rolling a consumer back to an older CultLib pin after it has written a v3 or v5
-store is therefore one-way. There is no carry-back: a whole-store write drops the
-mark only when nothing in the store holds an id, and a type with a
-`[CultElementId]` member always writes one. Restore from a copy taken before
-upgrading. Upgrade every reader before any writer.
+The first CultLib release that refuses such a store by name is `cultlib-unity-v2.0.0` (`caching-unity-v2.0.0`). Earlier pins, the 1.x line (`cultlib-unity-v1.0.61`, `cultlib-v1.0.32`), read the header string and never compare it: rolling back to one of them reads a v3 or v5 store silently, drops the ids, and can rewrite the elements without them. That is the dangerous case.
+
+Rolling a consumer back after it has written a v3 or v5 store is therefore
+one-way. The only carry-back is narrow and lossy: a whole-store write that leaves
+no id anywhere in the store (every record rewritten without list elements) writes
+the store unmarked again, and the ids are gone. Otherwise restore from a copy
+taken before upgrading. Upgrade every reader before any writer.
 
 ## Persistence discipline
 

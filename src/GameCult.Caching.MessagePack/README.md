@@ -61,7 +61,7 @@ await cache.PullAllBackingStoresAsync();
 
 ## Store format and rollback
 
-A store whose records hold an element id is marked `cultcache.store.v3` (a directory store `v5`). The single-file and directory stores here write the mark from content; see the Element ids section of the GameCult.Caching README. A CultLib or GameCult.Caching from before element ids refuses it by name, so rolling back to an older pin after a store has been written that way is one-way. There is no carry-back: a whole-store write drops the mark only when no record holds an id. Restore from a copy taken before upgrading, and upgrade every reader before any writer.
+A store whose elements hold an id is marked `cultcache.store.v3` (a directory store `v5`); the single-file and directory stores here write the mark from content. See the Store format and rollback section of the GameCult.Caching README. The first CultLib release that refuses such a store by name is `cultlib-unity-v2.0.0` (`caching-unity-v2.0.0`). Earlier pins, the 1.x line (`cultlib-unity-v1.0.61`, `cultlib-v1.0.32`), read the header string and never compare it: rolling back to one of them reads a v3 or v5 store silently, drops the ids, and can rewrite the elements without them. That is the dangerous case. The only carry-back is narrow and lossy (a whole-store write that leaves no id in the store drops the mark and the ids); otherwise restore from a copy taken before upgrading, and upgrade every reader before any writer.
 
 ## MessagePack source generator
 

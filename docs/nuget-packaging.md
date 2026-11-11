@@ -31,8 +31,7 @@ https://github.com/GameCult/CultLib.git?path=/unity/org.gamecult.cultlib#cultlib
 ## Rolling back across the store format
 
 A consumer that upgrades and writes a store holding an element id leaves a
-`cultcache.store.v3` single-file store (`v5` directory store). A `GameCult.Caching`
-from before element ids refuses it by name, so pinning an older package after
-writing is one-way. There is no carry-back; restore from a copy taken before
-upgrading. Upgrade readers before writers. Detail: the Element ids section of
+`cultcache.store.v3` single-file store (`v5` directory store). The first CultLib release that refuses such a store by name is `cultlib-unity-v2.0.0` (`caching-unity-v2.0.0`). Earlier pins, the 1.x line (`cultlib-unity-v1.0.61`, `cultlib-v1.0.32`), read the header string and never compare it: rolling back to one of them reads a v3 or v5 store silently, drops the ids, and can rewrite the elements without them. That is the dangerous case. There is
+no general carry-back; restore from a copy taken before upgrading, and upgrade
+readers before writers. Detail: the Store format and rollback section of
 `src/GameCult.Caching/README.md`.
