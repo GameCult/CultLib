@@ -143,6 +143,7 @@ use serde::de::DeserializeOwned;
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
@@ -1478,6 +1479,7 @@ impl SingleFileMessagePackBackingStore {
     }
 
     fn write_all_unlocked(&self, entries: &[CultCacheEnvelope]) -> Result<()> {
+        require_one_record_per_key(entries)?;
         let failed = |kind| CultCacheStoreWriteFailed {
             path: self.path.clone(),
             kind,
@@ -1747,11 +1749,8 @@ impl CacheBackingStore for SingleFileMessagePackBackingStore {
     fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
         self.with_exclusive_lock(|| {
             let mut entries = self.read_all_unlocked()?;
-            // A store holds one record per key: a write replaces the record of its own type under its key and refuses to retype it.
-            if let Some(held) = entries.iter().find(|candidate| candidate.key == entry.key) {
-                refuse_retype(held, entry)?;
-            }
-            entries.retain(|candidate| candidate.key != entry.key);
+            // A write replaces the record of its own type under its key; a second type under the key reaches the commit guard.
+            entries.retain(|candidate| entry_id(candidate) != entry_id(entry));
             entries.push(entry.clone());
             entries.sort_by_key(entry_id);
             self.write_all_unlocked(&entries)
@@ -1774,15 +1773,13 @@ impl CacheBackingStore for SingleFileMessagePackBackingStore {
                 return Ok(());
             }
 
-            // One record per key: of same-type entries sharing a key the last one given is the record; a second type under a
-            // key in one batch is refused, as a push of it is.
-            let mut by_key = BTreeMap::<&str, &CultCacheEnvelope>::new();
+            // Of same-type entries sharing a key the last one given is the record; a second type under a key reaches the
+            // commit guard.
+            let mut by_id = BTreeMap::<(String, String), &CultCacheEnvelope>::new();
             for entry in entries {
-                if let Some(held) = by_key.insert(entry.key.as_str(), entry) {
-                    refuse_retype(held, entry)?;
-                }
+                by_id.insert(entry_id(entry), entry);
             }
-            let mut entries: Vec<CultCacheEnvelope> = by_key.into_values().cloned().collect();
+            let mut entries: Vec<CultCacheEnvelope> = by_id.into_values().cloned().collect();
             entries.sort_by_key(entry_id);
             self.write_all_unlocked(&entries)
         })
@@ -3741,17 +3738,23 @@ fn require_unique_keys(envelopes: &[CultCacheEnvelope]) -> Result<()> {
     Ok(())
 }
 
-/// A store holds one record per key, so a write may replace a record of its own type and may not retype it: retyping is
-/// remove-then-add. The refusal names the key and both types; nothing is written.
-fn refuse_retype(held: &CultCacheEnvelope, incoming: &CultCacheEnvelope) -> Result<()> {
-    if held.r#type == incoming.r#type {
-        return Ok(());
+/// The commit guard every single-file write passes: a store holds one record per key, so a snapshot about to be written
+/// may not hold a key twice. Two types under a key are a retype, refused with the key and both types (retyping is
+/// remove-then-add); the same type twice is a malformed snapshot. Nothing is written.
+fn require_one_record_per_key(entries: &[CultCacheEnvelope]) -> Result<()> {
+    let mut held = HashMap::<&str, &CultCacheEnvelope>::new();
+    for entry in entries {
+        let Some(first) = held.insert(entry.key.as_str(), entry) else { continue };
+        if first.r#type == entry.r#type {
+            bail!("CultCache snapshot holds record {:?} of type {:?} more than once", entry.key, entry.r#type);
+        }
+        return Err(anyhow::Error::new(SchemaConflictError {
+            schema_id: entry.schema_id.clone().unwrap_or_else(|| entry.r#type.clone()),
+            schema_names: vec![first.r#type.clone(), entry.r#type.clone()],
+            record_key: entry.key.clone(),
+        }));
     }
-    Err(anyhow::Error::new(SchemaConflictError {
-        schema_id: incoming.schema_id.clone().unwrap_or_else(|| incoming.r#type.clone()),
-        schema_names: vec![held.r#type.clone(), incoming.r#type.clone()],
-        record_key: incoming.key.clone(),
-    }))
+    Ok(())
 }
 
 /// Decodes a store whose header the caller has already read as a readable one: its envelopes and its catalog.
@@ -4349,8 +4352,52 @@ mod tests {
         store.push(&settings)?;
         let before = std::fs::read(&store_path)?;
         let error = store.push(&note).unwrap_err();
-        assert_eq!(retype_refusal(&error).schema_names, vec![Settings::TYPE.to_string(), Note::TYPE.to_string()]);
+        let mut names = retype_refusal(&error).schema_names.clone();
+        names.sort();
+        assert_eq!(names, vec![Note::TYPE.to_string(), Settings::TYPE.to_string()]);
         assert_eq!(std::fs::read(&store_path)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn no_single_file_writer_commits_a_second_type_under_a_held_key() -> Result<()> {
+        let mut cache = CultCache::new();
+        cache.register_registry(TestEntries)?;
+        let (held, _) = cache.prepare_entry("k", &settings_one())?;
+        let (other_key, _) = cache.prepare_entry("c", &settings_one())?;
+        let (note, _) = cache.prepare_entry("k", &note_one())?;
+        let absent_note = CultCacheExpectedEnvelope { key: "k".to_string(), r#type: Note::TYPE.to_string(), current: None };
+        type Writer = fn(&mut SingleFileMessagePackBackingStore, &[CultCacheEnvelope; 3], &CultCacheExpectedEnvelope) -> Result<bool>;
+        let writers: Vec<(&str, Writer)> = vec![
+            ("push", |s, e, _| s.push(&e[2]).map(|()| true)),
+            ("push_all", |s, e, _| s.push_all(&[e[0].clone(), e[2].clone()], PushAllOptions::default()).map(|()| true)),
+            ("insert_entry_if_absent", |s, e, _| s.insert_entry_if_absent(e[2].clone())),
+            ("compare_exchange", |s, e, x| s.compare_exchange(std::slice::from_ref(x), &[e[2].clone()])),
+            ("compare_and_swap_batch", |s, e, _| s.compare_and_swap_batch(&[], vec![e[2].clone()])),
+            ("append_if_snapshot_unchanged", |s, e, _| s.append_if_snapshot_unchanged(&[e[0].clone(), e[1].clone()], vec![e[2].clone()])),
+            ("replace_and_append_if_snapshot_unchanged", |s, e, _| {
+                s.replace_and_append_if_snapshot_unchanged(&[e[0].clone(), e[1].clone()], vec![e[2].clone()])
+            }),
+            ("replace_and_delete_if_snapshot_unchanged", |s, e, _| {
+                s.replace_and_delete_if_snapshot_unchanged(&[e[0].clone(), e[1].clone()], vec![e[2].clone()], std::slice::from_ref(&e[1]))
+            }),
+            ("compare_exchange_snapshot", |s, e, _| s.compare_exchange_snapshot(&[e[1].clone(), e[0].clone()], &[e[0].clone(), e[2].clone()])),
+            ("try_compare_exchange_snapshot", |s, e, _| {
+                s.try_compare_exchange_snapshot(&[e[1].clone(), e[0].clone()], &[e[0].clone(), e[2].clone()]).map(|_| true)
+            }),
+        ];
+        let envelopes = [held.clone(), other_key.clone(), note];
+        for (name, write) in writers {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.cc");
+            let mut store = SingleFileMessagePackBackingStore::new(&path);
+            store.push_all(&[held.clone(), other_key.clone()], PushAllOptions::default())?;
+            let before = std::fs::read(&path)?;
+            let error = write(&mut store, &envelopes, &absent_note).expect_err(name);
+            assert_eq!(retype_refusal(&error).record_key, "k", "{name}");
+            assert_eq!(std::fs::read(&path)?, before, "{name} changed the file");
+            assert!(store.pull_all().is_ok(), "{name}");
+        }
         Ok(())
     }
 
