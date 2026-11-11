@@ -48,29 +48,54 @@ with one part replaced.
 
 ## Extra trailing slot (outcome `read-only`)
 
-Each payload is `union-surface.msgpack` with one slot appended past the reader's last declared slot of one
-record (ruling `cultlib-gaps:ruling:extra-trailing-slots`: the record is read, read-only at any depth, every write
-of it refused). A reader decodes the value of `union-surface.msgpack` from each; `detail` says where the slot is.
+Rulings `cultlib-gaps:ruling:extra-trailing-slots` and `cultlib-gaps:ruling:slot-mark-consent`: a payload carrying a
+slot past its reader's declared slots, in any object at any depth, is read, held read-only, and every write or
+removal of it is refused before anything is staged. The first four payloads are `union-surface.msgpack` with the
+string `"extra-slot"` appended as one more slot of one object; a reader decodes the value of `union-surface.msgpack`
+from each. The fifth is a bare arm of union `UnitOutcome` (0 Waiting `[Message]`; 2 Denied2, -2147483648 Floor2 and
+2147483647 Ceiling2, each `[]`), the union of the `unit-arm-*` files; a reader decodes Denied2 from it.
 
-| File | detail | Record with the extra slot |
-|---|---|---|
-| `extra-slot-record.msgpack` | record | the document (slot 7) |
-| `extra-slot-nested-record.msgpack` | nested-record | Composition `comp` |
-| `extra-slot-arm.msgpack` | arm | the Root Box arm |
-| `extra-slot-list-element.msgpack` | list-element | Text `s1`, an element of Use.Slots |
-| `extra-slot-unit-arm.msgpack` | unit-arm | not a UnionSurface: a bare UnitOutcome arm `[2, [extra]]` where Denied2 declares no slot (union `UnitOutcome`, key 2) |
+An object's declared slots are its highest key plus one. Only an array longer than that marks: a short array
+(missing trailing slots) keeps the defaults and is writable, and a non-nil value in a retired slot below the highest
+key (Image's slot 2) does not mark. A union adds no depth: an arm's array is counted against the arm's own slots.
 
-`depth-skipped-at-limit.msgpack` (bounds file) is also `read-only`: its extra slot is a deeply nested value at depth 0.
-Five rows of `outcomes.msgpack` are `read-only` (record, nested-record, arm, list-element, unit-arm).
+| File | detail | Object with the extra slot | Depth | Mark: type, slots carried, slots declared |
+|---|---|---|---|---|
+| `extra-slot-record.msgpack` | record | the document (slot 7) | 0 | UnionSurface, 8, 7 |
+| `extra-slot-nested-record.msgpack` | nested-record | Composition `comp` | nested | Composition, 3, 2 |
+| `extra-slot-arm.msgpack` | arm | the Root Box arm | nested | Box, 3, 2 |
+| `extra-slot-list-element.msgpack` | list-element | Text `s1`, an element of Use.Slots | nested | Text, 3, 2 |
+| `extra-slot-unit-arm.msgpack` | unit-arm | Denied2 in `[2, ["extra-slot"]]` (union `UnitOutcome`, key 2) | as placed | Denied2, 1, 0 |
+| `depth-skipped-at-limit.msgpack` (bounds file) | depth | the document (slot 7, a value of nested arrays) | 0 | UnionSurface, 8, 7 |
 
-`extra-slot-store.cc` is a single-file store holding two records of `tests.union_surface`: `marked` (the
-`extra-slot-nested-record.msgpack` payload) and `clean` (the ordinary value); the store's clock is pinned to
-2026-01-01T00:00:00Z as `union-surface.cc`'s.
+Each payload marks exactly one object. Five rows of `outcomes.msgpack` are `read-only` (record, nested-record, arm,
+list-element, unit-arm); the sixth `read-only` payload is in `bounds-outcomes.msgpack`. The payload nesting check
+runs before the mark: `depth-skipped-past-limit.msgpack` is refused, never marked.
 
-Every runtime asserts the same for a `read-only` payload loaded as a store record: the value is read past the extra
-slot, the record reports the unread slots (the first type read with them, the slots it carried and the slots the
-reader declares) and is not writable, and a write or removal of it is refused before anything is staged. Opening
-`extra-slot-store.cc` and writing `clean` leaves `marked` byte for byte, with its schema id and its catalog entry.
+### What a runtime asserts for a `read-only` payload
+
+Load it as a store record under the reader's own schema id (the C# reference puts each UnionSurface payload in a
+`tests.union_surface` store; the unit arm goes in slot 1 of a document `[Name, Outcome: UnitOutcome]`). Then:
+
+1. the value is read past the extra slot;
+2. the record reports the mark as in the table: the first type read with extra slots, the slots it carried and the
+   slots the reader declares, and the count of objects that carried extra slots (1 here);
+3. the record is not writable (C#: `CultCache.IsWritable(key)` false), and a key no store holds is writable;
+4. a replacing write, a variant write and a removal of the key (and a flatten, when the marked record is a variant)
+   are refused before anything is staged,
+   with the runtime's schema conflict refusal carrying the mark; its message names the type and both counts and
+   never contains `extra-slot`, the slot's value;
+5. a write to another key of the same store succeeds.
+
+Consent: a mark is explained only when it is at depth 0 and the schema comparison of the record's stored id against
+the reader reported ignored extra slots, i.e. the record is stored under an id the reader lists compatible and the
+catalog entry for that id has more members. Declaring that id consents to an explained mark only. Every mark in the
+table is unexplained (stored under the reader's own id), so each record stays read-only whatever is declared.
+
+`extra-slot-store.cc` is a single-file store of two `tests.union_surface` records, the store's clock pinned to
+2026-01-01T00:00:00Z as `union-surface.cc`'s: `marked`, whose payload is `extra-slot-nested-record.msgpack`, and
+`clean`, the value of `union-surface.msgpack`. Open it, assert `marked` read-only and `clean` writable, write `clean`
+and flush: `marked`'s payload bytes, schema id and stored-at, and every catalog entry's bytes, equal the originals.
 
 ## Bounds (`bounds-outcomes.msgpack`)
 
