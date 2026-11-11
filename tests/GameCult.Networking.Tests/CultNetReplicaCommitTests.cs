@@ -63,6 +63,8 @@ namespace GameCult.Networking.Tests
             {
                 if (message is CultNetDatabaseSubscribeMessage subscribe)
                     _server.Dispatch(subscribe, _peer).GetAwaiter().GetResult();
+                else if (message is CultNetDatabaseUnsubscribeMessage unsubscribe)
+                    _server.Dispatch(unsubscribe, _peer).GetAwaiter().GetResult();
             }
             public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
             {
@@ -312,6 +314,159 @@ namespace GameCult.Networking.Tests
 
             Assert.That(run.ReplicaItem("a")!.Sku, Is.EqualTo("two"));
             Assert.That(run.ReplicaItem("b")!.Sku, Is.EqualTo("one"));
+        }
+
+        // Hand-made wire messages: what a peer sends that the real server would not.
+        private static CultNetDatabaseChangeRawMessage Put(Replication run, string subscription, string key, string sku, string? commit, int count, string? id = null) =>
+            new()
+            {
+                MessageId = id ?? Guid.NewGuid().ToString("N"),
+                SubscriptionId = subscription,
+                ChangeKind = "updated",
+                Document = run.Database.Documents.ToRawRecord(
+                    run.Source.Registry.GetRequired<ReplicaItem>(), new CultRecordKey(key), Item(sku), "2026-01-01T00:00:00Z"),
+                CommitId = commit,
+                CommitCount = commit == null ? null : count
+            };
+
+        private static CultNetDatabaseChangeRawMessage Removal(string subscription, string key, string commit, int count) =>
+            new()
+            {
+                MessageId = Guid.NewGuid().ToString("N"),
+                SubscriptionId = subscription,
+                ChangeKind = "removed",
+                RecordKey = key,
+                SchemaId = "tests.replica_commit_item.v1",
+                CommitId = commit,
+                CommitCount = count
+            };
+
+        [Test]
+        public async Task TwoSubscriptionsMayUseOneCommitIdWithoutJoiningTheirCommits()
+        {
+            using var run = new Replication(source => Stage(source, ("a", "one"), ("b", "two")));
+            var emit = run.Peer.Client!;
+
+            emit.Emit(Put(run, "items", "a", "two", "9", 2));
+            emit.Emit(Put(run, "other", "x", "ex", "9", 2));
+            await Task.Delay(100);
+            Assert.That(run.ReplicaItem("a")!.Sku, Is.EqualTo("one"), "one change of each of two commits is not a commit");
+            Assert.That(run.ReplicaItem("x"), Is.Null);
+
+            emit.Emit(Put(run, "items", "b", "one", "9", 2));
+            await Until(() => run.ReplicaItem("a")!.Sku == "two");
+            Assert.That(run.ReplicaItem("b")!.Sku, Is.EqualTo("one"));
+            Assert.That(run.ReplicaItem("x"), Is.Null);
+            Assert.That(run.Client.Fault, Is.Null);
+        }
+
+        [Test]
+        public async Task ARemovalAfterTheFirstChangeOfACommitIsApplied()
+        {
+            using var run = new Replication(source => Stage(source, ("a", "one")));
+            var emit = run.Peer.Client!;
+
+            emit.Emit(Put(run, "items", "c", "one", "5", 2));
+            emit.Emit(Removal("items", "a", "5", 2));
+            await Until(() => run.ReplicaItem("c") != null);
+
+            Assert.That(run.ReplicaItem("a"), Is.Null);
+            Assert.That(run.Client.Fault, Is.Null);
+        }
+
+        [Test]
+        public void ASnapshotOfManyDocumentsAppliesEveryOne()
+        {
+            using var run = new Replication(source => Stage(source, ("a", "one"), ("b", "two"), ("c", "three"), ("d", "four")));
+
+            Assert.That(new[] { "a", "b", "c", "d" }.Select(key => run.ReplicaItem(key)?.Sku), Is.EqualTo(new[] { "one", "two", "three", "four" }));
+        }
+
+        [Test]
+        public async Task ManyCommitsInARowAreNotMistakenForAnUnboundedBuffer()
+        {
+            using var run = new Replication(source => Stage(source, ("a", "s0"), ("b", "s1")));
+
+            for (var round = 1; round <= 80; round++)
+            {
+                var a = "s" + (round % 2);
+                var b = "s" + ((round + 1) % 2);
+                Stage(run.Source, ("a", a), ("b", b));
+            }
+
+            await Until(() => run.ReplicaItem("a")!.Sku == "s0");
+            Assert.That(run.Client.Fault, Is.Null, "completed commits leave the buffer");
+        }
+
+        [Test]
+        public async Task AMessageDeliveredTwiceInOneCommitFaults()
+        {
+            using var run = new Replication();
+
+            run.Peer.Client!.Emit(Put(run, "items", "a", "one", "3", 3, id: "same"));
+            run.Peer.Client!.Emit(Put(run, "items", "b", "two", "3", 3, id: "same"));
+            await Until(() => run.Client.Fault != null);
+
+            Assert.That(run.Faults, Has.Count.EqualTo(1));
+            Assert.That(run.ReplicaItem("a"), Is.Null);
+        }
+
+        [Test]
+        public async Task ACommitThatChangesItsAnnouncedSizeFaults()
+        {
+            using var run = new Replication();
+
+            run.Peer.Client!.Emit(Put(run, "items", "a", "one", "3", 2));
+            run.Peer.Client!.Emit(Put(run, "items", "b", "two", "3", 3));
+            await Until(() => run.Client.Fault != null);
+
+            Assert.That(run.ReplicaItem("a"), Is.Null);
+        }
+
+        [Test]
+        public async Task ACommitAnnouncingMoreChangesThanAReplicaHoldsFaults()
+        {
+            using var run = new Replication();
+
+            run.Peer.Client!.Emit(Put(run, "items", "a", "one", "3", 1_000_000));
+            await Until(() => run.Client.Fault != null);
+        }
+
+        [Test]
+        public async Task MoreIncompleteCommitsThanTheBoundFault()
+        {
+            using var run = new Replication();
+
+            for (var commit = 0; commit < 70; commit++)
+                run.Peer.Client!.Emit(Put(run, "items", "k" + commit, "v" + commit, "c" + commit, 2));
+            await Until(() => run.Client.Fault != null);
+        }
+
+        [Test]
+        public async Task UnsubscribingDropsTheCommitsStillWaiting()
+        {
+            using var run = new Replication();
+            var emit = run.Peer.Client!;
+
+            emit.Emit(Put(run, "items", "a", "one", "4", 2));
+            await Task.Delay(50);
+            run.Client.Unsubscribe("items");
+            emit.Emit(Put(run, "items", "b", "two", "4", 2));
+            await Task.Delay(100);
+
+            Assert.That(run.ReplicaItem("a"), Is.Null);
+            Assert.That(run.ReplicaItem("b"), Is.Null, "the second half of a dropped commit is not a commit");
+        }
+
+        [Test]
+        public async Task AFaultedClientRefusesANewSubscription()
+        {
+            using var run = new Replication(seedReplica: replica => Stage(replica, ("local", "taken")));
+            Stage(run.Source, ("a", "taken"));
+            await Until(() => run.Client.Fault != null);
+
+            var refusal = Assert.Throws<InvalidOperationException>(() => run.Client.SubscribeAsync("again"));
+            Assert.That(refusal!.InnerException, Is.SameAs(run.Client.Fault));
         }
     }
 }

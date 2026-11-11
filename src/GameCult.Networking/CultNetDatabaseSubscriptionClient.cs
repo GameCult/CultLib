@@ -29,7 +29,11 @@ namespace GameCult.Networking
         private readonly ConcurrentDictionary<string, PendingSubscription> _initialSnapshots = new();
         private readonly ConcurrentDictionary<string, CultNetDatabaseSubscriptionDeliveryMode> _deliveryModes =
             new(StringComparer.Ordinal);
-        // Changes of a commit that has not fully arrived, by subscription and commit id. Touched only inside the queue.
+        // Changes of a commit that has not fully arrived, by subscription and commit id.
+        // Guarded by its own lock: the queue fills it, Unsubscribe and Dispose evict. A commit that does not complete is bounded
+        // by MaxPendingCommits and MaxCommitCount, and a violation faults the client.
+        private const int MaxPendingCommits = 64;
+        private const int MaxCommitCount = 4096;
         private readonly Dictionary<(string SubscriptionId, string CommitId), List<CultNetDatabaseChangeRawMessage>> _commits = new();
         private readonly object _queueLock = new();
         private Task _queue = Task.CompletedTask;
@@ -120,6 +124,8 @@ namespace GameCult.Networking
             CultNetDatabaseSubscriptionDeliveryMode deliveryMode = CultNetDatabaseSubscriptionDeliveryMode.ReplicateToCache)
         {
             if (_disposed) throw new ObjectDisposedException(nameof(CultNetDatabaseSubscriptionClient));
+            if (Fault != null)
+                throw new InvalidOperationException("The replica refused a commit and differs from its source; subscribe with a new client.", Fault);
             if (!_client.Connected) throw new InvalidOperationException("CultNet schema client must be connected before subscribing.");
             if (string.IsNullOrWhiteSpace(subscriptionId)) throw new ArgumentException("Subscription id is required.", nameof(subscriptionId));
 
@@ -177,6 +183,9 @@ namespace GameCult.Networking
             if (_disposed) return;
             if (string.IsNullOrWhiteSpace(subscriptionId)) throw new ArgumentException("Subscription id is required.", nameof(subscriptionId));
             _deliveryModes.TryRemove(subscriptionId, out _);
+            lock (_commits)
+                foreach (var held in _commits.Keys.Where(key => key.SubscriptionId == subscriptionId).ToArray())
+                    _commits.Remove(held);
             _client.SendCultNet(new CultNetDatabaseUnsubscribeMessage
             {
                 MessageId = Guid.NewGuid().ToString("N"),
@@ -192,6 +201,8 @@ namespace GameCult.Networking
                 pending.Completion.TrySetException(new ObjectDisposedException(nameof(CultNetDatabaseSubscriptionClient)));
             _initialSnapshots.Clear();
             _deliveryModes.Clear();
+            lock (_commits)
+                _commits.Clear();
             _client.Dispose();
         }
 
@@ -233,14 +244,53 @@ namespace GameCult.Networking
 
                 // The commit's other changes follow on this connection; the replica applies them as one commit.
                 var held = (message.SubscriptionId, message.CommitId);
-                if (!_commits.TryGetValue(held, out var changes))
-                    _commits[held] = changes = new List<CultNetDatabaseChangeRawMessage>();
-                changes.Add(message);
-                if (changes.Count < message.CommitCount)
-                    return Task.CompletedTask;
-                _commits.Remove(held);
+                List<CultNetDatabaseChangeRawMessage>? changes;
+                lock (_commits)
+                {
+                    if (Fault != null)
+                        return Task.CompletedTask;
+                    var count = message.CommitCount!.Value;
+                    var refusal = count > MaxCommitCount
+                        ? $"commit '{message.CommitId}' announces {count} changes, more than the {MaxCommitCount} a replica holds"
+                        : !_commits.TryGetValue(held, out changes)
+                            ? (_commits.Count >= MaxPendingCommits
+                                ? $"more than {MaxPendingCommits} commits are incomplete at once"
+                                : null)
+                            : changes[0].CommitCount != count
+                                ? $"commit '{message.CommitId}' announces {changes[0].CommitCount} and {count} changes"
+                                : changes.Any(other => other.MessageId == message.MessageId)
+                                    ? $"commit '{message.CommitId}' delivered message '{message.MessageId}' twice"
+                                    : null;
+                    if (refusal != null)
+                    {
+                        Break(new InvalidOperationException($"CultNet subscription '{message.SubscriptionId}': {refusal}."));
+                        return Task.CompletedTask;
+                    }
+
+                    if (!_commits.TryGetValue(held, out changes))
+                        _commits[held] = changes = new List<CultNetDatabaseChangeRawMessage>();
+                    changes.Add(message);
+                    if (changes.Count < count)
+                        return Task.CompletedTask;
+                    _commits.Remove(held);
+                }
+
                 return Apply(deliveryMode, changes);
             });
+        }
+
+        // The replica no longer matches its source: say so once, drop what was waiting, and apply nothing more.
+        private void Break(Exception error)
+        {
+            lock (_commits)
+            {
+                if (Fault != null)
+                    return;
+                Fault = error;
+                _commits.Clear();
+            }
+
+            Faulted?.Invoke(error);
         }
 
         private Task Apply(CultNetDatabaseSubscriptionDeliveryMode deliveryMode, IReadOnlyList<CultNetDatabaseChangeRawMessage> changes)
@@ -258,8 +308,7 @@ namespace GameCult.Networking
             }
             catch (Exception error)
             {
-                Fault = error;
-                Faulted?.Invoke(error);
+                Break(error);
                 return Task.CompletedTask;
             }
 
