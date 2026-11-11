@@ -55,14 +55,19 @@ What this establishes:
 - Retype as remove plus add already works in the cache (P4, P5); the cut adds no new primitive.
 - Directory store: its own judge (`DirectoryMessagePackBackingStore.cs:287-306`) asks `Registry.Owns` for every key,
   upserts included. It must take the same per-key rule.
-- TypeScript, Python (and Rust before its leaf cut): records are keyed by `(type, key)` (TS `#entryId(definition.type, key)`,
-  `cult-cache.ts:323`; Python sorts and stores by `(type, key)`).
-  A write of A at k never meets B's record: both live at k (P1). Neither carries a foreign record; a store holding an
-  unregistered type does not load (P2). Rust, after the leaf cut, keeps its `(type, key)` map but its one judge
-  (`refuse_retype`) refuses a second registered type at a held key on every write path, pull and SoA load, whatever schema
-  id an envelope claims, and carries an unregistered type's records as foreign; it walks the vector's 12 rows. So no leaf has a "write meets another type's record" path to fix. Bringing the
-  ruling to the leaves first needs C#'s key identity (one record per key) and C#'s foreign carry, which are parity changes
-  of the leaves' store model, not a write-ownership rule. Owned by the new follow-up `variants:follow_up:leaf-key-identity-parity`.
+- TypeScript and Python: records are keyed by `(type, key)` (TS `#entryId(definition.type, key)`, `cult-cache.ts:323`;
+  Python sorts and stores by `(type, key)`). A write of A at k never meets B's record: both live at k (P1). Neither carries
+  a foreign record; a store holding an unregistered type does not load (P2). So neither has a "write meets another type's
+  record" path to fix: bringing the ruling to them first needs C#'s key identity (one record per key) and C#'s foreign
+  carry, parity changes of their store model, not a write-ownership rule (follow-up `variants:follow_up:leaf-key-identity-parity`).
+- Rust is that follow-up's first leaf cut (`cut-leaf-key-identity-rs`). The cache keeps its `(type, key)` map; one judge
+  (`refuse_retype`) refuses another registered type at a key the cache holds, or any write at a key a store carries
+  foreign, on every write path, pull and SoA load, comparing types, not the ids envelopes claim. At a key the cache does not
+  hold (a fresh key, or one another writer filled after this cache's pull) the single-file store's commit guard judges by
+  the stored and claimed schema ids, so an envelope claiming another registered type's id is refused earlier, at every
+  envelope admission (`refuse_claimed_id`, the pull's own `resolve_registered_type` lookup); an id naming no registered type
+  passes. Store-level writers called directly (`push`, `insert_entry_if_absent`, compare-and-swap) trust the claimed id.
+  The cache carries an unregistered type's records as foreign and walks the vector's 12 rows.
 - Interop (unproven): a Python store holding A and B at k fails C# decode first on payload encoding (Python's
   lambda-defined document wrote JSON payloads), so what C# does with two records at one key was not reached.
 
