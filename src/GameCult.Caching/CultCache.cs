@@ -885,6 +885,10 @@ namespace GameCult.Caching
             return indexes.BySchemaId.ContainsKey(schemaId) || indexes.ByCompatibleSchemaId.ContainsKey(schemaId);
         }
 
+        // Whether the type registered under this schema id declares a [CultIndex]: its records are written through a cache, which judges uniqueness.
+        internal bool HoldsUniqueIndex(string schemaId) =>
+            _indexes.BySchemaId.TryGetValue(schemaId, out var descriptor) && descriptor.IndexAccessors.Count > 0;
+
         // A persisted entry a local entry reads whole: identical content, or compatible shapes that leave no persisted slot ignored.
         internal static bool ReadsWhole(CultSchemaCatalogEntry persisted, CultSchemaCatalogEntry local) =>
             string.Equals(persisted.ContentHash, local.ContentHash, StringComparison.Ordinal) ||
@@ -1006,10 +1010,10 @@ namespace GameCult.Caching
                 throw new InvalidOperationException(ids.Problems[0]);
             var nameMember = members.FirstOrDefault(member => member.IsName);
             var indexAccessors = members
-                .Where(member => member.IndexAlias != null)
+                .Where(member => member.IsUnique)
                 .ToDictionary(
                     member => member.IndexAlias!,
-                    member => member.Getter,
+                    member => member.IndexValue,
                     StringComparer.Ordinal);
             var descriptorMembers = members
                 .Select(member => new CultDocumentMemberDescriptor
@@ -1481,6 +1485,13 @@ namespace GameCult.Caching
                 rejections.Add(HiddenMemberMessage(type.Name, Qualified(pair[0].Member), Qualified(pair[1].Member)));
             }
 
+            // A member names its role once: [CultIndex] already is a role.
+            foreach (var entry in keyed.OrderBy(entry => entry.Member.Name, StringComparer.Ordinal))
+            {
+                if (entry.Member.GetCustomAttribute<CultIndexAttribute>() != null && entry.Member.GetCustomAttribute<CultRoleAttribute>() != null)
+                    rejections.Add($"Cult document {type.Name} member {Qualified(entry.Member)} declares both [CultIndex] and [CultRole]; [CultIndex] already names its role.");
+            }
+
             // D10: two differently-named members that independently declare the same index alias. A
             // hiding member sharing one slot is already caught above; this is two distinct members whose
             // alias map entry (BuildDescriptor's indexAccessors) would otherwise collide silently.
@@ -1580,14 +1591,19 @@ namespace GameCult.Caching
 
         private static string Qualified(MemberInfo member) => member.DeclaringType!.Name.Split('`')[0] + "." + member.Name;
 
+        // The member's role alias, from [CultIndex] or [CultRole] (the member name when the alias is blank).
         // Shared by DiscoverMembers' D10/D11 rejections and PersistedMember.FromMember, so registration
         // refuses exactly the shapes the accessor it builds afterward could not have walked anyway.
         private static string? ResolveIndexAlias(MemberInfo member)
         {
-            var indexAttribute = member.GetCustomAttribute<CultIndexAttribute>();
-            if (indexAttribute == null)
+            string? alias;
+            if (member.GetCustomAttribute<CultIndexAttribute>() is { } index)
+                alias = index.Alias;
+            else if (member.GetCustomAttribute<CultRoleAttribute>() is { } role)
+                alias = role.Alias;
+            else
                 return null;
-            return string.IsNullOrWhiteSpace(indexAttribute.Alias) ? member.Name : indexAttribute.Alias;
+            return string.IsNullOrWhiteSpace(alias) ? member.Name : alias;
         }
 
         private static bool IsCultRecordRefType(Type type) =>
@@ -1854,6 +1870,7 @@ namespace GameCult.Caching
             public int Slot { get; set; }
             public bool IsName { get; set; }
             public string? IndexAlias { get; set; }
+            public bool IsUnique { get; set; }
             public bool IsReference { get; set; }
             public bool IsMany { get; set; }
             public string? TargetSchemaName { get; set; }
@@ -1865,6 +1882,10 @@ namespace GameCult.Caching
             public bool IsNumeric { get; set; }
             public Func<object, string> Getter { get; set; } = default!;
             public Func<object, string?> GetterNullable { get; set; } = default!;
+
+            // What a [CultIndex] value is: culture-invariant, and a number is its canonical decimal (1.0m and 1.00m are one value,
+            // 0.0 and -0.0 are one value), so the value that decides a refusal is the value a lookup names.
+            public Func<object, string> IndexValue { get; set; } = default!;
 
             // D8/Q-J (revised 2026-09-22): non-null exactly for the closed CLR numeric set (Nullable<T>
             // unwrapped), rendered as the member's exact canonical decimal string - never a double, so
@@ -1896,6 +1917,7 @@ namespace GameCult.Caching
                     Slot = slot,
                     IsName = member.GetCustomAttribute<CultNameAttribute>() != null,
                     IndexAlias = ResolveIndexAlias(member),
+                    IsUnique = member.GetCustomAttribute<CultIndexAttribute>() != null,
                     IsReference = isReference,
                     IsMany = many,
                     TargetSchemaName = targetSchemaName,
@@ -1903,6 +1925,13 @@ namespace GameCult.Caching
                     IsNumeric = IsNumericClrType(memberType),
                     Getter = document => getValue(document)?.ToString() ?? string.Empty,
                     GetterNullable = document => getValue(document)?.ToString(),
+                    IndexValue = document => getValue(document) switch
+                    {
+                        null => string.Empty,
+                        var raw when IsNumericClrType(raw.GetType()) => RenderCanonicalNumber(raw) ?? string.Empty,
+                        IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
+                        var raw => raw.ToString() ?? string.Empty
+                    },
                     NumberOf = document =>
                     {
                         var raw = getValue(document);
@@ -2200,8 +2229,8 @@ namespace GameCult.Caching
         private readonly List<(CacheBackingStore Store, Type[] Homes)> _stores = new();
         private readonly Dictionary<string, CultStoredDocument> _entries = new(StringComparer.Ordinal);
         private readonly Dictionary<Type, Dictionary<string, string>> _names = new();
-        // Every key holding a value (unordered): the index is truthful about duplicates, so removing one holder never hides another.
-        private readonly Dictionary<(Type Type, string Alias), Dictionary<string, List<string>>> _indexes = new();
+        // One key per value: RefuseIndexSharing decides it, Apply only records it.
+        private readonly Dictionary<(Type Type, string Alias), Dictionary<string, string>> _indexes = new();
         private readonly Dictionary<Type, string> _globals = new();
         private readonly CultCodec? _codec;
         // Keys holding a variant: derived from the entries by Apply, never decided anywhere else.
@@ -2671,16 +2700,12 @@ namespace GameCult.Caching
                 .SelectMany(pair => pair.Value.TryGetValue(name, out var key) ? new[] { key } : Array.Empty<string>()));
         }
 
-        // A value held by one record finds it. Records of one type sharing a value (plain duplicates) find the holder with the
-        // smallest key (ordinal), whatever order they were written or loaded in: the choice is a function of the held set, so
-        // it is the same live, after a flush and after a reopen, and removing that holder finds the next.
+        // A [CultIndex] value names one record of its type; blank values are not indexed.
         public T? GetByIndex<T>(string alias, string value) where T : class
         {
             return Single<T>($"index {alias}='{value}'", () => _indexes
                 .Where(pair => pair.Key.Alias == alias && typeof(T).IsAssignableFrom(pair.Key.Type))
-                .SelectMany(pair => pair.Value.TryGetValue(value, out var keys)
-                    ? new[] { keys.Aggregate((best, next) => string.CompareOrdinal(next, best) < 0 ? next : best) }
-                    : Array.Empty<string>()));
+                .SelectMany(pair => pair.Value.TryGetValue(value, out var key) ? new[] { key } : Array.Empty<string>()));
         }
 
         public void Dispose()
@@ -3270,12 +3295,10 @@ namespace GameCult.Caching
         {
             var plan = ResolveVariants(admitted, evicted, source);
             Project(plan);
-            // The variant rules are judged only when a variant is involved.
+            RefuseIndexSharing(plan, evicted);
+            // The variant name rule is judged only when a variant is involved.
             if (_variantKeys.Count != 0 || admitted.Any(stored => stored.Variant != null))
-            {
                 RefuseVariantNameSharing(plan);
-                RefuseVariantIndexSharing(plan, evicted);
-            }
 
             return plan;
         }
@@ -3472,62 +3495,41 @@ namespace GameCult.Caching
             }
         }
 
-        // The one index rule, judged on the commit's result whatever the write order: a variant may not share an indexed
-        // value with another record. It reads the truthful held index (every holder of a value), minus the records this
-        // commit replaces or removes, plus the records it lands. Plain-vs-plain sharing is not this rule's business.
-        // A unique index maps a value to one key at lookup; a variant sharing it would be found in place of its
-        // holder or lose the value, and the store would refuse to reopen.
-        private void RefuseVariantIndexSharing(VariantPlan plan, IReadOnlyList<CultStoredDocument> evicted)
+        // The one index rule, judged on the commit's result whatever the write order: within one document type and one
+        // [CultIndex] alias, no two records hold one non-blank value. The holders of a value are the held key (unless this
+        // admission replaces or evicts it) plus every landing key projecting it; two distinct holders refuse, naming both
+        // keys and the index and never the value. One pass over what lands, one lookup per (index, value).
+        private void RefuseIndexSharing(VariantPlan plan, IReadOnlyList<CultStoredDocument> evicted)
         {
             var landing = plan.Admitted.Concat(plan.Dependents).ToList();
             if (landing.All(stored => stored.Descriptor.IndexAccessors.Count == 0))
                 return;
             var replaced = new HashSet<string>(
                 plan.Admitted.Concat(evicted).Concat(plan.Dependents).Select(stored => stored.Key.Value), StringComparer.Ordinal);
-            var landingByKey = landing.ToDictionary(stored => stored.Key.Value, StringComparer.Ordinal);
-
-            bool IsVariant(string key) =>
-                landingByKey.TryGetValue(key, out var landed) ? landed.Variant != null : _variantKeys.Contains(key);
-
-            // One pass over what lands, one lookup per (index, value): the rule is linear in the records landing.
-            var landedValues = new List<(CultStoredDocument Stored, (Type Type, string Alias) Index, string Value)>();
             var landed = new Dictionary<((Type Type, string Alias) Index, string Value), List<string>>();
+            var schemaNames = landing.Select(stored => stored.Descriptor).GroupBy(descriptor => descriptor.DocumentType)
+                .ToDictionary(group => group.Key, group => group.First().SchemaName);
             foreach (var stored in landing)
             {
                 foreach (var (alias, value) in plan.Projections[stored.Key.Value].Indexes)
                 {
-                    var index = (stored.Descriptor.DocumentType, alias);
-                    landedValues.Add((stored, index, value));
-                    if (!landed.TryGetValue((index, value), out var landedKeys))
-                        landed[(index, value)] = landedKeys = new List<string>();
-                    landedKeys.Add(stored.Key.Value);
+                    var slot = ((stored.Descriptor.DocumentType, alias), value);
+                    if (!landed.TryGetValue(slot, out var keys))
+                        landed[slot] = keys = new List<string>();
+                    keys.Add(stored.Key.Value);
                 }
             }
 
-            var holdersOf = new Dictionary<((Type Type, string Alias) Index, string Value), (string[] All, string[] Variants)>();
-            foreach (var (stored, index, value) in landedValues)
+            foreach (var ((index, value), landedKeys) in landed.OrderBy(pair => pair.Key.Index.Alias, StringComparer.Ordinal))
             {
-                if (!holdersOf.TryGetValue((index, value), out var known))
-                {
-                    var all = (_indexes.TryGetValue(index, out var held) && held.TryGetValue(value, out var heldKeys)
-                            ? heldKeys.Where(heldKey => !replaced.Contains(heldKey))
-                            : Enumerable.Empty<string>())
-                        .Concat(landed[(index, value)])
-                        .Distinct(StringComparer.Ordinal)
-                        .ToArray();
-                    holdersOf[(index, value)] = known = (all, all.Where(IsVariant).ToArray());
-                }
-
-                var self = stored.Key.Value;
-                var holder = known.All.FirstOrDefault(candidate => candidate != self);
-                if (stored.Variant != null && holder != null)
+                var holders = landedKeys.AsEnumerable();
+                if (_indexes.TryGetValue(index, out var held) && held.TryGetValue(value, out var heldKey) && !replaced.Contains(heldKey))
+                    holders = holders.Append(heldKey);
+                var distinct = holders.Distinct(StringComparer.Ordinal).OrderBy(key => key, StringComparer.Ordinal).Take(2).ToArray();
+                if (distinct.Length > 1)
                     throw new InvalidOperationException(
-                        $"Variant {self} and {holder} both hold index {index.Alias} '{value}'; a variant must override its indexed member.");
-                var variantHolder = known.Variants.FirstOrDefault(candidate => candidate != self);
-                if (stored.Variant == null && variantHolder != null)
-                    throw new InvalidOperationException(
-                        $"Record {self} and variant {variantHolder} both hold index {index.Alias} '{value}'; " +
-                        "a variant may not share an indexed value with another record.");
+                        $"Records {distinct[0]} and {distinct[1]} ({schemaNames[index.Type]}) " +
+                        $"both hold unique index '{index.Alias}'; an index value names one record.");
             }
         }
 
@@ -3633,7 +3635,7 @@ namespace GameCult.Caching
             if (projection.Name != null)
                 MapOf(_names, type)[projection.Name] = stored.Key.Value;
             foreach (var (alias, value) in projection.Indexes)
-                AddHolder(_indexes, (type, alias), value, stored.Key.Value);
+                MapOf(_indexes, (type, alias))[value] = stored.Key.Value;
         }
 
         // Documents are mutable, so a name or index value may have changed since it was indexed: drop by key.
@@ -3645,26 +3647,7 @@ namespace GameCult.Caching
             if (_names.TryGetValue(type, out var names))
                 RemoveKey(names, stored.Key.Value);
             foreach (var pair in _indexes.Where(pair => pair.Key.Type == type))
-                RemoveHolder(pair.Value, stored.Key.Value);
-        }
-
-        private static void AddHolder(Dictionary<(Type Type, string Alias), Dictionary<string, List<string>>> indexes, (Type, string) index, string value, string key)
-        {
-            if (!indexes.TryGetValue(index, out var map))
-                indexes[index] = map = new Dictionary<string, List<string>>(StringComparer.Ordinal);
-            if (!map.TryGetValue(value, out var keys))
-                map[value] = keys = new List<string>();
-            keys.Remove(key);
-            keys.Add(key);
-        }
-
-        private static void RemoveHolder(Dictionary<string, List<string>> map, string key)
-        {
-            foreach (var pair in map.ToArray())
-            {
-                if (pair.Value.Remove(key) && pair.Value.Count == 0)
-                    map.Remove(pair.Key);
-            }
+                RemoveKey(pair.Value, stored.Key.Value);
         }
 
         private static Dictionary<string, string> MapOf<TKey>(Dictionary<TKey, Dictionary<string, string>> maps, TKey key)
@@ -4648,13 +4631,17 @@ namespace GameCult.Caching
         /// <param name="holdsIds">Whether the record's payload holds element ids, or null when the caller cannot tell.</param>
         /// <param name="registry">The registry the payload was encoded with. Given, the write decides the header for copied records that registry can read. It never decides ownership: the answer is the same lent or not. <paramref name="catalogEntry"/> alone owns the record at the key when it declares the stored id (its own or one it lists compatible), or when it is the type that reads the stored entry and reads it whole, so an older id of its own schema name it reads whole is its own and is restamped. Everything else is refused with the file left as it was: a record of another registered type included, whatever the registry holds, and a record it would read only by dropping persisted slots. Retyping a key is a removal and an add. It serves this call only: the store keeps no registry.</param>
         /// <remarks>The call holds the store's gate while it runs. User code it runs must not enter a cache or another store; that throws <see cref="InvalidOperationException"/>.</remarks>
-        /// <exception cref="InvalidOperationException">The store is attached to a cache; write through the cache.</exception>
+        /// <exception cref="InvalidOperationException">The store is attached to a cache; write through the cache. Also thrown when the record's type declares a <see cref="CultIndexAttribute"/>, and when the catalog entry declares an index alias and the registry lent for the call does not hold the type (none, or another): the call cannot tell a unique index from a role, so such records are written through a cache.</exception>
         /// <exception cref="CultStoreUnreadableException">The file at the path is not a store this runtime can read.</exception>
         public void WriteRecord(CultPersistedRecord record, CultSchemaCatalogEntry catalogEntry, bool? holdsIds = null, CultDocumentRegistry? registry = null)
         {
             if (record == null) throw new ArgumentNullException(nameof(record));
             if (catalogEntry == null) throw new ArgumentNullException(nameof(catalogEntry));
-            Cacheless(registry, () => WriteOne(record, catalogEntry, holdsIds));
+            Cacheless(registry, () =>
+            {
+                RefuseUniqueIndexedCacheless(AttachedRegistry, catalogEntry);
+                WriteOne(record, catalogEntry, holdsIds);
+            });
         }
 
         /// <summary>
@@ -4671,7 +4658,7 @@ namespace GameCult.Caching
         /// <param name="storedAt">The stored-at stamp, or null for now.</param>
         /// <param name="registry">The registry that describes and encodes the document, or null for <see cref="CultDocumentRegistry.Shared"/>. The document type's entry is taken from it, and the registry decides the header for copied records it can read. It never decides ownership, so the answer is the same for any registry that holds the type: the document's entry owns a record whose id it declares (its own or one it lists compatible), and a record of an older id of its own schema name that it reads whole; everything else is refused, another registered type's record included, and a record it would read only by dropping persisted slots. Retyping a key is a removal and an add. It serves this call only: the store keeps no registry.</param>
         /// <remarks>The call holds the store's gate while it runs. User code it runs (property getters while the document is encoded, constructors while a copied record is read) must not enter a cache or another store; that throws <see cref="InvalidOperationException"/>, carried by the encoder's wrapper when the code ran inside it.</remarks>
-        /// <exception cref="InvalidOperationException">The store is attached to a cache; write through the cache.</exception>
+        /// <exception cref="InvalidOperationException">The store is attached to a cache; write through the cache. Also thrown when the record's type declares a <see cref="CultIndexAttribute"/>, and when the catalog entry declares an index alias and the registry lent for the call does not hold the type (none, or another): the call cannot tell a unique index from a role, so such records are written through a cache.</exception>
         /// <exception cref="CultStoreUnreadableException">The file at the path is not a store this runtime can read.</exception>
         /// <exception cref="CultElementIdException">The document holds an element id or list a cache write refuses.</exception>
         public void WriteDocument<TDocument>(CultRecordKey key, TDocument document, string? storedAt = null, CultDocumentRegistry? registry = null)
@@ -4680,6 +4667,7 @@ namespace GameCult.Caching
             if (document == null) throw new ArgumentNullException(nameof(document));
             var resolvedRegistry = registry ?? CultDocumentRegistry.Shared;
             var catalogEntry = resolvedRegistry.GetRequired<TDocument>().ToCatalogEntry();
+            RefuseUniqueIndexedCacheless(resolvedRegistry, catalogEntry);
             Cacheless(resolvedRegistry, () =>
             {
                 var ids = CultElementIds.Plan(typeof(TDocument), document, key.Value, deterministic: false);
@@ -4705,6 +4693,19 @@ namespace GameCult.Caching
             });
         }
 
+        // A unique index is judged against every held record, which a cacheless write does not hold. A write is refused when the
+        // registry lent for the call holds a type with a [CultIndex] under the schema id, and also when the entry declares an index
+        // alias the call cannot classify (no registry, or one not holding the type): the catalog does not say unique from role.
+        private static void RefuseUniqueIndexedCacheless(CultDocumentRegistry? registry, CultSchemaCatalogEntry entry)
+        {
+            var unique = registry != null && registry.HoldsUniqueIndex(entry.SchemaId);
+            var unclassified = entry.Members.Any(member => member.IndexAlias != null) && (registry == null || !registry.Declared(entry.SchemaId));
+            if (unique || unclassified)
+                throw new InvalidOperationException(
+                    "A record of a type with a unique index is written through a cache; a cacheless write cannot judge uniqueness" +
+                    (unclassified ? " and the registry lent for the call does not say whether this schema's index is unique." : "."));
+        }
+
         private void WriteOne(CultPersistedRecord record, CultSchemaCatalogEntry catalogEntry, bool? holdsIds)
         {
             using (AcquireLock(wait: true))
@@ -4727,7 +4728,7 @@ namespace GameCult.Caching
             RefuseUndeclaredOnDisk(durable, upserts, removals, checks);
             if (upserts.Count == 0 && removals.Count == 0 && (checks.Any() || StagedChecks.Count > 0))
                 return Array.Empty<(CultStagedRecord, string)>();
-            RefuseWriteIntoMovedVariantStore(durable, upserts, removals);
+            RefuseWriteIntoMovedStore(durable, upserts, removals);
             var durableRecords = durable?.Snapshot.Records ?? Array.Empty<CultPersistedRecord>();
             // A record written over one the store holds is stored at a storedAt later than the one it replaces, whoever wrote that.
             var replaced = durableRecords.ToDictionary(record => record.Key, record => record.StoredAt, StringComparer.Ordinal);
@@ -4812,10 +4813,11 @@ namespace GameCult.Caching
             return false;
         }
 
-        private void RefuseWriteIntoMovedVariantStore(Durable? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
+        private void RefuseWriteIntoMovedStore(Durable? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
         {
             var records = durable?.Snapshot.Records ?? Array.Empty<CultPersistedRecord>();
-            if (records.All(record => record.Variant == null) && upserts.All(staged => staged.Record.Variant == null))
+            if (records.All(record => record.Variant == null) && upserts.All(staged => staged.Record.Variant == null) &&
+                !upserts.Any(staged => AttachedRegistry?.HoldsUniqueIndex(staged.Entry.SchemaId) == true))
                 return;
             var changed = new HashSet<string>(StringComparer.Ordinal);
             var versions = records.ToDictionary(record => record.Key, record => durable!.Version(record.Key), StringComparer.Ordinal);
@@ -4852,9 +4854,9 @@ namespace GameCult.Caching
                 },
                 inner => new CultWriteConflictException(
                     Cache == null
-                        ? $"{this} holds a variant and was written by a writer with no CultCache, which cannot resolve variants; nothing was written. " +
+                        ? $"{this} holds a variant or a unique index and was written by a writer with no CultCache, which cannot resolve variants; nothing was written. " +
                           $"Records it would have written or removed: {string.Join(", ", recordKeys.Select(key => $"'{key}'"))}; records that differ from what the writer has read: {string.Join(", ", changedKeys.Select(key => $"'{key}'"))}."
-                        : $"{this} changed since this cache last read it, and it holds a variant, which resolves against other records; nothing was written. " +
+                        : $"{this} changed since this cache last read it, and it holds a variant or a record with a unique index, which resolve against other records; nothing was written. " +
                           $"Records this write would have written or removed: {string.Join(", ", recordKeys.Select(key => $"'{key}'"))}; records that changed: {string.Join(", ", changedKeys.Select(key => $"'{key}'"))}. " +
                           (inner == null
                               ? "The cache reloaded them; retry the write against what the store holds now."

@@ -44,7 +44,7 @@ using MessagePack;
 public sealed class Item
 {
     [Key(0)] [CultName] public string Name = string.Empty;
-    [Key(1)] [CultIndex] public string Category = string.Empty;
+    [Key(1)] public string Category = string.Empty;
     [Key(2)] public int Value;
 }
 

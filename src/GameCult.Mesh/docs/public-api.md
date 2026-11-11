@@ -321,15 +321,16 @@ var bySchema = documents.DocumentBySchema("gamecult.aetheria.station_refit.v1");
 Typed collections use the same one-call style:
 
 ```csharp
-var allies = CultMesh.CollectionByIndex<PlayerShipDocument>(
+// A [CultIndex] value is unique within its type, so the handle holds at most one record.
+var flagship = CultMesh.CollectionByIndex<PlayerShipDocument>(
     node,
-    "Faction",
-    "au");
+    "CallSign",
+    "au-1");
 
-var currentAllies = await allies.LatestAsync();
-using var changes = allies.WatchChanges(change => UpdateRoster(change));
+var currentFlagship = await flagship.LatestAsync();
+using var changes = flagship.WatchChanges(change => UpdateRoster(change));
 
-var collections = CultMesh.Collections(allies);
+var collections = CultMesh.Collections(flagship);
 var roster = await collections.LatestAsync<PlayerShipDocument>();
 using var rosterChanges = collections.WatchChanges<PlayerShipDocument>(RenderRoster);
 ```

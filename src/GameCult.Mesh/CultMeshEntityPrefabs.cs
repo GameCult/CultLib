@@ -193,12 +193,12 @@ namespace GameCult.Mesh
 
         /// <summary>Caller-defined package version.</summary>
         [Key(1)]
-        [CultIndex]
+        [CultRole]
         public string Version { get; set; } = string.Empty;
 
         /// <summary>Tool that authored the package, such as Brokkr Blender.</summary>
         [Key(2)]
-        [CultIndex]
+        [CultRole]
         public string SourceTool { get; set; } = string.Empty;
 
         /// <summary>Source scene name or path.</summary>
@@ -207,12 +207,12 @@ namespace GameCult.Mesh
 
         /// <summary>Source Blender collection name.</summary>
         [Key(4)]
-        [CultIndex]
+        [CultRole]
         public string SourceCollection { get; set; } = string.Empty;
 
         /// <summary>Stable hash of graph structure and referenced assets.</summary>
         [Key(5)]
-        [CultIndex]
+        [CultRole]
         public string ContentHash { get; set; } = string.Empty;
 
         /// <summary>Package creation timestamp in round-trip UTC format.</summary>

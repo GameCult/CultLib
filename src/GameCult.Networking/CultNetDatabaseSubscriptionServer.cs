@@ -300,48 +300,74 @@ namespace GameCult.Networking
             SubscriptionKey key)
         {
             var legacyRequest = request.ToLegacyShape(subscriptionId);
-            return _database.WatchAllChanges().Subscribe(change =>
+            return _database.WatchCommits().Subscribe(commit =>
             {
                 lock (_lifecycleGate)
                 {
                     if (_disposed || !_requests.ContainsKey(key) || !_projections.TryGetValue(key, out var projection))
                         return;
-                    if (_authorizeRequest?.Invoke(legacyRequest, peer) == false)
-                    {
-                        Reconcile(key, request);
-                        return;
-                    }
-
-                    // D6: cites/cited are set-dependent - a change to row B can change whether row A
-                    // matches - so a hop-bearing selection runs the full diff-against-delivered
-                    // reconcile on every change instead of the single-row fast path.
-                    if (request.Selection.HasHop)
-                    {
-                        Reconcile(key, request);
-                        return;
-                    }
-
-                    var sourceRecordKey = ResolveChangeRecordKey(change);
-                    CultNetRawDocumentRecord? matched;
+                    // What this subscription sends for the commit is held and sent together, tagged with the commit, so the replica
+                    // applies it as one commit and judges the result.
+                    var outbox = _outbox = new CommitOutbox(commit.Id);
                     try
                     {
-                        matched = CreateMatchedRecord(change, request, peer);
+                        ForwardCommit(commit, request, key, projection, legacyRequest, peer, subscriptionId);
                     }
-                    catch (NotSupportedException refusal)
+                    finally
                     {
-                        // Q6: a variant is not a record CultNet can carry; the subscriber that would have received it is told, by key.
-                        peer.SendCultNet(CultNetErrorMessage.ForVariantUnsupported(refusal.Message));
-                        return;
+                        _outbox = null;
+                        outbox.Send(peer);
                     }
-
-                    ApplyProjectedChange(
-                        projection,
-                        sourceRecordKey,
-                        matched,
-                        peer,
-                        subscriptionId);
                 }
             });
+        }
+
+        private void ForwardCommit(
+            CultNetDatabaseCommit commit,
+            SubscriptionRequest request,
+            SubscriptionKey key,
+            SubscriptionProjectionState projection,
+            CultNetDatabaseSubscribeMessage legacyRequest,
+            ICultNetSchemaServerPeer peer,
+            string subscriptionId)
+        {
+            if (_authorizeRequest?.Invoke(legacyRequest, peer) == false)
+            {
+                Reconcile(key, request);
+                return;
+            }
+
+            // D6: cites/cited are set-dependent - a change to row B can change whether row A
+            // matches - so a hop-bearing selection runs the full diff-against-delivered
+            // reconcile once per commit instead of the single-row fast path.
+            if (request.Selection.HasHop)
+            {
+                Reconcile(key, request);
+                return;
+            }
+
+            foreach (var change in commit.Changes)
+            {
+                var sourceRecordKey = ResolveChangeRecordKey(change);
+                CultNetRawDocumentRecord? matched;
+                try
+                {
+                    matched = CreateMatchedRecord(change, request, peer);
+                }
+                catch (NotSupportedException refusal)
+                {
+                    // Q6: a variant is not a record CultNet can carry; the subscriber that would have received it is told, by key.
+                    peer.SendCultNet(CultNetErrorMessage.ForVariantUnsupported(refusal.Message));
+                    continue;
+                }
+
+                ApplyProjectedChange(
+                    projection,
+                    sourceRecordKey,
+                    matched,
+                    peer,
+                    subscriptionId);
+            }
         }
 
         private void Reconcile(SubscriptionKey key, SubscriptionRequest request)
@@ -487,12 +513,15 @@ namespace GameCult.Networking
             string.Equals(left.SourceAgentId, right.SourceAgentId, StringComparison.Ordinal) &&
             string.Equals(left.SourceRole, right.SourceRole, StringComparison.Ordinal);
 
-        private static void SendUpsert(
+        // The commit being forwarded, under _lifecycleGate: the change messages it produces are held here, not sent one by one.
+        private CommitOutbox? _outbox;
+
+        private void SendUpsert(
             ICultNetSchemaServerPeer peer,
             string subscriptionId,
             CultNetRawDocumentRecord document,
             bool added) =>
-            peer.SendCultNet(new CultNetDatabaseChangeRawMessage
+            Deliver(peer, new CultNetDatabaseChangeRawMessage
             {
                 MessageId = Guid.NewGuid().ToString("N"),
                 SubscriptionId = subscriptionId,
@@ -500,11 +529,11 @@ namespace GameCult.Networking
                 Document = document
             });
 
-        private static void SendRemoval(
+        private void SendRemoval(
             ICultNetSchemaServerPeer peer,
             string subscriptionId,
             CultNetRawDocumentRecord document) =>
-            peer.SendCultNet(new CultNetDatabaseChangeRawMessage
+            Deliver(peer, new CultNetDatabaseChangeRawMessage
             {
                 MessageId = Guid.NewGuid().ToString("N"),
                 SubscriptionId = subscriptionId,
@@ -512,6 +541,38 @@ namespace GameCult.Networking
                 RecordKey = document.RecordKey,
                 SchemaId = document.SchemaId
             });
+
+        private void Deliver(ICultNetSchemaServerPeer peer, CultNetDatabaseChangeRawMessage message)
+        {
+            if (_outbox is { } outbox)
+                outbox.Messages.Add(message);
+            else
+                peer.SendCultNet(message);
+        }
+
+        private sealed class CommitOutbox
+        {
+            private readonly string _commitId;
+
+            public CommitOutbox(string commitId) => _commitId = commitId;
+
+            public List<CultNetDatabaseChangeRawMessage> Messages { get; } = new();
+
+            public void Send(ICultNetSchemaServerPeer peer)
+            {
+                if (Messages.Count > 1)
+                {
+                    foreach (var message in Messages)
+                    {
+                        message.CommitId = _commitId;
+                        message.CommitCount = Messages.Count;
+                    }
+                }
+
+                foreach (var message in Messages)
+                    peer.SendCultNet(message);
+            }
+        }
 
         private void Withdraw(SubscriptionKey key, bool sendRemovals, bool forgetRequest)
         {

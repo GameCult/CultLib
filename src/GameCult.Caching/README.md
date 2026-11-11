@@ -22,9 +22,12 @@ public sealed class ItemData
 
     [Key(1)]
     [CultIndex]
-    public string Category = string.Empty;
+    public string Sku = string.Empty;
 
     [Key(2)]
+    public string Category = string.Empty;
+
+    [Key(3)]
     public int Value;
 }
 ```
@@ -33,7 +36,8 @@ Available cache attributes:
 
 - `CultDocument(schemaName, schemaVersion)`
 - `CultName`
-- `CultIndex(alias?)`
+- `CultIndex(alias?)`: a unique lookup. Within one document type, a non-blank value names one record; a commit that would leave two records holding one is refused, and a store holding such a pair refuses to load. Uniqueness is judged by a `CultCache` over the single-file store; a cacheless `WriteDocument`/`WriteRecord` of such a type is refused (also when the catalog declares an index alias the call cannot classify), and concurrent writers on a directory store are not covered (`unique-index-directory-store`). A value is culture-invariant, and a number is its canonical decimal (`1.0m` and `1.00m`, `0.0` and `-0.0` are one value).
+- `CultRole(alias?)`: a selection and reference role. Many records may share a value; it is never a lookup.
 - `CultGlobal`
 - `CultReference(targetType?, many: false)`
 
@@ -53,6 +57,7 @@ var cache = new CultCache();
 var handle = await cache.AddAsync(new ItemData
 {
     Name = "Potion",
+    Sku = "POT-1",
     Category = "Consumable",
     Value = 50
 });
@@ -66,7 +71,7 @@ Name and index lookups are driven from attributes, not manual registration.
 
 ```csharp
 var byName = cache.GetByName<ItemData>("Potion");
-var byIndex = cache.GetByIndex<ItemData>("Category", "Consumable");
+var byIndex = cache.GetByIndex<ItemData>("Sku", "POT-1");
 ```
 
 ### Explicit references
@@ -130,6 +135,7 @@ var cache = await CultCacheMessagePack.OpenAsync("Data.msgpack");
 var handle = await cache.UpsertAsync(new ItemData
 {
     Name = "Potion",
+    Sku = "POT-1",
     Category = "Consumable",
     Value = 50
 });

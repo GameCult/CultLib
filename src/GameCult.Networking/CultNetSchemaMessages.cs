@@ -1179,6 +1179,17 @@ namespace GameCult.Networking
         /// Gets or sets the deleted schema id for removed changes.
         /// </summary>
         [Key("schemaId")] public string? SchemaId { get; set; }
+        /// <summary>
+        /// Gets or sets the identity of the cache commit this change belongs to. Optional and additive: a peer that does not
+        /// know the field ignores it and applies the change alone. Opaque to the receiver; equal ids on one subscription
+        /// name changes of one commit.
+        /// </summary>
+        [Key("commitId")] public string? CommitId { get; set; }
+        /// <summary>
+        /// Gets or sets how many change messages of this commit this subscription carries. Set with
+        /// <see cref="CommitId"/> when that is more than one; the receiver applies the commit once all have arrived.
+        /// </summary>
+        [Key("commitCount")] public int? CommitCount { get; set; }
     }
 
     /// <summary>

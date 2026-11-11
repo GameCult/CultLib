@@ -38,10 +38,24 @@ namespace GameCult.Caching
     {
     }
 
+    // A unique lookup: within one document type, a non-blank value names one record. Also filterable by CultNet selection.
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, Inherited = true, AllowMultiple = false)]
     public sealed class CultIndexAttribute : Attribute
     {
         public CultIndexAttribute(string? alias = null)
+        {
+            Alias = alias;
+        }
+
+        public string? Alias { get; }
+    }
+
+    // Names the member's selection and reference role (the alias, or the member name). Implies nothing about uniqueness:
+    // many records may hold one value, and a role member is never indexed for lookup.
+    [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, Inherited = true, AllowMultiple = false)]
+    public sealed class CultRoleAttribute : Attribute
+    {
+        public CultRoleAttribute(string? alias = null)
         {
             Alias = alias;
         }

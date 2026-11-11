@@ -12,7 +12,7 @@ namespace GameCult.Caching.Tests
     // two ways), an alias whose resolved type would depend on scan order, or a type a test needs to itself.
     internal static class EmittedDocumentTypes
     {
-        internal readonly record struct Field(string Name, Type Type, int Key, bool IsName = false);
+        internal readonly record struct Field(string Name, Type Type, int Key, bool IsName = false, string? Index = null, string? Role = null);
 
         internal static Type Emit(string typeName, string schemaName, string schemaVersion, Field[]? fields = null, string[]? compatibleSchemaIds = null)
         {
@@ -37,6 +37,10 @@ namespace GameCult.Caching.Tests
                 builder.SetCustomAttribute(new CustomAttributeBuilder(typeof(KeyAttribute).GetConstructor(new[] { typeof(int) })!, new object[] { field.Key }));
                 if (field.IsName)
                     builder.SetCustomAttribute(new CustomAttributeBuilder(typeof(CultNameAttribute).GetConstructor(Type.EmptyTypes)!, Array.Empty<object>()));
+                if (field.Index != null)
+                    builder.SetCustomAttribute(new CustomAttributeBuilder(typeof(CultIndexAttribute).GetConstructor(new[] { typeof(string) })!, new object[] { field.Index }));
+                if (field.Role != null)
+                    builder.SetCustomAttribute(new CustomAttributeBuilder(typeof(CultRoleAttribute).GetConstructor(new[] { typeof(string) })!, new object[] { field.Role }));
             }
 
             return type.CreateType()!;

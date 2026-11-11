@@ -33,9 +33,9 @@ Recovered from the legacy "Database Tools" window (Aetheria `d3db1730`,
 **The attribute is not `[CultIndex]`.** `[CultIndex]` means unique (operator, 2026-09-30;
 `CultDocumentContracts.cs:34`). Grouping is `CultInspectorGroupByAttribute`, in
 `CultInspectorAttributes.cs`, read only by `CultInspectorModel`. It changes no schema id,
-catalog entry, index, or store byte. The index cut's deletion of grouping-only `[CultIndex]`
-declarations (CultMesh, Geometry) adds no `[CultInspectorGroupBy]` in their place: those are
-service stores, not Studio-authored catalogs.
+catalog entry, index, or store byte. The index cut converts the grouping and selection `[CultIndex]`
+declarations (CultMesh, Geometry) to `[CultRole]` rather than deleting them, and adds no
+`[CultInspectorGroupBy]` in their place: those are service stores, not Studio-authored catalogs.
 
 ### Invariants
 

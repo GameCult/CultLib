@@ -34,7 +34,7 @@ namespace GameCult.Mesh
     public sealed class CultMeshBodyPublicationDocument
     {
         [Key(0), CultName] public string BodyId { get; set; } = string.Empty;
-        [Key(1), CultIndex] public string ProducerId { get; set; } = string.Empty;
+        [Key(1), CultRole] public string ProducerId { get; set; } = string.Empty;
         [Key(2)] public string SchemaId { get; set; } = string.Empty;
         [Key(3)] public int LayoutVersion { get; set; }
         [Key(4)] public long ByteSize { get; set; }

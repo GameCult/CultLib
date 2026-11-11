@@ -62,7 +62,7 @@ namespace GameCult.Networking.Tests
         public sealed class SurvivorNumericLeaf
         {
             [Key(0)] [CultName] public string Name = string.Empty;
-            [Key(1)] [CultIndex("level")] public int Level;
+            [Key(1)] [CultRole("level")] public int Level;
         }
 
         [CultDocument("cultnet.selection-tests.survivor_string_leaf", "cultnet.selection-tests.survivor_string_leaf.v1")]
@@ -70,7 +70,7 @@ namespace GameCult.Networking.Tests
         public sealed class SurvivorStringLeaf
         {
             [Key(0)] [CultName] public string Name = string.Empty;
-            [Key(1)] [CultIndex("level")] public string Level = string.Empty;
+            [Key(1)] [CultRole("level")] public string Level = string.Empty;
         }
 
         // ---------------------------------------------------------------------------------------------
@@ -173,7 +173,7 @@ namespace GameCult.Networking.Tests
             // The declared index alias ("linkRole") differs from the member name ("Link") - the exact
             // shape section 2's role-naming rule exists for, and no prior fixture had one.
             [Key(1)]
-            [CultIndex("linkRole")]
+            [CultRole("linkRole")]
             [CultReference(typeof(SurvivorAliasTarget))]
             public CultRecordRef<SurvivorAliasTarget> Link;
         }
@@ -408,7 +408,7 @@ namespace GameCult.Networking.Tests
             [Key(0)] [CultName] public string Name = string.Empty;
 
             [Key(1)]
-            [CultIndex("hopRole")]
+            [CultRole("hopRole")]
             [CultReference(typeof(SurvivorAliasTarget))]
             public CultRecordRef<SurvivorAliasTarget> Link;
         }
@@ -431,12 +431,12 @@ namespace GameCult.Networking.Tests
             [Key(0)] [CultName] public string Name = string.Empty;
 
             [Key(1)]
-            [CultIndex("zLastRole")]
+            [CultRole("zLastRole")]
             [CultReference(typeof(SurvivorAliasTarget))]
             public CultRecordRef<SurvivorAliasTarget> RefZ;
 
             [Key(2)]
-            [CultIndex("aFirstRole")]
+            [CultRole("aFirstRole")]
             [CultReference(typeof(SurvivorAliasTarget))]
             public CultRecordRef<SurvivorAliasTarget> RefA;
         }

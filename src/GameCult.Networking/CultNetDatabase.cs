@@ -316,6 +316,22 @@ namespace GameCult.Networking
     }
 
     /// <summary>
+    /// The typed changes (<see cref="CultNetDatabaseChange{T}"/> boxed) one cache commit made, in the order the cache admitted them.
+    /// <see cref="Id"/> is opaque and unique among the commits of one database instance.
+    /// </summary>
+    public sealed class CultNetDatabaseCommit
+    {
+        public CultNetDatabaseCommit(string id, IReadOnlyList<object> changes)
+        {
+            Id = id;
+            Changes = changes;
+        }
+
+        public string Id { get; }
+        public IReadOnlyList<object> Changes { get; }
+    }
+
+    /// <summary>
     /// A typed domain change emitted by a CultNet database surface.
     /// </summary>
     public sealed class CultNetDatabaseChange<T> where T : class
@@ -587,6 +603,7 @@ namespace GameCult.Networking
         private readonly Dictionary<(string SchemaId, string RecordKey), long> _lastWriteSequence =
             new();
         private readonly Subject<object> _changes = new();
+        private readonly Subject<CultNetDatabaseCommit> _commits = new();
         private readonly IDisposable _cacheChanges;
         private readonly IDisposable _cacheJournal;
         // What a write door of this database knows about the change it is admitting and the cache does not: the wire
@@ -1149,6 +1166,17 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Watches changes as the cache commits that made them: one event per commit, after every change of it was published to
+        /// <see cref="WatchAllChanges"/>. A consumer that forwards changes to a replica forwards a commit as a unit, so the replica
+        /// can judge the result of the commit and not each record's intermediate state.
+        /// </summary>
+        public Observable<CultNetDatabaseCommit> WatchCommits()
+        {
+            ThrowIfDisposed();
+            return _commits;
+        }
+
+        /// <summary>
         /// Watches one record.
         /// </summary>
         public Observable<CultNetDatabaseChange<T>> WatchRecord<T>(CultRecordKey key) where T : class
@@ -1215,6 +1243,7 @@ namespace GameCult.Networking
             }
 
             _changes.Dispose();
+            _commits.Dispose();
         }
 
         // The cache is the one owner of "a change was committed"; the journal is this database's one decision point and its
@@ -1231,6 +1260,8 @@ namespace GameCult.Networking
             }
 
             List<Exception>? failures = null;
+            // One journal call is one admission, so one commit; its first Sequence names it.
+            var commit = new CommitGroup(changes.Count == 0 ? "0" : changes[0].Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture));
             List<CultNetBurnedSequence>? burned = null;
             List<Exception>? burnCauses = null;
             foreach (var change in changes)
@@ -1288,7 +1319,10 @@ namespace GameCult.Networking
                 }
 
                 lock (_logGate)
-                    _stash[change.Sequence] = new Publication(documentType, kind, change.Key, descriptor.SchemaId, shard, change.Document, change.PreviousDocument);
+                {
+                    _stash[change.Sequence] = new Publication(documentType, kind, change.Key, descriptor.SchemaId, shard, change.Document, change.PreviousDocument, commit);
+                    commit.Unpublished++;
+                }
             }
 
             // Every change is stashed and will be published; the writer hears of a failed log afterwards, in one exception.
@@ -1321,8 +1355,9 @@ namespace GameCult.Networking
             Publish(publication);
         }
 
-        private void Publish(Publication publication) =>
-            PublishUntyped(
+        private void Publish(Publication publication)
+        {
+            var change = PublishUntyped(
                 publication.DocumentType,
                 publication.Kind,
                 publication.Key,
@@ -1330,6 +1365,19 @@ namespace GameCult.Networking
                 publication.Shard,
                 publication.Document,
                 publication.PreviousDocument);
+            CultNetDatabaseCommit? finished = null;
+            lock (_logGate)
+            {
+                var commit = publication.Commit;
+                if (change != null)
+                    commit.Published.Add(change);
+                if (--commit.Unpublished == 0 && commit.Published.Count > 0)
+                    finished = new CultNetDatabaseCommit(commit.Id, commit.Published.ToArray());
+            }
+
+            if (finished != null)
+                _commits.OnNext(finished);
+        }
 
         private void RecordReplicatedEntry(
             CultNetShardDescriptor shard,
@@ -1467,8 +1515,10 @@ namespace GameCult.Networking
                 string schemaId,
                 CultNetShardDescriptor shard,
                 object? document,
-                object? previousDocument)
+                object? previousDocument,
+                CommitGroup commit)
             {
+                Commit = commit;
                 DocumentType = documentType;
                 Kind = kind;
                 Key = key;
@@ -1485,6 +1535,16 @@ namespace GameCult.Networking
             public CultNetShardDescriptor Shard { get; }
             public object? Document { get; }
             public object? PreviousDocument { get; }
+            public CommitGroup Commit { get; }
+        }
+
+        // The changes of one cache admission, counted down as they are published. Guarded by _logGate.
+        private sealed class CommitGroup
+        {
+            public CommitGroup(string id) => Id = id;
+            public string Id { get; }
+            public int Unpublished { get; set; }
+            public List<object> Published { get; } = new();
         }
 
         private sealed class DoorContext
@@ -1964,7 +2024,7 @@ namespace GameCult.Networking
             return $"{schemaId}:{key.Value}";
         }
 
-        private void PublishUntyped(
+        private object? PublishUntyped(
             Type documentType,
             CultNetDatabaseChangeKind kind,
             CultRecordKey key,
@@ -1987,6 +2047,8 @@ namespace GameCult.Networking
             {
                 _changes.OnNext(change);
             }
+
+            return change;
         }
 
         // No shard owns a schema and key that no descriptor matches, and nothing is written to one: every write path refuses.

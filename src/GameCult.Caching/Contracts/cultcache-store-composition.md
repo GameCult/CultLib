@@ -110,7 +110,10 @@ which route wrote it.
   already agree when publication starts.
 - An admission runs a record's `[CultName]` and `[CultIndex]` getters once per
   landing record, before the store is written and before any `Sequence` is
-  minted. A conditional commit on a clean file store is judged a second time
+  minted. An admission is refused when it would leave two records of one type
+  holding one `[CultIndex]` value (blank is no value), and a load of a store
+  holding such a pair refuses naming both keys and the index. Concurrent writers on a
+  directory store are not covered by this rule. A conditional commit on a clean file store is judged a second time
   against the file it merges onto whenever the cache holds variants in any store,
   the batch lands a variant, or the file holds one. That second read runs the
   getters again for the records the batch lands, for any variant it re-resolves,

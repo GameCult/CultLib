@@ -29,6 +29,14 @@ namespace GameCult.Networking
         private readonly ConcurrentDictionary<string, PendingSubscription> _initialSnapshots = new();
         private readonly ConcurrentDictionary<string, CultNetDatabaseSubscriptionDeliveryMode> _deliveryModes =
             new(StringComparer.Ordinal);
+        // Changes of a commit that has not fully arrived, by subscription and commit id.
+        // Guarded by its own lock: the queue fills it, Unsubscribe and Dispose evict. A commit that does not complete is bounded
+        // by MaxPendingCommits and by MaxBufferedChanges, and a violation faults the client.
+        private const int MaxPendingCommits = 64;
+        // Policy: the most changes the incomplete commits may announce between them, the bound on what the buffer can hold. It
+        // sits far above any commit a source makes; a commit that announces more than this could not be held at all.
+        private const int MaxBufferedChanges = 1_000_000;
+        private readonly Dictionary<(string SubscriptionId, string CommitId), PendingCommit> _commits = new();
         private readonly object _queueLock = new();
         private Task _queue = Task.CompletedTask;
         private bool _disposed;
@@ -47,6 +55,15 @@ namespace GameCult.Networking
 
         /// <summary>Raised after a live change has been applied to the local typed cache.</summary>
         public event Action<CultNetReplicatedDocumentChange>? Changed;
+
+        /// <summary>
+        /// Raised when the local cache refuses a replicated commit. The replica then differs from its source; the client applies
+        /// no further changes and reports <see cref="Fault"/> until it is replaced by a new subscription.
+        /// </summary>
+        public event Action<Exception>? Faulted;
+
+        /// <summary>The refusal that stopped replication, or null while the replica is intact.</summary>
+        public Exception? Fault { get; private set; }
 
         /// <summary>Gets the local reactive cache receiving replicated documents.</summary>
         public CultCache Cache => _cache;
@@ -109,6 +126,8 @@ namespace GameCult.Networking
             CultNetDatabaseSubscriptionDeliveryMode deliveryMode = CultNetDatabaseSubscriptionDeliveryMode.ReplicateToCache)
         {
             if (_disposed) throw new ObjectDisposedException(nameof(CultNetDatabaseSubscriptionClient));
+            if (Fault != null)
+                throw new InvalidOperationException("The replica refused a commit and differs from its source; subscribe with a new client.", Fault);
             if (!_client.Connected) throw new InvalidOperationException("CultNet schema client must be connected before subscribing.");
             if (string.IsNullOrWhiteSpace(subscriptionId)) throw new ArgumentException("Subscription id is required.", nameof(subscriptionId));
 
@@ -166,6 +185,9 @@ namespace GameCult.Networking
             if (_disposed) return;
             if (string.IsNullOrWhiteSpace(subscriptionId)) throw new ArgumentException("Subscription id is required.", nameof(subscriptionId));
             _deliveryModes.TryRemove(subscriptionId, out _);
+            lock (_commits)
+                foreach (var held in _commits.Keys.Where(key => key.SubscriptionId == subscriptionId).ToArray())
+                    _commits.Remove(held);
             _client.SendCultNet(new CultNetDatabaseUnsubscribeMessage
             {
                 MessageId = Guid.NewGuid().ToString("N"),
@@ -181,6 +203,8 @@ namespace GameCult.Networking
                 pending.Completion.TrySetException(new ObjectDisposedException(nameof(CultNetDatabaseSubscriptionClient)));
             _initialSnapshots.Clear();
             _deliveryModes.Clear();
+            lock (_commits)
+                _commits.Clear();
             _client.Dispose();
         }
 
@@ -211,48 +235,111 @@ namespace GameCult.Networking
 
         private void HandleChange(CultNetDatabaseChangeRawMessage message)
         {
-            Enqueue(async () =>
+            Enqueue(() =>
             {
                 var deliveryMode = _deliveryModes.TryGetValue(message.SubscriptionId, out var configured)
                     ? configured
                     : CultNetDatabaseSubscriptionDeliveryMode.ReplicateToCache;
-                if (string.Equals(message.ChangeKind, "removed", StringComparison.Ordinal))
+                // Live delivery applies nothing, so there is no commit to judge; each change is reported as it arrives.
+                if (deliveryMode != CultNetDatabaseSubscriptionDeliveryMode.ReplicateToCache || message.CommitId == null || !(message.CommitCount > 1))
+                    return Apply(deliveryMode, new[] { message });
+
+                // The commit's other changes follow on this connection; the replica applies them as one commit.
+                // A straggler of a subscription that was ended, or never made, is not buffered.
+                if (!_deliveryModes.ContainsKey(message.SubscriptionId))
+                    return Task.CompletedTask;
+                var held = (message.SubscriptionId, message.CommitId);
+                PendingCommit? pending;
+                lock (_commits)
                 {
-                    if (deliveryMode == CultNetDatabaseSubscriptionDeliveryMode.ReplicateToCache)
-                        await DeleteAsync(message).ConfigureAwait(false);
-                    Changed?.Invoke(new CultNetReplicatedDocumentChange(
-                        message.SubscriptionId,
-                        "removed",
-                        message.RecordKey ?? string.Empty,
-                        message.SchemaId ?? string.Empty,
-                        null));
-                    return;
+                    if (Fault != null)
+                        return Task.CompletedTask;
+                    var count = message.CommitCount!.Value;
+                    var refusal = !_commits.TryGetValue(held, out pending)
+                            ? (_commits.Count >= MaxPendingCommits
+                                ? $"more than {MaxPendingCommits} commits are incomplete at once"
+                                : (long)count + _commits.Sum(entry => (long)entry.Value.Announced) > MaxBufferedChanges
+                                    ? $"commit '{message.CommitId}' announces {count} changes; the incomplete commits may announce {MaxBufferedChanges} between them"
+                                    : null)
+                            : pending.Announced != count
+                                ? $"commit '{message.CommitId}' announces {pending.Announced} and {count} changes"
+                                : pending.Ids.Contains(message.MessageId)
+                                    ? $"commit '{message.CommitId}' delivered message '{message.MessageId}' twice"
+                                    : null;
+                    if (refusal != null)
+                    {
+                        Break(new InvalidOperationException($"CultNet subscription '{message.SubscriptionId}': {refusal}."));
+                        return Task.CompletedTask;
+                    }
+
+                    if (!_commits.TryGetValue(held, out pending))
+                        _commits[held] = pending = new PendingCommit(count);
+                    pending.Ids.Add(message.MessageId);
+                    pending.Messages.Add(message);
+                    if (pending.Messages.Count < count)
+                        return Task.CompletedTask;
+                    _commits.Remove(held);
                 }
 
-                if (message.Document == null) return;
-                var document = deliveryMode == CultNetDatabaseSubscriptionDeliveryMode.Live
-                    ? _documents.DeserializeRawDocument(message.Document)
-                    : await _documents.ApplyRawDocumentPutMessageAsync(
-                        _cache,
-                        new CultNetDocumentPutRawMessage
-                        {
-                            MessageId = message.MessageId,
-                            Document = message.Document
-                        }).ConfigureAwait(false);
-                Changed?.Invoke(new CultNetReplicatedDocumentChange(
-                    message.SubscriptionId,
-                    message.ChangeKind,
-                    message.Document.RecordKey,
-                    message.Document.SchemaId,
-                    document));
+                return Apply(deliveryMode, pending.Messages);
             });
         }
 
-        private Task DeleteAsync(CultNetDatabaseChangeRawMessage message)
+        private sealed class PendingCommit
         {
-            if (string.IsNullOrWhiteSpace(message.RecordKey) || string.IsNullOrWhiteSpace(message.SchemaId)) return Task.CompletedTask;
-            _documents.ResolveDescriptorForSchemaId(message.SchemaId!);
-            _cache.Remove(new CultRecordKey(message.RecordKey!));
+            public PendingCommit(int announced) => Announced = announced;
+            public int Announced { get; }
+            public List<CultNetDatabaseChangeRawMessage> Messages { get; } = new();
+            public HashSet<string> Ids { get; } = new(StringComparer.Ordinal);
+        }
+
+        // The replica no longer matches its source: say so once, drop what was waiting, and apply nothing more.
+        private void Break(Exception error)
+        {
+            lock (_commits)
+            {
+                if (Fault != null)
+                    return;
+                Fault = error;
+                _commits.Clear();
+            }
+
+            Faulted?.Invoke(error);
+        }
+
+        private Task Apply(CultNetDatabaseSubscriptionDeliveryMode deliveryMode, IReadOnlyList<CultNetDatabaseChangeRawMessage> changes)
+        {
+            // A replica that refused a commit no longer matches its source. Applying later commits on top would hide that, so
+            // nothing more is applied: the fault is surfaced and the replica is rebuilt by subscribing again.
+            if (Fault != null)
+                return Task.CompletedTask;
+            IReadOnlyList<object?> applied;
+            try
+            {
+                applied = deliveryMode == CultNetDatabaseSubscriptionDeliveryMode.Live
+                    ? changes.Select(change => change.Document == null ? null : _documents.DeserializeRawDocument(change.Document)).ToArray()
+                    : _documents.ApplyRawChangesAsOneCommit(_cache, changes);
+            }
+            catch (Exception error)
+            {
+                Break(error);
+                return Task.CompletedTask;
+            }
+
+            for (var index = 0; index < changes.Count; index++)
+            {
+                var change = changes[index];
+                var removed = string.Equals(change.ChangeKind, "removed", StringComparison.Ordinal);
+                if (!removed && change.Document == null)
+                    continue;
+                Changed?.Invoke(new CultNetReplicatedDocumentChange(
+                    change.SubscriptionId,
+                    change.ChangeKind,
+                    removed ? change.RecordKey ?? string.Empty : change.Document!.RecordKey,
+                    removed ? change.SchemaId ?? string.Empty : change.Document!.SchemaId,
+                    removed ? null : applied[index]));
+            }
+
             return Task.CompletedTask;
         }
 
