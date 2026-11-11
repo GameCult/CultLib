@@ -5570,24 +5570,26 @@ mod tests {
     #[test]
     fn refused_pull_leaves_prior_view_intact() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let store_path = temp.path().join("generic.cc");
+        let (settings_path, generic_path) = (temp.path().join("settings.cc"), temp.path().join("generic.cc"));
         let mut cache = CultCache::new();
         cache.register_entry_type::<Settings>()?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
+        cache.add_backing_store(SingleFileMessagePackBackingStore::new(&settings_path), [Settings::TYPE])?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&generic_path))?;
         cache.put("app", &Settings { theme: "before".to_string(), retries: 1 })?;
         let before = cache.snapshot();
 
-        // A record of a type this cache never registered lands in the store behind its back.
-        SingleFileMessagePackBackingStore::new(&store_path).push(&CultCacheEnvelope {
-            key: "stray".into(),
+        // A record of a type this cache never registered lands, behind its back, in the other store at a held key.
+        SingleFileMessagePackBackingStore::new(&generic_path).push(&CultCacheEnvelope {
+            key: "app".into(),
             r#type: "unregistered".into(),
             payload: rmp_serde::to_vec(&("x",))?,
             stored_at: "2026-09-14T00:00:00Z".into(),
             schema_id: Some("unregistered".into()),
         })?;
         let error = cache.pull_all_backing_stores().unwrap_err();
-        assert!(error.to_string().contains("\"unregistered\""), "{error}");
+        assert_eq!(retype_refusal(&error).record_key, "app");
         assert_eq!(cache.snapshot(), before);
+        assert!(cache.foreign_records().is_empty());
         assert_eq!(cache.get_required::<Settings>("app")?.theme, "before");
         Ok(())
     }
