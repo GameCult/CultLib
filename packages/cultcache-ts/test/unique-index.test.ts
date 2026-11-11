@@ -572,3 +572,12 @@ test("a put names its key pair by UTF-16 code unit, not by normalised form", asy
   await assert.rejects(cache.put(document, "ê", { sku: "v" }), { message: refusal("ê", "ê", "tests.item", "sku") });
   assert.equal(cache.get(document, "ê"), undefined);
 });
+
+test("a put colliding on two aliases orders them by UTF-16 code unit, not by normalised form", async () => {
+  // U+00EA normalises to e U+0302, which is less than e U+0303 when normalised and greater by code unit.
+  const document = pair({ indexes: { "ê": "a", "ẽ": "b" } });
+  const cache = memory(document);
+  await cache.put(document, "h1", { a: "s1", b: "t1" });
+  await cache.put(document, "h2", { a: "s2", b: "t2" });
+  await assert.rejects(cache.put(document, "p", { a: "s1", b: "t2" }), { message: refusal("h2", "p", "tests.pair", "ẽ") });
+});
