@@ -3,6 +3,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using R3;
@@ -139,9 +140,9 @@ namespace GameCult.Networking.Tests
                     batch.Upsert(typeof(ReplicaItem), Item(sku), new CultRecordKey(key));
             }), Is.True);
 
-        private static async Task Until(Func<bool> condition)
+        private static async Task Until(Func<bool> condition, int seconds = 5)
         {
-            var deadline = DateTime.UtcNow.AddSeconds(5);
+            var deadline = DateTime.UtcNow.AddSeconds(seconds);
             while (!condition())
             {
                 if (DateTime.UtcNow > deadline) Assert.Fail("The replica did not reach the expected state.");
@@ -345,6 +346,7 @@ namespace GameCult.Networking.Tests
         public async Task TwoSubscriptionsMayUseOneCommitIdWithoutJoiningTheirCommits()
         {
             using var run = new Replication(source => Stage(source, ("a", "one"), ("b", "two")));
+            run.Client.SubscribeAsync("other", recordKeys: new[] { "nothing-matches" }).GetAwaiter().GetResult();
             var emit = run.Peer.Client!;
 
             emit.Emit(Put(run, "items", "a", "two", "9", 2));
@@ -430,7 +432,7 @@ namespace GameCult.Networking.Tests
         {
             using var run = new Replication();
 
-            run.Peer.Client!.Emit(Put(run, "items", "a", "one", "3", 1_000_000));
+            run.Peer.Client!.Emit(Put(run, "items", "a", "one", "3", 1_000_001));
             await Until(() => run.Client.Fault != null);
         }
 
@@ -439,9 +441,15 @@ namespace GameCult.Networking.Tests
         {
             using var run = new Replication();
 
-            for (var commit = 0; commit < 70; commit++)
+            for (var commit = 0; commit < 64; commit++)
                 run.Peer.Client!.Emit(Put(run, "items", "k" + commit, "v" + commit, "c" + commit, 2));
+            await Task.Delay(200);
+            Assert.That(run.Client.Fault, Is.Null, "64 incomplete commits are within the bound");
+            Assert.That(Pending(run.Client), Is.EqualTo(64));
+
+            run.Peer.Client!.Emit(Put(run, "items", "k64", "v64", "c64", 2));
             await Until(() => run.Client.Fault != null);
+            Assert.That(Pending(run.Client), Is.Zero, "a fault drops what was waiting");
         }
 
         [Test]
@@ -469,6 +477,145 @@ namespace GameCult.Networking.Tests
 
             var refusal = Assert.Throws<InvalidOperationException>(() => run.Client.SubscribeAsync("again"));
             Assert.That(refusal!.InnerException, Is.SameAs(run.Client.Fault));
+        }
+
+        private static int Pending(CultNetDatabaseSubscriptionClient client)
+        {
+            var commits = (System.Collections.IDictionary)typeof(CultNetDatabaseSubscriptionClient)
+                .GetField("_commits", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(client)!;
+            lock (commits)
+                return commits.Count;
+        }
+
+        [Test]
+        public async Task TheIncompleteCommitsMayAnnounceOneMillionChangesBetweenThem()
+        {
+            using var run = new Replication();
+
+            run.Peer.Client!.Emit(Put(run, "items", "a", "one", "1", 500_000));
+            run.Peer.Client!.Emit(Put(run, "items", "b", "two", "2", 500_000));
+            await Task.Delay(200);
+            Assert.That(run.Client.Fault, Is.Null, "500k and 500k fit");
+
+            run.Peer.Client!.Emit(Put(run, "items", "c", "three", "3", 2));
+            await Until(() => run.Client.Fault != null);
+        }
+
+        [Test]
+        public async Task ACommitOfOneMillionChangesIsHeldAndOneMillionAndOneIsNot()
+        {
+            using var held = new Replication();
+            held.Peer.Client!.Emit(Put(held, "items", "a", "one", "1", 1_000_000));
+            await Task.Delay(200);
+            Assert.That(held.Client.Fault, Is.Null);
+            Assert.That(Pending(held.Client), Is.EqualTo(1));
+
+            using var over = new Replication();
+            over.Peer.Client!.Emit(Put(over, "items", "a", "one", "1", 1_000_001));
+            await Until(() => over.Client.Fault != null);
+        }
+
+        [Test]
+        public async Task ACommitThatShrinksItsAnnouncedSizeFaults()
+        {
+            using var run = new Replication();
+
+            run.Peer.Client!.Emit(Put(run, "items", "a", "one", "3", 3));
+            run.Peer.Client!.Emit(Put(run, "items", "b", "two", "3", 2));
+            await Until(() => run.Client.Fault != null);
+        }
+
+        [Test]
+        public async Task UnsubscribingOneSubscriptionKeepsTheCommitsOfAnother()
+        {
+            using var run = new Replication();
+            run.Client.SubscribeAsync("items2", recordKeys: new[] { "nothing-matches" }).GetAwaiter().GetResult();
+            var emit = run.Peer.Client!;
+
+            emit.Emit(Put(run, "items", "a", "one", "4", 2));
+            emit.Emit(Put(run, "items2", "b", "two", "4", 2));
+            await Task.Delay(100);
+            Assert.That(Pending(run.Client), Is.EqualTo(2));
+
+            run.Client.Unsubscribe("items");
+            Assert.That(Pending(run.Client), Is.EqualTo(1), "only the unsubscribed subscription's commits leave");
+            emit.Emit(Put(run, "items2", "c", "three", "4", 2));
+            await Until(() => run.ReplicaItem("b") != null);
+            Assert.That(run.ReplicaItem("c"), Is.Not.Null);
+            Assert.That(run.ReplicaItem("a"), Is.Null);
+        }
+
+        [Test]
+        public async Task AStragglerAfterUnsubscribeOrFromAnUnknownSubscriptionIsNotBuffered()
+        {
+            using var run = new Replication();
+            run.Client.Unsubscribe("items");
+
+            run.Peer.Client!.Emit(Put(run, "items", "a", "one", "4", 2));
+            run.Peer.Client!.Emit(Put(run, "never-subscribed", "b", "two", "4", 2));
+            await Task.Delay(150);
+
+            Assert.That(Pending(run.Client), Is.Zero);
+            Assert.That(run.Client.Fault, Is.Null);
+        }
+
+        [Test]
+        public void DisposingTheClientDropsTheCommitsStillWaiting()
+        {
+            var run = new Replication();
+            run.Peer.Client!.Emit(Put(run, "items", "a", "one", "4", 2));
+            SpinWait.SpinUntil(() => Pending(run.Client) == 1, 2000);
+            Assert.That(Pending(run.Client), Is.EqualTo(1));
+
+            run.Dispose();
+
+            Assert.That(Pending(run.Client), Is.Zero);
+        }
+
+        [Test]
+        public async Task AFaultedClientBuffersNothingMore()
+        {
+            using var run = new Replication();
+            run.Peer.Client!.Emit(Put(run, "items", "a", "one", "3", 3, id: "same"));
+            run.Peer.Client!.Emit(Put(run, "items", "b", "two", "3", 3, id: "same"));
+            await Until(() => run.Client.Fault != null);
+
+            run.Peer.Client!.Emit(Put(run, "items", "c", "three", "8", 2));
+            run.Peer.Client!.Emit(Put(run, "items", "d", "four", "9", 2));
+            await Task.Delay(150);
+
+            Assert.That(Pending(run.Client), Is.Zero);
+            Assert.That(run.Faults, Has.Count.EqualTo(1), "a fault is reported once");
+        }
+
+        [Test]
+        public void AFaultIsReportedOnceHoweverOftenItIsRaised()
+        {
+            using var run = new Replication();
+            var raise = typeof(CultNetDatabaseSubscriptionClient)
+                .GetMethod("Break", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+
+            raise.Invoke(run.Client, new object[] { new InvalidOperationException("first") });
+            raise.Invoke(run.Client, new object[] { new InvalidOperationException("second") });
+
+            Assert.That(run.Faults, Has.Count.EqualTo(1));
+            Assert.That(run.Client.Fault!.Message, Is.EqualTo("first"));
+        }
+
+        [TestCase(5000)]
+        [TestCase(100_000)]
+        public async Task ACommitOfManyChangesThroughTheRealSubscriptionServerAppliesIntact(int size)
+        {
+            using var run = new Replication();
+            var keys = Enumerable.Range(0, size).Select(i => ("k" + i, "s" + i)).ToArray();
+
+            Stage(run.Source, keys);
+            await Until(() => run.ReplicaItem("k" + (size - 1)) != null || run.Client.Fault != null, seconds: 180);
+
+            Assert.That(run.Client.Fault, Is.Null);
+            Assert.That(run.Replica.GetAll<ReplicaItem>().Count(), Is.EqualTo(size));
+            Assert.That(run.Peer.Changes.Select(change => change.CommitCount).Distinct().Single(), Is.EqualTo(size));
+            Assert.That(run.ReplicaItem("k" + (size / 2))!.Sku, Is.EqualTo("s" + (size / 2)));
         }
     }
 }

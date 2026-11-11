@@ -31,10 +31,12 @@ namespace GameCult.Networking
             new(StringComparer.Ordinal);
         // Changes of a commit that has not fully arrived, by subscription and commit id.
         // Guarded by its own lock: the queue fills it, Unsubscribe and Dispose evict. A commit that does not complete is bounded
-        // by MaxPendingCommits and MaxCommitCount, and a violation faults the client.
+        // by MaxPendingCommits and by MaxBufferedChanges, and a violation faults the client.
         private const int MaxPendingCommits = 64;
-        private const int MaxCommitCount = 4096;
-        private readonly Dictionary<(string SubscriptionId, string CommitId), List<CultNetDatabaseChangeRawMessage>> _commits = new();
+        // Policy: the most changes the incomplete commits may announce between them, the bound on what the buffer can hold. It
+        // sits far above any commit a source makes; a commit that announces more than this could not be held at all.
+        private const int MaxBufferedChanges = 1_000_000;
+        private readonly Dictionary<(string SubscriptionId, string CommitId), PendingCommit> _commits = new();
         private readonly object _queueLock = new();
         private Task _queue = Task.CompletedTask;
         private bool _disposed;
@@ -243,22 +245,25 @@ namespace GameCult.Networking
                     return Apply(deliveryMode, new[] { message });
 
                 // The commit's other changes follow on this connection; the replica applies them as one commit.
+                // A straggler of a subscription that was ended, or never made, is not buffered.
+                if (!_deliveryModes.ContainsKey(message.SubscriptionId))
+                    return Task.CompletedTask;
                 var held = (message.SubscriptionId, message.CommitId);
-                List<CultNetDatabaseChangeRawMessage>? changes;
+                PendingCommit? pending;
                 lock (_commits)
                 {
                     if (Fault != null)
                         return Task.CompletedTask;
                     var count = message.CommitCount!.Value;
-                    var refusal = count > MaxCommitCount
-                        ? $"commit '{message.CommitId}' announces {count} changes, more than the {MaxCommitCount} a replica holds"
-                        : !_commits.TryGetValue(held, out changes)
+                    var refusal = !_commits.TryGetValue(held, out pending)
                             ? (_commits.Count >= MaxPendingCommits
                                 ? $"more than {MaxPendingCommits} commits are incomplete at once"
-                                : null)
-                            : changes[0].CommitCount != count
-                                ? $"commit '{message.CommitId}' announces {changes[0].CommitCount} and {count} changes"
-                                : changes.Any(other => other.MessageId == message.MessageId)
+                                : (long)count + _commits.Sum(entry => (long)entry.Value.Announced) > MaxBufferedChanges
+                                    ? $"commit '{message.CommitId}' announces {count} changes; the incomplete commits may announce {MaxBufferedChanges} between them"
+                                    : null)
+                            : pending.Announced != count
+                                ? $"commit '{message.CommitId}' announces {pending.Announced} and {count} changes"
+                                : pending.Ids.Contains(message.MessageId)
                                     ? $"commit '{message.CommitId}' delivered message '{message.MessageId}' twice"
                                     : null;
                     if (refusal != null)
@@ -267,16 +272,25 @@ namespace GameCult.Networking
                         return Task.CompletedTask;
                     }
 
-                    if (!_commits.TryGetValue(held, out changes))
-                        _commits[held] = changes = new List<CultNetDatabaseChangeRawMessage>();
-                    changes.Add(message);
-                    if (changes.Count < count)
+                    if (!_commits.TryGetValue(held, out pending))
+                        _commits[held] = pending = new PendingCommit(count);
+                    pending.Ids.Add(message.MessageId);
+                    pending.Messages.Add(message);
+                    if (pending.Messages.Count < count)
                         return Task.CompletedTask;
                     _commits.Remove(held);
                 }
 
-                return Apply(deliveryMode, changes);
+                return Apply(deliveryMode, pending.Messages);
             });
+        }
+
+        private sealed class PendingCommit
+        {
+            public PendingCommit(int announced) => Announced = announced;
+            public int Announced { get; }
+            public List<CultNetDatabaseChangeRawMessage> Messages { get; } = new();
+            public HashSet<string> Ids { get; } = new(StringComparer.Ordinal);
         }
 
         // The replica no longer matches its source: say so once, drop what was waiting, and apply nothing more.
