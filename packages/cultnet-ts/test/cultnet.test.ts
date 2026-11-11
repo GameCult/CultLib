@@ -1712,6 +1712,29 @@ test("database subscription contracts match the C# live document lane", () => {
     schemaId: "sample.counter_state.v1",
     ...extra,
   });
+  // The C# server writes commitId and commitCount as nil on every change outside a grouped commit, so null is absent.
+  const ungrouped = changeWith({ commitId: null, commitCount: null })() as CultNetDatabaseChangeRawMessage;
+  assert.equal(ungrouped.commitId, null);
+  assert.equal(ungrouped.commitCount, null);
+  assert.doesNotThrow(changeWith({ commitId: null }));
+  assert.doesNotThrow(changeWith({ commitCount: null }));
+  assert.doesNotThrow(() => parseCultNetMessage({
+    schemaVersion: "cultnet.database_change_raw.v0",
+    messageId: "change-counter-5",
+    subscriptionId: "counter:browser-1",
+    changeKind: "added",
+    document: {
+      schemaId: "sample.counter_state.v1",
+      recordKey: "counter:main",
+      storedAt: "2026-08-17T00:00:00Z",
+      payloadEncoding: "messagepack",
+      payload: new Uint8Array([0x81, 0xa5, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x01]),
+    },
+    recordKey: null,
+    schemaId: null,
+    commitId: null,
+    commitCount: null,
+  }));
   for (const commitId of ["", 5]) assert.throws(changeWith({ commitId }), /\/commitId/, `commitId ${JSON.stringify(commitId)}`);
   for (const commitCount of [1, 0, 2.5, "two", -3]) assert.throws(changeWith({ commitCount }), /\/commitCount/, `commitCount ${commitCount}`);
 

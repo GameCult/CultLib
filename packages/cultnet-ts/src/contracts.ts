@@ -425,9 +425,9 @@ export interface CultNetDatabaseChangeRawMessage {
   recordKey?: string;
   schemaId?: string;
   /** Opaque, one subscription: changes sharing a commitId are the changes of one commit. */
-  commitId?: string;
-  /** How many changes the commit carries, at least two. */
-  commitCount?: number;
+  commitId?: string | null;
+  /** How many changes the commit carries, at least two. The C# server sends null on a change outside a grouped commit. */
+  commitCount?: number | null;
 }
 
 export interface CultNetSchemaDescriptor {
