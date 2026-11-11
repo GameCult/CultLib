@@ -179,6 +179,16 @@ class UniqueIndexTests(unittest.TestCase):
         self.assertIsNone(cache.get_key_by_index(document, "serial", "1"))
         self.assertEqual(cache.get_key_by_index(document, "serial", "2"), "item:a")
 
+    def test_the_refusal_names_the_schema_not_the_type(self) -> None:
+        document = define_document_type(
+            "t.item", indexes={"sku": "sku"}, schema_name="schema.Item", schema_id="schema.Item.v1"
+        )
+        cache = cache_of(document)
+        cache.put(document, "k:1", {"sku": "S"})
+        with self.assertRaises(CultCacheError) as caught:
+            cache.put(document, "k:2", {"sku": "S"})
+        self.assertEqual(str(caught.exception), refusal("k:1", "k:2", "schema.Item", "sku"))
+
     def test_the_two_smallest_keys_are_named_in_ordinal_order(self) -> None:
         document = item_doc()
         cache = cache_of(document)
