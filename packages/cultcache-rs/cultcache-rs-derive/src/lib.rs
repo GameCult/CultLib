@@ -69,23 +69,16 @@ fn database_entry_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
             }
         }
     });
-    let index_members = slots.iter().filter_map(|slot| slot.index.as_ref().map(|alias| (alias, &slot.ident)));
-    let index_pushes = index_members.map(|(alias, member)| {
+    let index_members: Vec<_> = slots.iter().filter_map(|slot| slot.index.as_ref().map(|alias| (alias, &slot.ident))).collect();
+    let index_rows = index_members.iter().map(|(alias, member)| {
         quote! {
-            if let ::std::option::Option::Some(value) = ::cultcache_rs::CultLookupValue::lookup_value(&self.#member) {
-                held.push((#alias, value));
-            }
+            (#alias, (|record: &Self| ::cultcache_rs::CultLookupValue::lookup_value(&record.#member))
+                as fn(&Self) -> ::std::option::Option<::std::string::String>)
         }
     });
-    let index_pushes: Vec<_> = index_pushes.collect();
-    let indexes_fn = (!index_pushes.is_empty()).then(|| {
-        quote! {
-            fn cult_indexes(&self) -> ::std::vec::Vec<(&'static str, ::std::string::String)> {
-                let mut held = ::std::vec::Vec::new();
-                #(#index_pushes)*
-                held
-            }
-        }
+    let index_rows: Vec<_> = index_rows.collect();
+    let unique_indexes = (!index_rows.is_empty()).then(|| {
+        quote! { const UNIQUE_INDEXES: &'static [::cultcache_rs::CultIndexMember<Self>] = &[#(#index_rows),*]; }
     });
 
     Ok(quote! {
@@ -93,8 +86,8 @@ fn database_entry_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
             const TYPE: &'static str = #entry_type;
             const SCHEMA_NAME: &'static str = #schema_name;
             const GLOBAL: bool = #global;
+            #unique_indexes
             #name_fn
-            #indexes_fn
         }
 
         #codec
@@ -443,7 +436,8 @@ struct CultCacheSlot {
     bytes: bool,
     /// `#[cultcache(name)]`: the member `get_by_name` finds the record by.
     name: bool,
-    /// `#[cultcache(index)]` or `#[cultcache(index = "alias")]`: the alias `get_by_index` finds the record by.
+    /// `#[cultcache(index)]` or `#[cultcache(index = "alias")]`: a unique lookup. Within one type no two records hold one
+    /// non-blank value of the alias; `get_by_index` finds the record by it.
     index: Option<String>,
 }
 
@@ -941,15 +935,15 @@ mod tests {
         );
         assert!(tokens.contains("constGLOBAL:bool=true"), "{tokens}");
         assert!(tokens.contains("fncult_name"), "{tokens}");
-        assert!(tokens.contains("(\"code\",value)"), "{tokens}");
-        assert!(tokens.contains("(\"sku\",value)"), "{tokens}");
+        assert!(tokens.contains("(\"code\","), "{tokens}");
+        assert!(tokens.contains("(\"sku\","), "{tokens}");
     }
 
     #[test]
     fn a_record_without_lookups_generates_none_of_them() {
         let tokens = entry_tokens(r#"#[cultcache(type = "t")] struct S { #[cultcache(key = 0)] a: String }"#);
         assert!(tokens.contains("constGLOBAL:bool=false"), "{tokens}");
-        assert!(!tokens.contains("fncult_name") && !tokens.contains("fncult_indexes"), "{tokens}");
+        assert!(!tokens.contains("fncult_name") && !tokens.contains("UNIQUE_INDEXES"), "{tokens}");
     }
 
     // ResolveIndexAlias: a blank alias is the member's name.
@@ -958,7 +952,7 @@ mod tests {
         let tokens = entry_tokens(
             r#"#[cultcache(type = "t")] struct S { #[cultcache(key = 0, index = "  ")] code: String }"#,
         );
-        assert!(tokens.contains("(\"code\",value)"), "{tokens}");
+        assert!(tokens.contains("(\"code\","), "{tokens}");
     }
 
     #[test]

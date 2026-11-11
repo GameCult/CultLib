@@ -412,7 +412,9 @@ fn outcome(error: &anyhow::Error) {
 
 3. **Name and index lookups**
    - `cache.get_by_name::<T>("Potion")`
-   - `cache.get_by_index::<T>("faction", "Lucent")`
+   - `cache.get_by_index::<T>("callsign", "Lucent-7")`: `#[cultcache(index)]` is unique. Within one type no two
+     records hold one non-blank value of the alias; a put, batch or load that would make two is refused, naming both
+     keys and the alias, and writes nothing. A grouping (faction, kind, status) is not an index: filter `get_all`.
    - generated extractors instead of reflection strings
 
 4. **Schema/version metadata**
