@@ -27,3 +27,12 @@ Install the Unity package from the immutable release tag:
 ```text
 https://github.com/GameCult/CultLib.git?path=/unity/org.gamecult.cultlib#cultlib-unity-v2.0.0
 ```
+
+## Rolling back across the store format
+
+A consumer that upgrades and writes a store holding an element id leaves a
+`cultcache.store.v3` single-file store (`v5` directory store). A `GameCult.Caching`
+from before element ids refuses it by name, so pinning an older package after
+writing is one-way. There is no carry-back; restore from a copy taken before
+upgrading. Upgrade readers before writers. Detail: the Element ids section of
+`src/GameCult.Caching/README.md`.

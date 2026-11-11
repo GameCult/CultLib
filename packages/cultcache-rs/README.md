@@ -394,6 +394,10 @@ fn outcome(error: &anyhow::Error) {
 }
 ```
 
+## Store format and rollback
+
+A store whose records hold an element id is marked `cultcache.store.v3`. This runtime reads and writes a v3 single-file store and carries ids through a rewrite. A CultLib or cultcache-rs from before element ids refuses it by name, so rolling back to an older pin after a store has been written that way is one-way. There is no carry-back: a whole-store write drops the mark only when no record holds an id. Restore from a copy taken before upgrading, and upgrade every reader before any writer.
+
 ## Near-Term Ergonomic Improvements
 
 1. **Derive macro**

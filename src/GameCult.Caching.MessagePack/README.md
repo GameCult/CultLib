@@ -59,6 +59,10 @@ await cache.PullAllBackingStoresAsync();
 - The raw CultNet document lane should treat these payload bytes as already
   blessed, not decode and re-encode them for sport.
 
+## Store format and rollback
+
+A store whose records hold an element id is marked `cultcache.store.v3` (a directory store `v5`). The single-file and directory stores here write the mark from content; see the Element ids section of the GameCult.Caching README. A CultLib or GameCult.Caching from before element ids refuses it by name, so rolling back to an older pin after a store has been written that way is one-way. There is no carry-back: a whole-store write drops the mark only when no record holds an id. Restore from a copy taken before upgrading, and upgrade every reader before any writer.
+
 ## MessagePack source generator
 
 NuGet consumers get `[assembly: MessagePackAssumedFormattable(typeof(CultRecordRef<>))]` from the package, so a

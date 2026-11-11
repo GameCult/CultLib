@@ -7,6 +7,7 @@ All notable changes to `@gamecult/cultcache-ts` are recorded here, following
 
 ### Breaking
 
+- A single-file store marked `cultcache.store.v3` (it holds an element id, written by the C# runtime) is read, and a rewrite keeps the mark and the ids; this runtime does not decide when a document carries ids. A runtime from before this change refuses a v3 store by name, so rolling back to an older release after a store has been written as v3 is one-way: there is no carry-back, so restore from a copy taken before upgrading.
 - `indexes` are unique, as C# `[CultIndex]`: a write or a load that leaves two records of a type holding one non-blank
   value under one alias is refused naming both keys and the alias, and writes nothing. Index text is the C# canonical
   text (booleans `True`/`False`, integers as digits, doubles as the exact expansion, blank values never indexed), so

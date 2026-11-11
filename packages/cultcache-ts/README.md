@@ -63,6 +63,10 @@ const payload = encodeDocumentPayload(noteDocument, note); // DocumentPayload
 
 Browsers import the same names from `@gamecult/cultcache-ts/document`, which holds no Node built-ins. The whole cache without the single-file store is `@gamecult/cultcache-ts/browser`, which is also what bundlers resolve for the package root (`browser` condition); bring your own `CacheBackingStore`.
 
+## Store format and rollback
+
+A store whose records hold an element id is marked `cultcache.store.v3` (`v5` for a C# directory store). This runtime reads a v3 store and keeps the mark and the ids through a rewrite; it does not decide when a document carries ids. A CultLib or cultcache-ts from before element ids refuses a v3 or v5 store by name, so rolling back to an older pin after a store has been written that way is one-way. There is no carry-back: a whole-store write drops the mark only when no record holds an id. Restore from a copy taken before upgrading, and upgrade every reader before any writer.
+
 ## `.cc` Inspection
 
 CultCache files may use the `.cc` extension. The bytes are still the canonical
