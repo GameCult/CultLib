@@ -31,9 +31,10 @@ namespace GameCult.Caching
         public int Occurrences { get; }
 
         /// <summary>
-        /// True only when every mark is at depth 0 and the schema comparison reported ignored slots under the id the record was stored
-        /// under: the loss a compatible-id declaration consents to (cultlib-gaps:ruling:slot-mark-consent). Any other mark leaves the
-        /// record read-only whatever is declared.
+        /// True only when every mark is at depth 0 and the schema comparison under the id the record was stored under reported every
+        /// slot the mark carries past the reader (<see cref="SlotCount"/> is at most the highest reported slot plus one): the loss a
+        /// compatible-id declaration consents to (cultlib-gaps:ruling:slot-mark-consent). Any other mark leaves the record read-only
+        /// whatever is declared.
         /// </summary>
         public bool Explained { get; }
 

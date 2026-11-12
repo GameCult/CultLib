@@ -4034,8 +4034,11 @@ namespace GameCult.Caching
                 for (var cause = exception; cause != null; cause = cause.InnerException) causes.Add(cause.Message);
                 throw new InvalidDataException($"Record '{record.Key}' (schema '{record.SchemaId}') cannot be decoded: {string.Join(" <- ", causes.Distinct())}", exception);
             }
-            // Explained only when every mark is at depth 0 and the schema comparison reported ignored slots under this id.
-            unread = decoded.UnreadSlots?.Explaining(decoded.UnreadSlots.AllAtDepthZero && report.IgnoredExtraSlots.Length > 0);
+            // Explained only when every mark is at depth 0 and the schema comparison under this id reported every slot the mark carries
+            // past the reader: consent reaches no slot above the highest reported (none when nothing was reported).
+            unread = decoded.UnreadSlots is { } marked
+                ? marked.Explaining(marked.AllAtDepthZero && marked.SlotCount <= report.IgnoredExtraSlots.DefaultIfEmpty(-1).Max() + 1)
+                : null;
             return new CultStoredDocument(
                 new CultRecordKey(record.Key),
                 record.StoredAt,
