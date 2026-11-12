@@ -54,6 +54,8 @@ type HydratedEntry = CultCacheEnvelope & {
   lookups: EntryLookups;
   // What the payload decode read past: set when the record was admitted, and it makes the record read-only unless explained.
   unreadSlots?: CultCacheUnreadSlots;
+  // The schema id the record arrived under, before it was admitted under its reader's: what an unread-slots refusal names.
+  storedSchemaId?: string;
 };
 
 // Everything a pull replaces. Built whole, then swapped in with one assignment.
@@ -88,11 +90,15 @@ type DerivedTypeLookups = {
   readonly indexMaps: Map<string, Map<string, string>>;
 };
 
-// The consent a compatible-id declaration gives (cultlib-gaps:ruling:slot-mark-consent): a mark is explained only when it is at
+// The consent a compatible-id declaration gives (cultlib-gaps:ruling:slot-mark-consent): a mark is explained only when the record
+// arrived under an id other than the reader's own that the reader lists compatible, it is at
 // depth 0 and the schema comparison of the catalog entry the record arrived with against the reader's own reported the slots it
 // carries as ignored, so its slot count is at most the highest ignored slot plus one. A record written or put through the cache
 // arrives under the reader's own entry, which ignores nothing, so no mark of it is explained.
-function explainedBy(noted: NotedSlots, reader: CultCacheSchemaCatalogEntry, arrived: CultCacheSchemaCatalogEntry | undefined): boolean {
+function explainedBy(noted: NotedSlots, reader: CultCacheSchemaCatalogEntry, arrivedId: string, arrived: CultCacheSchemaCatalogEntry | undefined): boolean {
+  if (arrivedId === reader.schemaId || !(reader.compatibleSchemaIds ?? []).includes(arrivedId)) {
+    return false;
+  }
   const declared = new Set((reader.members ?? []).map((member) => member.slot));
   const ignored = (arrived?.members ?? []).map((member) => member.slot).filter((slot) => !declared.has(slot));
   return noted.depth0Only && noted.slotCount <= Math.max(-1, ...ignored) + 1;
@@ -599,7 +605,6 @@ export class CultCache {
     });
   }
 
-  // What the last pull found that no registered type claims, by key ordinal. A later registration claims a record at the next pull.
   /** What the record's payload carried past this build's declared slots, or undefined: the held record is read-only unless `explained`. */
   unreadSlots(definition: AnyCultCacheDocumentDefinition, key: string): CultCacheUnreadSlots | undefined {
     return this.#hydrated.entries.get(this.#entryId(this.#requireDefinition(definition).definition.type, key))?.unreadSlots;
@@ -612,10 +617,21 @@ export class CultCache {
    */
   isWritable(definition: AnyCultCacheDocumentDefinition, key: string): boolean {
     const registered = this.#requireDefinition(definition);
-    return !this.#hydrated.foreign.some((record) => record.key === key)
-      && this.#unreadRefusal(this.#hydrated.entries.get(this.#entryId(registered.definition.type, key))) === undefined;
+    const type = registered.definition.type;
+    if (this.#hydrated.foreign.some((record) => record.key === key)
+      || this.#unreadRefusal(this.#hydrated.entries.get(this.#entryId(type, key))) !== undefined) {
+      return false;
+    }
+    // The record of another type a write would restamp (or be refused by): the write's own questions, writeNow's #refuseRetype.
+    const other = this.#heldUnderOtherType(this.#hydrated, type, key);
+    const written: CultCacheEnvelope = {
+      key, type, payload: documentPayloadFromBytes(new Uint8Array(0)), storedAt: "",
+      schemaId: registered.catalogEntry.schemaId, catalogEntry: registered.catalogEntry,
+    };
+    return other === undefined || (writtenOwns(written, schemaIdForEnvelope(other)) && this.#unreadRefusal(other) === undefined);
   }
 
+  // What the last pull found that no registered type claims, by key ordinal. A later registration claims a record at the next pull.
   foreignRecords(): readonly CultCacheForeignRecord[] {
     return [...this.#hydrated.foreign].sort((left, right) => compareOrdinal(left.key, right.key));
   }
@@ -765,7 +781,7 @@ export class CultCache {
       return undefined;
     }
     return new SchemaConflictError(
-      held.schemaId ?? held.type,
+      held.storedSchemaId ?? held.schemaId ?? held.type,
       [held.catalogEntry.schemaName],
       held.key,
       `${held.catalogEntry.schemaName} record ${held.key} is read-only: ${unread.typeName} was read with ${unread.slotCount} slots where this build declares ${unread.declaredCount} ` +
@@ -1078,7 +1094,8 @@ export class CultCache {
       catalogEntry: registered.catalogEntry,
       value,
       lookups,
-      ...(noted ? { unreadSlots: { ...noted, explained: explainedBy(noted, registered.catalogEntry, entry.catalogEntry) } } : {}),
+      storedSchemaId: entry.schemaId ?? entry.type,
+      ...(noted ? { unreadSlots: { ...noted, explained: explainedBy(noted, registered.catalogEntry, entry.schemaId ?? entry.type, entry.catalogEntry) } } : {}),
     };
   }
 

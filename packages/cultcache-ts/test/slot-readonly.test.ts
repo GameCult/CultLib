@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { decode, encode } from "@msgpack/msgpack";
+import { z } from "zod";
 
+import { codecs } from "../src";
 import { CultCache } from "../src/cult-cache";
 import { defineDocumentType, documentPayloadBytes } from "../src/document";
 import { SingleFileMessagePackBackingStore, readSingleFileStore } from "../src/single-file-messagepack-backing-store";
@@ -19,6 +21,7 @@ import {
 // read-only, and every write or removal of its key is refused before a store is touched. The vectors are written by the C#
 // reference: tests/vectors/union-parity/README.md, "Extra trailing slot" and "Slot stores".
 
+const { slots, string } = codecs;
 const SLOT_VALUE = "extra-slot";
 
 function mark(typeName: string, slotCount: number, declaredCount: number, depth0Only: boolean, explained = false, occurrences = 1): CultCacheUnreadSlots {
@@ -129,6 +132,7 @@ test("a write by a type that owns the held record's id restamps it, and is refus
     const held = { ...envelopeOf(await read(file)), type: older.type, schemaId: "tests.surface_older.v1" };
     const cache = CultCache.builder().withDocumentType(older).withDocumentType(newer).withGenericStore(memoryStore([held])).build();
     await cache.pullAllBackingStores();
+    assert.equal(cache.isWritable(newer, "surface"), lands, `${file}: isWritable agrees with the write by the type that owns the id`);
     const write = cache.put(newer, "surface", golden);
     if (lands) {
       await write;
@@ -225,7 +229,11 @@ test("consent: a write of the explained record lands; the over-consent write is 
 
   for (const key of ["over-consent", "nested"]) {
     const refused = await openStore("extra-slot-consent.cc", true);
-    await assert.rejects(() => refused.cache.put(refused.surface, key, golden), SchemaConflictError, key);
+    await assert.rejects(
+      () => refused.cache.put(refused.surface, key, golden),
+      (error: unknown) => error instanceof SchemaConflictError && error.schemaId === "tests.union_surface.wide",
+      `${key}: the refusal names the id the record was stored under`,
+    );
   }
 });
 
@@ -242,4 +250,45 @@ test("carried: after writing another record, the marked record's bytes, schema i
     assert.equal(now.storedAt, was.storedAt, key);
     assert.deepEqual(now.catalogEntry, was.catalogEntry, key);
   }
+});
+
+// A writer that adds a slot and keeps its schema id (TS ids are hand-written; C# ids hash the members): the reader of that
+// same id has declared nothing, so it consents to nothing.
+test("a wider writer under the reader's own schema id is read-only, and a real round trip does not shed the slot", async () => {
+  const doc = (columns: 1 | 2, compatibleSchemaIds: string[] = []) => defineDocumentType({
+    type: "tests.own_id",
+    schemaId: "tests.own_id.v1",
+    schemaName: "tests.own_id",
+    compatibleSchemaIds,
+    schema: z.object({ n: z.string(), extra: z.string().optional() }),
+    codec: columns === 2
+      ? slots<{ n: string; extra: string }>({ 0: ["n", string], 1: ["extra", string] }, "Own")
+      : slots<{ n: string }>({ 0: ["n", string] }, "Own"),
+    name: "n",
+  });
+  const path = join(await mkdtemp(join(tmpdir(), "slot-readonly-")), "own.cc");
+  const wide = doc(2);
+  const writer = CultCache.builder().withDocumentType(wide).withGenericStore(new SingleFileMessagePackBackingStore(path)).build();
+  await writer.put(wide, "k", { n: "n1", extra: "kept" });
+  const bytes = await readFile(path);
+
+  for (const compatible of [[], ["tests.own_id.v1"]]) {
+    const reader = doc(1, compatible);
+    const cache = CultCache.builder().withDocumentType(reader).withGenericStore(new SingleFileMessagePackBackingStore(path)).build();
+    await cache.pullAllBackingStores();
+    assert.deepEqual(cache.unreadSlots(reader, "k"), mark("Own", 2, 1, true), "unexplained: the arrived id is the reader's own");
+    assert.equal(cache.isWritable(reader, "k"), false);
+    await assert.rejects(() => cache.put(reader, "k", { n: "n2" }), SchemaConflictError);
+    await assert.rejects(() => cache.delete(reader, "k"), SchemaConflictError);
+    assert.equal(Buffer.compare(bytes, await readFile(path)), 0, "the file still holds the slot");
+  }
+});
+
+test("a record that arrived under an id the reader does not list compatible is never consented to", async () => {
+  const path = await copyOf("extra-slot-consent.cc");
+  const reader = surfaceDocument("tests.union_surface.v2"); // resolves by type name; lists nothing
+  const cache = CultCache.builder().withDocumentType(reader).withGenericStore(new SingleFileMessagePackBackingStore(path)).build();
+  await cache.pullAllBackingStores();
+  assert.equal(cache.unreadSlots(reader, "consented")?.explained, false);
+  assert.equal(cache.isWritable(reader, "consented"), false);
 });
