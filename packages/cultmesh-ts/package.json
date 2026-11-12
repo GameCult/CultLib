@@ -50,7 +50,7 @@
   },
   "dependencies": {
     "@gamecult/cultcache-ts": "^0.15.0",
-    "@gamecult/cultnet-ts": "^0.3.0",
+    "@gamecult/cultnet-ts": "^0.4.0",
     "koffi": "3.3.0"
   },
   "devDependencies": {
