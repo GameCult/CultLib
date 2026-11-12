@@ -365,7 +365,8 @@ class ReplaceKernel:
 
 def _replace_store(staged: str | os.PathLike[str], destination: str | os.PathLike[str]) -> None:
     """Replaces `destination` with `staged`: POSIX-semantics rename first on Windows (so a reader holding the store open
-    never sees it absent), os.replace elsewhere."""
+    keeps it and rarely sees it absent; a stalled rename can still leave it absent for 5-47 ms on NTFS,
+    variants:ruling:posix-rename-absent-window-document), os.replace elsewhere."""
     if sys.platform == "win32":
         replace_store_windows(os.fspath(staged), os.fspath(destination), WindowsReplaceKernel())
     else:
