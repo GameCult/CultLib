@@ -4422,8 +4422,8 @@ const MOVEFILE_REPLACE_WRITE_THROUGH: u32 = 0x9;
 /// for the rest of the call; and a bounded retry on access, sharing and lock violations.
 /// A concurrent reader (another process, an indexer, an antivirus scan) makes the replace fail
 /// transiently, and a daemon that treats that as fatal dies on the first overlap (Muninn serve
-/// did, 2026-09-11). The same table ships in cultcache-ts and cultcache-cs
-/// (`variants:ruling:windows-replace-posix-first`).
+/// did, 2026-09-11). Ruling `variants:ruling:windows-replace-posix-first`: cultcache-ts carries the
+/// same table on main; cultcache-cs carries it only once its pending PR lands.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn replace_with(kernel: &dyn ReplaceKernel, staged: &Path, destination: &Path) -> Result<()> {
     const ERROR_INVALID_FUNCTION: u32 = 1;
@@ -4488,9 +4488,7 @@ impl ReplaceKernel for WindowsKernel {
         };
 
         let staged_wide = wide(staged);
-        // FileName with a null RootDirectory must be a full path; MoveFileExW takes a relative one.
-        let destination_wide =
-            wide(&std::path::absolute(destination).unwrap_or_else(|_| destination.to_path_buf()));
+        let destination_wide = wide(destination);
         // FILE_RENAME_INFO ends in a variable-length name: allocate it as u64s for alignment.
         let name_bytes = (destination_wide.len() - 1) * 2;
         let header = std::mem::size_of::<FILE_RENAME_INFO>();
@@ -4674,6 +4672,35 @@ mod replace_with_tests {
 mod windows_replace_tests {
     use super::replace_file_atomically;
     use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4; // READ | WRITE | DELETE
+
+    /// A reader that shares delete holds the old store open. A POSIX-semantics rename
+    /// replaces the name while the reader keeps the old content; MoveFileExW alone fails
+    /// there with error 5 (Soul's Starfire probe, build 26200), so this test passes only
+    /// if the POSIX path is live. Compile-checked only: it has never run on Windows.
+    #[test]
+    fn a_replace_succeeds_over_a_delete_sharing_reader_which_keeps_the_old_content() {
+        use std::io::Read;
+        let dir = std::env::temp_dir().join(format!("cultcache-posix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let destination = dir.join("store.cc");
+        let staged = dir.join("store.cc.tmp");
+        std::fs::write(&destination, b"old").unwrap();
+        std::fs::write(&staged, b"new").unwrap();
+        let mut reader = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_ALL)
+            .open(&destination)
+            .unwrap();
+        replace_file_atomically(&staged, &destination).expect("POSIX rename over a sharing reader");
+        let mut seen = Vec::new();
+        reader.read_to_end(&mut seen).unwrap();
+        assert_eq!(seen, b"old", "the reader keeps the old content");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new");
+        drop(reader);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A reader holding the destination open with no sharing makes the
     /// replace fail for as long as it holds on; it must succeed once the
