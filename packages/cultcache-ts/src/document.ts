@@ -1,5 +1,5 @@
 import { resolveDocumentFormatter } from "./document-formatter";
-import { checkPayloadDepth } from "./payload-depth";
+import { checkPayloadDepth, checkPayloadIsOneValue } from "./payload-depth";
 import type {
   AnyCultCacheDocumentDefinition,
   CultCacheSchemaCatalogMember,
@@ -120,11 +120,8 @@ export function decodeDocumentPayload<TDefinition extends AnyCultCacheDocumentDe
 ): CultCacheDocumentValue<TDefinition> {
   const bytes = documentPayloadBytes(payload);
   if (writesLibraryMessagePack(definition)) {
-    // A payload is exactly one MessagePack value: bytes after the first are refused by count, from the walk's end, before
-    // any formatter reads; the tail is never walked or echoed. A payload that ends early stays the decoder's to refuse.
-    const subject = `document type "${definition.type}" payload`;
-    const end = checkPayloadDepth(bytes, subject);
-    if (end !== undefined && end < bytes.length) throw new Error(`${subject} has ${bytes.length - end} bytes after its first MessagePack value.`);
+    // A payload is exactly one MessagePack value: bytes after the first are refused by count before any formatter reads.
+    checkPayloadIsOneValue(bytes, `document type "${definition.type}" payload`);
   }
   const decoded = resolveDocumentFormatter(definition).decode(bytes);
   return definition.schema.parse(decoded) as CultCacheDocumentValue<TDefinition>;

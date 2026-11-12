@@ -64,9 +64,20 @@ export function checkPayloadDepth(bytes: Uint8Array, subject = "document payload
       position += skip;
     }
 
+    // A scalar whose declared length runs past the payload is an early end, not a value.
+    if (position > bytes.length) return undefined;
     // One element is complete; close every container it was the last element of.
     while (depth > 0 && --remaining[depth - 1] === 0) depth--;
     if (depth === 0) return position;
   }
   return undefined;
+}
+
+// The one rule that a payload is exactly one MessagePack value: the depth walk, then a refusal of bytes after the first
+// value, by count, naming the subject, from the walk's end. The tail is never walked or echoed; a payload that ends early
+// stays the decoder's to refuse. decodeDocumentPayload and the inspector speak this clause and no other.
+export function checkPayloadIsOneValue(bytes: Uint8Array, subject: string): number | undefined {
+  const end = checkPayloadDepth(bytes, subject);
+  if (end !== undefined && end < bytes.length) throw new Error(`${subject} has ${bytes.length - end} bytes after its first MessagePack value.`);
+  return end;
 }
