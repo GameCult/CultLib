@@ -381,6 +381,7 @@ fn slot_codec(ident: &syn::Ident, slots: &[CultCacheSlot]) -> proc_macro2::Token
                     where
                         __A: ::serde::de::SeqAccess<'de>,
                     {
+                        let __ticket = ::cultcache_rs::__enter_slots();
                         #(#option_declarations)*
                         let mut index = 0usize;
                         while index <= #max_slot {
@@ -390,7 +391,15 @@ fn slot_codec(ident: &syn::Ident, slots: &[CultCacheSlot]) -> proc_macro2::Token
                             }
                             index += 1;
                         }
-                        while let ::std::option::Option::Some(_) = seq.next_element::<::serde::de::IgnoredAny>()? {}
+                        // The slots past the declared ones are skipped and counted: the decode entry marks the record
+                        // that carried them read-only.
+                        let mut __extra = 0usize;
+                        while seq.next_element::<::serde::de::IgnoredAny>()?.is_some() {
+                            __extra += 1;
+                        }
+                        if __extra > 0 {
+                            ::cultcache_rs::__note_unread_slots(__ticket, stringify!(#ident), #max_slot + 1 + __extra, #max_slot + 1);
+                        }
                         Ok(#ident {
                             #(#build_fields),*
                         })
@@ -567,10 +576,13 @@ fn union_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             quote! {
                 #key => {
                     match seq
-                        .next_element::<::std::option::Option<[(); 0]>>()
+                        .next_element::<::std::option::Option<::cultcache_rs::__UnitArmSlots>>()
                         .map_err(|_| ::serde::de::Error::custom(#arity_message))?
                     {
-                        ::std::option::Option::Some(::std::option::Option::Some(_)) => #ident::#variant,
+                        ::std::option::Option::Some(::std::option::Option::Some(slots)) => {
+                            slots.note(stringify!(#variant));
+                            #ident::#variant
+                        }
                         ::std::option::Option::Some(::std::option::Option::None) => {
                             return ::std::result::Result::Err(::serde::de::Error::custom(
                                 format!(#nil_slots_message, #key),

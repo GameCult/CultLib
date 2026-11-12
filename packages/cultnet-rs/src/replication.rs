@@ -146,6 +146,7 @@ impl CultNetDocumentRegistry {
                 schema_id: binding.schema_id.clone(),
                 schema_names: vec![holder.document_type.clone(), binding.document_type.clone()],
                 record_key: String::new(),
+                unread_slots: None,
             }));
         }
         self.bindings_by_schema_id
