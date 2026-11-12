@@ -180,6 +180,21 @@ class RemoteWriteAuthorityTests(unittest.TestCase):
         reply = self.send(granting, unowned)
         self.assertEqual(reply[0]["code"], "unregistered_document_put", "a granted put still meets the store's refusal")
 
+    def test_a_put_with_a_payload_tail_and_an_unknown_schema_id_is_refused_whole_under_the_canonical_id(self) -> None:
+        # The payload head names the registered schema, so the put routes by stamp; the tail makes the payload more
+        # than one MessagePack value. It is answered message_invalid (not unregistered_document_put), nothing is
+        # stored, and the authority is asked under the canonical id, not the id as sent.
+        authority = Recording(lambda _: CultMeshRemoteWriteDecision.grant())
+        server = self.build(authority)
+        tailed = put_of(KEY_A, "x", schema_id="sha256:nobody-owns-this")
+        tailed["document"]["payload"] = bytes(tailed["document"]["payload"]) + b"\x01"
+
+        replies = self.send(server, tailed)
+
+        self.assertEqual([(reply["code"], reply["details"]["field"]) for reply in replies], [("message_invalid", "document")])
+        self.assertIsNone(self.text_of(server, KEY_A))
+        self.assertEqual([request.schema_id for request in authority.requests], [SCHEMA_ID])
+
     def test_an_authority_that_raises_refuses_and_is_logged_as_an_error(self) -> None:
         def explode(_: Any) -> Any:
             raise RuntimeError("authority exploded")
