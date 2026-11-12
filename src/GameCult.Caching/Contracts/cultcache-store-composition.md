@@ -383,11 +383,13 @@ it.
 | TypeScript | `<path>.tmp-<pid>-<ms>-<random>` | `store-file.ts:70` |
 | Python | `<path>.tmp-<pid>-<uuid hex>` | `stores.py:316` |
 
-- **Which temp files are safe to delete.** One that is not being written now:
-  no process holds `<path>.lock`. Test with `flock -n <path>.lock true` (Linux,
-  util-linux): success means no writer is mid-write, so every temp file of that
-  store is abandoned. Deleting one while a writer holds the lock destroys that
-  write.
+- **Which temp files are safe to delete.** One that no writer is writing:
+  delete only while you hold `<path>.lock` yourself
+  (`flock <path>.lock rm <temp file>`, Linux, util-linux) or with every writer of
+  the store stopped. Merely testing that the lock is free is not enough: a writer
+  can take it and stage a new temp file the moment after the test. While you hold
+  the lock, every temp file of that store is abandoned. Deleting one a writer is
+  still writing destroys that write.
 - **How to know the write was incomplete.** The temp file existing is the proof.
   Its content may be partial (killed during the write) or whole (killed between
   the fsync and the rename); either way it was not applied, and the writer that
@@ -405,8 +407,10 @@ it.
   `<store file name>.<uuid>.tmp` (`lib.rs:1698`, `4318-4352`). C#, TypeScript and
   Python never sweep, and their unique names mean leftovers accumulate until an
   operator deletes them. A store file that cannot be read (truncated, wrong
-  header) is refused at open and left byte-identical
-  (`CultCache.cs:4659-4663`); that is the store, not a temp file, and is
+  header) is refused at open and left byte-identical (the open reads through
+  `ReadSnapshot`, `CultCache.cs:4590`, `5104-5118`, whose `ReadStore` must throw
+  `CultStoreUnreadableException` for anything that is not exactly one store,
+  `4510-4516`); that is the store, not a temp file, and is
   restored from a copy, never deleted and rewritten.
 
 ### Backing up a pair of stores
@@ -422,20 +426,27 @@ that copy may violate it. Back up the pair at one point in time:
    writes either store. Flush staged writes first; `PullAll` and the dispose
    flush do not capture unflushed state of a still-running cache. Copy both `.cc`
    files. Do not copy `.lock` files or temp files. Start the writers again.
-2. **Without stopping (Unix).** Take both locks in one fixed order (sorted by
-   full path), copy while holding both, release:
+2. **Without stopping (Unix): per-store consistency only.** Take both locks in
+   one fixed order (sorted by full path), copy while holding both, release:
    `flock A.cc.lock flock B.cc.lock cp A.cc B.cc /backup/dir/`.
-   Cooperating writers wait (30 s in C#, TypeScript and Python; Rust waits
-   indefinitely), so keep the hold short and copy locally. This captures what
-   was durable at that instant; unflushed state of live caches is not in it. On
-   Windows, no shipped tool holds the C# share-none lock for you: quiesce.
+   This does not make the pair consistent. A writer holds one store lock at a
+   time, so it can land A and then B with a gap between; holding both locks
+   cannot pause a writer that has landed A and not yet B, so the copy can hold A
+   after and B before that pair of writes. It guarantees each copy is one
+   complete generation of its store and nothing more. Any invariant spanning the
+   pair requires step 1. Cooperating writers wait (30 s in C#, TypeScript and
+   Python; Rust waits indefinitely), so keep the hold short. Unflushed state of
+   live caches is not in it. On Windows, no shipped tool holds the C# share-none
+   lock for you: quiesce.
 3. **Verify.** Open each copy read-only with the runtime that will use it (for
    Rust, `pull_all_read_only_snapshot`); an unreadable copy is refused, not
-   repaired (`CultCache.cs:4659-4663`).
+   repaired (`CultCache.cs:4510-4516`, `5104-5118`).
 4. **Restore both files together** from the same backup, with every writer
-   stopped, then restart so each cache loads fresh. Restoring one half of a pair
-   from a different backup recreates the skew. Leave the `.lock` files as they
-   are.
+   stopped, then restart so each cache loads fresh. Copy each file to a temp
+   name in the store's own directory and `mv` it over the store: a plain `cp`
+   over the store is not atomic, and C#, TypeScript and Python readers take no
+   lock, so they can read a torn file. Restoring one half of a pair from a
+   different backup recreates the skew. Leave the `.lock` files as they are.
 
 ## Serialization options
 
