@@ -800,6 +800,145 @@ pub fn decode_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<
     decode_grown(payload).map_err(opaque_decode_error)
 }
 
+/// What a payload decode found past the slots this build declares, at any depth: the first type read with extra slots,
+/// how many slots it carried against how many it declares, and how many objects in the payload did. It holds no slot
+/// value, so a refusal can name it. A record whose payload carries it is read-only in the cache
+/// ([`CultCache::is_writable`]); this runtime has no compatible schema ids, so every mark is unconsented.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnreadSlots {
+    /// The first type read with extra slots (a unit arm is named by its variant).
+    pub type_name: String,
+    /// The slots that object carried.
+    pub slot_count: usize,
+    /// The slots this build declares for it.
+    pub declared_count: usize,
+    /// The objects in the payload that carried extra slots.
+    pub occurrences: usize,
+}
+
+/// The open mark scope of a decode: how many slot objects it has entered, and the mark of the first entered one that
+/// carried extra slots (the reference names the first type read, which is the outermost: it is entered before its members).
+#[derive(Default)]
+struct MarkScope {
+    entered: usize,
+    mark: Option<(usize, UnreadSlots)>,
+}
+
+thread_local! {
+    /// The open mark scope of a decode on this thread: `None` when no decode entry has one open, so a decode through
+    /// serde alone notes nothing. The slot visitors the derives write note into it.
+    static UNREAD_SLOTS: std::cell::RefCell<Option<MarkScope>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The derives' sensor, first half: a slot object is entered. Its ticket orders it among the objects of the decode.
+#[doc(hidden)]
+pub fn __enter_slots() -> usize {
+    UNREAD_SLOTS.with(|scope| {
+        scope.borrow_mut().as_mut().map_or(0, |open| {
+            open.entered += 1;
+            open.entered
+        })
+    })
+}
+
+/// The derives' sensor, second half: the object entered as `ticket`, of `type_name`, carried `carried` slots where this
+/// build declares `declared`.
+#[doc(hidden)]
+pub fn __note_unread_slots(ticket: usize, type_name: &str, carried: usize, declared: usize) {
+    UNREAD_SLOTS.with(|scope| {
+        let mut scope = scope.borrow_mut();
+        let Some(open) = scope.as_mut() else {
+            return;
+        };
+        let occurrences = open.mark.as_ref().map_or(0, |(_, found)| found.occurrences) + 1;
+        if open.mark.as_ref().is_none_or(|(first, _)| ticket < *first) {
+            let named = UnreadSlots { type_name: type_name.to_string(), slot_count: carried, declared_count: declared, occurrences };
+            open.mark = Some((ticket, named));
+        } else if let Some((_, found)) = open.mark.as_mut() {
+            found.occurrences = occurrences;
+        }
+    });
+}
+
+/// A unit arm is a zero-slot record: its slots array is read and counted, not refused.
+#[doc(hidden)]
+pub struct __UnitArmSlots {
+    ticket: usize,
+    extra: usize,
+}
+
+impl __UnitArmSlots {
+    /// Notes the arm if its array held any element.
+    pub fn note(self, variant: &str) {
+        if self.extra > 0 {
+            __note_unread_slots(self.ticket, variant, self.extra, 0);
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for __UnitArmSlots {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct Count;
+        impl<'de> serde::de::Visitor<'de> for Count {
+            type Value = __UnitArmSlots;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a slots array")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error> {
+                let ticket = __enter_slots();
+                let mut extra = 0usize;
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                    extra += 1;
+                }
+                Ok(__UnitArmSlots { ticket, extra })
+            }
+        }
+        deserializer.deserialize_seq(Count)
+    }
+}
+
+/// Puts the previous scope back whatever the decode did.
+struct UnreadScope(Option<MarkScope>);
+
+impl UnreadScope {
+    fn open() -> Self {
+        Self(UNREAD_SLOTS.with(|scope| scope.replace(Some(MarkScope::default()))))
+    }
+
+    fn mark(&self) -> Option<UnreadSlots> {
+        UNREAD_SLOTS.with(|scope| scope.borrow_mut().as_mut().and_then(|open| open.mark.take()).map(|(_, mark)| mark))
+    }
+}
+
+impl Drop for UnreadScope {
+    fn drop(&mut self) {
+        UNREAD_SLOTS.with(|scope| *scope.borrow_mut() = self.0.take());
+    }
+}
+
+/// [`decode_payload`] with the mark: the same depth check and grown decode, inside a scope the derives' slot
+/// visitors note into. A payload past the nesting limit is refused before the decode, never marked.
+pub fn decode_payload_marked<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<(T, Option<UnreadSlots>)> {
+    check_payload_depth(payload)?;
+    let scope = UnreadScope::open();
+    let value = decode_grown(payload).map_err(opaque_decode_error)?;
+    Ok((value, scope.mark()))
+}
+
+/// The registered check of a held payload: monomorphized by [`CultCache::register_entry_type`] so the untyped write
+/// entries can decode a payload they cannot name.
+/// A payload the type cannot decode at all carries no finding: replacing or removing it stays allowed, as it was before
+/// the mark, so a corrupt record can still be repaired.
+fn unread_slots_of<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Option<UnreadSlots> {
+    decode_payload_marked::<T>(payload).ok().and_then(|(_, mark)| mark)
+}
+
+/// What a registered type is to the cache: its schema name and how to read the slots a held payload carries.
+struct Definition {
+    schema_name: &'static str,
+    unread_slots: fn(&[u8]) -> Option<UnreadSlots>,
+}
+
 /// The nesting bound for an envelope admitted without a typed decode, from the same walk that
 /// [`decode_payload`] runs first. Names the entry's type and key, never the payload.
 fn require_payload_depth(entry: &CultCacheEnvelope) -> Result<()> {
@@ -938,10 +1077,26 @@ pub struct SchemaConflictError {
     pub schema_id: String,
     pub schema_names: Vec<String>,
     pub record_key: String,
+    /// Set when the refusal is a write or removal of a record held read-only for the slots its payload carries past
+    /// this build's; `None` for every other refusal.
+    pub unread_slots: Option<UnreadSlots>,
 }
 
 impl std::fmt::Display for SchemaConflictError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(unread) = &self.unread_slots {
+            return write!(
+                formatter,
+                "{} record {} is read-only: {} was read with {} slots where this build declares {} ({} object(s) in the record). \
+                 Writing it would drop data a newer writer stored; read it with types that declare those slots, or write it from that build.",
+                self.schema_names.first().map_or("", String::as_str),
+                self.record_key,
+                unread.type_name,
+                unread.slot_count,
+                unread.declared_count,
+                unread.occurrences
+            );
+        }
         write!(
             formatter,
             "schema id {:?} cannot describe record {:?}: {:?}",
@@ -2738,7 +2893,7 @@ struct CultCacheStoreRegistration {
 }
 
 pub struct CultCache {
-    definitions: BTreeMap<String, &'static str>,
+    definitions: BTreeMap<String, Definition>,
     /// The registered types declared `#[cultcache(global)]`.
     globals: BTreeSet<String>,
     schema_name_definitions: BTreeMap<String, String>,
@@ -2825,8 +2980,8 @@ impl CultCache {
                 "CultCache entry types must declare a non-empty type"
             ));
         }
-        if let Some(existing_schema) = self.definitions.get(T::TYPE)
-            && *existing_schema != T::SCHEMA_NAME
+        if let Some(existing) = self.definitions.get(T::TYPE)
+            && existing.schema_name != T::SCHEMA_NAME
         {
             return Err(anyhow!(
                 "CultCache already has a different definition registered for type {:?}",
@@ -2875,7 +3030,7 @@ impl CultCache {
                 }
             }
         }
-        self.definitions.insert(T::TYPE.to_string(), T::SCHEMA_NAME);
+        self.definitions.insert(T::TYPE.to_string(), Definition { schema_name: T::SCHEMA_NAME, unread_slots: unread_slots_of::<T> });
         self.schema_name_definitions
             .insert(T::SCHEMA_NAME.to_string(), T::TYPE.to_string());
         Ok(())
@@ -3036,6 +3191,40 @@ impl CultCache {
         Ok(Some(payload))
     }
 
+    /// Whether a write or removal of `(type_id, key)` would be admitted by the unread-slots rule: false when the held
+    /// payload carries slots past its registered type's declared slots, at any depth, which makes the record read-only.
+    /// True for a key the cache does not hold, and for a held payload the registered type cannot decode at all (it
+    /// carries no finding). An unregistered type is an error. Advisory: the write entries ask the same check themselves.
+    pub fn is_writable(&self, type_id: &str, key: &str) -> Result<bool> {
+        Ok(self.unread_slots_held(type_id, key)?.is_none())
+    }
+
+    /// The one check behind every write entry and [`CultCache::is_writable`]: the held envelope at `(type_id, key)`
+    /// decoded under the registered type's mark.
+    fn unread_slots_held(&self, type_id: &str, key: &str) -> Result<Option<UnreadSlots>> {
+        let Some(definition) = self.definitions.get(type_id) else {
+            bail!("No entry type registered for CultCache envelope type {type_id:?}");
+        };
+        let Some(held) = self.entries.get(&entry_id_parts(type_id, key)) else {
+            return Ok(None);
+        };
+        Ok((definition.unread_slots)(&held.payload))
+    }
+
+    /// Refuses a write or removal of a record held read-only for its unread slots, before any store is touched.
+    fn refuse_unread_slots(&self, type_id: &str, key: &str) -> Result<()> {
+        let Some(unread) = self.unread_slots_held(type_id, key)? else {
+            return Ok(());
+        };
+        let held = &self.entries[&entry_id_parts(type_id, key)];
+        Err(anyhow::Error::new(SchemaConflictError {
+            schema_id: schema_identity(held).to_string(),
+            schema_names: vec![self.definitions[type_id].schema_name.to_string()],
+            record_key: key.to_string(),
+            unread_slots: Some(unread),
+        }))
+    }
+
     pub fn get_required<T: DatabaseEntry>(&self, key: &str) -> Result<T> {
         self.get::<T>(key)?
             .ok_or_else(|| anyhow!("CultCache has no {:?} entry at key {:?}", T::TYPE, key))
@@ -3166,6 +3355,7 @@ impl CultCache {
 
     pub fn put<T: DatabaseEntry>(&mut self, key: impl Into<String>, value: &T) -> Result<T> {
         let (entry, parsed) = self.prepare_entry(key, value)?;
+        self.refuse_unread_slots(&entry.r#type, &entry.key)?;
         self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
         self.refuse_retype(&self.entries, &self.foreign, &entry)?;
         let change = self.judge_unique(&[&entry])?;
@@ -3266,6 +3456,7 @@ impl CultCache {
                 ));
             }
             require_payload_depth(entry)?;
+            self.refuse_unread_slots(&entry.r#type, &entry.key)?;
             self.refuse_claimed_id(entry)?;
             let Some(home) = self.home_index(&entry.r#type)? else {
                 continue;
@@ -3308,6 +3499,7 @@ impl CultCache {
 
     pub fn put_envelope<T: DatabaseEntry>(&mut self, entry: CultCacheEnvelope) -> Result<T> {
         let parsed = self.validate_envelope::<T>(&entry)?;
+        self.refuse_unread_slots(&entry.r#type, &entry.key)?;
         self.refuse_claimed_id(&entry)?;
         self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
         self.refuse_retype(&self.entries, &self.foreign, &entry)?;
@@ -3345,6 +3537,7 @@ impl CultCache {
             ));
         }
         require_payload_depth(&entry)?;
+        self.refuse_unread_slots(&entry.r#type, &entry.key)?;
         self.refuse_claimed_id(&entry)?;
         self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
         self.refuse_retype(&self.entries, &self.foreign, &entry)?;
@@ -3400,6 +3593,7 @@ impl CultCache {
 
     pub fn delete<T: DatabaseEntry>(&mut self, key: &str) -> Result<bool> {
         self.require_entry_type::<T>()?;
+        self.refuse_unread_slots(T::TYPE, key)?;
         let id = entry_id_parts(T::TYPE, key);
         let Some(entry) = self.entries.get(&id).cloned() else {
             if let Some((_, foreign)) = self.foreign.iter().find(|(_, foreign)| foreign.key == key) {
@@ -3518,7 +3712,7 @@ impl CultCache {
         }
         for (slot, keys) in &ordered {
             if let [first, second, ..] = keys.as_slice() {
-                let schema = self.definitions.get(&slot.0).copied().unwrap_or(&slot.0);
+                let schema = self.definitions.get(&slot.0).map_or(slot.0.as_str(), |definition| definition.schema_name);
                 let violation = [slot.1.as_str(), first.as_str(), second.as_str(), schema];
                 if least.is_none_or(|best| violation_cmp(&violation, &best).is_lt()) {
                     least = Some(violation);
@@ -3553,7 +3747,7 @@ impl CultCache {
             .find(|held_key| held_key.as_str() != key);
         match held_other {
             Some(existing_key) => Err(CultCacheSecondGlobal {
-                schema_name: self.definitions.get(type_id).copied().unwrap_or(type_id).to_string(),
+                schema_name: self.definitions.get(type_id).map_or(type_id, |definition| definition.schema_name).to_string(),
                 existing_key: existing_key.clone(),
                 key: key.to_string(),
             }
@@ -3597,6 +3791,7 @@ impl CultCache {
                 schema_id: schema_identity(entry).to_string(),
                 schema_names: vec![resolved, entry.r#type.clone()],
                 record_key: entry.key.clone(),
+                unread_slots: None,
             })),
             _ => Ok(()),
         }
@@ -3611,7 +3806,7 @@ impl CultCache {
 
     fn require_entry_type<T: DatabaseEntry>(&self) -> Result<()> {
         match self.definitions.get(T::TYPE) {
-            Some(schema_name) if *schema_name == T::SCHEMA_NAME => Ok(()),
+            Some(definition) if definition.schema_name == T::SCHEMA_NAME => Ok(()),
             _ => Err(anyhow!(
                 "CultCache entry type {:?} is not registered on this cache instance",
                 T::TYPE
@@ -3693,6 +3888,7 @@ fn encode_store_snapshot(entries: &[CultCacheEnvelope], disk: &DiskStore) -> Res
                     schema_id,
                     schema_names: vec![existing_type, entry.r#type.clone()],
                     record_key: entry.key.clone(),
+                    unread_slots: None,
                 }));
             }
         }
@@ -3710,6 +3906,7 @@ fn encode_store_snapshot(entries: &[CultCacheEnvelope], disk: &DiskStore) -> Res
                 schema_id,
                 schema_names: vec![arrived_type, document_type],
                 record_key: key,
+                unread_slots: None,
             }));
         }
     }
@@ -3846,6 +4043,7 @@ fn foreign_conflict(carried: &CultCacheEnvelope, written_type: &str) -> anyhow::
         schema_id: schema_identity(carried).to_string(),
         schema_names: vec![carried.r#type.clone(), written_type.to_string()],
         record_key: carried.key.clone(),
+        unread_slots: None,
     })
 }
 
@@ -3856,6 +4054,7 @@ fn retype_conflict(held: &CultCacheEnvelope, written: &CultCacheEnvelope) -> any
         schema_id: schema_identity(written).to_string(),
         schema_names: vec![held.r#type.clone(), written.r#type.clone()],
         record_key: written.key.clone(),
+        unread_slots: None,
     })
 }
 
