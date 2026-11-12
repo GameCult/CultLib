@@ -5132,7 +5132,7 @@ namespace GameCult.Caching
             var attributes = FileInfo.Attributes;
             if ((int)attributes == -1)
                 return null;
-            if ((attributes & FileAttributes.Directory) != 0 && (attributes & FileAttributes.ReparsePoint) == 0)
+            if ((attributes & FileAttributes.Directory) != 0 && Directory.Exists(FileInfo.FullName))
                 throw new IOException("The store path is a directory, not a store file.");
             try
             {
@@ -5162,9 +5162,19 @@ namespace GameCult.Caching
             return (int)attributes != -1 && (attributes & FileAttributes.ReparsePoint) != 0;
         }
 
+        // A write never goes through a link at the store path: replacing it would silently detach the store from its link. Every
+        // write takes the lock first, so this is the one place a link is refused, before the lock file or anything else is made.
+        private void RefuseLinkedStore()
+        {
+            if (PathIsALink())
+                throw new CultStoreLinkedException(
+                    $"The store path {FileInfo.FullName} is a link; a write is refused so it does not replace the link. Configure the link's target as the store path to write to it.");
+        }
+
         // The lock is a sidecar opened exclusively, which excludes other handles in this process and in others alike.
         private FileStream? AcquireLock(bool wait)
         {
+            RefuseLinkedStore();
             Directory.CreateDirectory(FileInfo.DirectoryName!);
             var lockPath = FileInfo.FullName + ".lock";
             var started = Stopwatch.StartNew();
