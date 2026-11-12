@@ -897,12 +897,14 @@ impl<'de> serde::Deserialize<'de> for __UnitArmSlots {
     }
 }
 
-/// Puts the previous scope back whatever the decode did.
-struct UnreadScope(Option<MarkScope>);
+/// The scope one marked decode opens on this thread; closed when it ends, whatever the decode did. A marked decode is
+/// never re-entered (only the cache's own checks open one), so scopes do not nest.
+struct UnreadScope;
 
 impl UnreadScope {
     fn open() -> Self {
-        Self(UNREAD_SLOTS.with(|scope| scope.replace(Some(MarkScope::default()))))
+        UNREAD_SLOTS.with(|scope| *scope.borrow_mut() = Some(MarkScope::default()));
+        Self
     }
 
     fn mark(&self) -> Option<UnreadSlots> {
@@ -912,7 +914,7 @@ impl UnreadScope {
 
 impl Drop for UnreadScope {
     fn drop(&mut self) {
-        UNREAD_SLOTS.with(|scope| *scope.borrow_mut() = self.0.take());
+        UNREAD_SLOTS.with(|scope| *scope.borrow_mut() = None);
     }
 }
 
