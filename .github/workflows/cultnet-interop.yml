@@ -29,6 +29,12 @@ jobs:
     steps:
       - name: Check out CultLib
         uses: actions/checkout@v4
+        with:
+          # packages/cultnet-py/tests/test_declared_dependency_ranges.py reads the cultcache-py
+          # release tags and their file contents with `git show`; a shallow checkout has no tags
+          # and the test skips itself.
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up .NET
         uses: actions/setup-dotnet@v4

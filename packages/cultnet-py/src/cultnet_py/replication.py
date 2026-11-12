@@ -174,10 +174,11 @@ def _infer_schema_version_from_payload(payload: bytes) -> str | None:
     import msgpack  # type: ignore
     try:
         decoded = msgpack.unpackb(payload, raw=False)
-    except msgpack.ExtraData:
-        # A payload with bytes after its value gives no routing hint: the record is unroutable by inference, and a
-        # registered schema id routes it to a definition whose decode refuses the tail by count.
-        return None
+    except msgpack.ExtraData as extra:
+        # The hint is read from the first value; the tail is not this function's to judge. The routed definition refuses
+        # it by count when the record is applied, as it does for a record routed by a registered schema id. Treating a
+        # tail as "no hint" made a stamp-routed record look like an unknown schema, which a shard log skips silently.
+        decoded = extra.unpacked
     except Exception:
         return None
     if isinstance(decoded, list) and decoded and isinstance(decoded[0], str):
