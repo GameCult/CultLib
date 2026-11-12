@@ -1672,7 +1672,7 @@ The one door per runtime, and who walks through it:
 - **Shared paths.** TS `pushAll` and Rust `push_all` only.
 - **Cut line.** `merge-r1` h4 (TS) and h6 (Rust).
 - **Pinned by.** The manifest walks run a soft flush over every vector in TS (the `softPushAll` operation, TS test :2336) and Rust (`soft_push_all`, RS:5149), each with an absent and a dangling-link case; `a_soft_push_all_writes_where_nothing_is_and_refuses_a_dangling_link` RS:6019.
-- **Known gaps.** C# and Python have no soft decision, and the C# Mesh flag is dead; no follow-up is registered (h6 `undone` names it). `writer-dangling-link-tolerance` applies to the non-soft branch.
+- **Known gaps.** C# and Python have no soft decision, and the C# Mesh flag is dead; no follow-up is registered (h6 `undone` names it). `writer-dangling-link-tolerance` is settled: the non-soft branch refuses a dangling link too.
 
 ### What no cut owns yet
 
