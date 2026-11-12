@@ -2308,8 +2308,9 @@ namespace GameCult.Caching
 
         // The one-shot rewrite for stores written before element ids existed: upserts every record whose ids exist only in
         // memory (minted when it loaded), through the normal write path, one commit per home store. Returns how many records
-        // it rewrote; a second call finds none. A selected record that is neither declared nor read whole is read-only,
-        // so its home store's commit is refused with CultSchemaConflictException; commits to earlier stores stand.
+        // it rewrote; a second call finds none. A selected record that is not owned (neither declared nor read whole, or held
+        // read-only for slots past this build's, see CultStoredDocument.UnreadSlots) is read-only, so its home store's commit is
+        // refused with CultSchemaConflictException until a build that reads those slots rewrites it; commits to earlier stores stand.
         public int MintElementIds()
         {
             var groups = Held(() => _entries.Values
@@ -2665,14 +2666,19 @@ namespace GameCult.Caching
         }
 
         /// <summary>
-        /// Whether a write or removal of the key would be let through by every attached store: false when a store lists the key foreign,
-        /// or holds it unowned (undeclared drift that drops persisted slots, or a payload carrying slots past this build's, see
-        /// <see cref="CultStoredDocument.UnreadSlots"/>); true for a key no store holds. Live and advisory: the write still decides.
+        /// Whether a removal of the key, or a write of the record's own type, would be let through: the write's own decision, asked of
+        /// the record the cache holds. False when no attached store is home to the record's type, when its home store is read-only, or
+        /// when that store holds it unowned (undeclared drift that drops persisted slots, or a payload carrying slots past this build's,
+        /// see <see cref="CultStoredDocument.UnreadSlots"/>). For a key the cache does not hold, false only when a store lists it
+        /// foreign. One write it does not predict: a Flatten of a variant whose base chain holds an unowned record is refused, though
+        /// the variant itself is writable. Live and advisory: the write still decides.
         /// </summary>
         public bool IsWritable(CultRecordKey key)
         {
             lock (Gate())
-                return _stores.All(entry => entry.Store.Refusal(key.Value, null) == null);
+                return _entries.TryGetValue(key.Value, out var held)
+                    ? WriteRefusal(held, upsert: false, null, out _) == null
+                    : _stores.All(entry => entry.Store.ForeignRecords.All(record => !string.Equals(record.Key, key.Value, StringComparison.Ordinal)));
         }
 
         public object? Get(CultRecordKey key)
@@ -3170,6 +3176,8 @@ namespace GameCult.Caching
             IReadOnlyCollection<string>? removed)
         {
             var removedKeys = removed?.ToHashSet(StringComparer.Ordinal) ?? new HashSet<string>(StringComparer.Ordinal);
+            var batch = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
+            foreach (var stored in admitted) batch[stored.Key.Value] = stored;
             var homes = new List<CacheBackingStore>();
             var globals = new Dictionary<Type, string>(_globals);
             var evictedKeys = evicted.Select(stored => stored.Key.Value).ToHashSet(StringComparer.Ordinal);
@@ -3218,23 +3226,57 @@ namespace GameCult.Caching
 
             void Claim(CultStoredDocument stored, bool upsert)
             {
-                var home = Home(stored.Descriptor.DocumentType);
-                if (home == null)
+                if (WriteRefusal(stored, upsert, batch, out var home) is { } refusal) throw refusal;
+                if (home != null) homes.Add(home);
+            }
+        }
+
+        // The one answer to whether a record may be written (upsert: a write of its type) or its key removed, before anything is staged.
+        // Claim throws it; IsWritable asks it of the held record's removal form. Null when the write may land; home is where it lands,
+        // null for a store-less cache. batch holds the records the same batch admits, by key.
+        private Exception? WriteRefusal(CultStoredDocument stored, bool upsert, IReadOnlyDictionary<string, CultStoredDocument>? batch, out CacheBackingStore? home)
+        {
+            home = Home(stored.Descriptor.DocumentType);
+            if (home == null)
+            {
+                if (_stores.Count > 0)
+                    return new InvalidOperationException($"No backing store is home to {stored.Descriptor.SchemaName}.");
+                // No store, no file to judge, but the same rule: a record is replaced only by its own type's write.
+                return upsert && _entries.TryGetValue(stored.Key.Value, out var inMemory) && !CacheBackingStore.UpsertOwned(inMemory, stored.Descriptor)
+                    ? CacheBackingStore.Retyped(inMemory, stored.Key.Value, stored.Descriptor)
+                    : null;
+            }
+
+            if (home.IsReadOnly)
+                return new InvalidOperationException(
+                    $"{stored.Descriptor.SchemaName} record {stored.Key.Value} routes to read-only backing store {home}.");
+            return home.Refusal(stored.Key.Value, upsert ? stored.Descriptor : null)
+                   ?? (upsert && stored.Flattens ? FlattenRefusal(stored, batch) : null);
+        }
+
+        // A flatten writes its base chain's decoded view into a plain record, so it is refused when a record on that chain is not owned
+        // by its home store (the slots or drift that record's decode dropped would be lost): that ancestor's own refusal. The chain starts
+        // at the staged delta's base when the variant is flattened as it lands, else at the held variant's; a key the batch admits is
+        // judged by its own claim, and the walk follows its staged form.
+        private CultSchemaConflictException? FlattenRefusal(CultStoredDocument flatten, IReadOnlyDictionary<string, CultStoredDocument>? batch)
+        {
+            var delta = flatten.Variant ?? (_entries.TryGetValue(flatten.Key.Value, out var variant) ? variant.Variant : null);
+            var walked = new HashSet<string>(StringComparer.Ordinal) { flatten.Key.Value };
+            for (var key = delta?.BaseKey; key != null && walked.Add(key);)
+            {
+                CultStoredDocument? ancestor;
+                if (batch == null || !batch.TryGetValue(key, out ancestor))
                 {
-                    if (_stores.Count > 0)
-                        throw new InvalidOperationException($"No backing store is home to {stored.Descriptor.SchemaName}.");
-                    // No store, no file to judge, but the same rule: a record is replaced only by its own type's write.
-                    if (upsert && _entries.TryGetValue(stored.Key.Value, out var inMemory) && !CacheBackingStore.UpsertOwned(inMemory, stored.Descriptor))
-                        throw CacheBackingStore.Retyped(inMemory, stored.Key.Value, stored.Descriptor);
-                    return;
+                    if (!_entries.TryGetValue(key, out ancestor))
+                        return null;
+                    if (Home(ancestor.Descriptor.DocumentType)?.Refusal(key, null) is { } refusal)
+                        return refusal;
                 }
 
-                if (home.IsReadOnly)
-                    throw new InvalidOperationException(
-                        $"{stored.Descriptor.SchemaName} record {stored.Key.Value} routes to read-only backing store {home}.");
-                home.RefuseUndeclared(stored.Key.Value, upsert ? stored.Descriptor : null);
-                homes.Add(home);
+                key = ancestor.Variant?.BaseKey;
             }
+
+            return null;
         }
 
         private sealed class VariantPlan
