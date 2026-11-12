@@ -7,11 +7,12 @@ namespace GameCult.Caching.MessagePack;
 internal enum PayloadDirection { Read, Write }
 
 /// <summary>
-/// The one payload nesting count. Walks the MessagePack headers of a document payload iteratively, counting every array and
+/// The one walk of a payload's shape: its depth and its one value. Walks the MessagePack headers of a document payload iteratively, counting every array and
 /// map (read by a formatter or skipped past it; the outermost array is depth 1) and refusing the first container past
 /// <see cref="CultMessagePackSecurity.MaximumPayloadDepth"/>. Scalars are skipped by length, nothing is allocated per
 /// element, and the count stack is bounded by the limit. A refusal names the type, the depth reached and the limit,
-/// never payload bytes. A payload that ends early is the deserializer's to refuse.
+/// never payload bytes. A payload that ends early is the deserializer's to refuse; bytes after the first value are refused
+/// with their count and never walked.
 /// </summary>
 internal static class CultPayloadDepth
 {
@@ -73,7 +74,13 @@ internal static class CultPayloadDepth
 
             // One element is complete; close every container it was the last element of.
             while (depth > 0 && --remaining[depth - 1] == 0) depth--;
-            if (depth == 0) return;
+            if (depth == 0)
+            {
+                if (position < bytes.Length)
+                    throw new MessagePackSerializationException(
+                        $"{type.FullName} payload has {bytes.Length - position} bytes after its first MessagePack value (refused on {(direction == PayloadDirection.Read ? "read" : "write")}).");
+                return;
+            }
         }
     }
 

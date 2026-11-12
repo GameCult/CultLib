@@ -5,6 +5,10 @@ All notable changes to `@gamecult/cultnet-ts` are recorded here, following
 
 ## Unreleased
 
+### Breaking
+
+- `decodeManifest` refuses a manifest with bytes after its first MessagePack value (`CDN artifact manifest has N bytes after its first MessagePack value.`), as the C# reference does; before, the tail was ignored. `contracts/cultmesh/content-acceptance-vectors.json` now holds `trailing_nil`, `trailing_reserved_code` and `trailing_truncated_array` as refused.
+
 ### Added
 
 - Fork card (`contracts/cultnet/governance/fork-card.md`): `raised_at`, a required key holding an RFC3339 instant string or nil (the question's first admission time), outside `options_hash`; the card vectors are re-pinned with the key, three negatives (epoch integer, date-only string, missing key) and a nil-`raised_at` valid card; every `optionsHash` digest is unchanged.

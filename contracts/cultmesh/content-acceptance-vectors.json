@@ -899,23 +899,23 @@
     {
       "label": "trailing_nil",
       "inputBase64": "mqNhL2KlYXNzZXShMdlAZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NQCvYXBwbGljYXRpb24veC10oXSRlNlAZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NQAAoWuRoXiBoWuhdsA=",
-      "accepted": true,
-      "reencodedBase64": "mqNhL2KlYXNzZXShMdlAZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NQCvYXBwbGljYXRpb24veC10oXSRldlAZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NQAAoWugkaF4gaFroXY=",
-      "recordKey": "mesh:cdn:artifact:a-b:1:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      "accepted": false,
+      "reencodedBase64": null,
+      "recordKey": null
     },
     {
       "label": "trailing_reserved_code",
       "inputBase64": "mqNhL2KlYXNzZXShMdlAZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NQCvYXBwbGljYXRpb24veC10oXSRlNlAZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NQAAoWuRoXiBoWuhdsE=",
-      "accepted": true,
-      "reencodedBase64": "mqNhL2KlYXNzZXShMdlAZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NQCvYXBwbGljYXRpb24veC10oXSRldlAZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NQAAoWugkaF4gaFroXY=",
-      "recordKey": "mesh:cdn:artifact:a-b:1:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      "accepted": false,
+      "reencodedBase64": null,
+      "recordKey": null
     },
     {
       "label": "trailing_truncated_array",
       "inputBase64": "mqNhL2KlYXNzZXShMdlAZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NQCvYXBwbGljYXRpb24veC10oXSRlNlAZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NQAAoWuRoXiBoWuhdpI=",
-      "accepted": true,
-      "reencodedBase64": "mqNhL2KlYXNzZXShMdlAZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NQCvYXBwbGljYXRpb24veC10oXSRldlAZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NQAAoWugkaF4gaFroXY=",
-      "recordKey": "mesh:cdn:artifact:a-b:1:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      "accepted": false,
+      "reencodedBase64": null,
+      "recordKey": null
     },
     {
       "label": "top_nil",

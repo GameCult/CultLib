@@ -249,7 +249,7 @@ class Reader {
 export function decodeManifest(bytes: Uint8Array): CultMeshCdnArtifactManifest {
   checkPayloadDepth(bytes, "CDN artifact manifest");
   const reader = new Reader(bytes);
-  // A slot the array does not reach keeps the property initialiser; a slot past the tenth is skipped. Trailing bytes are not read.
+  // A slot the array does not reach keeps the property initialiser; a slot past the tenth is skipped.
   const count = reader.array("manifest");
   let index = 0;
   const slot = <T>(read: () => T, initial: T): T => index++ < count ? read() : initial;
@@ -267,6 +267,8 @@ export function decodeManifest(bytes: Uint8Array): CultMeshCdnArtifactManifest {
       [reader.string("metadata") ?? wrongType("metadata"), reader.string("metadata")] as const), []),
   };
   for (; index < count; index += 1) reader.skip();
+  // A manifest is one record payload: exactly one MessagePack value, as the reference's one-value rule has it.
+  if (reader.position < bytes.length) throw new Error(`CDN artifact manifest has ${bytes.length - reader.position} bytes after its first MessagePack value.`);
   validateManifest(manifest);
   return manifest;
 }

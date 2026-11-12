@@ -144,8 +144,8 @@ imports no `node:` module, so a browser bundle can take it.
   past the shared depth limit are refused.
 - The decoder reads what MessagePack-CSharp reads and refuses what it refuses:
   nil in a string, tag or metadata slot is `null` and is written back as nil,
-  a missing trailing slot takes the reference's default, extra slots and trailing
-  bytes are skipped (a chunk reference's fifth slot is its element id, a string
+  a missing trailing slot takes the reference's default, extra slots are skipped and bytes
+  after the manifest's first value are refused (a chunk reference's fifth slot is its element id, a string
   or nil, `""` when absent; `packContent` writes the decimal offset as the id, as the
   reference does), a float-encoded integer is refused, and invalid UTF-8
   decodes to U+FFFD. A nil `chunks` is refused, as the reference's

@@ -170,3 +170,22 @@ arrays around a canary string, which no formatter reads.
 | `depth-skipped-past-limit.msgpack` | 257 | refused, depth | refuse on read though the typed depth is under 10 |
 
 A walk of the payload must not recurse: 100000 nested arrays in an extra slot are refused on a 256 KiB stack.
+
+## Bytes after the value (bytes-after-outcomes.msgpack)
+
+A record's payload is exactly one MessagePack value. Each file is `union-surface.msgpack` followed by a tail the first value does not own; the C# reference writes them and every other runtime is held to the same refusal.
+
+| File | Tail after the value | outcome, detail |
+|---|---|---|
+| `bytes-after-nil.msgpack` | `c0` (1 byte) | refused, bytes-after |
+| `bytes-after-never-used.msgpack` | `c1 c1` (2 bytes, the never-used code) | refused, bytes-after |
+| `bytes-after-deep-tail.msgpack` | 300 nested fixarray(1) around a canary string (324 bytes), nested past the limit | refused, bytes-after |
+| `bytes-after-second-document.msgpack` | a second copy of `union-surface.msgpack` | refused, bytes-after |
+
+`bytes-after-outcomes.msgpack` is an array of `[file, "refused", "UnionSurface", nil, "bytes-after"]` rows, the row shape of `bounds-outcomes.msgpack` but in its own file, so the bounds walkers (which assert 12 rows) are unchanged.
+
+Must: refuse on read, naming the type and the count of bytes after the first value (`1`, `2`, the tail length) in a clause that says "bytes after its first MessagePack value"; never echo the canary; never report the depth refusal ("the limit is") for any of them, because the tail is not walked; and a single-file store holding `bytes-after-nil.msgpack` as a record payload refuses on open.
+
+What a runtime walks: only the first value of the payload, to find where it ends (a leaf counts as complete at its own length, a container when its last child completes). It compares that end with the payload length; a payload that ends early is not bytes after the value and stays the decoder's to refuse. It never walks the tail, so the tail's own shape (a stray `c1`, 300 levels) is never judged.
+
+A CDN manifest read as a record follows the same rule; its vectors are `contracts/cultmesh/content-acceptance-vectors.json` (`trailing_*` are refusals).

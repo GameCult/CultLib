@@ -403,6 +403,8 @@ runtime enforces the same bound on read and on write, and the refusal names the 
 the depth and the limit, never payload bytes. The vectors are in
 `tests/vectors/union-parity` (`bounds-outcomes.msgpack`).
 
+A record's payload is exactly one MessagePack value: every runtime refuses a payload with bytes after its first value wherever it reads a payload under the nesting bound, and on write where a write takes bytes the library did not encode itself (a C# type's own formatter, a Rust raw envelope), without walking those bytes, so a tail past the limit is refused as bytes after the value and not as depth; the refusal names the type and the count of bytes after the value, never the bytes (vectors: `tests/vectors/union-parity/bytes-after-outcomes.msgpack`). A CDN manifest is stored and keyed as a record and follows the same rule (`contracts/cultmesh/content-acceptance-vectors.json`: `trailing_nil`, `trailing_reserved_code` and `trailing_truncated_array` are refused). Streams of values (CultNet frames, a store's record array) are different contracts and are not covered.
+
 ## Variant Records
 
 A variant record is a record whose document is a base record's document with some
