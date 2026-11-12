@@ -96,7 +96,7 @@ namespace GameCult.Caching.Tests
         {
             var kernel = new FakeKernel(new int[30].Fill(32), new int[0]);
             var error = Fails(kernel);
-            Assert.That(error.Message, Does.Contain("25 attempts").And.Contain("32"));
+            Assert.That(error.Message, Does.Contain("25 attempts").And.Contain("last Win32 error 32"));
             Assert.That(kernel.Log.Count, Is.EqualTo(25));
             Assert.That(kernel.Sleeps.Count, Is.EqualTo(25));
         }
