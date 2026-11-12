@@ -55,7 +55,9 @@ string `"extra-slot"` appended as one more slot of one object; a reader decodes 
 from each. The fifth is a bare arm of union `UnitOutcome` (0 Waiting `[Message]`; 2 Denied2, -2147483648 Floor2 and
 2147483647 Ceiling2, each `[]`), the union of the `unit-arm-*` files; a reader decodes Denied2 from it.
 
-An object's declared slots are its highest key plus one. Only an array longer than that marks: a short array
+An object's declared slots are the slots its type's own formatter writes for one instance (for these fixtures,
+the highest key plus one); a reader derives them from the layout it writes, never from a list of public members.
+Only an array longer than that marks: a short array
 (missing trailing slots) keeps the defaults and is writable, and a non-nil value in a retired slot below the highest
 key (Image's slot 2) does not mark. A union adds no depth: an arm's array is counted against the arm's own slots.
 
@@ -81,21 +83,47 @@ Load it as a store record under the reader's own schema id (the C# reference put
 2. the record reports the mark as in the table: the first type read with extra slots, the slots it carried and the
    slots the reader declares, and the count of objects that carried extra slots (1 here);
 3. the record is not writable (C#: `CultCache.IsWritable(key)` false), and a key no store holds is writable;
-4. a replacing write, a variant write and a removal of the key (and a flatten, when the marked record is a variant)
-   are refused before anything is staged,
+4. a replacing write, a variant write and a removal of the key, and a flatten of a variant whose base chain holds
+   the marked record, are refused before anything is staged,
    with the runtime's schema conflict refusal carrying the mark; its message names the type and both counts and
    never contains `extra-slot`, the slot's value;
 5. a write to another key of the same store succeeds.
 
 Consent: a mark is explained only when it is at depth 0 and the schema comparison of the record's stored id against
-the reader reported ignored extra slots, i.e. the record is stored under an id the reader lists compatible and the
-catalog entry for that id has more members. Declaring that id consents to an explained mark only. Every mark in the
-table is unexplained (stored under the reader's own id), so each record stays read-only whatever is declared.
+the reader reported ignored extra slots covering it: the record is stored under an id the reader lists compatible,
+that id's catalog entry has more members, and the mark's slot count is at most the highest reported slot plus one.
+Declaring that id consents to an explained mark only. Every mark in the table above is unexplained (stored under
+the reader's own id), so each record stays read-only whatever is declared.
 
-`extra-slot-store.cc` is a single-file store of two `tests.union_surface` records, the store's clock pinned to
-2026-01-01T00:00:00Z as `union-surface.cc`'s: `marked`, whose payload is `extra-slot-nested-record.msgpack`, and
-`clean`, the value of `union-surface.msgpack`. Open it, assert `marked` read-only and `clean` writable, write `clean`
-and flush: `marked`'s payload bytes, schema id and stored-at, and every catalog entry's bytes, equal the originals.
+## Slot stores (`slot-outcomes.msgpack`)
+
+Two single-file stores, each record written as a value and its payload then replaced, the store's clock pinned to
+2026-01-01T00:00:00Z as `union-surface.cc`'s:
+
+- `extra-slot-store.cc`, read with `tests.union_surface` (schema `tests.union_surface.v1`) and `tests.slot_unit`
+  (schema `tests.slot_unit.v1`, a document `[Name, Outcome: UnitOutcome]`). `marked` is
+  `extra-slot-nested-record.msgpack`; `clean` is `union-surface.msgpack`; `unit-arm` is the `tests.slot_unit`
+  document `["unit-arm", [2, ["extra-slot"]]]`, whose Denied2 arm sits at depth 1 (the document is depth 0; a union
+  adds none).
+- `extra-slot-consent.cc`: every record is stored under `tests.union_surface.wide`, whose catalog entry is
+  `tests.union_surface`'s seven members plus slot 7 (`Wider`). Read it with a `tests.union_surface` type of schema
+  `tests.union_surface.v2` (the reference names it `SurfaceDeclaring`) that lists `tests.union_surface.wide`
+  compatible, so the comparison reports slot 7 ignored. `consented` is `union-surface.msgpack` plus one root slot
+  (slot 7); `over-consent` plus two (slots 7 and 8, past the highest reported); `nested` is
+  `extra-slot-nested-record.msgpack` plus one root slot; `clean` is `union-surface.msgpack`.
+
+`slot-outcomes.msgpack` is a second outcomes file, as `bounds-outcomes.msgpack` is, so readers of `outcomes.msgpack`
+stay green. It is an array of rows `[store, key, writable, explained, type, slots, declared, occurrences]`, one
+per record of both stores: `writable` is what `IsWritable` answers; for an unmarked record the last five are nil,
+otherwise they are the mark: whether it is explained, the first type read with extra slots, the slots it carried,
+the slots the reader declares, and how many objects carried extra slots. A depth-0 type is the reader's document
+type (the reference's names: `SurfaceDeclaring` for the consent store). For each row, open a copy of the store,
+assert the mark and `IsWritable`, then remove the key: refused (with the mark, the file unchanged) exactly where
+`writable` is false. In the consent store a write of `consented` lands and a write of `over-consent` is refused.
+
+The carried-verbatim check: open `extra-slot-store.cc`, assert `marked` read-only and `clean` writable, write
+`clean` and flush: `marked`'s payload bytes, schema id and stored-at, and every catalog entry's bytes, equal the
+originals.
 
 ## Bounds (`bounds-outcomes.msgpack`)
 

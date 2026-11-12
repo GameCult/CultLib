@@ -205,8 +205,14 @@ the next write stores it under the writing type's own id and sheds the slots.
 A record whose payload carries a slot past the slots its reader declares, at any depth (nested object, list
 element, union arm, unit arm), is read-only the same way, whatever id it is stored under. The one consent
 is the declaration above, and it reaches only depth-0 slots the schema comparison reports ignored under a
-listed compatible id: a mark anywhere else, or at depth 0 under the reader's own id, is not consented to.
-`CultCache.IsWritable(key)` answers the same question the staging refusal asks.
+listed compatible id, up to the highest slot it reports: a mark anywhere else, past that slot, or at depth 0
+under the reader's own id, is not consented to. Declared slots are what the type's own formatter writes; a
+type with its own `[MessagePackFormatter]`, or one no instance of which can be written, is not checked.
+A flatten of a variant whose base chain holds a record that is not owned is refused with that record's
+refusal, because it would write the base's decoded view; the variant's own writes persist only its delta and
+stay allowed. A plain write to another key of a value read from a read-only record is a copy this rule does
+not police. `CultCache.IsWritable(key)` answers what the staging refusal answers for a removal or a write of
+the record's type, read-only and missing home stores included; it does not predict that flatten.
 
 The rule is checked again where the write lands, under the store's lock: a write or removal at a key
 whose durable record is not owned, because another writer rewrote it after this cache

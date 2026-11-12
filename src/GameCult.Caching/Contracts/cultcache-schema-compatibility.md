@@ -119,8 +119,23 @@ served, `CultStoredDocument.UnreadSlots` names the first type read with extra sl
 `CultSchemaConflictException` (`UnreadSlots` set; the message names the type and the counts, never a slot
 value). A missing trailing slot keeps its default and stays writable; a non-nil value in a retired gap below
 the highest key is not extra. Declaring an id compatible consents only to depth-0 slots the schema comparison
-reports ignored under that id; any other mark (nested, list element, arm, unit arm, or depth 0 under the
-reader's own id) keeps the record read-only whatever is declared.
+reports ignored under that id, and only up to the highest slot it reports: a payload carrying a slot past that
+one is not consented to. Any other mark (nested, list element, arm, unit arm, or depth 0 under the reader's
+own id) keeps the record read-only whatever is declared.
+
+A type's declared slots are the array its own formatter writes for one instance (an uninitialized instance,
+else one from a parameterless constructor), never a reflected member list, so a non-public `[Key]` member of
+an `AllowPrivate` type counts. Only concrete int-keyed `[MessagePackObject]` types are checked. A type that
+names its own `[MessagePackFormatter]` owns its layout and its tolerance and is not checked, and neither is a
+type no instance of which can be written (no parameterless constructor and a `[Key]` getter that throws on an
+uninitialized one): extra slots in such a type are read past and dropped on the next write, as before.
+
+`Flatten` of a variant writes its base chain's decoded view into a plain record, so it is refused when any
+record on that chain is not owned by its home store (a mark nothing explains, or undeclared drift that drops
+slots), with that record's own refusal naming its key. Writing or removing the variant itself stays allowed:
+it persists only its delta. `CultCache.IsWritable(key)` is the write's own answer for a removal or a write of
+the record's type: it is also false when the record's home store is read-only or no attached store is home to
+its type. The one write it does not predict is that flatten.
 
 The cache emits a typed migration report with:
 
