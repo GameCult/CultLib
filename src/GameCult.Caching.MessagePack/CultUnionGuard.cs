@@ -26,6 +26,15 @@ internal sealed class CultUnionGuard(IFormatterResolver inner) : IFormatterResol
         return inner.GetFormatter<T>() is not { } formatter ? null : new Formatter<T>(formatter, arms);
     }
 
+    // The formatter that writes and reads the bytes: the one a guard wrapper delegates to, else the formatter itself. A check that a
+    // generated formatter is the one in use asks this (tests/GameCult.Caching.GeneratorConsumer).
+    internal static object Inner(object formatter) => formatter is IWrapper wrapper ? wrapper.Inner : formatter;
+
+    private interface IWrapper
+    {
+        object Inner { get; }
+    }
+
     // The one decision of whether a type is measured: the formatter the chain hands out for an int-keyed [MessagePackObject] type is
     // MessagePack's own [Key]-layout formatter, the very instance StandardResolver (or its AllowPrivate twin) builds for it. A formatter a
     // consumer resolver or a [MessagePackFormatter] attribute supplies owns its layout and its tolerance, and a [MessagePackObject]
@@ -56,8 +65,10 @@ internal sealed class CultUnionGuard(IFormatterResolver inner) : IFormatterResol
     // inner formatter read it unchanged: no byte scan, no second decode. With no scope open it is a depth-free pass-through.
     // Declared slots are what the type's own formatter writes: the array header of one instance written through it, measured on the
     // first read inside a scope (not in GetFormatter, so a self-referential type never recurses into its own resolver cache) and kept.
-    private sealed class SlotFormatter<T>(IMessagePackFormatter<T> inner) : IMessagePackFormatter<T>
+    private sealed class SlotFormatter<T>(IMessagePackFormatter<T> inner) : IMessagePackFormatter<T>, IWrapper
     {
+        object IWrapper.Inner => inner;
+
         private const int NotMeasured = -1;
 
         // A type no instance of which can be written is not guarded: no count can exceed this.
@@ -117,8 +128,10 @@ internal sealed class CultUnionGuard(IFormatterResolver inner) : IFormatterResol
         }
     }
 
-    private sealed class Formatter<T>(IMessagePackFormatter<T> inner, UnionAttribute[] arms) : IMessagePackFormatter<T>
+    private sealed class Formatter<T>(IMessagePackFormatter<T> inner, UnionAttribute[] arms) : IMessagePackFormatter<T>, IWrapper
     {
+        object IWrapper.Inner => inner;
+
         private readonly HashSet<int> keys = arms.Select(arm => arm.Key).ToHashSet();
         private readonly HashSet<Type> types = arms.Select(arm => arm.SubType).ToHashSet();
 

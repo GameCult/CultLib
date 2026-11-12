@@ -4,6 +4,9 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <!-- GameCult.Caching.MessagePack lets this check see CultUnionGuard.Inner (InternalsVisibleTo), which also shows it that
+         assembly's internal GeneratedMessagePackResolver; this project's own generated one is the type in use. -->
+    <NoWarn>$(NoWarn);CS0436</NoWarn>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Aot)' == 'true'">

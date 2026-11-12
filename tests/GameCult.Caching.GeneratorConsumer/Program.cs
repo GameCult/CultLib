@@ -20,7 +20,8 @@ var documents = new (Type Type, object Value)[]
 
 foreach (var (type, _) in documents)
 {
-    var formatter = options.Resolver.GetFormatterDynamic(type)!.GetType();
+    // The guard wraps a measured type's formatter; the generated formatter it delegates to is the one that runs.
+    var formatter = CultUnionGuard.Inner(options.Resolver.GetFormatterDynamic(type)!).GetType();
     if (formatter.Assembly.IsDynamic || !(formatter.FullName ?? "").Contains("GeneratedMessagePackResolver"))
         return Fail($"{type.Name} is formatted by {formatter.FullName}, not a generated formatter");
 }
