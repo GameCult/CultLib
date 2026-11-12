@@ -1971,6 +1971,34 @@ class CultNetTests(unittest.TestCase):
         apply_raw_document_record(cache, schema_document_map([first, second]), raw(first))  # the same type still replaces
         self.assertEqual(cache.get_required(first, "shared").name, "remote")
 
+    def test_a_raw_record_with_a_tail_is_unroutable_by_inference_and_refused_by_count_when_routed(self) -> None:
+        import msgpack  # type: ignore
+        from cultcache_py import define_document_type
+        from cultnet_py import resolve_document_for_raw_record
+
+        document = define_document_type("tests.tail_note", schema_id="tests.tail_note", schema_version="tests.tail_note.v1",
+                                   payload_encoder=msgpack.packb, payload_decoder=lambda payload: msgpack.unpackb(payload, raw=False))
+        known = document.catalog_entry().schema_id
+        head = msgpack.packb(["tests.tail_note.v1", "x"], use_bin_type=True)
+
+        def raw(schema_id: str, payload: bytes) -> dict:
+            return {"schemaId": schema_id, "recordKey": "k", "storedAt": "2026-06-13T00:00:00Z",
+                    "payloadEncoding": "messagepack", "payload": payload}
+
+        documents = schema_document_map([document])
+        # Routing by inference reads a hint, not a payload: a payload with a tail gives no hint, so an unknown schema id
+        # stays the unknown-schema error (KeyError) even when the first value names a registered schema.
+        self.assertIs(resolve_document_for_raw_record(documents, "unknown", raw("unknown", head)), document)
+        with self.assertRaises(KeyError):
+            resolve_document_for_raw_record(documents, "unknown", raw("unknown", head + b"\xc0"))
+        # A registered schema id routes, and the tail is refused by count when the record is applied.
+        cache = CultCache()
+        cache.register_document_type(document)
+        with self.assertRaises(ValueError) as caught:
+            apply_raw_document_record(cache, documents, raw(known, head + b"\xc0"))
+        self.assertIn("1 bytes after its first MessagePack value", str(caught.exception))
+        self.assertIsNone(cache.get(document, "k"))
+
     def test_cultnet_replication_helpers_apply_raw_snapshot_and_shard_log(self) -> None:
         document = define_database_entry_type(
             "replica.item",
@@ -2660,6 +2688,23 @@ class CultNetTests(unittest.TestCase):
                 self.assertEqual(responses[0]["code"], "unsupported_schema_version")
                 self.assertEqual(responses[0]["details"]["value"], schema_version)
                 self.assertNotIn("messageId", responses[0])
+
+    def test_witness_artifact_bundle_payload_is_one_value_and_depth_wins_over_a_tail(self) -> None:
+        import msgpack  # type: ignore
+        from cultcache_py import CultCachePayloadDepthError
+
+        payload = msgpack.packb(["b", "k", "t", {}, [], [], [], {}], use_bin_type=True)
+        decode_witness_artifact_bundle_payload(payload)
+        for tail, count in ((b"\xc0", 1), (b"\xc1\xc1", 2)):
+            with self.assertRaises(ValueError) as caught:
+                decode_witness_artifact_bundle_payload(payload + tail)
+            self.assertIs(type(caught.exception), ValueError)
+            self.assertEqual(
+                str(caught.exception),
+                f"cultnet.witness_artifact_bundle payload has {count} bytes after its first MessagePack value (refused on read).",
+            )
+        with self.assertRaises(CultCachePayloadDepthError):
+            decode_witness_artifact_bundle_payload(b"\x91" * 300 + b"\xc0\xc0")
 
     def test_cultnet_simulation_consensus_dedupes_witnesses_and_requires_quorum(self) -> None:
         from cultnet_py import CultNetSimulationConsensus

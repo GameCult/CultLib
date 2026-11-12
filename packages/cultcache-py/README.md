@@ -19,6 +19,7 @@ discovery, sessions, local server) build on it, mirroring `cultcache-rs` /
   `[format, schemaCatalog, records]`
 - records store raw MessagePack payload bytes under schema-catalog identity
 - payloads decode only through the registered document definition for that type
+- a payload is exactly one MessagePack value: bytes after it are refused on read, by count
 - a cache holds one record per key whatever its type: a write of a second type at a held key is refused with
   `SchemaConflictError` (in memory too), and two stores holding one key refuse the load
 - a store record no registered type claims loads and is carried as foreign: `cache.foreign_records()` lists it, the store

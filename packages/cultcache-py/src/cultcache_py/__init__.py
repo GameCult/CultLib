@@ -16,6 +16,7 @@ from .documents import (
     define_document_type,
     define_record_codec,
     define_union,
+    read_payload_tree,
 )
 from .leaves import SlotCodec
 from .stores import JsonLinesBackingStore, SchemaConflictError, SingleFileMessagePackBackingStore, StoreUnreadableError
@@ -40,6 +41,7 @@ __all__ = [
     "StoreUnreadableError",
     "UnionArm",
     "UnreadSlots",
+    "read_payload_tree",
     "leaves",
     "database_entry_field",
     "define_database_entry_type",

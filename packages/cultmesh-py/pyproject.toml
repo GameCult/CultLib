@@ -16,7 +16,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
 ]
-dependencies = ["cultcache-py>=0.2.0", "cultnet-py>=0.1.0", "cryptography>=41"]
+dependencies = ["cultcache-py>=0.4.0", "cultnet-py>=0.1.0", "cryptography>=41"]
 [project.scripts]
 cultmesh-py-daemon = "cultmesh_py.daemon:main"
 cultmesh-py-verify = "cultmesh_py.verify:main"

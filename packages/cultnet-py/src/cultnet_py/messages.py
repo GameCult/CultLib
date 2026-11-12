@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import msgpack
+from cultcache_py import read_payload_tree
 
 from .unicode_messageid_tables import DEFAULT_IGNORABLE, LETTER_OR_NUMBER
 
@@ -544,7 +545,7 @@ def encode_witness_artifact_bundle_payload(bundle: dict[str, Any] | CultNetWitne
 
 
 def decode_witness_artifact_bundle_payload(payload: bytes) -> dict[str, Any]:
-    slots = msgpack.unpackb(payload, raw=False)
+    slots = read_payload_tree("cultnet.witness_artifact_bundle", payload)
     if not isinstance(slots, list) or len(slots) < 8:
         raise ValueError("CultNet witness artifact bundle payload must be an 8-slot MessagePack array")
     return {
