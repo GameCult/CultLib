@@ -1,6 +1,6 @@
 import { decode } from "@msgpack/msgpack";
 
-import { checkPayloadDepth } from "./payload-depth";
+import { checkPayloadDepth, checkPayloadIsOneValue } from "./payload-depth";
 import { type StoreFormat, isStoreSnapshot, refuseUnreadStoreBytes, requireStoreSlots, requireV1RecordSlots } from "./store-format";
 
 export interface CultCacheInspection {
@@ -235,10 +235,20 @@ function decodeLegacyEnvelope(value: unknown): InspectedRecord {
   };
 }
 
-// The inspector's one payload read: the depth walk first, so a payload past the limit is refused before any decoder sees it.
+// The inspector's one payload read: the depth walk first, so a payload past the limit is refused before any decoder sees it,
+// and bytes after the first value are refused with the shared clause (the tail is never decoded or shown).
 function decodeBoundedPayload(payload: Uint8Array): unknown {
-  checkPayloadDepth(payload);
+  checkPayloadIsOneValue(payload, "document payload");
   return decode(payload);
+}
+
+// Where the first value ends (the whole payload when it ends early or cannot be walked): a preview never shows a tail.
+function valueEnd(payload: Uint8Array): number {
+  try {
+    return checkPayloadDepth(payload) ?? payload.length;
+  } catch {
+    return payload.length;
+  }
 }
 
 function previewPayload(payload: Uint8Array): Pick<InspectedRecord, "payloadPreview" | "payloadDecodeError"> {
@@ -248,7 +258,7 @@ function previewPayload(payload: Uint8Array): Pick<InspectedRecord, "payloadPrev
     return {
       payloadPreview: {
         bytes: payload.length,
-        hexPrefix: [...payload.slice(0, 32)]
+        hexPrefix: [...payload.slice(0, Math.min(32, valueEnd(payload)))]
           .map((value) => value.toString(16).padStart(2, "0"))
           .join(" "),
       },

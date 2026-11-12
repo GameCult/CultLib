@@ -119,6 +119,19 @@ test("a payload that ends early, is empty or carries trailing bytes is the reade
   assert.doesNotThrow(() => checkPayloadDepth(bytes(0xc0)));
 });
 
+test("the walk returns where the first value ends, and undefined when the payload ends early", () => {
+  assert.equal(checkPayloadDepth(bytes(0xc0)), 1);
+  assert.equal(checkPayloadDepth(bytes(0xc0, 0xc1, 0xc1)), 1, "a top-level scalar ends at its own length; the tail is not judged");
+  assert.equal(checkPayloadDepth(bytes(0x92, 0x01, 0xa1, 0x61, 0xc0)), 5 - 1, "a container ends when its last child completes");
+  assert.equal(checkPayloadDepth(cat(bytes(0x90), arrays(L + 50))), 1, "the tail is never walked");
+  assert.equal(checkPayloadDepth(bytes()), undefined);
+  assert.equal(checkPayloadDepth(bytes(0x92, 0x01)), undefined);
+  assert.equal(checkPayloadDepth(bytes(0xd9)), undefined);
+  for (const cut of [[0xcc], [0xcb, 0x3f, 0xf8], [0xa5, 0x61, 0x62, 0x63], [0xc4, 0x02, 0x01], [0xd7, 0x01]]) {
+    assert.equal(checkPayloadDepth(bytes(...cut)), undefined, `a scalar cut short: ${cut.map((value) => value.toString(16)).join(" ")}`);
+  }
+});
+
 test("the walk is iterative: 100000 nested arrays are refused with the depth error, not a RangeError", () => {
   refused(arrays(100_000), "100000 nested arrays");
   refused(chain(bytes(0x81, 0x00), 100_000), "100000 nested maps");
@@ -196,6 +209,13 @@ test("the inspector previews a payload at the limit and reports one past it, or 
     assert.equal(record.payloadDecodeError, "document payload nests 257 MessagePack containers deep; the limit is 256.");
     assert.equal(record.schemaName, "tests.schema_stamped_entry");
   }
+});
+
+test("the inspector refuses bytes after a payload's first value with the shared clause and previews no tail", async () => {
+  const file = await storeWith(bytes(0xc0, 0xc1, 0xc1));
+  const record = inspectCultCacheBytes(file, await readFile(file)).records[0]!;
+  assert.equal(record.payloadDecodeError, "document payload has 2 bytes after its first MessagePack value.");
+  assert.deepEqual(record.payloadPreview, { bytes: 3, hexPrefix: "c0" });
 });
 
 // A header whose length or count needs all four bytes: the low sixteen bits of the length are small, the whole is not.

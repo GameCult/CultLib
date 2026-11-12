@@ -49,7 +49,9 @@ through `decodeDocumentPayload`, and when you need the bytes themselves (hashing
 write) take them with `documentPayloadBytes`, the sanctioned escape.
 
 - `decodeDocumentPayload(definition, payload)` reads a payload through the definition's formatter,
-  codec or plain map and then its schema. The definition is required.
+  codec or plain map and then its schema. The definition is required. A payload is exactly one
+  MessagePack value: bytes after the first are refused by count, naming the type, and never walked or
+  echoed (a payload that ends early is the decoder's to refuse).
 - `encodeDocumentPayload(definition, value)` is the writer: the schema first, then the formatter,
   codec or plain map.
 - `documentPayloadFromBytes(bytes)` is where bytes enter (a record you validated, a store read, a
@@ -327,7 +329,7 @@ If you do not supply one, `CultCacheTS` uses MessagePack plus Zod validation by 
 
 The 256-container nesting bound (`MAX_PAYLOAD_DEPTH`, refused with `CultCachePayloadDepthError`) covers the MessagePack the
 library itself writes: the default format and a codec. A payload your formatter writes is opaque bytes in any format, so the
-library does not walk it as MessagePack; its format and its bounds are your formatter's.
+library does not walk it as MessagePack; its format, its bounds and whether it is one value are your formatter's.
 
 Zod is no longer mandatory. Any schema object with a `parse(...)` function will
 do, which means generated Ajv-backed JSON-schema contracts can feed the cache

@@ -1,6 +1,6 @@
 import type { NotedSlots } from "./codec";
 import { decodeMarked, resolveDocumentFormatter } from "./document-formatter";
-import { checkPayloadDepth } from "./payload-depth";
+import { checkPayloadDepth, checkPayloadIsOneValue } from "./payload-depth";
 import type {
   AnyCultCacheDocumentDefinition,
   CultCacheSchemaCatalogMember,
@@ -129,7 +129,11 @@ export function decodeDocumentPayloadMarked<TDefinition extends AnyCultCacheDocu
   payload: DocumentPayload,
 ): { value: CultCacheDocumentValue<TDefinition>; unreadSlots?: NotedSlots } {
   const bytes = documentPayloadBytes(payload);
-  if (writesLibraryMessagePack(definition)) checkPayloadDepth(bytes, `document type "${definition.type}" payload`);
+  if (writesLibraryMessagePack(definition)) {
+    // A payload is exactly one MessagePack value: bytes after the first are refused by count before any formatter reads,
+    // so a tail is refused before any slot is marked.
+    checkPayloadIsOneValue(bytes, `document type "${definition.type}" payload`);
+  }
   const { value: decoded, unreadSlots } = decodeMarked(definition, bytes);
   const value = definition.schema.parse(decoded) as CultCacheDocumentValue<TDefinition>;
   return unreadSlots ? { value, unreadSlots } : { value };

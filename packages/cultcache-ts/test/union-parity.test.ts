@@ -338,7 +338,7 @@ test("the wire reader keeps 64-bit integers whole, tells a float from an integer
   assert.throws(() => readWire(fromHex("dd")), /truncated/u);
   assert.throws(() => readWire(fromHex("ddffffffff")), /truncated/u, "a huge array header reserves nothing");
   assert.throws(() => readWire(fromHex("a5616263")), /truncated/u);
-  assert.throws(() => readWire(fromHex("0102")), /bytes after its value/u);
+  assert.equal(readWire(fromHex("0102")), 1, "the reader reads one value; the document owner refuses what follows");
   assert.throws(() => readWire(fromHex("81a161a162")), /map, extension or reserved/u);
   assert.throws(() => readWire(fromHex("c1")), /map, extension or reserved/u);
   assert.throws(() => readWire(fromHex("d4010a")), /map, extension or reserved/u);
@@ -724,4 +724,115 @@ test("a cache load refuses a store whose record is past the limit, naming the ty
   const document = surfaceDocument();
   const refusing = CultCache.builder().withDocumentType(document).withGenericStore(memoryStore([envelopeOf(await read("depth-past-limit.msgpack"))])).build();
   await assert.rejects(() => refusing.pullAllBackingStores(), (error: Error) => error instanceof CultCachePayloadDepthError && !error.message.includes(CANARY));
+});
+
+// ---- bytes-after vectors: a payload is exactly one MessagePack value (tests/vectors/union-parity/README.md) ----
+
+// The C# reference writes the vectors: union-surface.msgpack followed by a tail the first value does not own. The one
+// owner refuses by count, naming the type, from the walk's end; it never walks or echoes the tail.
+async function bytesAfterEntries() {
+  const raw = decode(await read("bytes-after-outcomes.msgpack")) as unknown[][];
+  return raw.map(([file, outcome, unionName, key, detail]) => ({ file: file as string, outcome: outcome as string, unionName: unionName as string, key: key as number | null, detail: detail as string }));
+}
+
+// The C# vector writer's canary (BytesAfterVectorTests): it sits in the deep tail, so an echo of the tail would carry it.
+const TAIL_CANARY = "CANARY-bytes-after-7d1e";
+const valueLength = async () => (await read("union-surface.msgpack")).length;
+const plainDocument = () => defineDocumentType({ type: "tests.plain_surface", schema: z.unknown() });
+const codecDocument = () => defineDocumentType({ type: "tests.codec_surface", schema: surfaceSchema, codec: surfaceCodec });
+
+async function assertBytesAfterRefused(file: string, tail: number, run: () => unknown | Promise<unknown>, type: string) {
+  const clause = `${type}`;
+  await assert.rejects(
+    async () => run(),
+    (error: Error) => {
+      assert.ok(!(error instanceof CultCachePayloadDepthError), `${file}: the tail was walked`);
+      assert.ok(!error.message.includes(CANARY) && !error.message.includes(TAIL_CANARY), `${file}: the refusal echoed the tail`);
+      assert.ok(!error.message.includes("the limit is"), `${file}: the depth refusal`);
+      assert.ok(error.message.includes(clause), `${file}: names the type: ${error.message}`);
+      assert.ok(error.message.includes(`${tail} bytes after its first MessagePack value`), `${file}: names the count: ${error.message}`);
+      return true;
+    },
+    file,
+  );
+}
+
+test("every bytes-after vector is refused by the one owner, by count, on the codec, plain and store paths", async () => {
+  const entries = await bytesAfterEntries();
+  assert.equal(entries.length, 4);
+  const length = await valueLength();
+  const surface = surfaceDocument();
+  const plain = plainDocument();
+  const codecOnly = codecDocument();
+  const dir = await mkdtemp(join(tmpdir(), "bytes-after-"));
+  for (const { file, outcome, unionName, detail } of entries) {
+    assert.equal(outcome, "refused");
+    assert.equal(unionName, "UnionSurface");
+    assert.equal(detail, "bytes-after");
+    const bytes = await read(file);
+    const tail = bytes.length - length;
+    assert.ok(tail > 0, file);
+    if (file === "bytes-after-deep-tail.msgpack") assert.ok(Buffer.from(bytes).includes(TAIL_CANARY), "the deep tail carries the canary the assertions look for");
+    const payload = documentPayloadFromBytes(bytes);
+    await assertBytesAfterRefused(file, tail, () => decodeDocumentPayload(surface, payload), surface.type);
+    await assertBytesAfterRefused(file, tail, () => decodeDocumentPayload(plain, payload), plain.type);
+    await assertBytesAfterRefused(file, tail, () => decodeDocumentPayload(codecOnly, payload), codecOnly.type);
+
+    // The store path: a single-file store holding the vector as a record payload refuses on load.
+    const path = join(dir, `${file}.cc`);
+    await new SingleFileMessagePackBackingStore(path).push(envelopeOf(bytes));
+    const cache = CultCache.builder().withDocumentType(surface).withGenericStore(new SingleFileMessagePackBackingStore(path)).build();
+    await assertBytesAfterRefused(file, tail, () => cache.pullAllBackingStores(), surface.type);
+
+    // The put path: an envelope arriving with the tail is refused and held nowhere.
+    const written: CultCacheEnvelope[] = [];
+    const held = CultCache.builder().withDocumentType(surface).withGenericStore(memoryStore(written)).build();
+    await assertBytesAfterRefused(file, tail, () => held.putEnvelope(surface, envelopeOf(bytes)), surface.type);
+    assert.equal(written.length, 0, `${file}: nothing reached the store`);
+    assert.equal(held.get(surface, "surface"), undefined, `${file}: nothing is held in memory`);
+  }
+});
+
+test("a payload with an unread slot and a tail is refused by count before any slot is marked or the record held", async () => {
+  const withSlot = await read("extra-slot-record.msgpack");
+  const surface = surfaceDocument();
+  const tailed = Uint8Array.from([...withSlot, 0xc0]);
+  const whole = CultCache.builder().withDocumentType(surface).withGenericStore(memoryStore([envelopeOf(withSlot)])).build();
+  await whole.pullAllBackingStores();
+  assert.ok(whole.unreadSlots(surface, "surface"), "without a tail the record is held with its unread slots");
+
+  const loading = CultCache.builder().withDocumentType(surface).withGenericStore(memoryStore([envelopeOf(tailed)])).build();
+  await assertBytesAfterRefused("extra-slot-record+tail", 1, () => loading.pullAllBackingStores(), surface.type);
+  assert.equal(loading.get(surface, "surface"), undefined);
+  assert.equal(loading.unreadSlots(surface, "surface"), undefined);
+
+  const written: CultCacheEnvelope[] = [];
+  const putting = CultCache.builder().withDocumentType(surface).withGenericStore(memoryStore(written)).build();
+  await assertBytesAfterRefused("extra-slot-record+tail", 1, () => putting.putEnvelope(surface, envelopeOf(tailed)), surface.type);
+  assert.equal(written.length, 0);
+  assert.equal(putting.get(surface, "surface"), undefined);
+  assert.equal(putting.unreadSlots(surface, "surface"), undefined);
+});
+
+test("a payload that ends early is not bytes after its value: the decoder refuses it, and a user formatter's bytes are not walked", async () => {
+  const whole = await read("union-surface.msgpack");
+  const surface = surfaceDocument();
+  for (const cut of [0, 1, 10, whole.length - 1]) {
+    assert.throws(
+      () => decodeDocumentPayload(surface, documentPayloadFromBytes(whole.slice(0, cut))),
+      (error: Error) => !error.message.includes("bytes after") && !(error instanceof CultCachePayloadDepthError),
+      `truncated at ${cut}`,
+    );
+  }
+  // A header cut short of its length is an early end too, whatever width it declares.
+  for (const early of ["dc00", "dd000000", "de00", "c4", "d9", "a5616263", "9291"]) {
+    assert.throws(
+      () => decodeDocumentPayload(surface, documentPayloadFromBytes(fromHex(early))),
+      (error: Error) => !error.message.includes("bytes after") && !(error instanceof CultCachePayloadDepthError),
+      `early end ${early}`,
+    );
+  }
+  const opaque = defineDocumentType({ type: "tests.opaque", schema: z.unknown(), formatter: { encode: (value: Uint8Array) => value, decode: (bytes: Uint8Array) => bytes } });
+  const tailed = await read("bytes-after-nil.msgpack");
+  assert.equal((decodeDocumentPayload(opaque, documentPayloadFromBytes(tailed)) as Uint8Array).length, tailed.length);
 });

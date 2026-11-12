@@ -24,10 +24,12 @@ All notable changes to `@gamecult/cultcache-ts` are recorded here, following
 
 ### Added
 
+- `checkPayloadDepth` returns the offset where the first value ends, or `undefined` when the payload ends early (a header, a container or a str/bin/scalar body cut short; it was `void`); it still refuses only depth. The bytes-after refusal is internal (`checkPayloadIsOneValue`, not exported); no new public name.
 - `CultCache.foreignRecords()`: the `{key, schemaId, schemaName, storedAt}` of every record the last pull carried and no registered type claims, sorted by key ordinal.
 
 ### Changed
 
+- A document payload is exactly one MessagePack value (cultlib-gaps:ruling:trailing-bytes-refuse). `decodeDocumentPayload`, the one reader (store loads, `put`/`putEnvelope`, CultNet replication, the provider command), and the inspector refuse bytes after the first value with `document type "T" payload has N bytes after its first MessagePack value.`, counted from the walk's end and never walked or echoed; a payload that ends early stays the decoder's to refuse. The refused set is unchanged; only the text changed (it was `@msgpack`'s `RangeError` "Extra N of M byte(s)" for a plain document and the codec reader's "bytes after its value" for a codec document, and the inspector's preview no longer shows a tail), so code matching either text must match this one. `readWire` reads one value and no longer checks what follows. Stated limit: a definition with its own `formatter` is not walked, so whether its payload is one value is the formatter's. Implied bump: 0.16.0 (pre-1.0 minor, with the Breaking entries above).
 - Opening a legacy (pre-v1) store is a pure read: payloads that were not bytes are normalized in memory and the
   file is left as it was, so a codec that refuses the content cannot lose the old bytes. The next push, delete or
   flush rewrites the file as v1, merging what the open read.
