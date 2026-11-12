@@ -58,4 +58,22 @@ public class BytesAfterPathTests
             .MakeGenericMethod(typeof(CultMeshCdnArtifactManifest));
         Refusal(() => read.Invoke(null, new object[] { snapshot, record.SchemaId, record.RecordKey })).Should().Contain(Clause);
     }
+
+    [Test]
+    public void ASingleFileDocumentReadRefusesATail()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"cultlib-bytesafter-mesh-{Guid.NewGuid():N}.cc");
+        try
+        {
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<CultMeshCdnArtifactManifest>();
+            var schema = new CultMeshSingleFileDocumentSchema(descriptor.SchemaId, descriptor.SchemaName, descriptor.SchemaVersion);
+            var payload = WithTail(Manifest()).Payload;
+            CultMesh.WriteSingleFileDocumentPayload(path, new CultRecordKey("k"), schema, null, payload);
+            Refusal(() => CultMesh.ReadSingleFileDocument<CultMeshCdnArtifactManifest>(path, new CultRecordKey("k"))).Should().Contain(Clause);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
 }

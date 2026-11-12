@@ -110,6 +110,15 @@ namespace GameCult.Caching.Tests
             Assert.That(message, Does.Contain(typeof(UnionSurface).FullName).And.Contain($"1 {Clause}").And.Contain("refused on read"));
         }
 
+        // The inspector reads documents through CultCodec.Deserialize (type == document), not DecodeDocument: its branch is its own path.
+        [Test]
+        public void CodecDeserializeOfADocumentRefusesATail()
+        {
+            var codec = CultCacheMessagePack.CreateCodec(Registry);
+            var message = Message(() => codec.Deserialize(typeof(UnionSurface), typeof(UnionSurface), Base.Concat(new byte[] { 0xc0 }).ToArray()));
+            Assert.That(message, Does.Contain(typeof(UnionSurface).FullName).And.Contain($"1 {Clause}").And.Contain("refused on read"));
+        }
+
         [Test]
         public void StoreLoadRefuses()
         {
