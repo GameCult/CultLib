@@ -59,8 +59,9 @@ An object's declared slots are the slots its type's own formatter writes for one
 the highest key plus one); a reader derives them from the layout it writes, never from a list of public members.
 Only a type the runtime writes by its own positional `[Key]` layout is checked. Exempt, as in the C# reference
 (`cultlib-gaps:ruling:leaf-acceptance-follows-reference`): a type the runtime formats some other way (a
-user codec or formatter, a hand-written serializer, a resolver ahead of the runtime's own, a collection type
-written as its items), and a type no instance of which the runtime can write for measuring
+user codec or formatter, a hand-written serializer, a resolver ahead of the runtime's own that supplies a layout
+of its own, a collection type written as its items; a resolver that hands out the runtime's own positional
+layout exempts nothing), and a type no instance of which the runtime can write for measuring
 (`cultlib-gaps:ruling:slot-unmeasurable-type`). Neither is ever marked. No vector carries an exempt type: each
 runtime pins its own exemption with its own fixture.
 Only an array longer than that marks: a short array

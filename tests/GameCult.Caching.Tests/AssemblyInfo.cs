@@ -11,6 +11,7 @@ using MessagePack.Formatters;
 [assembly: CultCacheFormatterResolver(typeof(UnionArmGuardTests.ListClaimResolver))]
 [assembly: CultCacheFormatterResolver(typeof(UnionArmGuardTests.FbLaterClaimResolver))]
 [assembly: CultCacheFormatterResolver(typeof(SlotReadOnlyTests.ResolvedBagResolver))]
+[assembly: CultCacheFormatterResolver(typeof(SlotReadOnlyTests.RelayResolver))]
 
 namespace GameCult.Caching.Tests
 {

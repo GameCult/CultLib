@@ -404,6 +404,21 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        // A type an assembly resolver claims by handing out MessagePack's own [Key]-layout formatter: still measured.
+        [MessagePackObject]
+        public sealed class Relayed
+        {
+            [Key(0)] public string A = string.Empty;
+        }
+
+        public sealed class RelayResolver : IFormatterResolver
+        {
+            public static readonly IFormatterResolver Instance = new RelayResolver();
+
+            public IMessagePackFormatter<T>? GetFormatter<T>() =>
+                typeof(T) == typeof(Relayed) ? global::MessagePack.Resolvers.StandardResolver.Instance.GetFormatter<T>() : null;
+        }
+
         // A [MessagePackObject] collection: MessagePack writes it as its items, not by [Key].
         [MessagePackObject]
         public class TagList : List<string> { }
@@ -419,6 +434,7 @@ namespace GameCult.Caching.Tests
             [Key(4)] public Bag? Bag;
             [Key(5)] public ResolvedBag? Resolved;
             [Key(6)] public TagList? Tags;
+            [Key(7)] public Relayed? Relayed;
         }
 
         private static readonly CultDocumentRegistry MeasuredRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(MeasuredDoc) });
@@ -483,6 +499,17 @@ namespace GameCult.Caching.Tests
             path = Seed(MeasuredRegistry, typeof(MeasuredDoc), () => new MeasuredDoc { Name = "c" }, countedPayload, "counted.cc");
             using (var cache = Open(path, MeasuredRegistry))
                 AssertSlotRefusal(() => cache.Commit(batch => batch.Remove(Marked)), "measured through its constructor", nameof(Counted), 2, 1);
+
+            // A resolver that hands out MessagePack's own [Key] formatter exempts nothing.
+            var relayedPayload = Emit((ref MessagePackWriter w) =>
+            {
+                w.WriteArrayHeader(8); w.Write("r");
+                for (var i = 0; i < 6; i++) w.WriteNil();
+                w.WriteArrayHeader(2); w.Write("a"); w.Write(Extra);
+            });
+            path = Seed(MeasuredRegistry, typeof(MeasuredDoc), () => new MeasuredDoc { Name = "c" }, relayedPayload, "relayed.cc");
+            using (var cache = Open(path, MeasuredRegistry))
+                AssertSlotRefusal(() => cache.Commit(batch => batch.Remove(Marked)), "relayed by a consumer resolver", nameof(Relayed), 2, 1);
         }
 
         // ---- a flatten writes its base chain's decoded view: refused when a record on the chain is not owned ----

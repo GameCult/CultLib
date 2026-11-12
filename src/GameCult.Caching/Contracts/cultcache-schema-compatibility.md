@@ -128,9 +128,11 @@ list, so a non-public `[Key]` member of an `AllowPrivate` type counts. Only a co
 `[MessagePackObject]` type whose formatter is MessagePack's own `[Key]`-layout formatter is checked. Not
 checked, and so read past with any extra slots dropped on the next write, as before:
 
-- a type formatted by anything else: its own `[MessagePackFormatter]`, a `CultCacheFormatterResolver` (or any
-  resolver ahead of MessagePack's), or the collection formatter of a `[MessagePackObject]` collection type
-  such as a `List<T>` subclass. Such a formatter owns its layout and its tolerance;
+- a type formatted by anything else: its own `[MessagePackFormatter]`, a formatter of its own that a
+  `CultCacheFormatterResolver` (or any resolver ahead of MessagePack's) hands out, or the collection formatter
+  of a `[MessagePackObject]` collection type such as a `List<T>` subclass. Such a formatter owns its layout and
+  its tolerance. A resolver that hands out MessagePack's own `[Key]`-layout formatter (StandardResolver's, or
+  StandardResolverAllowPrivate's) does not exempt the type: it is checked and marks;
 - a type no instance of which can be written: no write of an uninitialized instance and no write of one
   from a parameterless constructor succeeds (for example a `[Key]` getter that throws on an uninitialized
   instance and no parameterless constructor). This gap is ruled: `cultlib-gaps:ruling:slot-unmeasurable-type`.
