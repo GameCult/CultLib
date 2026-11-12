@@ -51,6 +51,12 @@ static async Task<int> ProgramMainAsync(string[] args)
             case "edit-in-place":
                 await EditInPlaceAsync(file, RequireArg(options, "kind"));
                 return 0;
+            case "write-shapes":
+                await WriteShapesAsync(file);
+                return 0;
+            case "read-shapes":
+                await ReadShapesAsync(file);
+                return 0;
             case "hold-lock":
                 HoldLock(file, int.Parse(RequireArg(options, "ms"), CultureInfo.InvariantCulture));
                 return 0;
@@ -95,6 +101,49 @@ static async Task WriteAsync(string file, string runtimeId)
     cache.FlushAllBackingStores();
     WriteJsonLine(note);
 }
+
+// Records a reader of a Bifrost-shaped store must open: a union field (two arms) and nested bytes (a bin member, a bin list).
+static async Task WriteShapesAsync(string file)
+{
+    var cache = BuildCache(file);
+    await cache.PullAllBackingStoresAsync();
+    foreach (var shape in InteropShapes())
+        await cache.AddAsync(shape, new CultRecordHandle<CultCacheInteropShape>(new CultRecordKey(shape.DocumentId)));
+    cache.FlushAllBackingStores();
+    WriteShapesJsonLine(InteropShapes());
+}
+
+static async Task ReadShapesAsync(string file)
+{
+    var cache = BuildCache(file);
+    await cache.PullAllBackingStoresAsync();
+    WriteShapesJsonLine(cache.AllEntries.OfType<CultCacheInteropShape>());
+}
+
+static CultCacheInteropShape[] InteropShapes() =>
+[
+    new() { DocumentId = "shape:text", Arm = new InteropTextArm { Text = "union arm 0" }, Raw = Enumerable.Range(0, 256).Select(i => (byte)i).ToArray() },
+    new()
+    {
+        DocumentId = "shape:pack",
+        Arm = new InteropPackArm { Label = "union arm 1", Chunks = [new byte[] { 0xc0, 0xc1, 0x00 }, [], [0x92, 0x01, 0x02]] },
+        Raw = [0xde, 0xad, 0xbe, 0xef]
+    }
+];
+
+// One line, ordered by document id, in the form the Rust peer prints.
+static void WriteShapesJsonLine(IEnumerable<CultCacheInteropShape> shapes) =>
+    Console.Out.WriteLine(JsonSerializer.Serialize(shapes.OrderBy(shape => shape.DocumentId, StringComparer.Ordinal).Select(shape => new
+    {
+        documentId = shape.DocumentId,
+        arm = shape.Arm switch
+        {
+            InteropTextArm text => (object)new { kind = "text", text = text.Text },
+            InteropPackArm pack => new { kind = "pack", label = pack.Label, chunks = pack.Chunks.Select(Convert.ToHexString).ToArray() },
+            _ => throw new InvalidOperationException("Unknown arm.")
+        },
+        raw = Convert.ToHexString(shape.Raw)
+    })));
 
 static async Task ReadAsync(string file)
 {
@@ -327,4 +376,29 @@ public sealed class CultCacheInteropMark
 {
     [Key(0)] public string Label { get; set; } = string.Empty;
     [Key(1)] [CultElementId] public string Id { get; set; } = string.Empty;
+}
+
+[CultDocument("cultcache.interop-shape", "cultcache.interop_shape.v1")]
+[MessagePackObject]
+public sealed class CultCacheInteropShape
+{
+    [Key(0)] [CultName] public string DocumentId { get; set; } = string.Empty;
+    [Key(1)] public InteropArm Arm { get; set; } = new InteropTextArm();
+    [Key(2)] public byte[] Raw { get; set; } = Array.Empty<byte>();
+}
+
+[Union(0, typeof(InteropTextArm)), Union(1, typeof(InteropPackArm))]
+public abstract class InteropArm { }
+
+[MessagePackObject]
+public sealed class InteropTextArm : InteropArm
+{
+    [Key(0)] public string Text { get; set; } = string.Empty;
+}
+
+[MessagePackObject]
+public sealed class InteropPackArm : InteropArm
+{
+    [Key(0)] public string Label { get; set; } = string.Empty;
+    [Key(1)] public List<byte[]> Chunks { get; set; } = new();
 }
