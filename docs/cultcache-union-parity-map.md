@@ -253,14 +253,15 @@ the opt-in derive leaves alone.
 
 One bound, 256 nested MessagePack arrays and maps, on read and on write (ruling
 `cultlib-gaps:ruling:payload-depth-limit-256`; prior art `docs/research/payload-depth-limit.md`). The C# reference
-landed in `ead5260c`, Python in `5618d8dd`, Rust in `c028c511`. TypeScript is not landed (spec
-`cultlib-gaps:cut_spec:cut-union-bounds-ts.r2`, blocked on question `cultlib-gaps:question:ts-payload-opaque-type`).
+landed in `ead5260c`, Python in `5618d8dd`, Rust in `c028c511`, TypeScript in `b69d3057`. The one-value rule that rides the
+same walkers (bytes after the first value) is section T1; the Python row below predates it, and T1 names its owner.
 
 | Runtime | Owner of the decision (constant and walker) | Doors routed through it |
 |---|---|---|
 | C# | `CultPayloadDepth.Check` (`src/GameCult.Caching.MessagePack/CultPayloadDepth.cs`), limit `CultMessagePackSecurity.MaximumPayloadDepth`. MessagePack's own graph counter is set to the same value as a backstop only. | Write: `CultDocumentMessagePackSerialization.SerializeUntyped`. Read: `DeserializeUntyped`. The cache store (`SerializePayload`/`DeserializePayload`), the directory store, `CultMesh` and single-file documents all call those two; C# has no separate raw-envelope or prepared-batch door. |
 | Rust | `check_record_payload` (private; depth, then no bytes after the first value) over `first_value_end`, and `MAX_PAYLOAD_DEPTH`; `cultcache_rs::check_payload_depth` is the depth-only probe for outside callers (`packages/cultcache-rs/src/lib.rs`). | Read: `decode_payload` (get, list, `validate_envelope`/`put_envelope`, `finish_prepared_entry`). Write: `put`/`prepare_entry`/`prepare_entry_named` reach it through `finish_prepared_entry`, which decodes what it just encoded. Raw envelope: `put_raw_envelope`, the door CultMesh network puts use (`cultmesh-rs` `lib.rs`, two call sites). Prepared batch: `put_prepared_batch` via `require_record_payload`. Load: `pull_all_backing_stores` and `load_soa` run `require_record_payload` on every record, so a store holding a payload past the bound (or with bytes after it) is refused at load, and the cache then refuses every write and removal (`CultCacheLoadRefused`) until a load succeeds. cultnet-rs: every free-form or skippable wire payload decodes through `cultcache_rs::decode_payload` (message decode in `contracts.rs`, `provider_session`, `media_stream_wire`, `replication`, `service_identity`). |
 | Python | `_refuse_past_depth_limit` and `MAX_PAYLOAD_DEPTH` (`packages/cultcache-py/src/cultcache_py/documents.py`); a msgpack `StackError` on read maps to the same error. | `DocumentDefinition.encode_payload` (write) and `decode_payload` (read). `CultCache.put`, `put_envelope`, `put_envelopes` and load-time hydration go through them; there is no raw-envelope door. cultmesh-py round trips call the same pair. |
+| TypeScript | `checkPayloadDepth` and `MAX_PAYLOAD_DEPTH` (`packages/cultcache-ts/src/payload-depth.ts`), iterative, returning where the first value ends. | `encodeDocumentPayload` (write, checks the bytes it just encoded) and `decodeDocumentPayloadMarked` (read, via `checkPayloadIsOneValue`) in `src/document.ts`, only for a definition that writes the library's own MessagePack (no `formatter`: a formatter's bytes are its own). The inspector (`cult-cache-inspector.ts`) checks a payload it previews with the same pair. |
 
 - **Doors deliberately not routed.** cultnet-rs `idunn_lifecycle_brake`, `provider_health_contracts` and
   `runtime_authority_contracts` decode records whose positional array length is checked exactly before decoding. A
@@ -279,6 +280,178 @@ landed in `ead5260c`, Python in `5618d8dd`, Rust in `c028c511`. TypeScript is no
   are outside the Python cut; they hold only msgpack's own stack limit.
 - **Verification layer.** Vector held by each runtime's own suite (limit 256 accepted, 257 refused, skipped content
   counted, non-recursive walk); Rust wire doors by the cultnet-rs test above.
+
+## T. Ownership after the trailing-bytes, slot-tolerance and load-gate cuts (body at `66bea107`, 2026-11-12)
+
+Body facts for the cuts that moved who decides these invariants. Typed state is cited by id, not restated:
+rulings `cultlib-gaps:ruling:trailing-bytes-refuse`, `cultlib-gaps:ruling:extra-trailing-slots`,
+`cultlib-gaps:ruling:slot-mark-consent`, `cultlib-gaps:ruling:slot-unmeasurable-type`,
+`cultlib-gaps:ruling:leaf-acceptance-follows-reference`; specs `cultlib-gaps:cut_spec:cut-bytes-after-{cs,py,rs,ts}.r1`,
+`cut-slot-tolerance.r4`, `cut-slot-readonly-{py,ts}` and `-rs`, `cut-cache-pull-before-write-rs.r1`. S1-S10 above are
+probes at the pre-cut base; where they say "today" or "dropped on write-back" (U6, U10) the behaviour they describe is
+gone, and T is the live owner.
+
+### T1. A record payload is exactly one MessagePack value
+
+- **Invariant.** Bytes after a payload's first value are refused, by count, on read in every runtime, and on write
+  where bytes the library did not encode itself are accepted. A payload nested past 256 is refused as depth even when
+  a tail follows: depth wins, and a tail is never walked or quoted. A payload that ends early is the decoder's
+  refusal, not "bytes after". Streams of values (CultNet frames, a store's record array) are other contracts.
+- **One owner per runtime** (the same walker that owns depth, D):
+
+| Runtime | Owner | Inputs | Doors that must reach it |
+|---|---|---|---|
+| C# | `CultPayloadDepth.Check(bytes, type, direction)` via `CultDocumentMessagePackSerialization` `SerializeUntyped` (write) and `DeserializeUntyped` / `DeserializeMarked` (read) | payload bytes | every cache, directory, single-file and `CultMesh` document read or write; no raw-envelope door |
+| Python | `read_payload_tree(type_name, payload, decoder=None)` in `documents.py`, exported; `DocumentDefinition.decode_payload` calls it. `_refuse_past_depth_limit` stays the depth owner (write calls it directly) | payload bytes | `decode_payload`, load-time hydration, `put_envelope(s)`; cultnet-py's witness bundle decode (`decode_witness_artifact_bundle_payload`) |
+| Rust | `check_record_payload` (private; depth, then one value) over `first_value_end`; `require_record_payload(&CultCacheEnvelope)` adds type and key to the error | payload bytes | `decode_payload` and `decode_payload_marked`, `put_raw_envelope`, `put_prepared_batch`, `stage_pull` (load), `load_soa`; `check_payload_depth` stays the depth-only public probe |
+| TypeScript | `checkPayloadIsOneValue(bytes, subject)` in `payload-depth.ts` over `checkPayloadDepth` (returns where the first value ends) | payload bytes | `decodeDocumentPayloadMarked` (so `decodeDocumentPayload`) and the inspector; only for a definition with no `formatter` |
+
+- **Outputs.** A refusal naming the type and the count (`<type> payload has N bytes after its first MessagePack value
+  (refused on read|write).`; C# `MessagePackSerializationException`, Python `ValueError`, TS error, Rust `anyhow`),
+  never the tail. Load and open refuse the whole store: Rust `pull_all_backing_stores` now refuses depth and tail for
+  every record, not only some doors (`stage_pull` and `load_soa` call `require_record_payload`).
+- **Derived state.** None. The count is computed per call; no runtime stores a "had a tail" flag.
+- **Forbidden writers.** A second walker, a second "is this one value" test, or a reader that ignores the tail
+  (`msgpack.unpackb` raising `ExtraData` and being caught as success; a deserializer left to stop at the first value).
+  A new payload door calls the owner or names itself exempt (D "Doors deliberately not routed"; a formatter's own
+  bytes in C# and TS).
+- **Shared path.** `tests/vectors/union-parity/bytes-after-*.msgpack` (`nil`, `never-used`, `deep-tail`,
+  `second-document`) and `bytes-after-outcomes.msgpack`, written by C# only; table in that directory's `README.md`
+  ("Bytes after the value"). CDN manifests follow the same rule through
+  `contracts/cultmesh/content-acceptance-vectors.json` (`trailing_nil`, `trailing_reserved_code`,
+  `trailing_truncated_array`).
+- **Cut line.** Inside each owner. cultnet-py and cultmesh-py wire messages still call `msgpack.unpackb` directly
+  (D, cut line); only the witness bundle payload crosses the owner.
+- **Verification layer.** Vector, each runtime's own suite: C# `PayloadDepthTests.OnlyOneValueIsAPayload` (owner)
+  and `UnionParityVectorTests`; Rust `union_parity.rs` `bytes_after_vectors`, `depth_beats_a_tail`,
+  `a_truncated_payload_is_the_decoders_not_bytes_after`, and `slot_readonly.rs`
+  `a_tail_on_a_slot_payload_is_refused_before_any_mark` and
+  `a_store_with_marked_records_and_a_tail_is_refused_and_its_cache_writes_nothing`; Python `test_union_parity.py`
+  `test_every_bytes_after_vector_is_refused`, `test_a_single_file_store_holding_a_tail_as_a_record_payload_refuses_on_load`,
+  `test_depth_wins_over_a_tail_whatever_the_unpackers_own_stack_limit`,
+  `test_a_payload_that_ends_early_is_the_decoders_not_bytes_after`; TypeScript `union-parity.test.ts` "every
+  bytes-after vector is refused by the one owner, by count, on the codec, plain and store paths" and
+  `payload-depth.test.ts` "the inspector refuses bytes after a payload's first value ...". Contract text:
+  `src/GameCult.Caching/Contracts/cultcache-persistence-format.md` ("A record's payload is exactly one MessagePack value").
+
+### T2. A record with unread slots is held read-only
+
+- **Invariant.** A record whose payload carries a slot past its reader's declared slots, at any depth (record, nested
+  record, list element, union arm, unit arm), is read, served, and held read-only in all four runtimes. Every write or
+  removal of its key is refused before any store is touched, with the runtime's schema-conflict refusal carrying the
+  mark (type, slots carried, slots declared, occurrences; never a slot value). An untouched marked record is
+  persisted from its original bytes, schema id, stored-at and catalog entry, never re-encoded from the decoded
+  document (S5). Missing trailing slots default and mark nothing; a non-nil value in a retired slot below the highest
+  key does not mark. Exempt types (custom formatter, unmeasurable): `cultlib-gaps:ruling:leaf-acceptance-follows-reference`,
+  `cultlib-gaps:ruling:slot-unmeasurable-type`.
+- **Consent.** Per `tests/vectors/union-parity/README.md` ("Consent"): a mark is explained only at depth 0, when the
+  record's stored id is one the reader lists compatible, that id's catalog entry has more members, and the mark's slot
+  count is at most the highest reported slot plus one. Declaring a compatible id consents to an explained mark only;
+  a nested mark or a mark under the reader's own id stays read-only whatever is declared
+  (`cultlib-gaps:ruling:slot-mark-consent`).
+- **One shared write-refusal judge per runtime.** The write entries and the writability query ask the same function,
+  so the query cannot disagree with the write:
+
+| Runtime | Judge | Query | Writers that must ask it |
+|---|---|---|---|
+| C# | `CultCache.WriteRefusal(stored, upsert, batch, out home)` (`CultCache.cs`); `Claim` throws its result, `FlattenRefusal` extends it over a variant's base chain | `CultCache.IsWritable(key)` | every upsert, variant write, flatten, removal and batch |
+| TypeScript | `#judge(registered, key, written?)` in `cult-cache.ts` (`#refuseForeignKey`, `#refuseRetype`, `#refuseUnread`) | `isWritable(definition, key)` | `#writeNow`, `#deleteNow` |
+| Python | `CultCache._refuse_at(document, key)` (`_refuse_unread`, then `_refuse_retype`; global-key rule first) | `is_writable(document, key)` | `put`, `put_global`, `update`, `update_global`, `put_envelope(s)`, `delete`, `delete_global` |
+| Rust | `refuse_unread_slots(type_id, key)` over `held_finding` (decodes the held bytes with the registered type's mark; `Free`, `Marked`, `Unreadable`) | `CultCache::is_writable(type_id, key)` (also asks `refuse_retype`, so a foreign or other-typed key is false) | `put`, `put_envelope`, `put_raw_envelope`, `put_prepared_batch`, `delete`, and `load_soa` (which keeps a held read-only record) |
+
+- **Derived state.** The mark (`UnreadSlots`, C# `CultStoredDocument.UnreadSlots`, Python `_state.unread` by key, Rust
+  derived on demand from the held bytes, TS `NotedSlots`) is derived from the payload at decode and never persisted. Rust
+  and TS hold payload bytes and carry them untouched (S5).
+- **Forbidden writers.** A per-entry check that re-derives the rule; a consumer deciding writability from its own
+  slot count; a decoder that drops unread slots and lets the next flush shed them (the old U6 loss).
+- **Shared path.** `tests/vectors/union-parity/extra-slot-*.msgpack`, `extra-slot-store.cc`,
+  `extra-slot-consent.cc`, `slot-outcomes.msgpack`, `outcomes.msgpack` (nine rows: four `read-only`; the fifth
+  read-only payload is `depth-skipped-at-limit.msgpack` in `bounds-outcomes.msgpack`); C# is the only writer.
+- **Cut line.** The decode path that carries the mark to the record (S10) and the judge; consumers only read
+  `isWritable`. Kotlin has no library slot codec (S8) and holds no rule. A Rust or Python document with a custom decode
+  and no slot codec never marks.
+- **Verification layer.** Vector plus per-runtime suites: C# `SlotReadOnlyTests` (`AMarkAtAnyDepthHoldsTheRecordReadOnly`,
+  `EverySlotOutcomeRowHoldsAndARemovalIsRefusedExactlyWhereTheRecordIsNotWritable`, `ConsentStopsAtTheSlotsTheCatalogReports`,
+  `AMarkedRecordIsCarriedByteForByteWhenAnotherRecordIsWritten`, `IsWritableIs*`); Rust `slot_readonly.rs`
+  (`every_read_only_vector_decodes_marked_and_is_not_writable`, `a_held_payload_the_type_cannot_read_is_read_only_and_refused_by_name`);
+  Python `test_slot_readonly.py` (`test_every_row_is_writable_exactly_where_the_vector_says_and_refuses_with_its_mark`,
+  `test_is_writable_agrees_with_the_write_for_a_key_a_store_carries_foreign`); TypeScript `slot-readonly.test.ts`
+  ("every slot-outcomes row holds: the mark, IsWritable, and the removal refused ..."). Contract text:
+  `cultcache-schema-compatibility.md` "Extra slots are read-only".
+
+### T3. Rust load gate (PR #132 `hands/cache-pull-before-write` at `7da20731`: pending, not on `origin/main`)
+
+Describe as pending until `git log origin/main` shows "must pull". Main today:
+
+- **Owner.** `CultCache::require_loaded` over `load_refused: Option<String>`. It is set when a `pull_all_backing_stores`
+  is refused (a tail, a payload past the bound, a duplicate unique-index value, a retype conflict, a record from the
+  wrong store) and cleared by a successful pull. `CultCacheLoadRefused` is a struct `{ reason }`. Five write
+  entries (`put`, `put_prepared_batch`, `put_envelope`, `put_raw_envelope`, `delete`) call `require_loaded` first.
+- **Hole on main.** A cache that attaches a populated store and never pulls has no `load_refused`, so its
+  `put_prepared_batch` replaces the populated store with only the new key (`cultlib-gaps:follow_up:cache-must-pull-before-write`).
+- **After #132.** `CultCacheLoadRefused` is an enum `{ NotLoaded, Failed { reason } }`; a private
+  `LoadState { Loaded, NotLoaded, Refused(String) }` replaces `load_refused`; `require_loaded` stays the only gate over
+  it. Attach rule: attaching a populated (or unreadable) store sets `NotLoaded`, which only a successful pull clears;
+  an empty store or no store stays `Loaded`. Costs one read of the store at attach. A store that gains records after
+  attach is not seen by the gate (also true after a pull). cultmesh-rs with `pull_on_start=false` over a populated store
+  refuses writes until the caller pulls. Breaking, cultcache-rs Unreleased. Spec `cut-cache-pull-before-write-rs.r1`,
+  verdict `cultlib-gaps:verdict:cut-cache-pull-before-write-rs.s1`.
+- **Forbidden writers.** A write entry that inspects `load` or `load_refused` itself; a second gate; a consumer
+  pulling to dodge the refusal without handling `Failed`.
+- **Not covered.** C#, Python and TypeScript caches have no such hole (research `unpulled-write.*`). TS
+  `SingleFileMessagePackBackingStore.pushAll` still replaces the file at the store level (follow-up
+  `ts-pushall-replaces-store`). `is_writable` does not ask `require_loaded` on main and after #132 (it answers
+  slot and retype questions only).
+- **Verification layer.** Main: `union_parity.rs` (load refusals downcast `CultCacheLoadRefused`, near line 665) and
+  `slot_readonly.rs` (near 514-535). #132 adds red-first tests in `union_parity.rs` (single-file and redb).
+- **Docs to touch when #132 merges.** The Rust row of D already names `CultCacheLoadRefused::Failed` / `::NotLoaded` in
+  #132's own diff; `packages/cultcache-rs/CHANGELOG.md` gains the Breaking line.
+
+### T4. cultcache-py 0.4.0 and the dependency ranges
+
+- **Owner.** `packages/cultcache-py/pyproject.toml` `version = "0.4.0"` (the minor the Unreleased Breaking entries imply
+  at 0.x: slot read-only, one record per key, unique indexes, one value). The CHANGELOG heading is still
+  `## Unreleased`; it becomes `## [0.4.0]` at the tag, and no `cultcache-py-v0.4.0` tag exists (latest `v0.3.0`).
+- **Consumers.** `cultnet-py` (`dependencies = ["cultcache-py>=0.4.0", "msgpack>=1.0"]`, version 0.1.0) and
+  `cultmesh-py` (`"cultcache-py>=0.4.0"`, `"cultnet-py>=0.1.0"`, version 0.1.0). The bound exists because cultnet-py
+  imports `read_payload_tree` at module load (finding `cultlib-gaps:finding:cut-bytes-after-py.s2.pin-admits-reader-less-cultcache`),
+  and 0.3.x lacks it.
+- **Verification layer.** `packages/cultnet-py/tests/test_declared_dependency_ranges.py` (the Python form of
+  `scripts/test-declared-dependency-ranges.mjs`): for each tagged `cultcache-py-vX.Y.Z` that the `>=` bound of
+  cultnet-py or cultmesh-py admits, every name those packages import from `cultcache_py` must exist in that release's
+  source. It needs git with release tags and skips without them; only `>=` bounds are read, star imports and
+  attribute access are unchecked. Run by the portability workflow (`.github/workflows/cultmesh-portability.yml`).
+  With `v0.3.0` as the newest tag the bound admits no older release, so the test is vacuous until a post-0.4.0 tag
+  exists; it starts to bite the first time a consumer imports a name newer than its bound.
+- **Forbidden writers.** A consumer importing a new `cultcache_py` name without raising its `>=` bound; the workspace
+  editable install is not evidence (it satisfies any range).
+- **Cut line.** Publishing: tagging `cultcache-py-v0.4.0` and the changelog heading. cultnet-py has a changelog
+  (Unreleased, breaking, next minor) but its manifest stays 0.1.0; `packages/cultmesh-py` has no CHANGELOG.
+
+### T5. Stale docs and state found
+
+- `docs/cultcache-union-parity-map.md`, D header: said TypeScript depth was not landed (spec `cut-union-bounds-ts.r2`,
+  question `ts-payload-opaque-type`); `b69d3057` landed it. Header and TS row corrected here. The Python row in D
+  still lists only `encode_payload` / `decode_payload`; T1 names `read_payload_tree` as the read owner.
+- D, Rust row: names `CultCacheLoadRefused` without a variant. #132 edits that row; this branch leaves it alone to
+  avoid a conflict. When #132 merges, no further edit is needed to that row.
+- Cut order, step 4, and the Model page ("Extra past the reader's last key ... read-only"): still correct.
+  U3, U6, U7-U10, A3 and the Rationale "extra slots" bullets describe pre-cut behaviour (silent drop on write-back,
+  "two written contracts disagree") and are probe history; U10's disagreement is resolved by
+  `cultcache-schema-compatibility.md` "Extra slots are read-only". They are not edited.
+- `docs/research/decode-stack-safety.md` lines 8, 9, 66, 80 cite `check_payload_depth` at `lib.rs` ~526 / 598-604 and
+  `decode_payload` as `check_payload_depth(payload)?; rmp_serde::from_slice`. Rust now routes `decode_payload` through
+  `check_record_payload`; the function is at `lib.rs:605`. The prose is research as of its date; line numbers are stale.
+- `docs/cultlib-gaps-map.md` line ~612 (`check_payload_depth` is iterative) is correct for the Rust probe; the file
+  is the decode-stack-safety map and holds no bytes-after or slot-readonly facts. Its pinned base (`6bdc23c9`) predates all of T.
+- READMEs and docs searched for the deleted names `require_payload_depth` and `DeserializeBoundedUntyped`: none remain
+  in tracked docs or READMEs (the live names are `require_record_payload` / `check_record_payload` and
+  `DeserializeUntyped`).
+- `tests/vectors/union-parity/README.md` counts: the "Extra trailing slot" table's last row (the unit arm) and the
+  `outcomes.msgpack` "nine rows" statement are consistent with `slot-outcomes.msgpack`; the `bytes-after-*` section
+  does not list `outcomes.msgpack`'s relation to `bytes-after-outcomes.msgpack` beyond the row shape (no defect, noted).
+- `packages/cultmesh-py` has no CHANGELOG, so its `>=0.4.0` pin bump is recorded only in the manifest and in the
+  cultnet-py entry.
 
 ## Rationale
 
