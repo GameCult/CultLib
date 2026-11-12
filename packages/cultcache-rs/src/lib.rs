@@ -2772,7 +2772,29 @@ pub struct CultCache {
     /// Records a store holds that no registered type claims: (store index, the envelope as the store read it). Derived from the last
     /// pull and replaced with it; written nowhere else. It decides only refusals at its keys.
     foreign: Vec<(usize, CultCacheEnvelope)>,
+    /// Why the last pull of the backing stores was refused; `None` once a pull succeeds. While set, every write and removal is refused.
+    load_refused: Option<String>,
 }
+
+/// A write or removal refused because the cache's last load of its backing stores was refused. The cache holds no
+/// image of those stores, so any write would persist an image that lacks the records it never read. Repair the store
+/// named by `reason` (which names a type, a key and a clause, never a payload) and load again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CultCacheLoadRefused {
+    pub reason: String,
+}
+
+impl std::fmt::Display for CultCacheLoadRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "CultCache refuses writes and removals: its load of the backing stores failed ({}); repair the store and load again",
+            self.reason
+        )
+    }
+}
+
+impl std::error::Error for CultCacheLoadRefused {}
 
 /// A record a store holds that no registered type claims: carried, never served.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2835,6 +2857,7 @@ impl CultCache {
             projectors: BTreeMap::new(),
             stores: Vec::new(),
             foreign: Vec::new(),
+            load_refused: None,
         }
     }
 
@@ -2971,6 +2994,32 @@ impl CultCache {
     /// Reads every store into a staged image and replaces the cache's view
     /// only when all of them loaded, so a refused load admits nothing.
     pub fn pull_all_backing_stores(&mut self) -> Result<()> {
+        match self.stage_pull() {
+            Ok((loaded, foreign, holders)) => {
+                self.entries = loaded;
+                self.foreign = foreign;
+                self.index_holders = holders;
+                self.load_refused = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.load_refused = Some(format!("{error:#}"));
+                Err(error)
+            }
+        }
+    }
+
+    /// The one gate of every write and removal: a cache whose load was refused holds no image of its stores.
+    fn require_loaded(&self) -> Result<()> {
+        match &self.load_refused {
+            Some(reason) => Err(CultCacheLoadRefused { reason: reason.clone() }.into()),
+            None => Ok(()),
+        }
+    }
+
+    /// The image every store holds, judged whole, installed nowhere.
+    #[allow(clippy::type_complexity)]
+    fn stage_pull(&self) -> Result<(BTreeMap<(String, String), CultCacheEnvelope>, Vec<(usize, CultCacheEnvelope)>, IndexHolders)> {
         let mut loaded = BTreeMap::new();
         let mut foreign = Vec::new();
         let known_types: BTreeSet<String> = self.definitions.keys().cloned().collect();
@@ -3010,10 +3059,7 @@ impl CultCache {
         }
         self.refuse_second_globals(&loaded)?;
         let holders = self.judge_image(&loaded)?;
-        self.entries = loaded;
-        self.foreign = foreign;
-        self.index_holders = holders;
-        Ok(())
+        Ok((loaded, foreign, holders))
     }
 
     /// The records the last pull found in a store that no registered type claims, sorted by key (UTF-16 order). The cache does not
@@ -3185,6 +3231,7 @@ impl CultCache {
     }
 
     pub fn put<T: DatabaseEntry>(&mut self, key: impl Into<String>, value: &T) -> Result<T> {
+        self.require_loaded()?;
         let (entry, parsed) = self.prepare_entry(key, value)?;
         self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
         self.refuse_retype(&self.entries, &self.foreign, &entry)?;
@@ -3261,6 +3308,7 @@ impl CultCache {
     }
 
     pub fn put_prepared_batch(&mut self, staged: Vec<CultCacheEnvelope>) -> Result<()> {
+        self.require_loaded()?;
         if staged.is_empty() {
             return Err(anyhow!("CultCache batch must contain at least one entry"));
         }
@@ -3327,6 +3375,7 @@ impl CultCache {
     }
 
     pub fn put_envelope<T: DatabaseEntry>(&mut self, entry: CultCacheEnvelope) -> Result<T> {
+        self.require_loaded()?;
         let parsed = self.validate_envelope::<T>(&entry)?;
         self.refuse_claimed_id(&entry)?;
         self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
@@ -3346,6 +3395,7 @@ impl CultCache {
     /// admission; CultCache still enforces registered type, identity, timestamp,
     /// the payload nesting bound ([`MAX_PAYLOAD_DEPTH`]), routing, and persistence.
     pub fn put_raw_envelope(&mut self, entry: CultCacheEnvelope) -> Result<()> {
+        self.require_loaded()?;
         if !self.definitions.contains_key(&entry.r#type) {
             return Err(anyhow!(
                 "No entry type registered for CultCache envelope type {:?}",
@@ -3419,6 +3469,7 @@ impl CultCache {
     }
 
     pub fn delete<T: DatabaseEntry>(&mut self, key: &str) -> Result<bool> {
+        self.require_loaded()?;
         self.require_entry_type::<T>()?;
         let id = entry_id_parts(T::TYPE, key);
         let Some(entry) = self.entries.get(&id).cloned() else {

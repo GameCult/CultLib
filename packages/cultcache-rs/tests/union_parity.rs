@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use cultcache_rs::CultCache;
 use cultcache_rs::CacheBackingStore;
 use cultcache_rs::CultCacheEnvelope;
+use cultcache_rs::CultCacheLoadRefused;
 use cultcache_rs::CultCacheSoaTable;
 use cultcache_rs::MAX_PAYLOAD_DEPTH;
 use cultcache_rs::PayloadTooDeep;
@@ -828,6 +829,81 @@ fn depth_beats_a_tail() {
     deep.push(0xc0);
     let error = decode_payload::<UnionSurface>(&deep).unwrap_err();
     assert_eq!(error.downcast_ref::<PayloadTooDeep>(), Some(&TOO_DEEP), "{error:#}");
+}
+
+// Depth is refused where the payload is loaded: a store holding one nested past the bound is not read.
+#[test]
+fn depth_is_refused_at_load() {
+    let mut deep = vec![0x91u8; MAX_PAYLOAD_DEPTH + 1];
+    deep.push(0xc0);
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("deep.cc");
+    SingleFileMessagePackBackingStore::new(&path).push(&envelope("k", &deep)).unwrap();
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<UnionSurface>().unwrap();
+    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+    let error = cache.pull_all_backing_stores().unwrap_err();
+    assert_eq!(error.downcast_ref::<PayloadTooDeep>(), Some(&TOO_DEEP), "{error:#}");
+    assert!(cache.snapshot().is_empty());
+}
+
+// A cache whose load was refused refuses every write and removal and leaves the store as it was: a
+// later write would otherwise persist the empty image over the records it never read.
+#[test]
+fn a_refused_load_refuses_every_write() {
+    let tail = {
+        let mut bytes = vector("union-surface.msgpack");
+        bytes.push(0xc0);
+        bytes
+    };
+    let good = envelope("good", &vector("union-surface.msgpack"));
+    let bad = envelope("bad", &tail);
+    for redb in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(if redb { "seed.redb" } else { "seed.cc" });
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<UnionSurface>().unwrap();
+        if redb {
+            let mut store = RedbMessagePackBackingStore::new(&path).unwrap();
+            store.push(&good).unwrap();
+            store.push(&bad).unwrap();
+            drop(store);
+            cache.add_generic_backing_store(RedbMessagePackBackingStore::new(&path).unwrap()).unwrap();
+        } else {
+            let mut store = SingleFileMessagePackBackingStore::new(&path);
+            store.push(&good).unwrap();
+            store.push(&bad).unwrap();
+            cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+        }
+        let load = cache.pull_all_backing_stores().unwrap_err();
+        assert!(format!("{load:#}").contains("bytes after"), "{load:#}");
+        let before = std::fs::read(&path).unwrap();
+        let value = constructed();
+        let staged = cache.prepare_entry("new", &value).unwrap().0;
+        let results: Vec<(&str, anyhow::Error)> = vec![
+            ("put", cache.put("new", &value).unwrap_err()),
+            ("put_prepared_batch", cache.put_prepared_batch(vec![staged.clone()]).unwrap_err()),
+            ("put_envelope", cache.put_envelope::<UnionSurface>(staged.clone()).unwrap_err()),
+            ("put_raw_envelope", cache.put_raw_envelope(staged.clone()).unwrap_err()),
+            ("update", cache.update::<UnionSurface, _>("good", |current| current.unwrap_or_else(constructed)).unwrap_err()),
+            ("delete", cache.delete::<UnionSurface>("good").unwrap_err()),
+            ("delete a key the image lacks", cache.delete::<UnionSurface>("absent").unwrap_err()),
+        ];
+        for (door, error) in results {
+            let refusal = error.downcast_ref::<CultCacheLoadRefused>().unwrap_or_else(|| panic!("{door} redb={redb}: {error:#}"));
+            assert!(refusal.to_string().contains("bytes after"), "{door}: {refusal}");
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before, "redb={redb}: the store changed");
+        assert!(cache.snapshot().is_empty());
+        // Repairing the store and loading again lifts it.
+        if redb {
+            RedbMessagePackBackingStore::new(&path).unwrap().delete(&bad).unwrap();
+        } else {
+            SingleFileMessagePackBackingStore::new(&path).delete(&bad).unwrap();
+        }
+        cache.pull_all_backing_stores().unwrap();
+        cache.put("new", &value).unwrap();
+    }
 }
 
 // A payload that ends early is not bytes after the value: the decoder refuses it, not the check.
