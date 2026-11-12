@@ -12,6 +12,7 @@ from cultcache_py import (
     CultCache,
     JsonLinesBackingStore,
     SingleFileMessagePackBackingStore,
+    StoreLinkedError,
     StoreUnreadableError,
     define_database_entry_type,
     define_document_type,
@@ -1431,10 +1432,10 @@ class CultCacheTests(unittest.TestCase):
                 self.assertNotIn("SECRET", str(caught.exception))
                 self.assertIn("not a valid store", str(caught.exception))
 
-    # What a write does through a symbolic link today. R3 decides whether a write resolves
-    # the link or refuses it; this pins the current behaviour so that change is deliberate.
+    # A write at a store path that is a link is refused: a replace there would swap the link for a regular file and
+    # detach the store from its target. Reads through a live link keep working.
     @unittest.skipIf(os.name != "posix", "symbolic links need POSIX here")
-    def test_r3_decides_resolve_or_refuse_a_push_through_a_live_link_replaces_the_link(self) -> None:
+    def test_a_write_at_a_live_link_is_refused_and_nothing_changes_while_a_read_through_it_works(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             volume = Path(tmp) / "volume"
             volume.mkdir()
@@ -1442,12 +1443,36 @@ class CultCacheTests(unittest.TestCase):
             envelope = CultCacheEnvelope(key="a", type="t", payload=b"\x90", stored_at="2026-09-30T00:00:00Z")
             SingleFileMessagePackBackingStore(target).push(envelope)
             before = target.read_bytes()
-            link = Path(tmp) / "store.cc"
+            volume_before = sorted(p.name for p in volume.iterdir())
+            link = Path(tmp) / "link.cc"
             link.symlink_to(target)
-            SingleFileMessagePackBackingStore(link).push(replace(envelope, key="b"))
-            self.assertFalse(link.is_symlink())
-            self.assertTrue(link.is_file())
+            store = SingleFileMessagePackBackingStore(link)
+            for write in (
+                lambda: store.push(replace(envelope, key="b")),
+                lambda: store.push_all([replace(envelope, key="b")]),
+                lambda: store.delete("t", "a"),
+            ):
+                with self.assertRaises(StoreLinkedError) as caught:
+                    write()
+                self.assertIn(str(link), str(caught.exception))
+            self.assertTrue(link.is_symlink())
             self.assertEqual(target.read_bytes(), before)
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["link.cc", "volume"])
+            self.assertEqual(sorted(p.name for p in volume.iterdir()), volume_before)
+            self.assertEqual([item.key for item in store.pull_all()], ["a"])
+
+    @unittest.skipIf(os.name != "posix", "symbolic links need POSIX here")
+    def test_a_write_at_a_live_directory_link_is_refused_as_a_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp) / "real"
+            real.mkdir()
+            link = Path(tmp) / "dirlink"
+            link.symlink_to(real, target_is_directory=True)
+            with self.assertRaises(StoreLinkedError):
+                SingleFileMessagePackBackingStore(link).push(
+                    CultCacheEnvelope(key="a", type="t", payload=b"\x90", stored_at="2026-09-30T00:00:00Z"))
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(list(real.iterdir()), [])
 
     @unittest.skipIf(os.name != "posix", "symbolic links need POSIX here")
     def test_a_dangling_symlink_at_a_store_path_is_an_os_error_and_nothing_is_written(self) -> None:
@@ -1460,7 +1485,8 @@ class CultCacheTests(unittest.TestCase):
                 store = store_type(path)
                 with self.assertRaises(FileNotFoundError):
                     store.pull_all()
-                with self.assertRaises(FileNotFoundError):
+                # The single-file store refuses the link itself; the unlocked JSON lines store meets the missing target.
+                with self.assertRaises(StoreLinkedError if store_type is SingleFileMessagePackBackingStore else FileNotFoundError):
                     store.push(CultCacheEnvelope(key="k", type="t", payload=b"\x90", stored_at="2026-09-30T00:00:00Z"))
                 self.assertTrue(path.is_symlink())
                 self.assertEqual(list(volume.iterdir()), [])

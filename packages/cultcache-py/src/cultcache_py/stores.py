@@ -440,11 +440,33 @@ class WindowsReplaceKernel(ReplaceKernel):
         return 0 if self._k.MoveFileExW(staged, destination, flags) else self._ctypes.get_last_error()
 
 
+class StoreLinkedError(OSError):
+    """A write was asked of a store path that is a link: a replace there would swap the link for a regular file."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"CultCache store {path} is a link, and a write at it would replace the link; configure the link's target as the store path.")
+        self.path = path
+
+
+def _refuse_linked(path: Path) -> None:
+    """Refuses a link at the store path: a file or directory link, and on Windows a junction or any reparse point (islink misses
+    junctions before Python 3.12). Absent is not a link."""
+    linked = os.path.islink(path)
+    if not linked and sys.platform == "win32":
+        try:
+            linked = bool(os.lstat(path).st_file_attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+        except FileNotFoundError:
+            pass
+    if linked:
+        raise StoreLinkedError(path)
+
+
 @contextmanager
 def store_write_lock(path: Path, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
     """Holds the exclusive store lock on `<path>.lock`, the lock the C#, Rust and TypeScript runtimes take: flock on Unix,
     LockFileEx over the whole file on Windows, polled every 10 ms with no handle held between polls. The lock file is
     created if absent and never written or deleted."""
+    _refuse_linked(path)
     lock_path = path.with_name(path.name + ".lock")
     deadline = time.monotonic() + timeout
     while True:

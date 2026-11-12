@@ -19,7 +19,7 @@ from .documents import (
     read_payload_tree,
 )
 from .leaves import SlotCodec
-from .stores import JsonLinesBackingStore, SchemaConflictError, SingleFileMessagePackBackingStore, StoreUnreadableError
+from .stores import JsonLinesBackingStore, SchemaConflictError, SingleFileMessagePackBackingStore, StoreLinkedError, StoreUnreadableError
 
 __all__ = [
     "BackingStore",
@@ -38,6 +38,7 @@ __all__ = [
     "SchemaConflictError",
     "SingleFileMessagePackBackingStore",
     "SlotCodec",
+    "StoreLinkedError",
     "StoreUnreadableError",
     "UnionArm",
     "UnreadSlots",
