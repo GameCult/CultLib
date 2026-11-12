@@ -149,6 +149,7 @@ fn every_read_only_vector_decodes_marked_and_is_not_writable() {
         let mut cache = registered();
         let dir = tempfile::tempdir().unwrap();
         cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(dir.path().join("s.cc"))).unwrap();
+        cache.pull_all_backing_stores().unwrap();
         cache.put_raw_envelope(envelope("k", payload.clone())).unwrap();
         assert_eq!(cache.get::<UnionSurface>("k").unwrap(), Some(constructed()), "{file}");
         assert!(!cache.is_writable(UnionSurface::TYPE, "k").unwrap(), "{file}");
@@ -470,6 +471,7 @@ fn is_writable_is_false_for_a_type_with_no_home_store() {
     let mut cache = registered();
     // One store, routed to SlotUnit only: UnionSurface has no home.
     cache.add_backing_store(SingleFileMessagePackBackingStore::new(dir.path().join("s.cc")), [SlotUnit::TYPE]).unwrap();
+    cache.pull_all_backing_stores().unwrap();
     assert!(cache.put("k", &constructed()).is_err());
     assert!(!cache.is_writable(UnionSurface::TYPE, "k").unwrap());
     assert!(cache.is_writable(SlotUnit::TYPE, "k").unwrap());

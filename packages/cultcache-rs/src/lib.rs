@@ -2951,9 +2951,10 @@ enum LoadState {
     Refused(String),
 }
 
-/// A write or removal refused because the cache's last load of its backing stores was refused. The cache holds no
-/// image of those stores, so any write would persist an image that lacks the records it never read. Repair the store
-/// named by `reason` (which names a type, a key and a clause, never a payload) and load again.
+/// A write or removal refused because the cache holds no image of its backing stores: its last load was refused, or it has
+/// not pulled since its stores were attached. Any write would persist an image that lacks the records it never read.
+/// Pull; for a refused load, first repair the store named by `reason` (which names a type, a key and a clause, never a
+/// payload).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CultCacheLoadRefused {
     pub reason: String,
@@ -3290,9 +3291,12 @@ impl CultCache {
 
     /// Whether a write or removal of `(type_id, key)` would be admitted: false when the held payload carries slots past
     /// its registered type's declared slots, at any depth, or cannot be read by this build at all (the record is
-    /// read-only), when a store carries a foreign record at the key, or when another registered type holds it. True for a
+    /// read-only), when the cache holds no image of its stores (see [`CultCacheLoadRefused`]), when a store carries a foreign record at the key, or when another registered type holds it. True for a
     /// key nothing holds. An unregistered type is an error. Advisory: the write entries ask the same checks themselves.
     pub fn is_writable(&self, type_id: &str, key: &str) -> Result<bool> {
+        if self.require_loaded().is_err() {
+            return Ok(false);
+        }
         if !matches!(self.held_finding(type_id, key)?, HeldFinding::Free) {
             return Ok(false);
         }
