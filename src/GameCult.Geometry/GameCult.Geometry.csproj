@@ -12,7 +12,7 @@
     <ProjectReference Include="..\GameCult.Caching\GameCult.Caching.csproj" />
     <ProjectReference Include="..\GameCult.Caching.MessagePack\GameCult.Caching.MessagePack.csproj" />
     <PackageReference Include="MessagePack" Version="3.1.7" />
-    <PackageReference Include="System.Text.Json" Version="9.0.10" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
   </ItemGroup>
 
   <Import Project="..\GameCult.Caching.MessagePack\buildTransitive\GameCult.Caching.MessagePack.targets" />
