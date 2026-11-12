@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import dataclasses
 import shutil
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,12 +12,14 @@ import msgpack
 from cultcache_py import (
     CultCache,
     CultCachePayloadDepthError,
+    SlotCodec,
     SchemaConflictError,
     SingleFileMessagePackBackingStore,
     UnionArm,
     UnreadSlots,
     database_entry_field,
     define_database_entry_type,
+    define_record_codec,
     leaves as t,
 )
 import test_union_parity as _parity
@@ -129,6 +133,32 @@ class PayloadMarkTests(unittest.TestCase):
 
     def test_a_codec_decoded_outside_a_payload_decode_notes_nothing(self) -> None:
         self.assertEqual(unit_outcome.decode([2, [SLOT]]), UnionArm("Denied"))
+
+    def test_the_scope_belongs_to_its_thread(self) -> None:
+        def decode_elsewhere(raw):
+            thread = threading.Thread(target=lambda: unit_outcome.decode([2, [SLOT]]))
+            thread.start()
+            thread.join()
+            return raw
+
+        outer = define_database_entry_type("tests.threaded", [database_entry_field("a", 0, codec=SlotCodec(lambda v: v, decode_elsewhere))])
+        self.assertIsNone(outer.decode_payload_marked(msgpack.packb(["x"]))[1])
+
+    def test_a_nested_payload_decode_restores_the_outer_scope(self) -> None:
+        def decode_clean_inside(raw):
+            surface_document.decode_payload_marked(_vector("union-surface.msgpack"))
+            return raw
+
+        inner = define_record_codec("Inner", [database_entry_field("x", 0, codec=t.string)])
+        outer = define_database_entry_type(
+            "tests.nested",
+            [
+                database_entry_field("a", 0, codec=SlotCodec(lambda v: v, decode_clean_inside)),
+                database_entry_field("b", 1, codec=inner),
+            ],
+        )
+        _, mark = outer.decode_payload_marked(msgpack.packb(["x", ["v", SLOT]]))
+        self.assertEqual(mark, UnreadSlots("Inner", 2, 1, 1, False))
 
 
 class StoreRowTests(unittest.TestCase):
@@ -250,6 +280,65 @@ class StoreRowTests(unittest.TestCase):
         _copy_store_without_variants(VECTORS / "extra-slot-consent.cc", path)
         cache = _open(path, unlisted)
         self.assertFalse(cache.is_writable(unlisted, "consented"))
+
+    def test_a_written_envelope_is_judged_on_the_id_it_is_stored_under_so_a_reload_agrees(self) -> None:
+        path, cache = self._store("extra-slot-consent.cc")
+        arrived = next(e for e in SingleFileMessagePackBackingStore(path).pull_all() if e.key == "consented")
+        self.assertEqual(arrived.schema_id, "tests.union_surface.wide")
+        cache.put_envelope(declaring_document, dataclasses.replace(arrived, key="via-envelope"))
+        cache.put_envelopes(declaring_document, [dataclasses.replace(arrived, key="via-batch")])
+        in_memory = [cache.is_writable(declaring_document, k) for k in ("via-envelope", "via-batch")]
+        cache.pull_all_backing_stores()
+        self.assertEqual([cache.is_writable(declaring_document, k) for k in ("via-envelope", "via-batch")], in_memory)
+        self.assertEqual(in_memory, [False, False])
+
+    def test_is_writable_agrees_with_the_write_for_a_key_a_store_carries_foreign(self) -> None:
+        path = self.tmp / "foreign.cc"
+        _copy_store_without_variants(VECTORS / "extra-slot-store.cc", path)
+        cache = _open(path, surface_document)  # tests.slot_unit is not registered: its record is carried foreign
+        self.assertEqual([r.key for r in cache.foreign_records()], ["unit-arm"])
+        self.assertFalse(cache.is_writable(surface_document, "unit-arm"))
+        with self.assertRaises(SchemaConflictError):
+            cache.put(surface_document, "unit-arm", _surface_value())
+        with self.assertRaises(SchemaConflictError):
+            cache.delete(surface_document, "unit-arm")
+
+    def test_every_key_of_a_batch_is_checked_wherever_the_marked_one_stands(self) -> None:
+        path, cache = self._store("extra-slot-store.cc")
+        before = path.read_bytes()
+        envelope = cache.get_required_envelope(surface_document, "clean")
+        fresh = dataclasses.replace(envelope, key="fresh")
+        marked = dataclasses.replace(envelope, key="marked")
+        for batch in ([fresh, marked], [marked, fresh], [fresh, dataclasses.replace(envelope, key="f2"), marked]):
+            with self.assertRaises(SchemaConflictError) as caught:
+                cache.put_envelopes(surface_document, batch)
+            self.assertEqual(caught.exception.record_key, "marked")
+            self.assertEqual(path.read_bytes(), before)
+            self.assertIsNone(cache.get(surface_document, "fresh"))
+
+    def test_only_the_marks_that_hold_a_record_read_only_are_kept_by_key(self) -> None:
+        _, store = self._store("extra-slot-store.cc")
+        self.assertEqual({k: v[0] for k, v in store._state.unread.items()}, {"marked": surface_document.type, "unit-arm": "tests.slot_unit"})
+        _, consent = self._store("extra-slot-consent.cc")
+        self.assertEqual(sorted(consent._state.unread), ["nested", "over-consent"])  # the consented mark is no state
+
+    def test_an_arrival_with_no_catalog_entry_under_a_listed_id_is_not_consented(self) -> None:
+        wide = next(e for e in SingleFileMessagePackBackingStore(VECTORS / "extra-slot-consent.cc").pull_all() if e.key == "consented")
+        bare = dataclasses.replace(wide, catalog_entry=None)
+
+        class Held:
+            def pull_all(self):
+                return [bare]
+
+            def push(self, envelope): ...
+
+            def push_all(self, envelopes): ...
+
+            def delete(self, type, key): ...
+
+        cache = CultCache.builder().register_document_type(declaring_document).add_generic_store(Held()).build()
+        cache.pull_all_backing_stores()
+        self.assertFalse(cache.is_writable(declaring_document, "consented"))
 
     def test_writing_another_record_and_flushing_carries_the_marked_one_unchanged(self) -> None:
         path, cache = self._store("extra-slot-store.cc")
