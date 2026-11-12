@@ -5,7 +5,7 @@
 // lazily inside `loadKernel`, so a consumer that never writes a store never loads it.
 
 import { closeSync, openSync, constants as fsConstants } from "node:fs";
-import { mkdir, open, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -22,6 +22,30 @@ export class StoreReplacedNotDurableError extends Error {
       }`,
     );
     this.name = "StoreReplacedNotDurableError";
+  }
+}
+
+/** Thrown when a write is asked of a store path that is a link: a replace there would swap the link for a regular file. */
+export class StoreLinkedError extends Error {
+  constructor(readonly path: string) {
+    super(`CultCache store ${path} is a link, and a write at it would replace the link; configure the link's target as the store path.`);
+    this.name = "StoreLinkedError";
+  }
+}
+
+/** Refuses a link at the store path (file or directory link; libuv reports Windows junctions as links). Absent is not a link. */
+export async function refuseLinkedStore(storePath: string): Promise<void> {
+  let linked = false;
+  try {
+    linked = (await lstat(storePath)).isSymbolicLink();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  if (linked) {
+    throw new StoreLinkedError(storePath);
   }
 }
 
@@ -177,6 +201,7 @@ export async function withStoreWriteLock<T>(
 ): Promise<T> {
   const lockPath = `${storePath}.lock`;
   const timeoutMs = options.timeoutMs ?? LOCK_TIMEOUT_MS;
+  await refuseLinkedStore(storePath);
   await mkdir(dirname(lockPath), { recursive: true });
 
   const started = Date.now();

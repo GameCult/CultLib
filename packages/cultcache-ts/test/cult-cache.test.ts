@@ -15,6 +15,7 @@ import { CultCache } from "../src/cult-cache";
 import { inspectCultCacheBytes } from "../src/cult-cache-inspector";
 import { defineDocumentRegistry, defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "../src/document";
 import { SingleFileMessagePackBackingStore, readSingleFileStore, readStoreBytes } from "../src/single-file-messagepack-backing-store";
+import { StoreLinkedError, withStoreWriteLock } from "../src/store-file";
 import { SchemaConflictError, StoreUnreadableError, refuseUnreadStoreBytes } from "../src/store-format";
 import type { AnyCultCacheDocumentDefinition, CacheBackingStore, CultCacheEnvelope, CultCacheSchema } from "../src/types";
 
@@ -2466,8 +2467,8 @@ test("SingleFileMessagePackBackingStore refuses a dangling symlink at its path a
     () => store.pullAll(),
     (error: NodeJS.ErrnoException) => error.code === "ENOENT" && error.message.includes("symbolic link") && error.message.includes(file),
   );
-  await assert.rejects(() => store.push(envelope), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
-  await assert.rejects(() => store.pushAll([envelope], { soft: true }), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+  await assert.rejects(() => store.push(envelope), (error: unknown) => error instanceof StoreLinkedError);
+  await assert.rejects(() => store.pushAll([envelope], { soft: true }), (error: unknown) => error instanceof StoreLinkedError);
   assert.ok((await lstat(file)).isSymbolicLink());
   assert.deepEqual(await readdir(volume), []);
 });
@@ -2508,9 +2509,9 @@ test("SingleFileMessagePackBackingStore record refusal names only a string key",
   }
 });
 
-// What a write does through a symbolic link today. R3 decides whether a write resolves the link
-// or refuses it; these pin the current behaviour so that change is deliberate.
-test("R3 decides resolve-or-refuse: a push through a live link replaces the link", { skip: process.platform === "win32" }, async () => {
+// A write at a store path that is a link is refused: a replace there would swap the link for a regular file and
+// detach the store from its target. Reads through a live link keep working.
+test("a write at a live link is refused and nothing changes, while a read through it still works", { skip: process.platform === "win32" }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-live-link-"));
   const volume = join(dir, "volume");
   await mkdir(volume);
@@ -2518,11 +2519,31 @@ test("R3 decides resolve-or-refuse: a push through a live link replaces the link
   const envelope = { key: "a", type: "t", payload: documentPayloadFromBytes(Uint8Array.of(0x90)), storedAt: "2026-09-30T00:00:00Z" };
   await new SingleFileMessagePackBackingStore(target).push(envelope);
   const before = await readFile(target);
-  const link = join(dir, "store.cc");
+  const volumeBefore = (await readdir(volume)).sort();
+  const link = join(dir, "link.cc");
   await symlink(target, link);
-  await new SingleFileMessagePackBackingStore(link).push({ ...envelope, key: "b" });
-  assert.ok((await lstat(link)).isFile());
+  const store = new SingleFileMessagePackBackingStore(link);
+  const refused = (error: unknown) => error instanceof StoreLinkedError && error.path === link && error.message.includes(link);
+  await assert.rejects(() => store.push({ ...envelope, key: "b" }), refused);
+  await assert.rejects(() => store.pushAll([{ ...envelope, key: "b" }]), refused);
+  await assert.rejects(() => store.delete(envelope), refused);
+  assert.ok((await lstat(link)).isSymbolicLink());
   assert.deepEqual(await readFile(target), before);
+  assert.deepEqual((await readdir(dir)).sort(), ["link.cc", "volume"]);
+  assert.deepEqual((await readdir(volume)).sort(), volumeBefore);
+  assert.deepEqual((await store.pullAll()).map((e) => e.key), ["a"]);
+});
+
+test("a write at a live directory link is refused as a link", { skip: process.platform === "win32" }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-dir-link-"));
+  const realDir = join(dir, "real");
+  await mkdir(realDir);
+  const link = join(dir, "dirlink");
+  await symlink(realDir, link);
+  const envelope = { key: "a", type: "t", payload: documentPayloadFromBytes(Uint8Array.of(0x90)), storedAt: "2026-09-30T00:00:00Z" };
+  await assert.rejects(() => new SingleFileMessagePackBackingStore(link).push(envelope), (error: unknown) => error instanceof StoreLinkedError);
+  assert.ok((await lstat(link)).isSymbolicLink());
+  assert.deepEqual(await readdir(realDir), []);
 });
 
 test("a pushAll through a dangling link is refused like push, and the link and its volume are left as they were", { skip: process.platform === "win32" }, async () => {
@@ -2532,7 +2553,7 @@ test("a pushAll through a dangling link is refused like push, and the link and i
   const link = join(dir, "store.cc");
   await symlink(join(volume, "store.cc"), link);
   const envelope = { key: "a", type: "t", payload: documentPayloadFromBytes(Uint8Array.of(0x90)), storedAt: "2026-09-30T00:00:00Z" };
-  await assert.rejects(() => new SingleFileMessagePackBackingStore(link).pushAll([envelope]), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+  await assert.rejects(() => new SingleFileMessagePackBackingStore(link).pushAll([envelope]), (error: unknown) => error instanceof StoreLinkedError);
   assert.ok((await lstat(link)).isSymbolicLink());
   assert.deepEqual(await readdir(volume), []);
 });
@@ -2827,7 +2848,6 @@ test("every registration refusal is a SchemaConflictError naming the id and both
 // Cross-runtime store lock: each runtime's writer excludes the others on `<file>.lock`.
 
 import { spawn } from "node:child_process";
-import { withStoreWriteLock } from "../src/store-file";
 
 type LockHolder = { exited: Promise<number | null>; stderr: () => string };
 
