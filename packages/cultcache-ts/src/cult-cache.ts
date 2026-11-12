@@ -538,7 +538,6 @@ export class CultCache {
       if (!envelope.storedAt || envelope.storedAt.trim().length === 0) {
         throw new Error(`CultCache envelope storedAt for type "${definition.type}" must be non-empty.`);
       }
-      this.#requireGlobalKey(registered, envelope.key);
 
       const payload = this.#cloneBytes(envelope.payload);
       const { value: parsed, unreadSlots } = registered.formatter.decode(payload) as { value: CultCacheDocumentValue<TDefinition>; unreadSlots?: NotedSlots };
@@ -611,24 +610,22 @@ export class CultCache {
   }
 
   /**
-   * Whether a removal of the key, or a write of the record's own type, would be let through: the write's own check, asked of
-   * the record the cache holds (false when a store carries the key foreign, or when the record carries unread slots nothing
-   * consents to). Live and advisory: the write still decides.
+   * Whether a removal of the key, or a write of the record's own type, would be let through: the write's own check: it asks the one judge #writeNow asks (a key a store carries foreign, a record of another type the
+   * write does not own or cannot replace, a global at another key, a record carrying unread slots nothing consents to). Live and
+   * advisory: the write still decides.
    */
   isWritable(definition: AnyCultCacheDocumentDefinition, key: string): boolean {
     const registered = this.#requireDefinition(definition);
-    const type = registered.definition.type;
-    if (this.#hydrated.foreign.some((record) => record.key === key)
-      || this.#unreadRefusal(this.#hydrated.entries.get(this.#entryId(type, key))) !== undefined) {
-      return false;
-    }
-    // The record of another type a write would restamp (or be refused by): the write's own questions, writeNow's #refuseRetype.
-    const other = this.#heldUnderOtherType(this.#hydrated, type, key);
     const written: CultCacheEnvelope = {
-      key, type, payload: documentPayloadFromBytes(new Uint8Array(0)), storedAt: "",
+      key, type: registered.definition.type, payload: documentPayloadFromBytes(new Uint8Array(0)), storedAt: "",
       schemaId: registered.catalogEntry.schemaId, catalogEntry: registered.catalogEntry,
     };
-    return other === undefined || (writtenOwns(written, schemaIdForEnvelope(other)) && this.#unreadRefusal(other) === undefined);
+    try {
+      this.#judge(registered, key, written);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   // What the last pull found that no registered type claims, by key ordinal. A later registration claims a record at the next pull.
@@ -726,7 +723,6 @@ export class CultCache {
     value: CultCacheDocumentValue<TDefinition>,
   ): Promise<CultCacheDocumentValue<TDefinition>> {
     const registered = this.#requireDefinition(definition);
-    this.#requireGlobalKey(registered, key);
     const payload = registered.formatter.encode(value);
     const { value: parsed, unreadSlots } = registered.formatter.decode(payload) as { value: CultCacheDocumentValue<TDefinition>; unreadSlots?: NotedSlots };
     const entry: CultCacheEnvelope = {
@@ -745,19 +741,7 @@ export class CultCache {
   // is touched; once the store accepts, applying to the cache has no fallible step.
   async #writeNow(registered: RegisteredDefinition, entry: CultCacheEnvelope, value: unknown, unreadSlots?: NotedSlots): Promise<void> {
     const home = this.#homeStore(entry.type);
-    const retyped = this.#refuseRetype(entry);
-    this.#refuseUnread(this.#hydrated.entries.get(this.#entryId(entry.type, entry.key)));
-    this.#refuseUnread(retyped);
-    if (retyped !== undefined && this.#homeStore(retyped.type) !== home) {
-      // The write owns the held record's id and would replace it, but the held record is in another store; the push
-      // reaches only this type's home, so the old record would stay in its own file and load as a second holder.
-      throw new SchemaConflictError(
-        schemaIdForEnvelope(entry),
-        [retyped.type, entry.type],
-        entry.key,
-        `CultCache holds record "${entry.key}" as type "${retyped.type}" in another store than the home of type "${entry.type}", so the rename cannot replace it; remove the record first.`,
-      );
-    }
+    const retyped = this.#judge(registered, entry.key, entry);
     const hydrated = this.#admitEntry(this.#hydrated, registered, entry, value, unreadSlots);
     this.#refuseIndexSharing(this.#hydrated, entry.type, registered.catalogEntry.schemaName, entry.key, hydrated.lookups);
     const legacy = this.#hydrated.legacyGlobals.get(entry.type);
@@ -771,6 +755,35 @@ export class CultCache {
       this.#removeEntry(this.#hydrated, this.#definitions.get(retyped.type)!, retyped);
     }
     this.#installEntry(this.#hydrated, registered, hydrated);
+  }
+
+  // The one judge of whether a key may be written (a written envelope) or removed (none), before any store is touched: it throws the
+  // refusal, and #writeNow, #deleteNow and isWritable all ask it, so the query cannot disagree with the write. For a write it
+  // returns the held record of another type that the write owns and so restamps, if any. A refusal names keys and schemas,
+  // never a payload or a slot value.
+  #judge(registered: RegisteredDefinition, key: string, written?: CultCacheEnvelope): HydratedEntry | undefined {
+    const type = registered.definition.type;
+    const held = this.#hydrated.entries.get(this.#entryId(type, key));
+    if (written === undefined) {
+      this.#refuseForeignKey(key, type, "removed");
+      this.#refuseUnread(held);
+      return undefined;
+    }
+    this.#requireGlobalKey(registered, key);
+    const retyped = this.#refuseRetype(written);
+    this.#refuseUnread(held);
+    this.#refuseUnread(retyped);
+    if (retyped !== undefined && this.#homeStore(retyped.type) !== this.#homeStore(type)) {
+      // The write owns the held record's id and would replace it, but the held record is in another store; the push
+      // reaches only this type's home, so the old record would stay in its own file and load as a second holder.
+      throw new SchemaConflictError(
+        schemaIdForEnvelope(written),
+        [retyped.type, type],
+        key,
+        `CultCache holds record "${key}" as type "${retyped.type}" in another store than the home of type "${type}", so the rename cannot replace it; remove the record first.`,
+      );
+    }
+    return retyped;
   }
 
   // The one refusal of a record held read-only for the slots its payload carries past this build's: a write or a removal of
@@ -854,14 +867,13 @@ export class CultCache {
     key: string,
   ): Promise<boolean> {
     const registered = this.#requireDefinition(definition);
+    // variants:ruling:unheld-removal-refused-at-commit: a key a store carries foreign is refused, a key held under
+    // another type or by nobody is the existing false.
+    this.#judge(registered, key);
     const entry = this.#hydrated.entries.get(this.#entryId(definition.type, key));
     if (!entry) {
-      // variants:ruling:unheld-removal-refused-at-commit: a key a store carries foreign is refused, a key held under
-      // another type or by nobody is the existing false.
-      this.#refuseForeignKey(key, definition.type, "removed");
       return false;
     }
-    this.#refuseUnread(entry);
 
     const home = this.#homeStore(definition.type);
     await home?.delete(this.#hydrated.legacyGlobals.get(definition.type) ?? this.#toEnvelope(entry));

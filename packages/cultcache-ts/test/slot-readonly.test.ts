@@ -9,7 +9,7 @@ import { z } from "zod";
 
 import { codecs } from "../src";
 import { CultCache } from "../src/cult-cache";
-import { defineDocumentType, documentPayloadBytes } from "../src/document";
+import { defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "../src/document";
 import { SingleFileMessagePackBackingStore, readSingleFileStore } from "../src/single-file-messagepack-backing-store";
 import { SchemaConflictError, StoreUnreadableError } from "../src/store-format";
 import type { CultCacheUnreadSlots } from "../src/types";
@@ -291,4 +291,71 @@ test("a record that arrived under an id the reader does not list compatible is n
   await cache.pullAllBackingStores();
   assert.equal(cache.unreadSlots(reader, "consented")?.explained, false);
   assert.equal(cache.isWritable(reader, "consented"), false);
+});
+
+// isWritable is the write's own judge, not a second one: for every key state it answers what put does.
+test("isWritable equals the outcome of put for every key state the write judges", async () => {
+  const typed = (type: string, schemaId: string, extra: Record<string, unknown> = {}) =>
+    defineDocumentType({ type, schemaId, schemaName: type, schemaVersion: `${type}.v1`, schema: surfaceSchema, codec: surfaceCodec, name: "id", ...extra });
+  const older = typed("tests.surface_older", "tests.surface_older.v1");
+  const newer = typed("tests.surface_newer", "tests.surface_newer.v1", { compatibleSchemaIds: ["tests.surface_older.v1"] });
+  const stranger = typed("tests.surface_stranger", "tests.surface_stranger.v1");
+  const global = typed("tests.surface_global", "tests.surface_global.v1", { global: true });
+  const clean = (key: string, type: string, schemaId: string) => ({ ...envelopeOf(new Uint8Array()), key, type, schemaId });
+  const held = async (key: string, file: string, type: string, schemaId: string) =>
+    ({ ...envelopeOf(await read(file)), key, type, schemaId });
+
+  type Row = { name: string; build: () => Promise<{ cache: CultCache; target: typeof older; key: string }> };
+  const rows: Row[] = [
+    { name: "owned clean record in the writer's own store", build: async () => {
+      const cache = CultCache.builder().withDocumentType(older).withDocumentType(newer)
+        .withGenericStore(memoryStore([await held("k", "union-surface.msgpack", older.type, older.schemaId!)])).build();
+      return { cache, target: newer, key: "k" };
+    } },
+    { name: "owned record held in a store other than the writer's home", build: async () => {
+      const cache = CultCache.builder().withDocumentType(older).withDocumentType(newer)
+        .withBackingStore(memoryStore([await held("k", "union-surface.msgpack", older.type, older.schemaId!)]), older)
+        .withBackingStore(memoryStore([]), newer).build();
+      return { cache, target: newer, key: "k" };
+    } },
+    { name: "a record of a type that does not own the writer's id", build: async () => {
+      const cache = CultCache.builder().withDocumentType(older).withDocumentType(stranger)
+        .withGenericStore(memoryStore([await held("k", "union-surface.msgpack", older.type, older.schemaId!)])).build();
+      return { cache, target: stranger, key: "k" };
+    } },
+    { name: "a global type at a key other than the global key", build: async () => {
+      const cache = CultCache.builder().withDocumentType(global).withGenericStore(memoryStore([])).build();
+      return { cache, target: global, key: "x" };
+    } },
+    { name: "a key a store carries foreign", build: async () => {
+      const cache = CultCache.builder().withDocumentType(older)
+        .withGenericStore(memoryStore([{ ...clean("k", "tests.unknown", "tests.unknown.v1"), payload: documentPayloadFromBytes(await read("union-surface.msgpack")) }])).build();
+      return { cache, target: older, key: "k" };
+    } },
+    { name: "a marked record of the writer's own type", build: async () => {
+      const cache = CultCache.builder().withDocumentType(older)
+        .withGenericStore(memoryStore([await held("k", "extra-slot-record.msgpack", older.type, older.schemaId!)])).build();
+      return { cache, target: older, key: "k" };
+    } },
+    { name: "an unheld key", build: async () => ({ cache: CultCache.builder().withDocumentType(older).withGenericStore(memoryStore([])).build(), target: older, key: "k" }) },
+  ];
+  const outcomes: [string, boolean, boolean][] = [];
+  for (const row of rows) {
+    const { cache, target, key } = await row.build();
+    await cache.pullAllBackingStores();
+    const predicted = cache.isWritable(target, key);
+    const landed = await cache.put(target, key === "x" ? "x" : key, golden).then(() => true, () => false);
+    assert.equal(predicted, landed, row.name);
+    outcomes.push([row.name, predicted, landed]);
+  }
+  assert.deepEqual(outcomes.map(([, writable]) => writable), [true, false, false, false, false, false, true]);
+  // The same judge refuses a removal of a key held read-only or carried foreign.
+  const removals = CultCache.builder().withDocumentType(older)
+    .withGenericStore(memoryStore([await held("k", "extra-slot-record.msgpack", older.type, older.schemaId!)])).build();
+  await removals.pullAllBackingStores();
+  await assert.rejects(() => removals.delete(older, "k"), SchemaConflictError);
+  const stranger2 = CultCache.builder().withDocumentType(older)
+    .withGenericStore(memoryStore([{ ...envelopeOf(await read("union-surface.msgpack")), key: "f", type: "tests.unknown", schemaId: "tests.unknown.v1" }])).build();
+  await stranger2.pullAllBackingStores();
+  await assert.rejects(() => stranger2.delete(older, "f"), SchemaConflictError);
 });
