@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use cultcache_rs::CultCache;
 use cultcache_rs::CacheBackingStore;
 use cultcache_rs::CultCacheEnvelope;
+use cultcache_rs::CultCacheSoaTable;
 use cultcache_rs::MAX_PAYLOAD_DEPTH;
 use cultcache_rs::PayloadTooDeep;
 use cultcache_rs::check_payload_depth;
@@ -694,7 +695,7 @@ fn envelope(key: &str, payload: &[u8]) -> CultCacheEnvelope {
 }
 
 // A payload past the bound cannot be admitted through the cache, so a store file written behind its
-// back stands in for one a peer or an older runtime left.
+// back stands in for one a peer or an older runtime left; load or read refuses it.
 fn through_cache(payload: &[u8]) -> Result<UnionSurface, String> {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("foreign.cc");
@@ -702,7 +703,10 @@ fn through_cache(payload: &[u8]) -> Result<UnionSurface, String> {
     let mut cache = CultCache::new();
     cache.register_entry_type::<UnionSurface>().unwrap();
     cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
-    cache.pull_all_backing_stores().unwrap();
+    // The payload check runs at load, so a payload past the bound is refused there, before any read.
+    if let Err(error) = cache.pull_all_backing_stores() {
+        return Err(format!("{error:#}"));
+    }
     match cache.get::<UnionSurface>("k") {
         Ok(value) => Ok(value.expect("the envelope was stored")),
         Err(error) => Err(format!("{error:#}")),
@@ -782,25 +786,30 @@ fn bytes_after_vectors() {
         let error = decode_payload::<UnionSurface>(&bytes).unwrap_err();
         assert!(error.downcast_ref::<PayloadTooDeep>().is_none(), "{file}");
         check("decode_payload", &format!("{error:#}"));
-        // A store written behind the cache's back loads (the bound is the read's, as for depth) and
-        // its read refuses, naming the key and the type.
+        // A store written behind the cache's back is refused at load, naming the type, the key and the count.
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("foreign.cc");
         SingleFileMessagePackBackingStore::new(&path).push(&envelope("k", &bytes)).unwrap();
         let mut single = CultCache::new();
         single.register_entry_type::<UnionSurface>().unwrap();
         single.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
-        single.pull_all_backing_stores().unwrap();
-        let message = format!("{:#}", single.get::<UnionSurface>("k").unwrap_err());
-        check("single-file read", &message);
+        let message = format!("{:#}", single.pull_all_backing_stores().unwrap_err());
+        check("single-file load", &message);
         assert!(message.contains("\"k\"") && message.contains(UnionSurface::TYPE), "{file}: {message}");
         let redb_path = temp.path().join("foreign.redb");
         RedbMessagePackBackingStore::new(&redb_path).unwrap().push(&envelope("k", &bytes)).unwrap();
         let mut redb = CultCache::new();
         redb.register_entry_type::<UnionSurface>().unwrap();
         redb.add_generic_backing_store(RedbMessagePackBackingStore::new(&redb_path).unwrap()).unwrap();
-        redb.pull_all_backing_stores().unwrap();
-        check("redb read", &format!("{:#}", redb.get::<UnionSurface>("k").unwrap_err()));
+        let message = format!("{:#}", redb.pull_all_backing_stores().unwrap_err());
+        check("redb load", &message);
+        assert!(message.contains("\"k\"") && message.contains(UnionSurface::TYPE), "{file}: {message}");
+        let mut soa = CultCache::new();
+        soa.register_entry_type::<UnionSurface>().unwrap();
+        let message = format!("{:#}", soa.load_soa(CultCacheSoaTable::from_envelopes(vec![envelope("k", &bytes)])).unwrap_err());
+        check("load_soa", &message);
+        assert!(message.contains("\"k\"") && message.contains(UnionSurface::TYPE), "{file}: {message}");
+        assert!(soa.snapshot().is_empty(), "{file}");
         // Raw admission refuses and stages nothing.
         let mut raw = CultCache::new();
         raw.register_entry_type::<UnionSurface>().unwrap();
@@ -808,6 +817,17 @@ fn bytes_after_vectors() {
         check("put_raw_envelope", &message);
         assert!(raw.snapshot().is_empty(), "{file}");
     }
+}
+
+// Depth is found inside the first value, so a tail never hides it: a payload nested past the bound
+// with a tail after it is the depth refusal, not bytes after.
+#[test]
+fn depth_beats_a_tail() {
+    let mut deep = vec![0x91u8; MAX_PAYLOAD_DEPTH + 1];
+    deep.push(0xc0);
+    deep.push(0xc0);
+    let error = decode_payload::<UnionSurface>(&deep).unwrap_err();
+    assert_eq!(error.downcast_ref::<PayloadTooDeep>(), Some(&TOO_DEEP), "{error:#}");
 }
 
 // A payload that ends early is not bytes after the value: the decoder refuses it, not the check.

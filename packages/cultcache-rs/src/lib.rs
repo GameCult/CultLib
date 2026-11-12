@@ -607,7 +607,8 @@ pub fn check_payload_depth(bytes: &[u8]) -> std::result::Result<(), PayloadTooDe
 }
 
 /// Where the first MessagePack value of `bytes` ends, walking only that value (its tail is never
-/// read). `None` when the payload ends before the value does: the decoder's to refuse.
+/// read). `None` when the payload ends inside a header; a final scalar cut short ends past the
+/// payload's length, which is not bytes after the value either. Both are the decoder's to refuse.
 fn first_value_end(bytes: &[u8]) -> std::result::Result<Option<usize>, PayloadTooDeep> {
     let mut remaining = [0usize; MAX_PAYLOAD_DEPTH];
     let mut depth = 0usize;
@@ -636,7 +637,7 @@ fn first_value_end(bytes: &[u8]) -> std::result::Result<Option<usize>, PayloadTo
             depth -= 1;
         }
         if depth == 0 {
-            return Ok((position <= bytes.len()).then_some(position));
+            return Ok(Some(position));
         }
     }
     Ok(None)
@@ -2976,6 +2977,7 @@ impl CultCache {
         let schema_name_definitions = self.schema_name_definitions.clone();
         for (index, registration) in self.stores.iter().enumerate() {
             for mut entry in registration.store.pull_all()? {
+                require_record_payload(&entry)?;
                 let Some(canonical_type) = resolve_registered_type(
                     &known_types,
                     &schema_name_definitions,
@@ -3455,6 +3457,7 @@ impl CultCache {
                     entry.r#type
                 ));
             }
+            require_record_payload(&entry)?;
             self.home_index(&entry.r#type)?;
             self.refuse_claimed_id(&entry)?;
             self.refuse_retype(&loaded, &self.foreign, &entry)?;
