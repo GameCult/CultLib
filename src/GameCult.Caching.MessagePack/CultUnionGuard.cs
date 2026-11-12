@@ -1,7 +1,9 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using MessagePack;
 using MessagePack.Formatters;
 
@@ -19,33 +21,30 @@ internal sealed class CultUnionGuard(IFormatterResolver inner) : IFormatterResol
     {
         var arms = typeof(T).GetCustomAttributes<UnionAttribute>(inherit: false).ToArray();
         if (arms.Length == 0)
-            return DeclaredSlots(typeof(T)) is { } declared && inner.GetFormatter<T>() is { } objectFormatter
-                ? new SlotFormatter<T>(objectFormatter, declared)
-                : null;
+            return Guarded(typeof(T)) && inner.GetFormatter<T>() is { } objectFormatter ? new SlotFormatter<T>(objectFormatter) : null;
         return inner.GetFormatter<T>() is not { } formatter ? null : new Formatter<T>(formatter, arms);
     }
 
-    // The slots a concrete int-keyed [MessagePackObject] type declares (highest [Key] plus one), by MessagePack's member rule: public
-    // instance properties and fields, base keys included, [IgnoreMember] excluded. Null for any other type, which the guard leaves alone.
-    private static int? DeclaredSlots(Type type)
-    {
-        if (type.IsAbstract || type.IsInterface || type.IsGenericTypeDefinition) return null;
-        if (type.GetCustomAttribute<MessagePackObjectAttribute>(inherit: true) is not { KeyAsPropertyName: false }) return null;
-        var highest = -1;
-        const BindingFlags members = BindingFlags.Public | BindingFlags.Instance;
-        foreach (var member in type.GetFields(members).Cast<MemberInfo>().Concat(type.GetProperties(members)))
-        {
-            if (member.GetCustomAttribute<IgnoreMemberAttribute>(inherit: true) != null) continue;
-            if (member.GetCustomAttribute<KeyAttribute>(inherit: true)?.IntKey is { } key) highest = Math.Max(highest, key);
-        }
-
-        return highest + 1;
-    }
+    // A concrete int-keyed [MessagePackObject] type whose layout MessagePack derives from its [Key] members. A type that names its own
+    // [MessagePackFormatter] owns its layout and its tolerance (it may read a legacy shape or skip fields on purpose), so it is not guarded.
+    private static bool Guarded(Type type) =>
+        !type.IsAbstract && !type.IsInterface && !type.IsGenericTypeDefinition &&
+        type.GetCustomAttribute<MessagePackObjectAttribute>(inherit: true) is { KeyAsPropertyName: false } &&
+        type.GetCustomAttribute<MessagePackFormatterAttribute>(inherit: true) == null;
 
     // Counts a concrete object's array header against its declared slots and notes the excess into the open CultSlotScope, then lets the
     // inner formatter read it unchanged: no byte scan, no second decode. With no scope open it is a depth-free pass-through.
-    private sealed class SlotFormatter<T>(IMessagePackFormatter<T> inner, int declared) : IMessagePackFormatter<T>
+    // Declared slots are what the type's own formatter writes: the array header of one instance written through it, measured on the
+    // first read inside a scope (not in GetFormatter, so a self-referential type never recurses into its own resolver cache) and kept.
+    private sealed class SlotFormatter<T>(IMessagePackFormatter<T> inner) : IMessagePackFormatter<T>
     {
+        private const int NotMeasured = -1;
+
+        // A type no instance of which can be written is not guarded: no count can exceed this.
+        private const int Unguarded = int.MaxValue;
+
+        private int declared = NotMeasured;
+
         public void Serialize(ref MessagePackWriter writer, T value, MessagePackSerializerOptions options) =>
             inner.Serialize(ref writer, value, options);
 
@@ -57,6 +56,7 @@ internal sealed class CultUnionGuard(IFormatterResolver inner) : IFormatterResol
             if (!peek.TryReadNil() && peek.NextMessagePackType == MessagePackType.Array)
             {
                 var count = peek.ReadArrayHeader();
+                if (declared == NotMeasured) declared = Measure(options);
                 if (count > declared) scope.Note(typeof(T).Name, count, declared);
             }
 
@@ -68,6 +68,31 @@ internal sealed class CultUnionGuard(IFormatterResolver inner) : IFormatterResol
             finally
             {
                 scope.Depth--;
+            }
+        }
+
+        // The uninitialized instance, else one from a parameterless constructor (public or not) when that write throws.
+        private int Measure(MessagePackSerializerOptions options)
+        {
+            if (Written(() => (T)RuntimeHelpers.GetUninitializedObject(typeof(T)), options) is { } slots) return slots;
+            var constructor = typeof(T).GetConstructor(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+            return constructor != null && Written(() => (T)constructor.Invoke(null), options) is { } constructed ? constructed : Unguarded;
+        }
+
+        private int? Written(Func<T> instance, MessagePackSerializerOptions options)
+        {
+            try
+            {
+                var buffer = new ArrayBufferWriter<byte>();
+                var writer = new MessagePackWriter(buffer);
+                inner.Serialize(ref writer, instance(), options);
+                writer.Flush();
+                var written = new MessagePackReader(buffer.WrittenMemory);
+                return written.NextMessagePackType == MessagePackType.Array ? written.ReadArrayHeader() : null;
+            }
+            catch (Exception)
+            {
+                return null;
             }
         }
     }

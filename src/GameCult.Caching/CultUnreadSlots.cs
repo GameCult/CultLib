@@ -24,7 +24,7 @@ namespace GameCult.Caching
         /// <summary>The slots that object carried.</summary>
         public int SlotCount { get; }
 
-        /// <summary>The slots this build declares for that type (highest key plus one).</summary>
+        /// <summary>The slots this build declares for that type: the array its own formatter writes for one instance.</summary>
         public int DeclaredCount { get; }
 
         /// <summary>The objects in the record that carried extra slots.</summary>
