@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Generic, Iterable, TypeVar
 
 from .backing_store import BackingStore, CultCacheEnvelope
-from .documents import DocumentDefinition, extract_value
+from .documents import DocumentDefinition, UnreadSlots, extract_value
 from .stores import SchemaConflictError, retyped, written_owns
 
 T = TypeVar("T")
@@ -123,6 +123,10 @@ class _State:
     # The records the last pull read that no registered type claims, sorted by key. Derived from the pull and swapped with the
     # rest of the state, written nowhere else; it decides only refusals at its keys. A store keeps their bytes.
     foreign: list["ForeignRecord"] = field(default_factory=list)
+    # The records held read-only, by key (a key holds one record) with the type that holds it: the payload carried slots past the
+    # declared ones and nothing consents to the loss. Derived from the load or the write that admitted the record and swapped with
+    # the rest of the state; it decides only refusals at its keys, and any other key is absent.
+    unread: dict[str, tuple[str, UnreadSlots]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -337,6 +341,7 @@ class CultCache:
         routes, generic = self._state.stores_by_type, self._state.generic_store
         seen_globals: set[str] = set()
         foreign: list[ForeignRecord] = []
+        loaded_unread: dict[str, tuple[str, UnreadSlots]] = {}
         type_at_key: dict[str, tuple[str, int]] = {}  # one record per key across every store: its type (or schema name) and store
         stores: list[BackingStore] = []
         for candidate in [*self._state.stores_by_type.values(), self._state.generic_store]:
@@ -376,8 +381,10 @@ class CultCache:
                         loaded_legacy_global_keys[envelope.type] = envelope.key
                         envelope = replace(envelope, key=GLOBAL_KEY)
                 self._claim_key(type_at_key, envelope.key, envelope.type, position)
-                envelope = self._stamped(document, envelope)
-                value = document.decode_payload(envelope.payload)
+                arrived, envelope = envelope, self._stamped(document, envelope)
+                value, unread = self._decode_marked(document, arrived)
+                if unread is not None:
+                    loaded_unread[envelope.key] = (envelope.type, unread)
                 loaded_values.setdefault(envelope.type, {})[envelope.key] = value
                 read_values[(envelope.type, envelope.key)] = value
                 loaded_envelopes.setdefault(envelope.type, {})[envelope.key] = envelope
@@ -393,6 +400,7 @@ class CultCache:
             self._state.lookup_keys,
             self._state.legacy_global_keys,
             self._state.foreign,
+            self._state.unread,
         ) = (
             loaded_values,
             loaded_envelopes,
@@ -401,6 +409,7 @@ class CultCache:
             loaded_lookup_keys,
             loaded_legacy_global_keys,
             sorted(foreign, key=lambda record: _utf16_order(record.key)),
+            loaded_unread,
         )
 
     @staticmethod
@@ -491,9 +500,9 @@ class CultCache:
     def put_envelope(self, document: DocumentDefinition[T], envelope: CultCacheEnvelope) -> T:
         self._assert_registered(document)
         self._check_envelope(document, envelope)
-        envelope = self._stamped(document, envelope)
-        value = document.decode_payload(envelope.payload)
-        self._write(document, [(envelope, value)], batch=False)
+        arrived, envelope = envelope, self._stamped(document, envelope)
+        value, unread = self._decode_marked(document, envelope)
+        self._write(document, [(envelope, value)], batch=False, unread={envelope.key: unread})
         return value
 
     @_mutating
@@ -501,12 +510,32 @@ class CultCache:
         self._assert_registered(document)
         values: list[T] = []
         stamped: list[CultCacheEnvelope] = []
+        unread: dict[str, UnreadSlots | None] = {}
         for envelope in envelopes:
             self._check_envelope(document, envelope)
             stamped.append(self._stamped(document, envelope))
-            values.append(document.decode_payload(envelope.payload))
-        self._write(document, list(zip(stamped, values)), batch=True)
+            value, unread[envelope.key] = self._decode_marked(document, stamped[-1])
+            values.append(value)
+        self._write(document, list(zip(stamped, values)), batch=True, unread=unread)
         return values
+
+    @staticmethod
+    def _decode_marked(document: DocumentDefinition[Any], held_as: CultCacheEnvelope) -> tuple[Any, UnreadSlots | None]:
+        """The payload decoded under the document, with the mark of any slot it carried past the declared ones, or no mark when the
+        loss is consented. `held_as` is the envelope under the id the record is stored under: a load's arrival, a write's stamped
+        envelope, so a key is writable in memory exactly when it is after a reload. A depth-0 mark is consented only when that id is
+        one the document lists compatible and its catalog entry has slots past the document's that cover the mark's slot count (the
+        loss a compatible-id declaration consents to, cultlib-gaps:ruling:slot-mark-consent). Any other mark keeps the record read-only."""
+        value, slots = document.decode_payload_marked(held_as.payload)
+        if slots is None:
+            return value, None
+        entry, stored = document.catalog_entry(), held_as.catalog_entry
+        if slots.depth0_only and stored is not None and held_as.schema_id in entry.compatible_schema_ids and held_as.schema_id != entry.schema_id:
+            declared = {member.slot for member in entry.members}
+            reported = [member.slot for member in stored.members if member.slot not in declared]
+            if reported and slots.slot_count <= max(reported) + 1:
+                return value, None
+        return value, slots
 
     @staticmethod
     def _stamped(document: DocumentDefinition[Any], envelope: CultCacheEnvelope) -> CultCacheEnvelope:
@@ -527,7 +556,12 @@ class CultCache:
             raise CultCacheError(f"Global document {document.type} must use key {GLOBAL_KEY}")
 
     def _write(
-        self, document: DocumentDefinition[Any], records: list[tuple[CultCacheEnvelope, Any]], *, batch: bool
+        self,
+        document: DocumentDefinition[Any],
+        records: list[tuple[CultCacheEnvelope, Any]],
+        *,
+        batch: bool,
+        unread: dict[str, UnreadSlots | None] | None = None,
     ) -> None:
         """Validates every record (home and name and index extractors included) before the store is
         touched; once the store accepts, applying to the cache has no fallible step."""
@@ -535,6 +569,7 @@ class CultCache:
         # A batch naming a key twice lands the last record for it, as C# CultCacheBatch stages one operation per key. The
         # judge, the store and the apply all read this one list.
         records = list({envelope.key: (envelope, value) for envelope, value in records}.values())
+        self._refuse_unread([envelope.key for envelope, _ in records])
         name_extractor = self._state.name_extractors.get(type)
         index_extractors = self._state.index_extractors.get(type, {})
         admitted = [
@@ -566,6 +601,9 @@ class CultCache:
             self._remove_lookups(type, envelope.key)
             values[envelope.key] = value
             envelopes[envelope.key] = envelope
+            # A held mark refused this write above, so a key reaching here carries none to clear.
+            if (mark := (unread or {}).get(envelope.key)) is not None:
+                self._state.unread[envelope.key] = (type, mark)
             lookup_keys[envelope.key] = keys
             if keys.name is not None:
                 self._state.names[(type, keys.name)] = envelope.key
@@ -591,6 +629,51 @@ class CultCache:
                     raise retyped(held, envelope)
                 replaced.append((other, envelope.key))
         return replaced
+
+    @_locked
+    def is_writable(self, document: DocumentDefinition[Any], key: str) -> bool:
+        """Whether a write or removal of the key by this document would pass the judges that run before any store is touched: False for
+        a record held read-only (its payload carried slots past the declared ones, at any depth, and nothing consents to the loss, so
+        writing it would drop data a newer writer stored), for a key a store carries foreign, and for a key held as another type's
+        record this document does not own. Advisory (the write still decides): it answers at call time, and a key nothing holds is
+        writable."""
+        self._assert_registered(document)
+        try:
+            self._refuse_at(document, key)
+        except (SchemaConflictError, CultCacheError):
+            return False
+        return True
+
+    def _refuse_at(self, document: DocumentDefinition[Any], key: str) -> list[tuple[str, str]]:
+        """The judges a write or removal of the key by this document passes before any store is touched, asked by `is_writable` and
+        by `delete`: a global document writes only its global key, a record held read-only is never replaced, and a key held as
+        another type's record or carried foreign is refused (`_refuse_retype`)."""
+        if document.global_document and key != GLOBAL_KEY:
+            raise CultCacheError(f"Global document {document.type} must use key {GLOBAL_KEY}")
+        self._refuse_unread([key])
+        entry = document.catalog_entry()
+        probe = CultCacheEnvelope.create(key=key, type=document.type, payload=b"", schema_id=entry.schema_id, catalog_entry=entry)
+        return self._refuse_retype(document, [probe])
+
+    def _refuse_unread(self, keys: list[str]) -> None:
+        """The one check every write and removal asks before any store is touched."""
+        for key in keys:
+            held = self._state.unread.get(key)
+            if held is None:
+                continue
+            type, slots = held
+            raise SchemaConflictError(
+                self._state.envelopes[type][key].schema_id or type,
+                [self._state.documents[type].catalog_entry().schema_name],
+                key,
+                message=(
+                    f"{self._state.documents[type].catalog_entry().schema_name} record {key} is read-only: {slots.type_name} was read with "
+                    f"{slots.slot_count} slots where this build declares {slots.declared_count} ({slots.occurrences} object(s) in the "
+                    "record). Writing it would drop data a newer writer stored; read it with types that declare those slots, or "
+                    "write it from that build."
+                ),
+                unread_slots=slots,
+            )
 
     @staticmethod
     def _foreign_refusal(record: ForeignRecord) -> SchemaConflictError:
@@ -644,16 +727,18 @@ class CultCache:
 
     def _delete(self, document: DocumentDefinition[Any], key: str) -> None:
         self._assert_registered(document)
-        if key not in self._state.envelopes.get(document.type, {}):
-            carried = next((record for record in self._state.foreign if record.key == key), None)
-            if carried is not None:
-                raise self._foreign_refusal(carried)
+        # A key held as another type's record this document owns is removed, as a write of the key would replace it (C# Remove is by key).
+        owned = self._refuse_at(document, key)
         store = self._store_for_type(document.type)
         legacy_key = self._state.legacy_global_keys.get(document.type) if key == GLOBAL_KEY else None
         if store is not None:
-            store.delete(document.type, key if legacy_key is None else legacy_key)
+            # One record per key: the owned record when this document does not hold the key, else its own, in one store call.
+            holder = owned[0][0] if owned else document.type
+            store.delete(holder, key if legacy_key is None else legacy_key)
         if legacy_key is not None:
             del self._state.legacy_global_keys[document.type]
+        for other, _ in owned:
+            self._drop(other, key)
         self._drop(document.type, key)
 
     def _drop(self, type: str, key: str) -> None:

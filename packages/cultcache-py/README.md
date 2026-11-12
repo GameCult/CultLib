@@ -97,6 +97,7 @@ store.
 - `update_global(...)`
 - `delete(...)`
 - `delete_global(...)`
+- `is_writable(document, key)` (advisory: would a write or removal of the key be refused; see below)
 - `snapshot()`
 
 ## Indexes And Roles
@@ -179,6 +180,16 @@ The payload is a MessagePack array. Field keys are durable slot indexes:
 - deleted fields should leave their slots reserved
 - newly added fields should use new keys
 - fields with defaults tolerate missing or nil slots when older payloads are read
+
+A payload carrying a slot past the slots a reader declares, at any depth (the document, a nested record, a list element, a
+union arm, a unit arm), was written by a newer build. It is read, and the record is held read-only: `put`, `update`,
+`put_envelope(s)`, `delete` and their global forms refuse its key with `SchemaConflictError` before any store is touched, and
+`SchemaConflictError.unread_slots` is an `UnreadSlots(type_name, slot_count, declared_count, occurrences, depth0_only)` naming the
+first type read with extra slots (never a slot value). `CultCache.is_writable(document, key)` answers the same question before
+the write: False for such a record, for a key a store carries foreign, and for a key held as another type's record; the write
+still decides. `DocumentDefinition.decode_payload_marked(payload)` returns the value and its `UnreadSlots` (or None). Declaring the
+stored id in `compatible_schema_ids` consents to the loss of depth-0 slots that id's catalog entry reports; a nested mark never is.
+A store keeps a read-only record's bytes through every other write. A document with a custom `decode` never marks.
 
 That matches the Rust `#[derive(DatabaseEntry)]` formatter shape and the C#
 `[Key(n)]` intent: schema evolution comes from stable field slots, not source
