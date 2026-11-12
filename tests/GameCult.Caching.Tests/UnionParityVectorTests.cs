@@ -297,9 +297,6 @@ namespace GameCult.Caching.Tests
                 Surface(extra: new Extra(RootArm: true))),
             new Case("extra-slot-list-element.msgpack", "read-only", "Node", 1, "list-element",
                 Surface(extra: new Extra(ListElement: true))),
-            // A bare UnitOutcome arm (the fixture's unit-arm union), not a UnionSurface payload: [2, [extra]] where Denied2 declares no slot.
-            new Case("extra-slot-unit-arm.msgpack", "read-only", "UnitOutcome", 2, "unit-arm",
-                Raw(ArmOf(2, ExtraSlot))),
         };
 
         private static byte[] OutcomesFile() => Raw((ref MessagePackWriter w) =>
@@ -320,7 +317,6 @@ namespace GameCult.Caching.Tests
             "Node" => typeof(Node).FullName!,
             "Outcome" => typeof(Outcome).FullName!,
             "CraftedItem" => typeof(CraftedItem).FullName!,
-            "UnitOutcome" => typeof(UnitOutcome).FullName!,
             "UnionSurface" => typeof(UnionSurface).FullName!,
             _ => throw new ArgumentOutOfRangeException(nameof(logical), logical, null)
         };
@@ -620,10 +616,7 @@ namespace GameCult.Caching.Tests
                 {
                     Assert.That(outcome, Is.EqualTo("read-only"), file);
                     // The extra slot is read past; that the record then loads read-only is asserted in SlotReadOnlyTests, store by store.
-                    if (union == "UnitOutcome")
-                        Assert.That(MessagePackSerializer.Deserialize<UnitOutcome>(payload, UnitOptions), Is.TypeOf<Denied2>(), $"{file}: the extra slot is read past");
-                    else
-                        Assert.That(Describe(Decode(payload)), Is.EqualTo(golden), $"{file}: the extra slot is read past");
+                    Assert.That(Describe(Decode(payload)), Is.EqualTo(golden), $"{file}: the extra slot is read past");
                 }
             }
         }

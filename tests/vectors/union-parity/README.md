@@ -52,8 +52,8 @@ Rulings `cultlib-gaps:ruling:extra-trailing-slots` and `cultlib-gaps:ruling:slot
 slot past its reader's declared slots, in any object at any depth, is read, held read-only, and every write or
 removal of it is refused before anything is staged. The first four payloads are `union-surface.msgpack` with the
 string `"extra-slot"` appended as one more slot of one object; a reader decodes the value of `union-surface.msgpack`
-from each. The fifth is a bare arm of union `UnitOutcome` (0 Waiting `[Message]`; 2 Denied2, -2147483648 Floor2 and
-2147483647 Ceiling2, each `[]`), the union of the `unit-arm-*` files; a reader decodes Denied2 from it.
+from each. A unit arm with an extra slot is pinned only as a store record, `unit-arm` in `extra-slot-store.cc`
+(below): `outcomes.msgpack` keeps the nine rows the leaf walkers count.
 
 An object's declared slots are the slots its type's own formatter writes for one instance (for these fixtures,
 the highest key plus one); a reader derives them from the layout it writes, never from a list of public members.
@@ -74,17 +74,18 @@ key (Image's slot 2) does not mark. A union adds no depth: an arm's array is cou
 | `extra-slot-nested-record.msgpack` | nested-record | Composition `comp` | nested | Composition, 3, 2 |
 | `extra-slot-arm.msgpack` | arm | the Root Box arm | nested | Box, 3, 2 |
 | `extra-slot-list-element.msgpack` | list-element | Text `s1`, an element of Use.Slots | nested | Text, 3, 2 |
-| `extra-slot-unit-arm.msgpack` | unit-arm | Denied2 in `[2, ["extra-slot"]]` (union `UnitOutcome`, key 2) | as placed | Denied2, 1, 0 |
+| record `unit-arm` of `extra-slot-store.cc` | unit-arm | Denied2 in `[2, ["extra-slot"]]` (union `UnitOutcome`, key 2), slot 1 of the document | 1 | Denied2, 1, 0 |
 | `depth-skipped-at-limit.msgpack` (bounds file) | depth | the document (slot 7, a value of nested arrays) | 0 | UnionSurface, 8, 7 |
 
-Each payload marks exactly one object. Five rows of `outcomes.msgpack` are `read-only` (record, nested-record, arm,
-list-element, unit-arm); the sixth `read-only` payload is in `bounds-outcomes.msgpack`. The payload nesting check
+Each payload marks exactly one object. Four rows of `outcomes.msgpack` are `read-only` (record, nested-record, arm,
+list-element); the fifth `read-only` payload is in `bounds-outcomes.msgpack`, and the unit arm's outcome is its row
+in `slot-outcomes.msgpack`. The payload nesting check
 runs before the mark: `depth-skipped-past-limit.msgpack` is refused, never marked.
 
 ### What a runtime asserts for a `read-only` payload
 
 Load it as a store record under the reader's own schema id (the C# reference puts each UnionSurface payload in a
-`tests.union_surface` store; the unit arm goes in slot 1 of a document `[Name, Outcome: UnitOutcome]`). Then:
+`tests.union_surface` store; the unit arm is already a store record, `unit-arm` of `extra-slot-store.cc`). Then:
 
 1. the value is read past the extra slot;
 2. the record reports the mark as in the table: the first type read with extra slots, the slots it carried and the
