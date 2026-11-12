@@ -681,14 +681,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 stream.Flush(true);
             }
 
-            if (File.Exists(path))
-            {
-                ReplaceExistingFile(tempPath, path);
-            }
-            else
-            {
-                File.Move(tempPath, path);
-            }
+            StoreReplace.Replace(tempPath, path);
         }
         finally
         {
@@ -745,27 +738,5 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 Thread.Sleep(10);
             }
         }
-    }
-
-    private static void ReplaceExistingFile(string sourcePath, string destinationPath)
-    {
-        for (var attempt = 0; attempt < 3; attempt++)
-        {
-            try
-            {
-                File.Replace(sourcePath, destinationPath, null);
-                return;
-            }
-            catch (IOException) when (attempt < 2)
-            {
-                Thread.Sleep(10 * (attempt + 1));
-            }
-            catch (UnauthorizedAccessException) when (attempt < 2)
-            {
-                Thread.Sleep(10 * (attempt + 1));
-            }
-        }
-
-        File.Replace(sourcePath, destinationPath, null);
     }
 }

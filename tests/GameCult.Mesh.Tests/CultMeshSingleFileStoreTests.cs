@@ -364,11 +364,7 @@ public sealed class CultMeshSingleFileStoreTests
     [Test]
     public void ACacheOpeningDuringMeshWritesNeverSeesAnEmptyStore()
     {
-        // Windows replaces with ReplaceFile, which leaves a moment with nothing at the path for a lock-free reader: 1,722 empty
-        // stores in 17,313 opens at b1ff2dcb. That is the store's replace, not Mesh's, and it is the same for a cache flush beside a
-        // cache open; the fork is in the cut report.
-        if (OperatingSystem.IsWindows())
-            Assert.Ignore("Windows File.Replace is not atomic to a lock-free reader; see cut report fork mesh-reader-windows-replace-window.");
+        // Windows replaces with a POSIX-semantics rename (StoreReplace), so a lock-free reader never finds the path empty.
 
         var path = Path.Combine(_root, "race.cc");
         CultMesh.WriteSingleFileDocument(path, Key, Publication());

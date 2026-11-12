@@ -5204,14 +5204,7 @@ namespace GameCult.Caching
                     stream.Flush(true);
                 }
 
-                if (File.Exists(path))
-                {
-                    File.Replace(tempPath, path, null);
-                }
-                else
-                {
-                    File.Move(tempPath, path);
-                }
+                StoreReplace.Replace(tempPath, path);
             }
             finally
             {
