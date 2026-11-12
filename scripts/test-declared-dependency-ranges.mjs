@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const rootRequire = createRequire(join(repoRoot, "package.json"));
 const ts = rootRequire("typescript");
+const npmCli = join(npmRoot(), "bin", "npm-cli.js");
 const semver = createRequire(join(npmRoot(), "package.json"))("semver");
 
 // npm ships semver, so the check needs no dependency of its own. npm's root is beside the node binary on Windows and under lib/ on Unix.
@@ -84,16 +85,17 @@ function sourceFiles(directory) {
   });
 }
 
-// Builds the package as the tag released it, in a scratch directory that borrows the workspace's node_modules.
+// Builds the package as the tag released it (with the repo-level contracts its generator reads), in a scratch directory that borrows the workspace's node_modules.
 function buildRelease(directory, tag, scratch) {
   const archive = join(scratch, `${tag}.tar`);
-  git("archive", "--format=tar", "-o", archive, tag, `packages/${directory}`);
+  git("archive", "--format=tar", "-o", archive, tag, `packages/${directory}`, "contracts");
   const extracted = join(scratch, tag);
   mkdirSync(extracted);
   execFileSync("tar", ["-xf", archive, "-C", extracted]);
   symlinkSync(join(repoRoot, "node_modules"), join(extracted, "node_modules"), "junction");
   const packageRoot = join(extracted, "packages", directory);
-  execFileSync(process.execPath, [rootRequire.resolve("typescript/bin/tsc"), "-p", "tsconfig.json"], { cwd: packageRoot, stdio: "inherit" });
+  // The package's own build, which is how a release was made: cultnet-ts generates its contracts module first.
+  execFileSync(process.execPath, [npmCli, "run", "build", "--silent"], { cwd: packageRoot, stdio: "inherit" });
   return rootRequire(join(packageRoot, "dist", "index.js"));
 }
 
@@ -127,7 +129,7 @@ try {
       const prefix = `${dependency.directory}-v`;
       const admitted = tags.filter((tag) => {
         const version = tag.startsWith(prefix) ? tag.slice(prefix.length) : undefined;
-        return version !== undefined && semver.valid(version) !== null && semver.satisfies(version, range) && version !== dependency.manifest.version;
+        return version !== undefined && semver.valid(version) !== null && semver.satisfies(version, range);
       });
       for (const tag of admitted) {
         if (!built.has(tag)) {

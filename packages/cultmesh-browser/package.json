@@ -42,7 +42,7 @@
   },
   "dependencies": {
     "@gamecult/cultcache-ts": "^0.15.0",
-    "@gamecult/cultnet-ts": "^0.3.0"
+    "@gamecult/cultnet-ts": "^0.4.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
