@@ -1971,7 +1971,7 @@ class CultNetTests(unittest.TestCase):
         apply_raw_document_record(cache, schema_document_map([first, second]), raw(first))  # the same type still replaces
         self.assertEqual(cache.get_required(first, "shared").name, "remote")
 
-    def test_a_raw_record_with_a_tail_is_unroutable_by_inference_and_refused_by_count_when_routed(self) -> None:
+    def test_a_raw_record_with_a_tail_is_routed_by_its_stamp_and_refused_by_count_on_every_apply_path(self) -> None:
         import msgpack  # type: ignore
         from cultcache_py import define_document_type
         from cultnet_py import resolve_document_for_raw_record
@@ -1986,18 +1986,33 @@ class CultNetTests(unittest.TestCase):
                     "payloadEncoding": "messagepack", "payload": payload}
 
         documents = schema_document_map([document])
-        # Routing by inference reads a hint, not a payload: a payload with a tail gives no hint, so an unknown schema id
-        # stays the unknown-schema error (KeyError) even when the first value names a registered schema.
-        self.assertIs(resolve_document_for_raw_record(documents, "unknown", raw("unknown", head)), document)
+        # The stamp is read from the first value whether or not a tail follows, so an unknown schema id whose payload names
+        # a registered schema routes to it; the tail is then refused by count where the record is applied.
+        self.assertIs(resolve_document_for_raw_record(documents, "unknown", raw("unknown", head + b"\xc0")), document)
+        for schema_id in (known, "unknown"):
+            cache = CultCache()
+            cache.register_document_type(document)
+            with self.assertRaises(ValueError, msg=schema_id) as caught:
+                apply_raw_document_record(cache, documents, raw(schema_id, head + b"\xc0"))
+            self.assertIn("1 bytes after its first MessagePack value", str(caught.exception))
+            self.assertIsNone(cache.get(document, "k"))
+            snapshot = {"schemaVersion": "cultnet.snapshot_response_raw.v0", "messageId": "s",
+                        "documents": [raw(schema_id, head + b"\xc0")]}
+            with self.assertRaises(ValueError, msg=schema_id):
+                apply_raw_snapshot(cache, [document], snapshot)
+            log = {"schemaVersion": "cultnet.shard_log_response.v0", "messageId": "l", "shardId": "s", "shardEpoch": 1,
+                   "resyncRequired": False,
+                   "entries": [{"sequence": 0, "changeKind": "updated",
+                                "put": {"schemaVersion": "cultnet.document_put_raw.v0", "messageId": "p",
+                                        "document": raw(schema_id, head + b"\xc0"), "shardId": "s", "shardEpoch": 1}}]}
+            with self.assertRaises(ValueError, msg=schema_id) as caught:
+                apply_shard_log_response(cache, [document], log)
+            self.assertIn("1 bytes after its first MessagePack value", str(caught.exception))
+            self.assertIsNone(cache.get(document, "k"))
+        # A tail on a payload that names no registered schema is still an unknown schema, which a shard log skips.
+        stranger = msgpack.packb(["tests.stranger.v1", "x"], use_bin_type=True) + b"\xc0"
         with self.assertRaises(KeyError):
-            resolve_document_for_raw_record(documents, "unknown", raw("unknown", head + b"\xc0"))
-        # A registered schema id routes, and the tail is refused by count when the record is applied.
-        cache = CultCache()
-        cache.register_document_type(document)
-        with self.assertRaises(ValueError) as caught:
-            apply_raw_document_record(cache, documents, raw(known, head + b"\xc0"))
-        self.assertIn("1 bytes after its first MessagePack value", str(caught.exception))
-        self.assertIsNone(cache.get(document, "k"))
+            resolve_document_for_raw_record(documents, "unknown", raw("unknown", stranger))
 
     def test_cultnet_replication_helpers_apply_raw_snapshot_and_shard_log(self) -> None:
         document = define_database_entry_type(
