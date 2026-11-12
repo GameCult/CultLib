@@ -16,7 +16,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
 ]
-dependencies = ["cultcache-py>=0.2.0", "msgpack>=1.0"]
+dependencies = ["cultcache-py>=0.4.0", "msgpack>=1.0"]
 [project.optional-dependencies]
 crypto = ["cryptography>=42"]
 

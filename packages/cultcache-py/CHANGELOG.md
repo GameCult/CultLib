@@ -4,7 +4,7 @@
 
 ### Added
 
-- `read_payload_tree(type_name, payload, decoder=None)`: the exported owner of the one-value, depth-first payload read that `decode_payload` uses, for payloads read outside a definition (`cultnet-py`'s witness bundle decode needs it, so it needs this release, the next minor).
+- `read_payload_tree(type_name, payload, decoder=None)`: the exported owner of the one-value, depth-first payload read that `decode_payload` uses, for payloads read outside a definition (`cultnet-py`'s witness bundle decode needs it, so `cultnet-py` now requires `cultcache-py>=0.4.0`). The manifest version is 0.4.0, the minor these Unreleased breaking changes imply, set in this change so the workspace install resolves the new bound; the `## Unreleased` heading becomes `## [0.4.0]` when it is tagged.
 
 ### Changed
 
