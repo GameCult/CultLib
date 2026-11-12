@@ -1,0 +1,316 @@
+from __future__ import annotations
+
+import re
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+
+import msgpack
+
+from cultcache_py.cache import CultCacheError
+from cultcache_py import (
+    CultCache,
+
+    JsonLinesBackingStore,
+    SchemaConflictError,
+    SingleFileMessagePackBackingStore,
+    database_entry_field,
+    define_database_entry_type,
+    leaves as t,
+)
+
+# variants:ruling:cache-refuses-retype, write-ownership-by-written-type, unheld-removal-refused-at-commit. The vector in
+# tests/vectors/key-identity is written only by the C# reference; this walks every row against the Python cache.
+VECTORS = Path(__file__).resolve().parents[3] / "tests" / "vectors" / "key-identity"
+
+IDS = {
+    "alpha": "sha256:b20703a98f49c253898404ab50ba2c630720f0b8a5e1a41614d5650be22799fe",
+    "beta": "sha256:dee4b727cf2ee04e61ab635ff0c5f3dca7345a411dc5f1018e583ab16009cf94",
+    "gamma": "sha256:fbc26e351e00c9e7185e8de171c7486aba707c229c949f0aae6b889288af5f6d",
+}
+DOCUMENTS = {
+    label: define_database_entry_type(
+        f"tests.ki_{label}",
+        [database_entry_field("text", 0, codec=t.string)],
+        schema_id=schema_id,
+        schema_name=f"tests.ki_{label}",
+    )
+    for label, schema_id in IDS.items()
+}
+LABEL_OF = {document.type: label for label, document in DOCUMENTS.items()}
+
+def file_records(path: Path) -> list[list[str]]:
+    return sorted([envelope.key, envelope.type] for envelope in SingleFileMessagePackBackingStore(path).pull_all())
+
+def stored(path: Path, key: str):
+    for envelope in SingleFileMessagePackBackingStore(path).pull_all():
+        if envelope.key == key:
+            return envelope.schema_id, envelope.stored_at, envelope.payload
+    return None
+
+class KeyIdentityVectorTests(unittest.TestCase):
+    def test_rows(self) -> None:
+        rows = msgpack.unpackb((VECTORS / "rows.msgpack").read_bytes(), raw=False)
+        walked = 0
+        for label, registered, ops, expect in rows:
+            with self.subTest(row=label), tempfile.TemporaryDirectory() as tmp:
+                self.walk(Path(tmp), registered, ops, expect)
+                walked += 1
+        self.assertEqual(walked, 12)
+
+    def walk(self, tmp: Path, registered: list[str], ops: list, expect: list) -> None:
+        refusal, held, file, foreign, kept = expect
+        state: dict = {"cache": None, "path": None, "before": None, "attached": []}
+
+        def builder() -> CultCache.builder:
+            made = CultCache.builder()
+            for name in registered:
+                made.register_document_type(DOCUMENTS[name])
+            return made
+
+        def open_cache(target) -> None:
+            if target == "memory":
+                state["cache"], state["path"] = builder().build(), None
+                return
+            path = tmp / "store.cc"
+            if target is not None and target != path:
+                shutil.copyfile(VECTORS / target, path)
+                state["before"] = path.read_bytes()
+            state["path"] = path
+            made = builder().add_generic_store(SingleFileMessagePackBackingStore(path))
+            state["cache"] = made.build()
+            state["cache"].pull_all_backing_stores()
+
+        def perform(op: list) -> None:
+            cache = state["cache"]
+            if op[0] == "open":
+                open_cache(op[1])
+            elif op[0] == "attach":
+                path = tmp / f"attached-{len(state['attached'])}.cc"
+                shutil.copyfile(VECTORS / op[1], path)
+                state["attached"].append((path, path.read_bytes()))
+                cache.add_backing_store(
+                    SingleFileMessagePackBackingStore(path), [DOCUMENTS[name].type for name in op[2]]
+                )
+                cache.pull_all_backing_stores()
+            elif op[0] == "reopen":
+                open_cache(state["path"])  # the same file, no fresh copy
+            elif op[0] == "put":
+                cache.put(DOCUMENTS[op[1]], op[2], {"text": op[3]})
+            elif op[0] == "delete":
+                cache.delete(DOCUMENTS[op[1]], op[2])
+            else:
+                self.fail(f"unknown op {op[0]}")
+
+        for op in ops[:-1]:
+            perform(op)
+        if refusal is None:
+            perform(ops[-1])
+        else:
+            key = refusal[0]
+            with self.assertRaises((SchemaConflictError, ValueError, RuntimeError)) as caught:
+                perform(ops[-1])
+            if ops[-1][0] == "attach":
+                # The key is read out of the refusal's own text (it opens "Record 'key' is held by") and occurs only as a
+                # delimited token, never inside a schema name or other word.
+                message = str(caught.exception)
+                named = re.match(r"Record '([^']*)' is held by", message)
+                self.assertIsNotNone(named, message)
+                self.assertEqual(named.group(1), key)
+                self.assertEqual(len(re.findall(rf"(?<![A-Za-z0-9_]){re.escape(key)}(?![A-Za-z0-9_])", message)), 1)
+                self.assertEqual(message.count(key), 1)
+                for path, before in state["attached"]:
+                    self.assertEqual(path.read_bytes(), before)
+            else:
+                self.assertIsInstance(caught.exception, SchemaConflictError)
+                self.assertEqual(caught.exception.record_key, key)
+                self.assertIn(key, str(caught.exception))
+        cache = state["cache"]
+        got_held = sorted(
+            [LABEL_OF[type], key, value["text"]]
+            for type, values in cache.snapshot().items()
+            for key, value in values.items()
+        )
+        self.assertEqual(got_held, held)
+        path = state["path"]
+        if file is None:
+            self.assertIsNone(path)
+        else:
+            self.assertEqual(file_records(path), file)
+        self.assertEqual([record.key for record in cache.foreign_records()], foreign)
+        if kept:
+            vector = tmp / "vector-before.cc"
+            vector.write_bytes(state["before"])
+            for key in kept:
+                self.assertIsNotNone(stored(vector, key))
+                self.assertEqual(stored(path, key), stored(vector, key))
+
+def alpha_beta(*names: str, store=None) -> CultCache:
+    made = CultCache.builder()
+    for name in names:
+        made.register_document_type(DOCUMENTS[name])
+    if store is not None:
+        made.add_generic_store(store)
+    return made.build()
+
+class KeyIdentityTests(unittest.TestCase):
+    def test_two_global_types_are_refused_in_one_cache_and_a_store_holding_both_does_not_load(self) -> None:
+        # C# refuses a second persisted global on pull (cultcache-store-composition.md, "Globals never invented"); the Python
+        # JSONL store and a cache with no store used to let two global types share __global__, so such a file can exist.
+        ga = define_database_entry_type(
+            "tests.ki_ga", [database_entry_field("text", 0, codec=t.string)], schema_id="sha256:" + "1" * 64, global_document=True
+        )
+        gb = define_database_entry_type(
+            "tests.ki_gb", [database_entry_field("text", 0, codec=t.string)], schema_id="sha256:" + "2" * 64, global_document=True
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.jsonl"
+            for document in (ga, gb):  # one cache per type that never pulled: how a file got two globals
+                writer = CultCache.builder().register_document_type(document).add_generic_store(JsonLinesBackingStore(path)).build()
+                writer.put_global(document, {"text": document.type})
+            both = CultCache.builder().register_document_type(ga).register_document_type(gb).add_generic_store(JsonLinesBackingStore(path)).build()
+            with self.assertRaises(CultCacheError) as caught:
+                both.pull_all_backing_stores()
+            self.assertIn("'__global__' is held by both", str(caught.exception))
+            self.assertEqual(both.snapshot(), {})
+            memory = CultCache.builder().register_document_type(ga).register_document_type(gb).build()
+            memory.put_global(ga, {"text": "a"})
+            with self.assertRaises(SchemaConflictError):
+                memory.put_global(gb, {"text": "b"})
+            self.assertEqual(memory.get_required_global(ga), {"text": "a"})
+
+    def test_every_write_path_refuses_a_second_type_and_never_echoes_the_payload(self) -> None:
+        alpha, beta = DOCUMENTS["alpha"], DOCUMENTS["beta"]
+        for name in ("put", "put_envelope", "put_envelopes"):
+            with self.subTest(path=name):
+                cache = alpha_beta("alpha", "beta")
+                cache.put(alpha, "k", {"text": "held"})
+                envelope = cache.get_envelope(alpha, "k")
+                other = type(envelope).create(
+                    key="k", type=beta.type, payload=beta.encode_payload({"text": "CANARY"}), schema_id=IDS["beta"]
+                )
+                writes = {
+                    "put": lambda: cache.put(beta, "k", {"text": "CANARY"}),
+                    "put_envelope": lambda: cache.put_envelope(beta, other),
+                    "put_envelopes": lambda: cache.put_envelopes(beta, [other]),
+                }
+                with self.assertRaises(SchemaConflictError) as caught:
+                    writes[name]()
+                self.assertEqual(caught.exception.record_key, "k")
+                self.assertNotIn("CANARY", str(caught.exception))
+                self.assertEqual(cache.get(alpha, "k"), {"text": "held"})
+                self.assertIsNone(cache.get(beta, "k"))
+
+    def test_two_routed_stores_holding_one_key_refuse_the_pull_and_keep_the_earlier_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            one, two = Path(tmp) / "one.cc", Path(tmp) / "two.cc"
+            shutil.copyfile(VECTORS / "catalog-store.cc", one)
+            shutil.copyfile(VECTORS / "run-store.cc", two)
+            cache = alpha_beta("alpha", "beta")
+            cache.add_backing_store(SingleFileMessagePackBackingStore(one), [DOCUMENTS["alpha"].type])
+            cache.pull_all_backing_stores()
+            cache.add_backing_store(SingleFileMessagePackBackingStore(two), [DOCUMENTS["beta"].type])
+            with self.assertRaises(Exception) as caught:
+                cache.pull_all_backing_stores()
+            self.assertIn("'qx'", str(caught.exception))
+            self.assertEqual(cache.get(DOCUMENTS["alpha"], "qx"), {"text": "a"})
+            self.assertIsNone(cache.get(DOCUMENTS["beta"], "qx"))
+
+    def test_a_foreign_record_is_listed_and_its_bytes_survive_writes_and_removals_elsewhere(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.cc"
+            shutil.copyfile(VECTORS / "foreign-store.cc", path)
+            before = stored(path, "k")
+            cache = alpha_beta("alpha", store=SingleFileMessagePackBackingStore(path))
+            cache.pull_all_backing_stores()
+            [record] = cache.foreign_records()
+            self.assertEqual((record.key, record.schema_id, record.schema_name), ("k", IDS["gamma"], "tests.ki_gamma"))
+            self.assertEqual(record.stored_at, before[1])
+            cache.put(DOCUMENTS["alpha"], "m", {"text": "m"})
+            cache.delete(DOCUMENTS["alpha"], "j")
+            self.assertEqual(stored(path, "k"), before)
+            self.assertEqual(file_records(path), [["k", "tests.ki_gamma"], ["m", "tests.ki_alpha"]])
+            claimed = alpha_beta("alpha", "gamma", store=SingleFileMessagePackBackingStore(path))
+            claimed.pull_all_backing_stores()
+            self.assertEqual(claimed.foreign_records(), [])
+            self.assertEqual(claimed.get(DOCUMENTS["gamma"], "k"), {"text": "g"})
+
+    def test_the_foreign_list_is_sorted_by_utf16_code_unit_and_replaced_by_the_next_pull(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.cc"
+            store = SingleFileMessagePackBackingStore(path)
+            gamma = DOCUMENTS["gamma"]
+            writer = alpha_beta("gamma", store=store)
+            for key in ("\U00010400", "Ａ", "b", "B"):
+                writer.put(gamma, key, {"text": "x"})
+            cache = alpha_beta("alpha", store=SingleFileMessagePackBackingStore(path))
+            cache.pull_all_backing_stores()
+            self.assertEqual([record.key for record in cache.foreign_records()], ["B", "b", "\U00010400", "Ａ"])
+            for key in ("B", "b", "\U00010400", "Ａ"):
+                writer.delete(gamma, key)
+            cache.pull_all_backing_stores()
+            self.assertEqual(cache.foreign_records(), [])
+
+class OwnershipAndStoreKindTests(unittest.TestCase):
+    """The cache judge answers on its own where the store has no commit guard (JSONL) or the records live in two stores."""
+
+    def test_a_jsonl_store_gets_no_help_from_a_disk_judge(self) -> None:
+        from cultcache_py import JsonLinesBackingStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.jsonl"
+            gamma = DOCUMENTS["gamma"]
+            alpha_beta("gamma", store=JsonLinesBackingStore(path)).put(gamma, "k", {"text": "g"})
+            before = path.read_bytes()
+            cache = alpha_beta("alpha", store=JsonLinesBackingStore(path))
+            cache.pull_all_backing_stores()
+            self.assertEqual([record.key for record in cache.foreign_records()], ["k"])
+            with self.assertRaises(SchemaConflictError):
+                cache.put(DOCUMENTS["alpha"], "k", {"text": "x"})
+            with self.assertRaises(SchemaConflictError):
+                cache.delete(DOCUMENTS["alpha"], "k")
+            self.assertEqual(path.read_bytes(), before)
+            cache.put(DOCUMENTS["alpha"], "j", {"text": "a"})  # the foreign line is carried through a write elsewhere
+            self.assertIn(b"tests.ki_gamma", path.read_bytes())
+
+    def test_a_foreign_key_in_two_stores_refuses_the_pull(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            one, two = Path(tmp) / "one.cc", Path(tmp) / "two.cc"
+            for path in (one, two):
+                alpha_beta("gamma", store=SingleFileMessagePackBackingStore(path)).put(DOCUMENTS["gamma"], "k", {"text": "g"})
+            cache = alpha_beta("alpha")
+            cache.add_backing_store(SingleFileMessagePackBackingStore(one), [DOCUMENTS["alpha"].type])
+            cache.add_backing_store(SingleFileMessagePackBackingStore(two), [DOCUMENTS["beta"].type])
+            with self.assertRaises(Exception) as caught:
+                cache.pull_all_backing_stores()
+            self.assertIn("'k'", str(caught.exception))
+
+    def test_a_type_that_owns_the_held_schema_id_replaces_the_record_and_the_key_keeps_one_type(self) -> None:
+        successor = define_database_entry_type(
+            "tests.ki_alpha2",
+            [database_entry_field("text", 0, codec=t.string)],
+            schema_id="sha256:" + "a" * 64,
+            schema_name="tests.ki_alpha2",
+            compatible_schema_ids=[IDS["alpha"]],
+        )
+        for routed in (False, True):
+            with self.subTest(routed=routed), tempfile.TemporaryDirectory() as tmp:
+                one, two = Path(tmp) / "one.cc", Path(tmp) / "two.cc"
+                made = CultCache.builder().register_document_type(DOCUMENTS["alpha"]).register_document_type(successor)
+                if routed:
+                    made.add_backing_store(SingleFileMessagePackBackingStore(one), [DOCUMENTS["alpha"].type])
+                    made.add_backing_store(SingleFileMessagePackBackingStore(two), [successor.type])
+                else:
+                    made.add_generic_store(SingleFileMessagePackBackingStore(one))
+                cache = made.build()
+                cache.put(DOCUMENTS["alpha"], "k", {"text": "old"})
+                if routed:
+                    with self.assertRaises(SchemaConflictError):  # one key would live in two stores
+                        cache.put(successor, "k", {"text": "new"})
+                    self.assertEqual(cache.get(DOCUMENTS["alpha"], "k"), {"text": "old"})
+                else:
+                    cache.put(successor, "k", {"text": "new"})
+                    self.assertIsNone(cache.get(DOCUMENTS["alpha"], "k"))
+                    self.assertEqual(cache.get(successor, "k"), {"text": "new"})
+                    self.assertEqual(file_records(one), [["k", "tests.ki_alpha2"]])
