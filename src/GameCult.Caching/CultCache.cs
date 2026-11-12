@@ -2537,19 +2537,19 @@ namespace GameCult.Caching
             return Task.CompletedTask;
         }
 
-        public void FlushAllBackingStores() => Held(() =>
+        public void FlushAllBackingStores(bool soft = false) => Held(() =>
         {
             foreach (var (store, _) in _stores)
             {
                 if (!store.IsReadOnly && (store.IsDirty || store.HasStagedChecks))
-                    store.PushAll();
+                    store.PushAll(soft);
             }
             return true;
         });
 
-        public Task FlushAsync()
+        public Task FlushAsync(bool soft = false)
         {
-            FlushAllBackingStores();
+            FlushAllBackingStores(soft);
             return Task.CompletedTask;
         }
 
@@ -3945,7 +3945,13 @@ namespace GameCult.Caching
         public abstract void PullAll();
         public abstract void Push(CultStoredDocument entry);
         public abstract void Delete(CultStoredDocument entry);
-        public abstract void PushAll();
+        public void PushAll() => PushAll(soft: false);
+
+        /// <summary>
+        /// Applies the staged writes. A soft flush writes only where nothing is at the path: over a store it reads it returns without
+        /// writing and leaves the staged writes staged and dirty for a later plain flush, and over a file it cannot read it refuses.
+        /// </summary>
+        public abstract void PushAll(bool soft);
 
         /// <summary>
         /// One durable step under the store's exclusive lock: the batch and every staged write land onto the store as it is then,
@@ -4184,7 +4190,7 @@ namespace GameCult.Caching
         /// </para>
         /// <para>
         /// A writable store kind that reads its durable state under a lock overrides this to call <see cref="StageChecks"/>, and
-        /// judges <see cref="StagedChecks"/> at its next <see cref="PushAll"/> or <see cref="CommitBatch"/> as it judges
+        /// judges <see cref="StagedChecks"/> at its next <see cref="PushAll(bool)"/> or <see cref="CommitBatch"/> as it judges
         /// <see cref="CultCommitRequest.Checks"/>: under the lock, with the keys it writes, refused through the same refusal, never
         /// removed. It calls <see cref="MarkFlushSucceeded"/> when that step succeeds, which clears them. A read-only store has no
         /// such step and keeps the default. Both shipped store kinds do this. A batch's own checks are judged through
@@ -4661,7 +4667,7 @@ namespace GameCult.Caching
         // only per staged key. A key whose durable record is under an id this cache does not declare refuses the write, and in a store
         // holding a variant it lands only onto the store as this cache last read it (both ApplyWriteSet).
         // A file it cannot read (truncated, trailing bytes, not a store, a format it does not read) is refused and left as it is.
-        public override void PushAll()
+        public override void PushAll(bool soft)
         {
             ThrowIfReadOnly();
             Held(() =>
@@ -4669,6 +4675,8 @@ namespace GameCult.Caching
                 using (AcquireLock(wait: true))
                 {
                     var disk = ReadSnapshot();
+                    if (soft && disk != null)
+                        return;
                     var (upserts, removals) = StagedWrites(Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>());
                     Wrote(ApplyWriteSet(disk, upserts, removals, Array.Empty<string>()));
                 }

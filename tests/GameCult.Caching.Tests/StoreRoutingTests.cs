@@ -699,10 +699,10 @@ namespace GameCult.Caching.Tests
                 _nested = nested;
             }
 
-            public override void PushAll()
+            public override void PushAll(bool soft)
             {
                 _nested();
-                base.PushAll();
+                base.PushAll(soft);
             }
         }
 

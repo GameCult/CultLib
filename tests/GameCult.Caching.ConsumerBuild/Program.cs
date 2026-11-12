@@ -56,7 +56,7 @@ public sealed class OutsideStore : CacheBackingStore
 
     public override void Delete(CultStoredDocument entry) { }
 
-    public override void PushAll() { }
+    public override void PushAll(bool soft) { }
 
     public override CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait) =>
         request.ConditionsHold(new Dictionary<string, string> { ["w"] = "v1" }, Entries.Values, ForeignRecords)

@@ -100,7 +100,7 @@ namespace GameCult.Networking
         /// </summary>
         public Task FlushAsync(bool soft = false)
         {
-            return Cache.FlushAsync();
+            return Cache.FlushAsync(soft);
         }
 
         /// <summary>
