@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using MessagePack;
 using MessagePack.Formatters;
+using MessagePack.Resolvers;
 
 namespace GameCult.Caching.MessagePack;
 
@@ -21,16 +22,35 @@ internal sealed class CultUnionGuard(IFormatterResolver inner) : IFormatterResol
     {
         var arms = typeof(T).GetCustomAttributes<UnionAttribute>(inherit: false).ToArray();
         if (arms.Length == 0)
-            return Guarded(typeof(T)) && inner.GetFormatter<T>() is { } objectFormatter ? new SlotFormatter<T>(objectFormatter) : null;
+            return inner.GetFormatter<T>() is { } objectFormatter && KeyLayout(objectFormatter) ? new SlotFormatter<T>(objectFormatter) : null;
         return inner.GetFormatter<T>() is not { } formatter ? null : new Formatter<T>(formatter, arms);
     }
 
-    // A concrete int-keyed [MessagePackObject] type whose layout MessagePack derives from its [Key] members. A type that names its own
-    // [MessagePackFormatter] owns its layout and its tolerance (it may read a legacy shape or skip fields on purpose), so it is not guarded.
-    private static bool Guarded(Type type) =>
-        !type.IsAbstract && !type.IsInterface && !type.IsGenericTypeDefinition &&
-        type.GetCustomAttribute<MessagePackObjectAttribute>(inherit: true) is { KeyAsPropertyName: false } &&
-        type.GetCustomAttribute<MessagePackFormatterAttribute>(inherit: true) == null;
+    // The one decision of whether a type is measured: the formatter the chain hands out for an int-keyed [MessagePackObject] type is
+    // MessagePack's own [Key]-layout formatter, the very instance StandardResolver (or its AllowPrivate twin) builds for it. A formatter a
+    // consumer resolver or a [MessagePackFormatter] attribute supplies owns its layout and its tolerance, and a [MessagePackObject]
+    // collection is written as its items by the generic resolver: none of those is measured. Identity, as ResolverClaim asks it.
+    private static bool KeyLayout<T>(IMessagePackFormatter<T> formatter)
+    {
+        if (typeof(T).IsAbstract || typeof(T).IsInterface ||
+            typeof(T).GetCustomAttribute<MessagePackObjectAttribute>(inherit: true) is not { KeyAsPropertyName: false })
+            return false;
+        if (ReferenceEquals(formatter, Of<T>(AttributeFormatterResolver.Instance)) || ReferenceEquals(formatter, Of<T>(DynamicGenericResolver.Instance)))
+            return false;
+        return ReferenceEquals(formatter, Of<T>(StandardResolver.Instance)) || ReferenceEquals(formatter, Of<T>(StandardResolverAllowPrivate.Instance));
+    }
+
+    private static IMessagePackFormatter<T>? Of<T>(IFormatterResolver resolver)
+    {
+        try
+        {
+            return resolver.GetFormatter<T>();
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
 
     // Counts a concrete object's array header against its declared slots and notes the excess into the open CultSlotScope, then lets the
     // inner formatter read it unchanged: no byte scan, no second decode. With no scope open it is a depth-free pass-through.
