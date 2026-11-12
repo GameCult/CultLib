@@ -245,9 +245,9 @@ fn delete_releases_a_value() {
 fn types_sharing_an_alias_and_a_value_do_not_conflict() {
     let mut cache = memory_cache();
     cache.put("a", &unique("S")).unwrap();
-    cache.put("a", &Other { sku: "S".into() }).unwrap();
-    cache.put("b", &Other { sku: "T".into() }).unwrap();
-    assert!(cache.put("b", &Other { sku: "S".into() }).is_err());
+    cache.put("oa", &Other { sku: "S".into() }).unwrap();
+    cache.put("ob", &Other { sku: "T".into() }).unwrap();
+    assert!(cache.put("ob", &Other { sku: "S".into() }).is_err());
     assert_eq!(cache.get_by_index::<Unique>("Sku", "S").unwrap().unwrap(), unique("S"));
     assert_eq!(cache.get_by_index::<Other>("Sku", "S").unwrap().unwrap(), Other { sku: "S".into() });
 }

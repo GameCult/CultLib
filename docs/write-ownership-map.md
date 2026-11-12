@@ -33,8 +33,8 @@ Probes: scratch tests in this worktree, removed. C# filtered runs on Starfire (o
 
 | Probe | C# | TypeScript | Rust | Python |
 |---|---|---|---|---|
-| P1 cache {A,B}: B at k, then A at k | **C**: B's record replaced, k now A's id | R `SchemaConflictError` (cultcache-ts: one record per key) | C, both live at k | R `SchemaConflictError`, A's write refused, B kept (was C, both live) |
-| P2 cache {A} only, store holds B at k, write A at k | R `CultSchemaConflictException` (B is foreign, carried) | R `SchemaConflictError` at write (foreign loads, carried; cultcache-ts) | R at load, same | R `SchemaConflictError` (B is foreign, carried; the load admits it; was R at load) |
+| P1 cache {A,B}: B at k, then A at k | **C**: B's record replaced, k now A's id | R `SchemaConflictError` (cultcache-ts: one record per key) | R `SchemaConflictError` naming k, A not written (leaf cut) | R `SchemaConflictError`, A's write refused, B kept (was C, both live) |
+| P2 cache {A} only, store holds B at k, write A at k | R `CultSchemaConflictException` (B is foreign, carried) | R `SchemaConflictError` at write (foreign loads, carried; cultcache-ts) | R `SchemaConflictError` (B loads as foreign, carried; leaf cut) | R `SchemaConflictError` (B is foreign, carried; the load admits it; was R at load) |
 | P3 cacheless `WriteDocument<A>` over B, registry null / {A} / {A,B} | R / R / R | no cacheless write | no cacheless write | no cacheless write |
 | P4 cache {A,B}: remove k and upsert A at k in one batch | C (k is A's) | n/a | n/a | n/a |
 | P5 cache {A,B}: remove, then add in a second commit | C | n/a | n/a | n/a |
@@ -55,12 +55,22 @@ What this establishes:
 - Retype as remove plus add already works in the cache (P4, P5); the cut adds no new primitive.
 - Directory store: its own judge (`DirectoryMessagePackBackingStore.cs:287-306`) asks `Registry.Owns` for every key,
   upserts included. It must take the same per-key rule.
-- TypeScript, Rust, Python: records are keyed by `(type, key)` (Rust `entries: BTreeMap<(String, String), _>`,
-  `lib.rs:2659`; TS `#entryId(definition.type, key)`, `cult-cache.ts:323`; Python sorts and stores by `(type, key)`).
-  A write of A at k never meets B's record: both live at k (P1). None carries a foreign record; a store holding an
-  unregistered type does not load (P2). So no leaf has a "write meets another type's record" path to fix. Bringing the
-  ruling to the leaves first needs C#'s key identity (one record per key) and C#'s foreign carry, which are parity changes
-  of the leaves' store model, not a write-ownership rule. Owned by the new follow-up `variants:follow_up:leaf-key-identity-parity`.
+- TypeScript and Python: records are keyed by `(type, key)` (TS `#entryId(definition.type, key)`, `cult-cache.ts:323`;
+  Python sorts and stores by `(type, key)`). A write of A at k never meets B's record: both live at k (P1). Neither carries
+  a foreign record; a store holding an unregistered type does not load (P2). So neither has a "write meets another type's
+  record" path to fix: bringing the ruling to them first needs C#'s key identity (one record per key) and C#'s foreign
+  carry, parity changes of their store model, not a write-ownership rule (follow-up `variants:follow_up:leaf-key-identity-parity`).
+- Rust is that follow-up's first leaf cut (`cut-leaf-key-identity-rs`). The cache keeps its `(type, key)` map; one judge
+  (`refuse_retype`) refuses another registered type at a key the cache holds, or any write at a key a store carries
+  foreign, on every write path, pull and SoA load, comparing types, not the ids envelopes claim. At a key the cache does not
+  hold (a fresh key, or one another writer filled after this cache's pull) the single-file store's commit guard judges by
+  the stored and claimed schema ids, so an envelope claiming another registered type's id is refused earlier, at every
+  envelope admission (`refuse_claimed_id`, the pull's own `resolve_registered_type` lookup); an id naming no registered type
+  passes, trusted as claimed: an envelope under such an id can replace another writer's record stored under it at a key
+  this cache does not hold, or be served as another type by a reader that registers the type the id names (Soul g8a, g8c,
+  open: which ids a Rust type owns is not declared to CultCache). Store-level writers called directly (`push`,
+  `insert_entry_if_absent`, compare-and-swap) trust the claimed id.
+  The cache carries an unregistered type's records as foreign and walks the vector's 12 rows.
 - Interop (unproven): a Python store holding A and B at k fails C# decode first on payload encoding (Python's
   lambda-defined document wrote JSON payloads), so what C# does with two records at one key was not reached.
 

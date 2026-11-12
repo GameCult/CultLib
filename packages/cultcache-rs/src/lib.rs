@@ -2750,6 +2750,18 @@ pub struct CultCache {
     /// values. Registration data, so the judge decodes only indexed types.
     projectors: BTreeMap<String, IndexProjector>,
     stores: Vec<CultCacheStoreRegistration>,
+    /// Records a store holds that no registered type claims: (store index, the envelope as the store read it). Derived from the last
+    /// pull and replaced with it; written nowhere else. It decides only refusals at its keys.
+    foreign: Vec<(usize, CultCacheEnvelope)>,
+}
+
+/// A record a store holds that no registered type claims: carried, never served.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForeignRecord {
+    pub key: String,
+    pub schema_id: String,
+    pub schema_name: String,
+    pub stored_at: String,
 }
 
 type IndexProjector = fn(&[u8]) -> Result<Vec<(&'static str, String)>>;
@@ -2803,6 +2815,7 @@ impl CultCache {
             index_holders: BTreeMap::new(),
             projectors: BTreeMap::new(),
             stores: Vec::new(),
+            foreign: Vec::new(),
         }
     }
 
@@ -2940,6 +2953,7 @@ impl CultCache {
     /// only when all of them loaded, so a refused load admits nothing.
     pub fn pull_all_backing_stores(&mut self) -> Result<()> {
         let mut loaded = BTreeMap::new();
+        let mut foreign = Vec::new();
         let known_types: BTreeSet<String> = self.definitions.keys().cloned().collect();
         let schema_name_definitions = self.schema_name_definitions.clone();
         for (index, registration) in self.stores.iter().enumerate() {
@@ -2950,10 +2964,10 @@ impl CultCache {
                     entry.schema_id.as_deref(),
                     &entry.r#type,
                 ) else {
-                    return Err(anyhow!(
-                        "No schema is registered for persisted entry type {:?}",
-                        entry.r#type
-                    ));
+                    // No registered type claims the record: the cache carries it, never serves it.
+                    self.refuse_retype(&loaded, &foreign, &entry)?;
+                    foreign.push((index, entry));
+                    continue;
                 };
                 let home = self.resolve_route_index(&canonical_type);
                 if home != Some(index) {
@@ -2966,14 +2980,37 @@ impl CultCache {
                     ));
                 }
                 entry.r#type = canonical_type;
+                self.refuse_retype(&loaded, &foreign, &entry)?;
+                // Two records of a store resolving to one type at one key (one stamped with the other's id): one record per key.
+                if let Some(held) = loaded.get(&entry_id(&entry)) {
+                    return Err(retype_conflict(held, &entry));
+                }
                 loaded.insert(entry_id(&entry), entry);
             }
         }
         self.refuse_second_globals(&loaded)?;
         let holders = self.judge_image(&loaded)?;
         self.entries = loaded;
+        self.foreign = foreign;
         self.index_holders = holders;
         Ok(())
+    }
+
+    /// The records the last pull found in a store that no registered type claims, sorted by key (UTF-16 order). The cache does not
+    /// serve them; it carries them through every write and refuses a write or removal at their keys.
+    pub fn foreign_records(&self) -> Vec<ForeignRecord> {
+        let mut records: Vec<ForeignRecord> = self
+            .foreign
+            .iter()
+            .map(|(_, entry)| ForeignRecord {
+                key: entry.key.clone(),
+                schema_id: schema_identity(entry).to_string(),
+                schema_name: entry.r#type.clone(),
+                stored_at: entry.stored_at.clone(),
+            })
+            .collect();
+        records.sort_by(|left, right| utf16_cmp(&left.key, &right.key));
+        records
     }
 
     /// Returns the exact envelopes in the currently loaded cache image.
@@ -3130,6 +3167,7 @@ impl CultCache {
     pub fn put<T: DatabaseEntry>(&mut self, key: impl Into<String>, value: &T) -> Result<T> {
         let (entry, parsed) = self.prepare_entry(key, value)?;
         self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
+        self.refuse_retype(&self.entries, &self.foreign, &entry)?;
         let change = self.judge_unique(&[&entry])?;
         if let Some(home) = self.home_index(T::TYPE)? {
             self.stores[home].store.push(&entry)?;
@@ -3228,6 +3266,7 @@ impl CultCache {
                 ));
             }
             require_payload_depth(entry)?;
+            self.refuse_claimed_id(entry)?;
             let Some(home) = self.home_index(&entry.r#type)? else {
                 continue;
             };
@@ -3244,13 +3283,18 @@ impl CultCache {
             next.insert(entry_id(entry), entry.clone());
         }
         self.refuse_second_globals(&next)?;
+        for entry in &staged {
+            self.refuse_retype(&next, &self.foreign, entry)?;
+        }
         let change = self.judge_unique(&staged.iter().collect::<Vec<_>>())?;
         if let Some(store_index) = store_index {
-            // The home store receives its own records only: those it already
-            // holds in this cache plus the staged ones.
+            // The home store receives its own records only: those it already holds in this cache plus the staged ones, and
+            // the records it carries that no registered type claims: push_all replaces the store's records, so a foreign
+            // record is laid back as the store read it.
             let snapshot: Vec<_> = next
                 .values()
                 .filter(|entry| self.resolve_route_index(&entry.r#type) == Some(store_index))
+                .chain(self.foreign.iter().filter(|(home, _)| *home == store_index).map(|(_, entry)| entry))
                 .cloned()
                 .collect();
             self.stores[store_index]
@@ -3264,7 +3308,9 @@ impl CultCache {
 
     pub fn put_envelope<T: DatabaseEntry>(&mut self, entry: CultCacheEnvelope) -> Result<T> {
         let parsed = self.validate_envelope::<T>(&entry)?;
+        self.refuse_claimed_id(&entry)?;
         self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
+        self.refuse_retype(&self.entries, &self.foreign, &entry)?;
         let change = self.judge_unique(&[&entry])?;
         if let Some(home) = self.home_index(T::TYPE)? {
             self.stores[home].store.push(&entry)?;
@@ -3299,7 +3345,9 @@ impl CultCache {
             ));
         }
         require_payload_depth(&entry)?;
+        self.refuse_claimed_id(&entry)?;
         self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
+        self.refuse_retype(&self.entries, &self.foreign, &entry)?;
         let change = self.judge_unique(&[&entry])?;
         if let Some(home) = self.home_index(&entry.r#type)? {
             self.stores[home].store.push(&entry)?;
@@ -3354,6 +3402,9 @@ impl CultCache {
         self.require_entry_type::<T>()?;
         let id = entry_id_parts(T::TYPE, key);
         let Some(entry) = self.entries.get(&id).cloned() else {
+            if let Some((_, foreign)) = self.foreign.iter().find(|(_, foreign)| foreign.key == key) {
+                return Err(foreign_conflict(foreign, T::TYPE));
+            }
             return Ok(false);
         };
         let released = self.projected_slots(&entry)?;
@@ -3387,6 +3438,8 @@ impl CultCache {
                 ));
             }
             self.home_index(&entry.r#type)?;
+            self.refuse_claimed_id(&entry)?;
+            self.refuse_retype(&loaded, &self.foreign, &entry)?;
             loaded.insert(entry_id(&entry), entry);
         }
         self.refuse_second_globals(&loaded)?;
@@ -3506,6 +3559,46 @@ impl CultCache {
             }
             .into()),
             None => Ok(()),
+        }
+    }
+
+    /// The one key-identity judge (C# `RefuseUndeclared` and the cache's held-owned check): a cache holds one record per key
+    /// whatever its type. `written` may not land at a key a store carries foreign, nor at a key another registered type holds
+    /// in `image`. C# `WrittenOwns` lets a write replace a held record its own type's id owns; a registered type's id here is
+    /// its entry type and declares no compatible ids, so another type's record is never owned, whatever schema id either
+    /// envelope claims. Refused with a typed [`SchemaConflictError`] naming the key and both types, never a value; nothing is
+    /// changed. The single-file store's commit guard judges the same question for the file on disk (another writer's file)
+    /// and stays.
+    fn refuse_retype(
+        &self,
+        image: &BTreeMap<(String, String), CultCacheEnvelope>,
+        foreign: &[(usize, CultCacheEnvelope)],
+        written: &CultCacheEnvelope,
+    ) -> Result<()> {
+        if let Some((_, carried)) = foreign.iter().find(|(_, carried)| carried.key == written.key) {
+            return Err(foreign_conflict(carried, &written.r#type));
+        }
+        for type_id in self.definitions.keys().filter(|type_id| **type_id != written.r#type) {
+            if let Some(held) = image.get(&(type_id.clone(), written.key.clone())) {
+                return Err(retype_conflict(held, written));
+            }
+        }
+        Ok(())
+    }
+
+    /// An admitted envelope's schema id may not name another registered type: the pull resolves a record's type from that id
+    /// (`resolve_registered_type`), so admitting it would store one type that every reload serves as the other, at a key this
+    /// cache may not hold (another writer's record, or a fresh key). Admission asks the pull's own lookup. An id that names no
+    /// registered type (a dynamic or versioned id) is the envelope's own. Store-level writers called directly trust the id.
+    fn refuse_claimed_id(&self, entry: &CultCacheEnvelope) -> Result<()> {
+        let known_types: BTreeSet<String> = self.definitions.keys().cloned().collect();
+        match resolve_registered_type(&known_types, &self.schema_name_definitions, entry.schema_id.as_deref(), &entry.r#type) {
+            Some(resolved) if resolved != entry.r#type => Err(anyhow::Error::new(SchemaConflictError {
+                schema_id: schema_identity(entry).to_string(),
+                schema_names: vec![resolved, entry.r#type.clone()],
+                record_key: entry.key.clone(),
+            })),
+            _ => Ok(()),
         }
     }
 
@@ -3742,11 +3835,18 @@ fn require_unique_keys(envelopes: &[CultCacheEnvelope]) -> Result<()> {
     Ok(())
 }
 
-/// What a record's stored schema id is: the id it carries, else its type (a registered type's id is its entry type). This
-/// runtime's registered types declare no compatible ids, so a written record owns a held one exactly when the ids are equal:
-/// the question C# `WrittenOwns` asks of the stored id, not a comparison of type names.
+/// What a record's stored schema id is: the id it carries, else its type (a registered type's id is its entry type).
 fn schema_identity(entry: &CultCacheEnvelope) -> &str {
     entry.schema_id.as_deref().unwrap_or(&entry.r#type)
+}
+
+/// The refusal of a write at a key a store carries as a record no registered type claims.
+fn foreign_conflict(carried: &CultCacheEnvelope, written_type: &str) -> anyhow::Error {
+    anyhow::Error::new(SchemaConflictError {
+        schema_id: schema_identity(carried).to_string(),
+        schema_names: vec![carried.r#type.clone(), written_type.to_string()],
+        record_key: carried.key.clone(),
+    })
 }
 
 /// The refusal of a write that would retype a key: the written record does not own the schema id the held one is stored under.
@@ -4307,6 +4407,347 @@ mod tests {
 
     fn reloaded(path: &Path) -> Result<Vec<CultCacheEnvelope>> {
         SingleFileMessagePackBackingStore::new(path).pull_all()
+    }
+
+    const SECRET: &str = "payload-text-a-refusal-must-not-echo";
+
+    fn store_with(path: &Path, records: impl FnOnce(&mut CultCache) -> Result<()>) -> Result<()> {
+        let mut cache = CultCache::new();
+        cache.register_registry(TestEntries)?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(path))?;
+        records(&mut cache)
+    }
+
+    #[test]
+    fn retype_memory_cache_refuses_a_second_type_on_every_write_path_and_keeps_the_first() -> Result<()> {
+        let mut cache = CultCache::new();
+        cache.register_registry(TestEntries)?;
+        cache.put("shared", &settings_one())?;
+        let before = cache.snapshot();
+        let secret = Note { title: SECRET.to_string(), body: SECRET.to_string() };
+        let (staged, _) = cache.prepare_entry("shared", &secret)?;
+
+        let mut errors = vec![
+            cache.put("shared", &secret).unwrap_err(),
+            cache.put_envelope::<Note>(staged.clone()).unwrap_err(),
+            cache.put_raw_envelope(staged.clone()).unwrap_err(),
+            cache.put_prepared_batch(vec![staged.clone()]).unwrap_err(),
+        ];
+        // Two types staged at one key in one batch never land, even at a fresh key.
+        let (fresh_note, _) = cache.prepare_entry("fresh", &secret)?;
+        let (fresh_settings, _) = cache.prepare_entry("fresh", &settings_one())?;
+        errors.push(cache.put_prepared_batch(vec![fresh_note, fresh_settings]).unwrap_err());
+        for (error, key) in errors.iter().zip(["shared", "shared", "shared", "shared", "fresh"]) {
+            assert_eq!(retype_refusal(error).record_key, key);
+            assert!(!format!("{error:#}").contains(SECRET), "a refusal never echoes a value: {error:#}");
+        }
+        assert_eq!(cache.snapshot(), before);
+        cache.delete::<Settings>("shared")?;
+        cache.put("shared", &secret)?;
+        Ok(())
+    }
+
+    /// Two types whose envelopes carry one schema id (an id naming no registered type, so admission passes it) are still two
+    /// types: ownership is the written type's own id, never the id an envelope claims (C# `WrittenOwns` reads the written
+    /// entry's catalog entry). Refused at a key the other type holds on every envelope path, with and without a store, and in
+    /// an SoA image.
+    #[test]
+    fn retype_envelopes_sharing_one_claimed_id_are_still_two_types() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("cache.cc");
+        for stored in [false, true] {
+            let mut cache = CultCache::new();
+            cache.register_registry(TestEntries)?;
+            if stored {
+                cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+                cache.pull_all_backing_stores()?;
+            }
+            let (mut settings, _) = cache.prepare_entry("shared", &settings_one())?;
+            settings.schema_id = Some("dynamic.shared.v1".to_string());
+            cache.put_raw_envelope(settings.clone())?;
+            let before = (cache.snapshot(), if stored { fs::read(&path)? } else { Vec::new() });
+            let (mut stamped, _) = cache.prepare_entry("shared", &note_one())?;
+            stamped.schema_id = settings.schema_id.clone();
+            for error in [
+                cache.put_envelope::<Note>(stamped.clone()).unwrap_err(),
+                cache.put_raw_envelope(stamped.clone()).unwrap_err(),
+                cache.put_prepared_batch(vec![stamped.clone()]).unwrap_err(),
+            ] {
+                assert_eq!(retype_refusal(&error).record_key, "shared", "stored {stored}");
+            }
+            assert_eq!((cache.snapshot(), if stored { fs::read(&path)? } else { Vec::new() }), before, "stored {stored}");
+
+            let error = cache.load_soa(CultCacheSoaTable::from_envelopes(vec![settings, stamped])).unwrap_err();
+            assert_eq!(retype_refusal(&error).record_key, "shared");
+            assert_eq!(cache.snapshot(), before.0);
+        }
+        Ok(())
+    }
+
+    /// An envelope whose schema id names another registered type is refused at admission, whether or not this cache holds the
+    /// key: a stale cache (another writer put Settings at the key after this pull) and a fresh key both, on every envelope path
+    /// and in an SoA image, the store unchanged. The pull resolves a record's type from that id, so admitting it would store a
+    /// Note that every reload serves as Settings.
+    #[test]
+    fn retype_an_envelope_claiming_another_registered_types_id_is_refused_at_admission() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("cache.cc");
+        let open = || -> Result<CultCache> {
+            let mut cache = CultCache::new();
+            cache.register_registry(TestEntries)?;
+            cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+            cache.pull_all_backing_stores()?;
+            Ok(cache)
+        };
+        let mut stale = open()?;
+        open()?.put("held-elsewhere", &settings_one())?;
+        let before = fs::read(&path)?;
+        for key in ["held-elsewhere", "fresh"] {
+            let (mut stamped, _) = stale.prepare_entry(key, &note_one())?;
+            stamped.schema_id = Some(Settings::TYPE.to_string());
+            for error in [
+                stale.put_envelope::<Note>(stamped.clone()).unwrap_err(),
+                stale.put_raw_envelope(stamped.clone()).unwrap_err(),
+                stale.put_prepared_batch(vec![stamped.clone()]).unwrap_err(),
+                stale.load_soa(CultCacheSoaTable::from_envelopes(vec![stamped.clone()])).unwrap_err(),
+            ] {
+                let refusal = retype_refusal(&error);
+                assert_eq!((refusal.record_key.as_str(), refusal.schema_id.as_str()), (key, Settings::TYPE), "{error:#}");
+            }
+        }
+        assert!(stale.snapshot().is_empty());
+        assert_eq!(fs::read(&path)?, before, "nothing reached the store");
+        assert_eq!(open()?.get_required::<Settings>("held-elsewhere")?, settings_one());
+        Ok(())
+    }
+
+    /// A store that holds two records at one key, one stamped with the other's schema id, is refused at the pull: both resolve
+    /// to one type, and the cache would otherwise keep whichever came last.
+    #[test]
+    fn retype_a_store_holding_two_records_at_one_key_refuses_the_pull() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("cache.redb");
+        let mut cache = CultCache::new();
+        cache.register_registry(TestEntries)?;
+        let (settings, _) = cache.prepare_entry("shared", &settings_one())?;
+        let (mut stamped, _) = cache.prepare_entry("shared", &note_one())?;
+        stamped.schema_id = Some(Settings::TYPE.to_string());
+        {
+            let mut store = RedbMessagePackBackingStore::new(&path)?;
+            store.push(&settings)?;
+            store.push(&stamped)?;
+        }
+        cache.add_generic_backing_store(RedbMessagePackBackingStore::new(&path)?)?;
+        let error = cache.pull_all_backing_stores().unwrap_err();
+        assert_eq!(retype_refusal(&error).record_key, "shared");
+        assert!(cache.snapshot().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn retype_two_stores_holding_one_key_refuse_the_pull_and_admit_nothing() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let (first, second) = (temp.path().join("first.cc"), temp.path().join("second.cc"));
+        store_with(&first, |cache| cache.put("k", &settings_one()).map(drop))?;
+        store_with(&second, |cache| cache.put("k", &note_one()).map(drop))?;
+        let (first_bytes, second_bytes) = (fs::read(&first)?, fs::read(&second)?);
+
+        let mut cache = CultCache::new();
+        cache.register_registry(TestEntries)?;
+        cache.add_backing_store(SingleFileMessagePackBackingStore::new(&first), [Settings::TYPE])?;
+        cache.pull_all_backing_stores()?;
+        let before = cache.snapshot();
+        cache.add_backing_store(SingleFileMessagePackBackingStore::new(&second), [Note::TYPE])?;
+        let error = cache.pull_all_backing_stores().unwrap_err();
+        assert_eq!(retype_refusal(&error).record_key, "k");
+        assert_eq!(cache.snapshot(), before, "a refused pull admits nothing");
+        assert_eq!((fs::read(&first)?, fs::read(&second)?), (first_bytes, second_bytes));
+        Ok(())
+    }
+
+    #[test]
+    fn retype_a_store_with_an_unregistered_type_loads_lists_it_and_keeps_its_bytes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("cache.cc");
+        store_with(&path, |cache| {
+            cache.put("held", &settings_one())?;
+            cache.put("carried", &note_one()).map(drop)
+        })?;
+        let carried = |path: &Path| -> Result<CultCacheEnvelope> {
+            Ok(reloaded(path)?.into_iter().find(|entry| entry.key == "carried").unwrap())
+        };
+        let original = carried(&path)?;
+
+        for as_batch in [false, true] {
+            let mut cache = CultCache::new();
+            cache.register_entry_type::<Settings>()?;
+            cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+            cache.pull_all_backing_stores()?;
+            let foreign = cache.foreign_records();
+            assert_eq!(foreign.len(), 1);
+            assert_eq!((foreign[0].key.as_str(), foreign[0].schema_id.as_str(), foreign[0].schema_name.as_str()), ("carried", Note::TYPE, Note::TYPE));
+            assert_eq!(cache.snapshot().len(), 1, "a foreign record is listed, not served");
+
+            if as_batch {
+                let (staged, _) = cache.prepare_entry("other", &settings_one())?;
+                cache.put_prepared_batch(vec![staged])?;
+            } else {
+                cache.put("other", &settings_one())?;
+            }
+            assert!(cache.delete::<Settings>("other")?);
+            assert_eq!(carried(&path)?, original, "the foreign record keeps its bytes (batch {as_batch})");
+
+            let secret = Settings { theme: SECRET.to_string(), retries: 9 };
+            let before = fs::read(&path)?;
+            let mut refusals = vec![cache.put("carried", &secret).unwrap_err(), cache.delete::<Settings>("carried").unwrap_err()];
+            let (staged, _) = cache.prepare_entry("carried", &secret)?;
+            refusals.push(cache.put_prepared_batch(vec![staged]).unwrap_err());
+            for error in &refusals {
+                assert_eq!(retype_refusal(error).record_key, "carried");
+                assert!(!format!("{error:#}").contains(SECRET), "{error:#}");
+            }
+            assert_eq!(fs::read(&path)?, before);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retype_a_foreign_key_in_another_store_refuses_the_pull_and_every_write_to_it() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let (routed, generic) = (temp.path().join("routed.cc"), temp.path().join("generic.cc"));
+        store_with(&routed, |cache| cache.put("k", &settings_one()).map(drop))?;
+        store_with(&generic, |cache| cache.put("n", &note_one()).map(drop))?;
+        let open = || -> Result<CultCache> {
+            let mut cache = CultCache::new();
+            cache.register_entry_type::<Settings>()?;
+            cache.add_backing_store(SingleFileMessagePackBackingStore::new(&routed), [Settings::TYPE])?;
+            cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&generic))?;
+            Ok(cache)
+        };
+
+        // A registered record in one store and a foreign one at the same key in another: the pull is refused.
+        store_with(&generic, |cache| cache.put("k", &note_one()).map(drop))?;
+        let mut cache = open()?;
+        assert_eq!(retype_refusal(&cache.pull_all_backing_stores().unwrap_err()).record_key, "k");
+        assert!(cache.snapshot().is_empty() && cache.foreign_records().is_empty());
+
+        // The foreign key lives in the generic store; a write routed to the other store is refused by the cache alone.
+        fs::remove_file(&generic)?;
+        store_with(&generic, |cache| cache.put("n", &note_one()).map(drop))?;
+        let mut cache = open()?;
+        cache.pull_all_backing_stores()?;
+        let before = (cache.snapshot(), fs::read(&routed)?, fs::read(&generic)?);
+        let (staged, _) = cache.prepare_entry("n", &settings_one())?;
+        for error in [cache.put("n", &settings_one()).unwrap_err(), cache.put_prepared_batch(vec![staged]).unwrap_err()] {
+            assert_eq!(retype_refusal(&error).record_key, "n");
+        }
+        assert_eq!((cache.snapshot(), fs::read(&routed)?, fs::read(&generic)?), before);
+        Ok(())
+    }
+
+    /// A batch lays back only its home store's foreign records: another store's are never copied into it.
+    #[test]
+    fn retype_a_batch_lays_back_only_its_own_stores_foreign_records() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let (routed, generic) = (temp.path().join("routed.cc"), temp.path().join("generic.cc"));
+        store_with(&routed, |cache| cache.put("own", &settings_one()).map(drop))?;
+        store_with(&generic, |cache| cache.put("carried", &note_one()).map(drop))?;
+        let generic_bytes = fs::read(&generic)?;
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<Settings>()?;
+        cache.add_backing_store(SingleFileMessagePackBackingStore::new(&routed), [Settings::TYPE])?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&generic))?;
+        cache.pull_all_backing_stores()?;
+        let (staged, _) = cache.prepare_entry("other", &settings_one())?;
+        cache.put_prepared_batch(vec![staged])?;
+        let keys: Vec<String> = reloaded(&routed)?.into_iter().map(|entry| entry.key).collect();
+        assert_eq!(keys, ["other", "own"], "the routed store holds its own records only");
+        assert_eq!(fs::read(&generic)?, generic_bytes);
+        cache.pull_all_backing_stores()?;
+        Ok(())
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+    #[cultcache(type = "only-one", schema = "tests.only_one", global)]
+    struct OnlyOne {
+        #[cultcache(key = 0)]
+        text: String,
+    }
+
+    /// A pull refused after every record is read (here, a second global) changes nothing, the foreign list included.
+    #[test]
+    fn retype_a_pull_refused_after_reading_keeps_the_foreign_list() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("cache.cc");
+        store_with(&path, |cache| cache.put("carried", &note_one()).map(drop))?;
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<Settings>()?;
+        cache.register_entry_type::<OnlyOne>()?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+        cache.pull_all_backing_stores()?;
+        let before = (cache.snapshot(), cache.foreign_records());
+
+        // Behind the cache's back: another foreign record and two records of the global type.
+        let mut store = SingleFileMessagePackBackingStore::new(&path);
+        let (mut late, _) = cache.prepare_entry("late", &settings_one())?;
+        late.r#type = Note::TYPE.to_string();
+        late.schema_id = Some(Note::TYPE.to_string());
+        store.push(&late)?;
+        for key in ["g1", "g2"] {
+            store.push(&cache.prepare_entry(key, &OnlyOne { text: key.to_string() })?.0)?;
+        }
+        assert!(cache.pull_all_backing_stores().is_err());
+        assert_eq!((cache.snapshot(), cache.foreign_records()), before, "a refused pull changes nothing");
+        Ok(())
+    }
+
+    /// An SoA image is judged against the foreign keys too: it may not put a record at a key a store carries foreign.
+    #[test]
+    fn retype_load_soa_refuses_a_record_at_a_foreign_key() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("cache.cc");
+        store_with(&path, |cache| cache.put("carried", &note_one()).map(drop))?;
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<Settings>()?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+        cache.pull_all_backing_stores()?;
+        let (staged, _) = cache.prepare_entry("carried", &settings_one())?;
+        let error = cache.load_soa(CultCacheSoaTable::from_envelopes(vec![staged])).unwrap_err();
+        assert_eq!(retype_refusal(&error).record_key, "carried");
+        assert!(cache.snapshot().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn retype_load_soa_refuses_a_second_type_at_a_key_and_admits_nothing() -> Result<()> {
+        let mut cache = CultCache::new();
+        cache.register_registry(TestEntries)?;
+        cache.put("kept", &settings_one())?;
+        let before = cache.snapshot();
+        let (settings, _) = cache.prepare_entry("k", &settings_one())?;
+        let (note, _) = cache.prepare_entry("k", &note_one())?;
+        let error = cache.load_soa(CultCacheSoaTable::from_envelopes(vec![settings, note])).unwrap_err();
+        assert_eq!(retype_refusal(&error).record_key, "k");
+        assert_eq!(cache.snapshot(), before);
+        Ok(())
+    }
+
+    #[test]
+    fn retype_a_later_registration_claims_the_foreign_record_at_the_next_load() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("cache.cc");
+        store_with(&path, |cache| cache.put("carried", &note_one()).map(drop))?;
+
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<Settings>()?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+        cache.pull_all_backing_stores()?;
+        assert_eq!(cache.foreign_records().len(), 1);
+        cache.register_entry_type::<Note>()?;
+        cache.pull_all_backing_stores()?;
+        assert!(cache.foreign_records().is_empty());
+        assert_eq!(cache.get_required::<Note>("carried")?, note_one());
+        Ok(())
     }
 
     #[test]
@@ -5321,24 +5762,26 @@ mod tests {
     #[test]
     fn refused_pull_leaves_prior_view_intact() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let store_path = temp.path().join("generic.cc");
+        let (settings_path, generic_path) = (temp.path().join("settings.cc"), temp.path().join("generic.cc"));
         let mut cache = CultCache::new();
         cache.register_entry_type::<Settings>()?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
+        cache.add_backing_store(SingleFileMessagePackBackingStore::new(&settings_path), [Settings::TYPE])?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&generic_path))?;
         cache.put("app", &Settings { theme: "before".to_string(), retries: 1 })?;
         let before = cache.snapshot();
 
-        // A record of a type this cache never registered lands in the store behind its back.
-        SingleFileMessagePackBackingStore::new(&store_path).push(&CultCacheEnvelope {
-            key: "stray".into(),
+        // A record of a type this cache never registered lands, behind its back, in the other store at a held key.
+        SingleFileMessagePackBackingStore::new(&generic_path).push(&CultCacheEnvelope {
+            key: "app".into(),
             r#type: "unregistered".into(),
             payload: rmp_serde::to_vec(&("x",))?,
             stored_at: "2026-09-14T00:00:00Z".into(),
             schema_id: Some("unregistered".into()),
         })?;
         let error = cache.pull_all_backing_stores().unwrap_err();
-        assert!(error.to_string().contains("\"unregistered\""), "{error}");
+        assert_eq!(retype_refusal(&error).record_key, "app");
         assert_eq!(cache.snapshot(), before);
+        assert!(cache.foreign_records().is_empty());
         assert_eq!(cache.get_required::<Settings>("app")?.theme, "before");
         Ok(())
     }
@@ -5463,30 +5906,6 @@ mod tests {
         assert_eq!(updated.retries, 1);
         assert!(cache.delete::<Settings>("app")?);
         assert!(cache.get::<Settings>("app")?.is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn pull_rejects_unregistered_persisted_entry_type() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let store_path = temp.path().join("cache.cc");
-        let mut store = SingleFileMessagePackBackingStore::new(&store_path);
-        store.push(&CultCacheEnvelope {
-            key: "unknown".to_string(),
-            r#type: "unregistered".to_string(),
-            payload: rmp_serde::to_vec(&1_u8)?,
-            stored_at: now_utc_second(),
-            schema_id: Some("unregistered".to_string()),
-        })?;
-
-        let mut cache = CultCache::new();
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
-        let error = cache.pull_all_backing_stores().unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("No schema is registered for persisted entry type")
-        );
         Ok(())
     }
 
