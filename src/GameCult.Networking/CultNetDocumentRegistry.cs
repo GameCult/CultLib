@@ -641,23 +641,19 @@ namespace GameCult.Networking
             string storedAt,
             CultNetDocumentMessageOptions? options = null)
         {
-            var binding = GetByDocumentType(descriptor.DocumentType) ??
-                          new CultNetDocumentBinding(
-                              descriptor.DocumentType,
-                              descriptor.SchemaId,
-                              value => CultDocumentMessagePackSerialization.SerializeUntyped(value, value.GetType(), _documents),
-                              payload => CultDocumentMessagePackSerialization.DeserializeUntyped(descriptor.DocumentType, payload, _documents));
+            var binding = GetByDocumentType(descriptor.DocumentType);
 
             return new CultNetRawDocumentRecord
             {
-                SchemaId = binding.SchemaId,
+                SchemaId = binding?.SchemaId ?? descriptor.SchemaId,
                 SchemaName = descriptor.SchemaName,
                 SchemaVersion = descriptor.SchemaVersion,
                 SchemaContentHash = descriptor.ContentHash,
                 RecordKey = key.Value,
                 StoredAt = storedAt,
                 PayloadEncoding = "messagepack",
-                Payload = binding.PayloadSerializer(document),
+                Payload = binding?.PayloadSerializer(document) ??
+                          CultDocumentMessagePackSerialization.SerializeUntyped(document, document.GetType(), _documents),
                 SourceRuntimeId = options?.SourceRuntimeId,
                 SourceAgentId = options?.SourceAgentId,
                 SourceRole = options?.SourceRole,

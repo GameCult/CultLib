@@ -99,6 +99,17 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        // The codec the store and the inspector read through is a path of its own: DecodeDocument<T> deserializes by the codec's
+        // delegate, so a tail it did not refuse would be read as a document.
+        [Test]
+        public void CodecDecodeDocumentRefusesATail()
+        {
+            var codec = CultCacheMessagePack.CreateCodec(Registry);
+            Assert.That(codec.DecodeDocument<UnionSurface>(new CultRecordKey("surface"), Base), Is.Not.Null);
+            var message = Message(() => codec.DecodeDocument<UnionSurface>(new CultRecordKey("surface"), Base.Concat(new byte[] { 0xc0 }).ToArray()));
+            Assert.That(message, Does.Contain(typeof(UnionSurface).FullName).And.Contain($"1 {Clause}").And.Contain("refused on read"));
+        }
+
         [Test]
         public void StoreLoadRefuses()
         {

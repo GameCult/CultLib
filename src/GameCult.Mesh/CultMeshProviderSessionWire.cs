@@ -284,7 +284,10 @@ namespace GameCult.Mesh
                 throw new ArgumentException($"Expected provider command schema '{CultMeshProviderSessionWireContract.CommandSchema}'.", nameof(document));
             if (!string.Equals(document.PayloadEncoding, "messagepack", StringComparison.Ordinal))
                 throw new ArgumentException("Provider command document must use MessagePack.", nameof(document));
-            var command = MessagePackSerializer.Deserialize<CultMeshProviderCommandWire>(document.Payload, Options);
+            // A raw record's payload is one MessagePack value (ruling trailing-bytes-refuse): a tail is refused by count, never walked.
+            var command = MessagePackSerializer.Deserialize<CultMeshProviderCommandWire>(new ReadOnlyMemory<byte>(document.Payload), Options, out var read);
+            if (read < document.Payload.Length)
+                throw new MessagePackSerializationException($"Provider command document: {document.Payload.Length - read} bytes after its first MessagePack value (refused on read).");
             if (command == null) throw new MessagePackSerializationException("Provider command decoded to null.");
             Validate(command);
             return command;

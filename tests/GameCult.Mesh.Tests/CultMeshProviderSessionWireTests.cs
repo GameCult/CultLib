@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using GameCult.Networking;
 using MessagePack;
 using NUnit.Framework;
@@ -166,6 +167,29 @@ public sealed class CultMeshProviderSessionWireTests
             Assert.That(decodedReceipt.Receipt.State, Is.EqualTo("applied"));
             Assert.That(decodedReceipt.Receipt.Result, Is.Not.Null);
         });
+    }
+
+    [Test]
+    public void DecodeCommandDocumentRefusesBytesAfterItsFirstValue()
+    {
+        var command = new CultMeshProviderCommandWire
+        {
+            CommandId = "cmd-7", CommandKind = "pilot.thrust", ProviderId = "aetheria", ServiceInstanceId = "aetheria-42",
+            Payload = new Dictionary<string, object> { ["thrust"] = 1 }
+        };
+        var payload = Convert.FromBase64String(CultMeshProviderSessionWire.EncodePayload(command));
+        CultNetRawDocumentRecord Record(byte[] bytes) => new()
+        {
+            SchemaId = CultMeshProviderSessionWireContract.CommandSchema,
+            RecordKey = "provider-command:aetheria:aetheria-42:cmd-7",
+            PayloadEncoding = "messagepack",
+            Payload = bytes
+        };
+
+        Assert.That(CultMeshProviderSessionWire.DecodeCommandDocument(Record(payload)).CommandId, Is.EqualTo("cmd-7"));
+        var thrown = Assert.Throws<MessagePackSerializationException>(() =>
+            CultMeshProviderSessionWire.DecodeCommandDocument(Record(payload.Concat(new byte[] { 0xc0, 0xc0 }).ToArray())))!;
+        Assert.That(thrown.Message, Does.Contain("2 bytes after its first MessagePack value"));
     }
 
     [Test]
