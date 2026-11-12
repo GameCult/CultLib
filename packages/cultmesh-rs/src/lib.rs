@@ -737,8 +737,9 @@ impl CultMeshNode {
 
     /// Applies each snapshot document of a registered schema with `put_raw_envelope`. The first refusal ends the pull
     /// and the documents before it stay applied; a key this node holds read-only (unread slots from a newer peer, or a
-    /// payload this build cannot read) is refused like any other, as C# CultMesh holds no per-key handling either
-    /// (follow-up mesh-unread-slots).
+    /// payload this build cannot read) is refused like any other. C# applies a raw snapshot as one cache commit, so a
+    /// refusal there applies nothing: this is a divergence, owed by follow-up mesh-unread-slots (stage the pull through
+    /// `put_prepared_batch`).
     fn apply_raw_snapshot_documents(
         &mut self,
         documents: Vec<cultnet_rs::CultNetRawDocumentRecord>,
@@ -1225,7 +1226,7 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_document_for_a_read_only_key_ends_the_pull_and_keeps_the_applied_ones() -> Result<()> {
+    fn a_snapshot_document_for_a_read_only_key_ends_the_pull_unlike_csharp_which_applies_nothing() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let mut node = CultMesh::create_node(temp.path().join("m.cc"), TestDocuments, Default::default())?;
         // A newer peer's note: one slot past the declared one.

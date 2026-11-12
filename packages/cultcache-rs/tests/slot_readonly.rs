@@ -346,7 +346,7 @@ fn a_held_payload_the_type_cannot_read_is_read_only_and_refused_by_name() {
     let mut cache = registered();
     // A newer writer's record: an arm this build lacks and an extra root slot. get cannot read it, and it is the data
     // read-only exists to protect.
-    let newer = rmp_serde::to_vec(&("newer", (99u64, ("x",)), "extra")).unwrap();
+    let newer = rmp_serde::to_vec(&("CANARY-name", (99u64, ("x",)), "CANARY-extra")).unwrap();
     cache.put_raw_envelope(slot_unit_envelope("n", newer)).unwrap();
     assert!(cache.get::<SlotUnit>("n").is_err());
     assert!(!cache.is_writable(SlotUnit::TYPE, "n").unwrap());
@@ -359,7 +359,7 @@ fn a_held_payload_the_type_cannot_read_is_read_only_and_refused_by_name() {
     ] {
         let message = format!("{error:#}");
         assert!(message.contains("\"n\"") && message.contains("tests.slot_unit") && message.contains("read-only"), "{message}");
-        assert!(!message.contains("newer") && !message.contains("extra"), "{message}");
+        assert!(!message.contains("CANARY"), "{message}");
     }
     assert_eq!(cache.snapshot_envelopes(), held);
 }
@@ -371,7 +371,8 @@ fn a_corrupt_held_payload_is_refused_naming_the_key_never_its_bytes() {
     assert!(!cache.is_writable(UnionSurface::TYPE, "broken").unwrap());
     let error = cache.delete::<UnionSurface>("broken").unwrap_err();
     let message = format!("{error:#}");
-    assert!(message.contains("\"broken\"") && message.contains("repair"), "{message}");
+    assert!(message.contains("\"broken\"") && message.contains("backup") && message.contains("store"), "{message}");
+    assert!(!message.contains("build that wrote it"), "{message}");
     assert!(!message.contains("CANARY"), "{message}");
     assert!(cache.is_writable("tests.unregistered", "broken").is_err());
 }
@@ -461,4 +462,32 @@ fn a_marked_decode_leaves_no_scope_open() {
     assert_eq!(cultcache_rs::__enter_slots(), 0, "a marked decode left its scope open on this thread");
     let _ = decode_payload_marked::<UnionSurface>(&vector("depth-skipped-past-limit.msgpack"));
     assert_eq!(cultcache_rs::__enter_slots(), 0);
+}
+
+#[test]
+fn is_writable_is_false_for_a_type_with_no_home_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cache = registered();
+    // One store, routed to SlotUnit only: UnionSurface has no home.
+    cache.add_backing_store(SingleFileMessagePackBackingStore::new(dir.path().join("s.cc")), [SlotUnit::TYPE]).unwrap();
+    assert!(cache.put("k", &constructed()).is_err());
+    assert!(!cache.is_writable(UnionSurface::TYPE, "k").unwrap());
+    assert!(cache.is_writable(SlotUnit::TYPE, "k").unwrap());
+}
+
+#[test]
+fn load_soa_refuses_a_same_length_replacement_of_a_marked_record() {
+    use cultcache_rs::CultCacheSoaTable;
+    let (mut cache, _dir, _) = held_marked_and_clean();
+    let all = cache.snapshot_envelopes();
+    let marked = all.iter().find(|held| held.key == "marked").unwrap();
+    // The clean record's bytes padded to the marked record's length: same length, different bytes.
+    let mut same_length = vec![0xc0; marked.payload.len()];
+    same_length[..2].copy_from_slice(&[0x91, 0xa1]);
+    assert_eq!(same_length.len(), marked.payload.len());
+    let mut replaced = all.clone();
+    replaced.iter_mut().find(|held| held.key == "marked").unwrap().payload = same_length;
+    let error = cache.load_soa(CultCacheSoaTable::from_envelopes(replaced)).unwrap_err();
+    assert_refused_with(&error, "marked", &mark("Composition", 3, 2, 1));
+    assert_eq!(cache.snapshot_envelopes(), all);
 }

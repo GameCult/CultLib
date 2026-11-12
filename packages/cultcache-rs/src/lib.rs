@@ -3215,7 +3215,7 @@ impl CultCache {
             stored_at: String::new(),
             schema_id: None,
         };
-        Ok(self.refuse_retype(&self.entries, &self.foreign, &probe).is_ok())
+        Ok(self.home_index(type_id).is_ok() && self.refuse_retype(&self.entries, &self.foreign, &probe).is_ok())
     }
 
     /// The one decode behind every write entry and [`CultCache::is_writable`]: the held envelope at `(type_id, key)`
@@ -3240,7 +3240,7 @@ impl CultCache {
         match self.held_finding(type_id, key)? {
             HeldFinding::Free => Ok(()),
             HeldFinding::Unreadable(error) => Err(error.context(format!(
-                "CultCache entry {type_id:?} at key {key:?} is held read-only: this build cannot read its payload; repair it with the build that wrote it"
+                "CultCache entry {type_id:?} at key {key:?} is held read-only: this build cannot read its payload. A newer writer's record is read with that build; a corrupt one is restored from a backup or removed at the store itself, not through the cache"
             ))),
             HeldFinding::Marked(unread) => {
                 let held = &self.entries[&entry_id_parts(type_id, key)];
