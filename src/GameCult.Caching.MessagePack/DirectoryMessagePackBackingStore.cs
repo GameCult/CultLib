@@ -247,9 +247,11 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
             Directory.CreateDirectory(_manifestFile.DirectoryName!);
             using var commitLease = AcquireCommitLease(wait: true, create: true);
-            var (manifest, catalogBytes) = ReadManifest();
-            // A soft flush writes only where no manifest is; a manifest ReadManifest read stays as it is, its staged writes staged.
-            if (soft && File.Exists(_manifestFile.FullName))
+            var manifestBytes = ReadManifestBytes();
+            var (manifest, catalogBytes) = ParseManifest(manifestBytes);
+            // A soft flush writes only where no manifest is: the reader's answer (null is absent), not a second look at the path.
+            // A manifest it read stays as it is, its staged writes staged.
+            if (soft && manifestBytes != null)
                 return;
             RefuseUndeclaredOnDisk(manifest, StagedKeys, Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>(), Array.Empty<string>());
             if (IsDirty)

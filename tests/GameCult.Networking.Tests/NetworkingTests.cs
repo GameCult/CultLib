@@ -7377,6 +7377,66 @@ namespace GameCult.Networking.Tests
             Assert.That(developmentServer.LogSensitivePayloads, Is.True);
         }
 
+        // Records the flag each PushAll took, and holds nothing: a flush that decided soft itself and never asked the store records nothing.
+        private sealed class SoftFlagSpyStore : CacheBackingStore
+        {
+            public sealed class SpyHome { }
+
+            public readonly List<bool> Flags = new();
+            public void Stage() => IsDirty = true;
+            public override void PullAll() { }
+            public override void Push(CultStoredDocument entry) { }
+            public override void Delete(CultStoredDocument entry) { }
+            public override void PushAll(bool soft) => Flags.Add(soft);
+            public override CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait) => CultCommitOutcome.Committed;
+        }
+
+        [Test]
+        public async Task CultNetLocal_Host_FlushAsync_Hands_The_Store_The_Flag_It_Was_Given()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultnet-host-spy-{Guid.NewGuid():N}.msgpack");
+            CultNetHost? host = null;
+            try
+            {
+                host = await CultNetLocal.CreateHostAsync(filePath, new CultNetHostOptions { StartServer = false });
+                var spy = new SoftFlagSpyStore();
+                host.Cache.AddBackingStore(spy, typeof(SoftFlagSpyStore.SpyHome));
+                spy.Stage();
+
+                await host.FlushAsync(soft: true);
+                await host.FlushAsync();
+
+                Assert.That(spy.Flags, Is.EqualTo(new[] { true, false }));
+            }
+            finally
+            {
+                host?.Dispose();
+                if (File.Exists(filePath)) File.Delete(filePath);
+            }
+        }
+
+        [Test]
+        public async Task CultMeshNode_FlushAsync_Hands_The_Store_The_Flag_It_Was_Given()
+        {
+            var rootPath = Path.Combine(TestContext.CurrentContext.WorkDirectory, "cultmesh-soft-spy", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(rootPath);
+            var documents = new CultNetDocumentRegistry()
+                .Register(CultNetDocumentBinding.ForDocument<MeshQuickstartNote>());
+            using var node = await CultMesh.CreateNodeAsync(Path.Combine(rootPath, "world.ccmp"), new CultMeshNodeOptions
+            {
+                StartServer = false,
+                DatabaseOptions = new CultNetDatabaseOptions { RuntimeId = "soft-spy-local", DocumentRegistry = documents }
+            });
+            var spy = new SoftFlagSpyStore();
+            node.Cache.AddBackingStore(spy, typeof(SoftFlagSpyStore.SpyHome));
+            spy.Stage();
+
+            await node.FlushAsync(soft: true);
+            await node.FlushAsync();
+
+            Assert.That(spy.Flags, Is.EqualTo(new[] { true, false }));
+        }
+
         [Test]
         public async Task CultNetLocal_Host_SoftFlush_Passes_The_Flag_To_The_Store()
         {

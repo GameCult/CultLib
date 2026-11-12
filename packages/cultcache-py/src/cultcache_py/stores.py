@@ -76,10 +76,14 @@ class JsonLinesBackingStore:
         self._lock = threading.RLock()
 
     def pull_all(self) -> list[CultCacheEnvelope]:
+        return self._pull() or []
+
+    def _pull(self) -> list[CultCacheEnvelope] | None:
+        """The envelopes the reader reads, or None when nothing is at the path."""
         with self._lock:
             text = _read_store(self.path, lambda path: path.read_text(encoding="utf-8"))
             if text is None:
-                return []
+                return None
             envelopes: list[CultCacheEnvelope] = []
             for line_number, line in enumerate(text.splitlines(), start=1):
                 if not line.strip():
@@ -108,9 +112,10 @@ class JsonLinesBackingStore:
 
     def push_all(self, envelopes: list[CultCacheEnvelope], soft: bool = False) -> None:
         with self._lock:
-            existing = {(item.type, item.key): item for item in self.pull_all()}
-            if soft and self.path.exists():
+            arrived = self._pull()
+            if soft and arrived is not None:
                 return
+            existing = {(item.type, item.key): item for item in arrived or []}
             for envelope in envelopes:
                 existing[(envelope.type, envelope.key)] = envelope
             self._replace_all(list(existing.values()))
@@ -144,13 +149,17 @@ class SingleFileMessagePackBackingStore:
         self._format = STORE_FORMAT_VERSION
 
     def pull_all(self) -> list[CultCacheEnvelope]:
+        return self._pull() or []
+
+    def _pull(self) -> list[CultCacheEnvelope] | None:
+        """The envelopes the reader reads, or None when nothing is at the path."""
         with self._lock:
             # An empty file is not a store (no writer leaves one), so it is decoded and refused.
             # The disk decides the header: a file that is gone is not marked.
             self._format = STORE_FORMAT_VERSION
             data = _read_store(self.path, Path.read_bytes)
             if data is None:
-                return []
+                return None
             try:
                 decoded = msgpack.unpackb(data, raw=False)
                 snapshot = _decode_snapshot(decoded)
@@ -169,10 +178,10 @@ class SingleFileMessagePackBackingStore:
         """A soft push writes only where nothing is at the path: a store the reader reads is left byte for byte, and a file it
         cannot read is refused by the same read, as in TS and Rust."""
         with self._write_transaction():
-            arrived = self.pull_all()
-            if soft and self.path.exists():
+            arrived = self._pull()
+            if soft and arrived is not None:
                 return
-            self._replace_all(list(envelopes), arrived)
+            self._replace_all(list(envelopes), arrived or [])
 
     def delete(self, type: str, key: str) -> None:
         with self._write_transaction():

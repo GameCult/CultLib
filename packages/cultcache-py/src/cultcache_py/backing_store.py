@@ -68,11 +68,12 @@ class BackingStore(Protocol):
         ...
 
     def push_all(self, envelopes: list[CultCacheEnvelope], soft: bool = False) -> None:
-        existing = {
-            (envelope.type, envelope.key): envelope for envelope in self.pull_all()
-        }
-        if soft and existing:
+        # A pull that returns is a store the reader read, empty included: the protocol cannot say "absent", so a soft push
+        # through this default always skips. A store that can tell nothing-at-the-path overrides push_all.
+        pulled = self.pull_all()
+        if soft:
             return
+        existing = {(envelope.type, envelope.key): envelope for envelope in pulled}
         for envelope in envelopes:
             existing[(envelope.type, envelope.key)] = envelope
         self._replace_all(list(existing.values()))

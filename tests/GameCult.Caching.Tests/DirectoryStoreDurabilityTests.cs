@@ -244,6 +244,24 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task SoftFlushOverReadableEmptyManifestLeavesIt()
+        {
+            using var cache = Open(out var store);
+            var key = await cache.UpsertAsync(typeof(Page), new Page { Name = "a", Text = "one" });
+            cache.FlushAllBackingStores();
+            cache.Remove(key);
+            cache.FlushAllBackingStores();
+            var before = File.ReadAllBytes(_manifest);
+            using (var reader = Open(out _)) Assert.That(reader.AllEntries, Is.Empty, "the store is not readable-empty");
+            await cache.UpsertAsync(typeof(Page), new Page { Name = "b", Text = "two" });
+
+            cache.FlushAllBackingStores(soft: true);
+
+            Assert.That(File.ReadAllBytes(_manifest), Is.EqualTo(before), "a soft flush wrote over a readable store that holds no records");
+            Assert.That(store.IsDirty, Is.True);
+        }
+
+        [Test]
         public async Task SoftFlushOverUnreadableManifestRefusesAndLeavesIt()
         {
             using var cache = Open(out var store);
