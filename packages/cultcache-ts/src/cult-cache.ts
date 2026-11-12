@@ -610,9 +610,12 @@ export class CultCache {
   }
 
   /**
-   * Whether a removal of the key, or a write of the record's own type, would be let through: the write's own check: it asks the one judge #writeNow asks (a key a store carries foreign, a record of another type the
-   * write does not own or cannot replace, a global at another key, a record carrying unread slots nothing consents to). Live and
-   * advisory: the write still decides.
+   * Whether a write of the record's own type at the key would be let through: it asks the judge #writeNow asks, of the record the
+   * cache holds (a key a store carries foreign, a record of another type the write does not own or cannot replace, a global at
+   * another key, a record carrying unread slots nothing consents to). It answers the WRITE form. A removal asks the judge's
+   * removal form and differs in two states: an owner's `delete` of a record held in another store than its own home succeeds
+   * where this is false (a write would push to the wrong store), and `delete` of a global type at a key other than __global__ is
+   * the plain false of an unheld key where this is false. Live and advisory: the write or removal still decides.
    */
   isWritable(definition: AnyCultCacheDocumentDefinition, key: string): boolean {
     const registered = this.#requireDefinition(definition);

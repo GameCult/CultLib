@@ -404,3 +404,58 @@ test("delete of a key held as another type: the owner removes it once, a strange
   assert.equal(await same.cache.delete(older, "k"), true);
   assert.equal(await same.cache.delete(older, "k"), false, "an unheld key is still the plain false");
 });
+
+// The removal form's three finer behaviours (cultlib-gaps:finding:cut-slot-readonly-ts.s4.removal-form-unpinned).
+test("an owner's delete: refused for a marked record, taken from the held record's store, and clears the held type's lookups", async () => {
+  const typed = (type: string, schemaId: string, extra: Record<string, unknown> = {}) =>
+    defineDocumentType({ type, schemaId, schemaName: type, schemaVersion: `${type}.v1`, schema: surfaceSchema, codec: surfaceCodec, name: "id", ...extra });
+  const older = typed("tests.surface_older", "tests.surface_older.v1", { indexes: { byVersion: (value: Surface) => String(value.version) } });
+  const newer = typed("tests.surface_newer", "tests.surface_newer.v1", { compatibleSchemaIds: ["tests.surface_older.v1"] });
+  const heldIn = async (file: string): Promise<CultCacheEnvelope> =>
+    ({ ...envelopeOf(await read(file)), key: "k", type: older.type, schemaId: older.schemaId });
+  const recording = (rows: CultCacheEnvelope[]) => {
+    const removed: string[] = [];
+    const store: CacheBackingStore = {
+      async pullAll() { return rows.map((row) => ({ ...row })); },
+      async push(entry) { rows.push(entry); },
+      async delete(entry) { removed.push(entry.key); rows.splice(rows.findIndex((row) => row.key === entry.key), 1); },
+    };
+    return { store, removed, rows };
+  };
+
+  // 1. The owner may not remove a record carrying unread slots nothing consents to.
+  const marked = recording([await heldIn("extra-slot-record.msgpack")]);
+  const markedCache = CultCache.builder().withDocumentType(older).withDocumentType(newer).withGenericStore(marked.store).build();
+  await markedCache.pullAllBackingStores();
+  await assert.rejects(() => markedCache.delete(newer, "k"), (error: unknown) => error instanceof SchemaConflictError && error.unreadSlots?.typeName === "UnionSurface");
+  assert.deepEqual([marked.rows.length, marked.removed.length, markedCache.get(older, "k") !== undefined], [1, 0, true]);
+
+  // 2. The removal goes to the store of the record that exists, not the deleting type's; there the write form is false (it would
+  //    push to the wrong store) while the removal succeeds.
+  const olderStore = recording([await heldIn("union-surface.msgpack")]);
+  const newerStore = recording([]);
+  const split = CultCache.builder().withDocumentType(older).withDocumentType(newer)
+    .withBackingStore(olderStore.store, older).withBackingStore(newerStore.store, newer).build();
+  await split.pullAllBackingStores();
+  assert.equal(split.isWritable(newer, "k"), false, "isWritable answers the write form: the rename cannot replace a record in another store");
+  assert.equal(await split.delete(newer, "k"), true);
+  assert.deepEqual([olderStore.removed, newerStore.removed, split.get(older, "k")], [["k"], [], undefined]);
+
+  // 3. The held type's name and index lookups are cleared with the record.
+  const single = recording([await heldIn("union-surface.msgpack")]);
+  const cache = CultCache.builder().withDocumentType(older).withDocumentType(newer).withGenericStore(single.store).build();
+  await cache.pullAllBackingStores();
+  assert.equal(cache.getKeyByName(older, "surface"), "k");
+  assert.equal(cache.getKeyByIndex(older, "byVersion", "3"), "k");
+  await cache.delete(newer, "k");
+  assert.equal(cache.getKeyByName(older, "surface"), undefined);
+  assert.equal(cache.getKeyByIndex(older, "byVersion", "3"), undefined);
+  assert.equal(cache.getAll(older).length, 0);
+});
+
+test("a global type at a key other than the global key: isWritable is false and delete is the plain false of an unheld key", async () => {
+  const global = defineDocumentType({ type: "tests.surface_global", schemaId: "tests.surface_global.v1", schemaName: "tests.surface_global", schemaVersion: "tests.surface_global.v1", schema: surfaceSchema, codec: surfaceCodec, name: "id", global: true });
+  const cache = CultCache.builder().withDocumentType(global).withGenericStore(memoryStore([])).build();
+  assert.equal(cache.isWritable(global, "x"), false);
+  assert.equal(await cache.delete(global, "x"), false);
+});
