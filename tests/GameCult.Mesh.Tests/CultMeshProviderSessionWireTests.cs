@@ -190,6 +190,9 @@ public sealed class CultMeshProviderSessionWireTests
         var thrown = Assert.Throws<MessagePackSerializationException>(() =>
             CultMeshProviderSessionWire.DecodeCommandDocument(Record(payload.Concat(new byte[] { 0xc0, 0xc0 }).ToArray())))!;
         Assert.That(thrown.Message, Does.Contain("2 bytes after its first MessagePack value"));
+        var one = Assert.Throws<MessagePackSerializationException>(() =>
+            CultMeshProviderSessionWire.DecodeCommandDocument(Record(payload.Concat(new byte[] { 0xc0 }).ToArray())))!;
+        Assert.That(one.Message, Does.Contain("1 bytes after its first MessagePack value"));
     }
 
     [Test]
