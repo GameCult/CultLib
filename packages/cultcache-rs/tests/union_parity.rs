@@ -718,6 +718,7 @@ fn write_refused_past_limit() {
     let mut cache = CultCache::new();
     cache.register_entry_type::<UnionSurface>().unwrap();
     cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+    cache.pull_all_backing_stores().unwrap();
 
     let at_limit = wrap_chain(126, boxed("0000000000f0", vec![]));
     assert_eq!(cache.put("at", &at_limit).unwrap(), at_limit);
@@ -801,6 +802,7 @@ fn the_raw_doors_hold_the_bound_for_arms_maps_and_arrays() {
         cache.register_entry_type::<UnionSurface>().unwrap();
         cache.register_entry_type::<MapDoc>().unwrap();
         cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+        cache.pull_all_backing_stores().unwrap();
         cache.put_raw_envelope(raw(type_name, "at-raw", at.clone())).unwrap();
         cache.put_prepared_batch(vec![raw(type_name, "at-batch", at.clone())]).unwrap();
         let stored = cache.snapshot_envelopes();
