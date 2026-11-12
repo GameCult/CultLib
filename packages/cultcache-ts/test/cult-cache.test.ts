@@ -1032,6 +1032,25 @@ test("legacyKeyGlobalLoadsWithoutWritingAndFirstWriteLeavesOneGlobal", async () 
   await assert.rejects(build().pullAllBackingStores(), /has multiple persisted entries/u);
 });
 
+test("a flush of a cache that loaded a legacy-key global leaves the store reopenable", async () => {
+  const settingsDocument = defineDocumentType({ type: "settings", schema: z.object({ t: z.string() }), global: true });
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-legacy-flush-")), "generic.cc");
+  const store = new SingleFileMessagePackBackingStore(storePath);
+  const build = () => CultCache.builder().withRegistry(defineDocumentRegistry(settingsDocument)).withGenericStore(store).build();
+  const seed = CultCache.builder().withRegistry(defineDocumentRegistry(settingsDocument)).build();
+  await seed.putGlobal(settingsDocument, { t: "old" });
+  await store.push({ ...seed.getRequiredEnvelope(settingsDocument, CultCache.GLOBAL_KEY), key: "legacy" });
+
+  const cache = build();
+  await cache.pullAllBackingStores();
+  assert.equal(cache.snapshot()[0]!.key, CultCache.GLOBAL_KEY, "the logical image names the global by the global key");
+  await store.pushAll(cache.storedSnapshot());
+  assert.deepEqual((await store.pullAll()).map((entry) => entry.key), ["legacy"], "the flush wrote the record under the key the store holds it");
+  const reopened = build();
+  await reopened.pullAllBackingStores();
+  assert.deepEqual(reopened.getRequiredGlobal(settingsDocument), { t: "old" });
+});
+
 test("concurrentPutAndAttachCannotLandRecordInNonHomeStore", async () => {
   const settingsDocument = defineDocumentType({ type: "settings", schema: z.object({ t: z.string() }) });
   const tempDir = await mkdtemp(join(tmpdir(), "cultcache-put-attach-race-"));
@@ -2614,6 +2633,7 @@ test("SingleFileMessagePackBackingStore rewrites a file exactly when it reads", 
                 ? store.push(envelopes[0]!)
                 : store.delete(envelopes[0]!);
       if (reads) {
+        const heldBefore = operation === "pushAll" ? (await new SingleFileMessagePackBackingStore(file).pullAll()).map((entry) => entry.key) : [];
         await run();
         if (operation === "pullAll") {
           continue;
@@ -2631,7 +2651,7 @@ test("SingleFileMessagePackBackingStore rewrites a file exactly when it reads", 
         const keys = (await new SingleFileMessagePackBackingStore(file).pullAll()).map((entry) => entry.key);
         if (operation === "pushAll") {
           assert.deepEqual(envelopes.map((entry) => entry.key).filter((key) => !keys.includes(key)), [], `${vector} ${operation}: every written key is held`);
-          assert.ok(keys.length >= envelopes.length, `${vector} ${operation}: nothing else is removed`);
+          assert.deepEqual(heldBefore.filter((key) => !keys.includes(key)), [], `${vector} ${operation}: nothing else is removed`);
         } else if (operation === "push") {
           assert.ok(keys.includes(envelopes[0]!.key), `${vector} ${operation}`);
         } else {

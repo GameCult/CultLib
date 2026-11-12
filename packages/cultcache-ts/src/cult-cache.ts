@@ -636,6 +636,13 @@ export class CultCache {
     return [...this.#hydrated.entries.values()].map((entry) => this.#toEnvelope(entry));
   }
 
+  // The image as the stores hold it, for persisting it whole (a flush): a global loaded from a legacy key is handed out under
+  // that key until its first write retires it, so a flush cannot leave the store holding it under two keys. `snapshot` is the
+  // logical image and always names a global by CultCache.GLOBAL_KEY.
+  storedSnapshot(): CultCacheEnvelope[] {
+    return [...this.#hydrated.entries.values()].map((entry) => this.#hydrated.legacyGlobals.get(entry.type) ?? this.#toEnvelope(entry));
+  }
+
   #registerNow(definition: AnyCultCacheDocumentDefinition): void {
     // Every registration refusal is a SchemaConflictError naming the new definition's schema id and both schema names.
     const refuse = (holder: RegisteredDefinition, claimed: CultCacheSchemaCatalogEntry, what: string) =>

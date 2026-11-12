@@ -174,7 +174,7 @@ const settings = cache.getRequiredGlobal(settingsDocument);
 - `updateGlobal(...)`
 - `delete(...)`
 - `deleteGlobal(...)`
-- `snapshot()`
+- `snapshot()` (the logical image) and `storedSnapshot()` (the image as the stores hold it, for a whole flush)
 - `getEnvelope(...)`
 - `getRequiredEnvelope(...)`
 - `getGlobalEnvelope(...)`
