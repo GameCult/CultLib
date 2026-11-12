@@ -732,9 +732,9 @@ class CultCache:
         store = self._store_for_type(document.type)
         legacy_key = self._state.legacy_global_keys.get(document.type) if key == GLOBAL_KEY else None
         if store is not None:
-            for other, _ in owned:
-                store.delete(other, key)
-            store.delete(document.type, key if legacy_key is None else legacy_key)
+            # One record per key: the owned record when this document does not hold the key, else its own, in one store call.
+            holder = owned[0][0] if owned else document.type
+            store.delete(holder, key if legacy_key is None else legacy_key)
         if legacy_key is not None:
             del self._state.legacy_global_keys[document.type]
         for other, _ in owned:

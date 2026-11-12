@@ -441,6 +441,31 @@ class StoreRowTests(unittest.TestCase):
         self.assertEqual([e.key for e in SingleFileMessagePackBackingStore(path).pull_all()], ["other"])
         self.assertTrue(cache.is_writable(b, "k"))
 
+    def test_an_owners_removal_is_one_store_call_so_the_cache_and_the_store_agree_when_it_fails(self) -> None:
+        a = define_database_entry_type("tests.one_a", [database_entry_field("a", 0, codec=t.string)], name="a")
+        b = define_database_entry_type(
+            "tests.one_b", [database_entry_field("a", 0, codec=t.string)], compatible_schema_ids=(a.catalog_entry().schema_id,)
+        )
+        path = self.tmp / "one.cc"
+        _open(path, a).put(a, "k", {"a": "x"})
+
+        class SecondDeleteFails(SingleFileMessagePackBackingStore):
+            calls = 0
+
+            def delete(self, type, key):
+                self.calls += 1
+                if self.calls > 1:
+                    raise OSError("second delete")
+                super().delete(type, key)
+
+        store = SecondDeleteFails(path)
+        cache = CultCache.builder().register_document_type(a).register_document_type(b).add_generic_store(store).build()
+        cache.pull_all_backing_stores()
+        cache.delete(b, "k")
+        self.assertEqual(store.calls, 1)
+        self.assertIsNone(cache.get(a, "k"))
+        self.assertEqual(SingleFileMessagePackBackingStore(path).pull_all(), [])
+
     def test_writing_another_record_and_flushing_carries_the_marked_one_unchanged(self) -> None:
         path, cache = self._store("extra-slot-store.cc")
         original = {e.key: e for e in SingleFileMessagePackBackingStore(path).pull_all()}
