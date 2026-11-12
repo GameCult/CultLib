@@ -307,8 +307,19 @@ Useful surfaces:
 This is built for callers like Aquarium that want durable runtime state while
 still choosing *when* to pay the write cost.
 
-Single-file MessagePack remains a single-writer format. The atomic replace path
-protects against partial writes, not competing writers trampling each other.
+A single-file store admits any number of writers, in one process or many, one at
+a time. Every write (flush, `PushAll`, `CommitBatch`, cacheless `WriteRecord`)
+takes an exclusive advisory lock on the sidecar `<path>.lock`, reads the file as
+it is then, applies its own staged keys onto it and replaces the file by a
+write-to-temp-then-rename. Two writers never interleave bytes, and a record
+another writer put there survives; a key both staged holds the last write
+(`Contracts/cultcache-store-composition.md`, "Locking"). What the lock does not
+give is cross-key or cross-store atomicity, a lock that binds a program that
+ignores it, or protection on a filesystem without working `flock`. A second
+writer waits (30 seconds, then `IOException`; `TryCommit` reports `Contended`
+instead of waiting); readers take no lock and always see one complete file. The
+operator procedures for a leftover temp file and for backing up two stores are
+in the same contract document, "Operating a single-file store".
 
 ## Schema migration diagnostics
 

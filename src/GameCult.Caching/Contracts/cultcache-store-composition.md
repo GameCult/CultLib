@@ -315,11 +315,127 @@ refuses to replace a file whose header it cannot read, and leaves it as it was.
   in that store, and leaves the store clean.
 - A conditional commit lands the batch onto the file as it is under the lock.
 
-C#, Rust and TypeScript writers exclude each other on the shared lock file;
-Python takes no cross-process lock yet (`variants:follow_up:py-shared-write-lock`),
-and Rust's open fails rather than waits while a C# writer holds the lock
-(`variants:follow_up:rust-lock-open-waits`). Another runtime need not obey the
-`storedAt` rule.
+C#, Rust, TypeScript and Python single-file writers exclude each other on the
+shared lock file. Another runtime need not obey the `storedAt` rule.
+
+## Operating a single-file store
+
+What the lock guarantees, per runtime. Every claim cites the code.
+
+- **Scope.** The lock is the sidecar `<path>.lock`, taken by every write of a
+  single-file store, never by a read except in Rust. It is advisory: it excludes
+  only openers that also take it, in this process and others. C# opens it
+  share-none (`CultCache.cs:5166-5183`; .NET emulates that with `flock(LOCK_EX)`
+  on Unix, switched off by `DOTNET_SYSTEM_IO_DISABLEFILELOCKING`, see
+  `docs/research/cross-process-file-locking-prior-art.md`); Rust takes
+  `fs2` exclusive (`cultcache-rs/src/lib.rs:1721-1726`); TypeScript `flock` or
+  `LockFileEx` (`cultcache-ts/src/store-file.ts:340-382`); Python the same
+  (`cultcache-py/src/cultcache_py/stores.py:342-389`). A tool that opens and
+  writes the `.cc` file without the lock is not excluded. `flock` is not
+  reliable on every network filesystem; keep stores on a local one.
+- **What a second writer sees.** It waits. C# polls every 10 ms for 30 seconds,
+  then the `IOException` propagates (`CultCache.cs:5166-5183`); with `wait: false`
+  (`TryCommit`) it returns `Contended` (`CultCache.cs:2052`, `2897`, `4691-4693`).
+  TypeScript times out after 30 s (`store-file.ts:173-195`), Python raises
+  `TimeoutError` after `lock_timeout`, 30 s by default (`stores.py:342-354`).
+  Rust waits without a timeout on its write paths (`lib.rs:1721-1726`); only its
+  `try_with_exclusive_lock` returns without waiting (`lib.rs:1832-1843`). Each
+  write re-reads the file after taking the lock and applies its staged keys onto
+  it (`CultCache.cs:4659-4676`), so waiting writers merge rather than overwrite.
+  The in-memory cache of a writer is not refreshed by another's write until its
+  next `PullAll`, which does nothing while that cache is dirty
+  (`CultCache.cs:4582-4588`).
+- **What a reader sees.** C#, TypeScript and Python read without the lock
+  (`CultCache.cs:5139`, `5227`; `single-file-messagepack-backing-store.ts:200`;
+  `stores.py:144-152`). The store file is only ever replaced by rename of a fully
+  written, fsynced temp file (`CultCache.cs:5191-5213`, `lib.rs:1693-1712`,
+  `store-file.ts:70-95`, `stores.py:316-326`), so a read gets one complete
+  generation, old or new, never a mix. Rust `pull_all` takes the lock shared and
+  so waits behind a writer (`lib.rs:1926-1930`); it creates the `.lock` file if
+  absent, so on a read-only directory use `pull_all_read_only_snapshot`
+  (`lib.rs:1667-1669`), which takes no lock and relies on the producer's atomic
+  replace.
+- **Not covered.** A unique-index check or condition spanning two stores, or any
+  invariant between two files: each store has its own lock and no store carries a
+  generation counter (the file is `[formatVersion, schemaCatalog, records]`);
+  a record's identity is its `version`, the SHA-256 of its stored bytes. No
+  library writer holds two store locks at once (`CultCache.cs:2917-2926` judges
+  one store, releases, then commits the home). Python's `JsonLinesBackingStore`
+  takes only an in-process lock (`stores.py:73-80`) and is not a single-file store
+  in this sense.
+- **The `.lock` file is not a stale-lock marker.** It is never written or deleted
+  by a library writer (`store-file.ts:167-172`, `stores.py:342-345`), and the
+  lock is released when the holding process exits. A `.lock` file left on disk is
+  normal. Do not delete it while any process may open the store: a new opener
+  would create a second file and take a second, independent lock on it.
+
+### A leftover temp file
+
+A write stages its bytes in a temp file beside the store and renames it over the
+store. The name is consumed by the rename, so a temp file that still exists is a
+write that was never applied. The store file itself is never partial because of
+it.
+
+| Runtime | Temp name | Source |
+|---|---|---|
+| C# | `.<store file name>.<32 hex>.tmp` | `CultCache.cs:5191` |
+| Rust | `<store file name>.<uuid>.tmp` | `lib.rs:4268-4275` |
+| TypeScript | `<path>.tmp-<pid>-<ms>-<random>` | `store-file.ts:70` |
+| Python | `<path>.tmp-<pid>-<uuid hex>` | `stores.py:316` |
+
+- **Which temp files are safe to delete.** One that is not being written now:
+  no process holds `<path>.lock`. Test with `flock -n <path>.lock true` (Linux,
+  util-linux): success means no writer is mid-write, so every temp file of that
+  store is abandoned. Deleting one while a writer holds the lock destroys that
+  write.
+- **How to know the write was incomplete.** The temp file existing is the proof.
+  Its content may be partial (killed during the write) or whole (killed between
+  the fsync and the rename); either way it was not applied, and the writer that
+  made it never saw its flush succeed. The store holds the last completed write.
+  Do not rename a temp file over the store by hand. Rust additionally reports a
+  rename that landed but whose directory fsync failed as `ReplacedNotDurable`
+  (`lib.rs:1685-1688`; TypeScript `StoreReplacedNotDurableError`,
+  `store-file.ts:88-92`): after a power loss the store may still be the earlier
+  generation.
+- **What the store does about it.** Opening and reading ignore temp files and
+  never delete them. A writer removes only its own temp file when its write
+  throws (`CultCache.cs:5216-5222`, `store-file.ts:82-84`, `stores.py:327-331`,
+  `lib.rs:1707-1710`); a killed process skips that. Rust alone sweeps: its next
+  write, under the exclusive lock, deletes every regular file named
+  `<store file name>.<uuid>.tmp` (`lib.rs:1698`, `4318-4352`). C#, TypeScript and
+  Python never sweep, and their unique names mean leftovers accumulate until an
+  operator deletes them. A store file that cannot be read (truncated, wrong
+  header) is refused at open and left byte-identical
+  (`CultCache.cs:4659-4663`); that is the store, not a temp file, and is
+  restored from a copy, never deleted and rewritten.
+
+### Backing up a pair of stores
+
+Each store is whole on its own: copying one `.cc` file is safe at any moment,
+because the file is only ever replaced whole, and a copy of the path is one
+complete generation. Two stores have two independent locks and no shared
+generation, so copying them one after the other can capture store A at one
+moment and store B at a later one. If an application invariant spans the pair,
+that copy may violate it. Back up the pair at one point in time:
+
+1. **Preferred, quiesce.** Stop (or have flush and close) every process that
+   writes either store. Flush staged writes first; `PullAll` and the dispose
+   flush do not capture unflushed state of a still-running cache. Copy both `.cc`
+   files. Do not copy `.lock` files or temp files. Start the writers again.
+2. **Without stopping (Unix).** Take both locks in one fixed order (sorted by
+   full path), copy while holding both, release:
+   `flock A.cc.lock flock B.cc.lock cp A.cc B.cc /backup/dir/`.
+   Cooperating writers wait (30 s in C#, TypeScript and Python; Rust waits
+   indefinitely), so keep the hold short and copy locally. This captures what
+   was durable at that instant; unflushed state of live caches is not in it. On
+   Windows, no shipped tool holds the C# share-none lock for you: quiesce.
+3. **Verify.** Open each copy read-only with the runtime that will use it (for
+   Rust, `pull_all_read_only_snapshot`); an unreadable copy is refused, not
+   repaired (`CultCache.cs:4659-4663`).
+4. **Restore both files together** from the same backup, with every writer
+   stopped, then restart so each cache loads fresh. Restoring one half of a pair
+   from a different backup recreates the skew. Leave the `.lock` files as they
+   are.
 
 ## Serialization options
 
