@@ -101,22 +101,24 @@ class JsonLinesBackingStore:
             return envelopes
 
     def push(self, envelope: CultCacheEnvelope) -> None:
-        with self._lock:
-            existing = {(item.type, item.key): item for item in self.pull_all()}
-            existing[(envelope.type, envelope.key)] = envelope
-            self._replace_all(list(existing.values()))
+        self.push_all([envelope])
 
     def push_all(self, envelopes: list[CultCacheEnvelope]) -> None:
-        with self._lock:
-            existing = {(item.type, item.key): item for item in self.pull_all()}
+        def merge(existing: dict[tuple[str, str], CultCacheEnvelope]) -> None:
             for envelope in envelopes:
                 existing[(envelope.type, envelope.key)] = envelope
-            self._replace_all(list(existing.values()))
+        self._rewrite(merge)
 
     def delete(self, type: str, key: str) -> None:
+        self._rewrite(lambda existing: existing.pop((type, key), None))
+
+    def _rewrite(self, change: Callable[[dict[tuple[str, str], CultCacheEnvelope]], object]) -> None:
+        """The one entry of every write: refuses a link at the path, then reads the file, applies the change and replaces it."""
         with self._lock:
-            existing = [item for item in self.pull_all() if not (item.type == type and item.key == key)]
-            self._replace_all(existing)
+            _refuse_linked(self.path)
+            existing = {(item.type, item.key): item for item in self.pull_all()}
+            change(existing)
+            self._replace_all(list(existing.values()))
 
     def _replace_all(self, envelopes: list[CultCacheEnvelope]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

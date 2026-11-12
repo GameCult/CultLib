@@ -1462,6 +1462,35 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual([item.key for item in store.pull_all()], ["a"])
 
     @unittest.skipIf(os.name != "posix", "symbolic links need POSIX here")
+    def test_a_json_lines_write_at_a_live_link_is_refused_and_the_link_survives(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            volume = Path(tmp) / "volume"
+            volume.mkdir()
+            target = volume / "store.jsonl"
+            envelope = CultCacheEnvelope(key="a", type="t", payload=b"\x90", stored_at="2026-09-30T00:00:00Z")
+            JsonLinesBackingStore(target).push(envelope)
+            before = target.read_bytes()
+            link = Path(tmp) / "link.jsonl"
+            link.symlink_to(target)
+            store = JsonLinesBackingStore(link)
+            for write in (
+                lambda: store.push(replace(envelope, key="b")),
+                lambda: store.push_all([replace(envelope, key="b")]),
+                lambda: store.delete("t", "a"),
+            ):
+                with self.assertRaises(StoreLinkedError):
+                    write()
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(target.read_bytes(), before)
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["link.jsonl", "volume"])
+            self.assertEqual(sorted(p.name for p in volume.iterdir()), ["store.jsonl"])
+
+    def test_store_linked_error_is_an_os_error_carrying_the_path(self) -> None:
+        error = StoreLinkedError(Path("some/store.cc"))
+        self.assertIsInstance(error, OSError)
+        self.assertEqual(error.path, Path("some/store.cc"))
+
+    @unittest.skipIf(os.name != "posix", "symbolic links need POSIX here")
     def test_a_write_at_a_live_directory_link_is_refused_as_a_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             real = Path(tmp) / "real"
@@ -1485,8 +1514,7 @@ class CultCacheTests(unittest.TestCase):
                 store = store_type(path)
                 with self.assertRaises(FileNotFoundError):
                     store.pull_all()
-                # The single-file store refuses the link itself; the unlocked JSON lines store meets the missing target.
-                with self.assertRaises(StoreLinkedError if store_type is SingleFileMessagePackBackingStore else FileNotFoundError):
+                with self.assertRaises(StoreLinkedError):
                     store.push(CultCacheEnvelope(key="k", type="t", payload=b"\x90", stored_at="2026-09-30T00:00:00Z"))
                 self.assertTrue(path.is_symlink())
                 self.assertEqual(list(volume.iterdir()), [])
