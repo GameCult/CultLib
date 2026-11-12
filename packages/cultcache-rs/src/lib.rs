@@ -4417,7 +4417,9 @@ trait ReplaceKernel {
 const MOVEFILE_REPLACE_WRITE_THROUGH: u32 = 0x9;
 
 /// Replaces `destination` with `staged` on Windows: a POSIX-semantics rename first, so a reader
-/// that opened the old store keeps it and never sees the destination absent; MoveFileExW with
+/// that opened the old store keeps it and the destination is rarely seen absent (a stalled rename
+/// can still leave it absent for 5-47 ms on NTFS: `variants:ruling:posix-rename-absent-window-document`);
+/// MoveFileExW with
 /// write-through where POSIX semantics are unsupported (FAT, exFAT, before Windows 10 1607),
 /// for the rest of the call; and a bounded retry on access, sharing and lock violations.
 /// A concurrent reader (another process, an indexer, an antivirus scan) makes the replace fail
