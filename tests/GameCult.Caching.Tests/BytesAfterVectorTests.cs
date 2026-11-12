@@ -100,16 +100,6 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void TheBoundedEntryKeepsTheDepthBoundAndToleratesATail()
-        {
-            foreach (var (file, _) in Cases())
-                Assert.That(CultDocumentMessagePackSerialization.DeserializeBoundedUntyped(typeof(UnionSurface), VectorFiles.Committed(Vector, file), Registry), Is.TypeOf<UnionSurface>(), file);
-
-            var deep = VectorFiles.Committed(Vector, "depth-past-limit.msgpack");
-            Assert.That(Message(() => CultDocumentMessagePackSerialization.DeserializeBoundedUntyped(typeof(UnionSurface), deep, Registry)), Does.Contain($"the limit is {Limit}"));
-        }
-
-        [Test]
         public void StoreLoadRefuses()
         {
             var work = Path.Combine(Path.GetTempPath(), $"cultlib-bytesafter-{Guid.NewGuid():N}");
@@ -117,7 +107,7 @@ namespace GameCult.Caching.Tests
             try
             {
                 var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(VectorFiles.Committed(Vector, "union-surface.cc"));
-                snapshot.Records[0].Payload = VectorFiles.Committed(Vector, "bytes-after-nil.msgpack");
+                snapshot.Records[0].Payload = Base.Concat(new byte[] { 0xc0 }).ToArray();
                 var scratch = Path.Combine(work, "tail.cc");
                 File.WriteAllBytes(scratch, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
                 var load = Message(() => CultCacheMessagePack.Create(scratch, new CultCacheOpenOptions { Registry = Registry }).Dispose());
@@ -126,6 +116,57 @@ namespace GameCult.Caching.Tests
             finally
             {
                 Directory.Delete(work, recursive: true);
+            }
+        }
+
+        // A directory store names a page by the SHA-256 of its bytes and its manifest commits to that hash: the page holding the
+        // payload is rewritten with a tail, renamed, and the manifest told its new hash, so the store is well formed and only the payload is wrong.
+        [Test]
+        public async System.Threading.Tasks.Task DirectoryLoadPageRefuses()
+        {
+            var folder = Path.Combine(Path.GetTempPath(), $"cultlib-bytesafter-dir-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(folder);
+            try
+            {
+                var path = Path.Combine(folder, "tail.cc");
+                var options = new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = true, StoreFlushOnDispose = true };
+                using (var writer = CultCacheMessagePack.Create(path, options))
+                {
+                    var value = CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(UnionSurface), Base, Registry);
+                    await writer.UpsertAsync(typeof(UnionSurface), value, new CultRecordKey("surface"));
+                    await writer.FlushAsync();
+                }
+
+                var rehashed = new System.Collections.Generic.List<(byte[] Old, byte[] New)>();
+                foreach (var file in Directory.EnumerateFiles(folder, "*.msgpack", SearchOption.AllDirectories).ToArray())
+                {
+                    var bytes = File.ReadAllBytes(file);
+                    if (bytes.AsSpan().IndexOf(Base) < 0) continue;
+                    var page = CultDocumentMessagePackSerialization.DeserializePersistedRecord(bytes);
+                    page.Payload = Base.Concat(new byte[] { 0xc0 }).ToArray();
+                    var forged = CultDocumentMessagePackSerialization.SerializePersistedRecord(page);
+                    File.Delete(file);
+                    File.WriteAllBytes(Path.Combine(Path.GetDirectoryName(file)!, Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(forged)).ToLowerInvariant() + ".msgpack"), forged);
+                    rehashed.Add((System.Security.Cryptography.SHA256.HashData(bytes), System.Security.Cryptography.SHA256.HashData(forged)));
+                }
+
+                Assert.That(rehashed, Is.Not.Empty, "the record page was found");
+                foreach (var file in Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories).Where(f => !f.EndsWith(".msgpack", StringComparison.Ordinal)).ToArray())
+                {
+                    var bytes = File.ReadAllBytes(file);
+                    foreach (var (old, @new) in rehashed)
+                        for (var at = bytes.AsSpan().IndexOf(old); at >= 0; at = bytes.AsSpan().IndexOf(old)) @new.CopyTo(bytes, at);
+                    File.WriteAllBytes(file, bytes);
+                }
+
+                var thrown = Assert.CatchAsync(async () => { using var cache = await CultCacheMessagePack.OpenAsync(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = true, ReadOnly = true }); });
+                var chain = "";
+                for (var e = thrown; e != null; e = e.InnerException) chain += e.Message + "\n";
+                Assert.That(chain, Does.Contain($"1 {Clause}"));
+            }
+            finally
+            {
+                Directory.Delete(folder, recursive: true);
             }
         }
 

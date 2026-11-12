@@ -462,12 +462,12 @@ public sealed class CultMeshContentVectorTests
     private static byte[] Reencode(CultMeshContentChunkResponseMessage message) =>
         CultNetSchemaMessageSerialization.Serialize(message);
 
-    /// <summary>The one reader of manifest bytes: the bounded document reader (CultPayloadDepth 256 included): the CDN manifest contract tolerates bytes after the value, a record payload does not.</summary>
+    /// <summary>The one reader of manifest bytes: the production CultNet binding of the manifest (CultPayloadDepth 256 and the one-value rule included).</summary>
     private static CultMeshCdnArtifactManifest ReadManifest(byte[] bytes) =>
-        (CultMeshCdnArtifactManifest)CultDocumentMessagePackSerialization.DeserializeBoundedUntyped(typeof(CultMeshCdnArtifactManifest), bytes, CultDocumentRegistry.Shared);
+        (CultMeshCdnArtifactManifest)CultMeshCdn.CreateDocumentRegistry().GetByDocumentType(typeof(CultMeshCdnArtifactManifest))!.PayloadDeserializer(bytes);
 
     private static byte[] Reencode(CultMeshCdnArtifactManifest manifest) =>
-        CultDocumentMessagePackSerialization.SerializeUntyped(manifest, typeof(CultMeshCdnArtifactManifest));
+        CultMeshCdn.CreateDocumentRegistry().GetByDocumentType(typeof(CultMeshCdnArtifactManifest))!.PayloadSerializer(manifest);
 
     private static CultMeshContentChunkRequestMessage Request(string id, string hash, string key, int size) => new()
     {

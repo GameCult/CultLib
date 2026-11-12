@@ -16,20 +16,7 @@ internal enum PayloadDirection { Read, Write }
 /// </summary>
 internal static class CultPayloadDepth
 {
-    /// <summary>A record's payload: the depth bound, and exactly one value. Bytes after the first value are refused, never walked.</summary>
     public static void Check(ReadOnlySpan<byte> bytes, Type type, PayloadDirection direction)
-    {
-        var end = Walk(bytes, type, direction);
-        if (end < bytes.Length)
-            throw new MessagePackSerializationException(
-                $"{type.FullName} payload has {bytes.Length - end} bytes after its first MessagePack value (refused on {(direction == PayloadDirection.Read ? "read" : "write")}).");
-    }
-
-    /// <summary>The depth bound alone, for a reader whose contract tolerates bytes after the value (the CDN manifest vectors).</summary>
-    public static void CheckDepth(ReadOnlySpan<byte> bytes, Type type, PayloadDirection direction) => Walk(bytes, type, direction);
-
-    // The one walk: refuses past the depth limit and returns where the first value ends (the payload's length when it ends early).
-    private static long Walk(ReadOnlySpan<byte> bytes, Type type, PayloadDirection direction)
     {
         const int limit = CultMessagePackSecurity.MaximumPayloadDepth;
         Span<long> remaining = stackalloc long[limit];
@@ -48,12 +35,12 @@ internal static class CultPayloadDepth
                 case <= 0x8f: container = true; header = 1; children = 2L * (code & 0x0f); break;
                 case <= 0x9f: container = true; header = 1; children = code & 0x0f; break;
                 case <= 0xbf: skip = 1 + (code & 0x1f); break;
-                case 0xc4 or 0xd9: if (!Length(bytes, position, 1, out var l8)) return bytes.Length; skip = 2 + l8; break;
-                case 0xc5 or 0xda: if (!Length(bytes, position, 2, out var l16)) return bytes.Length; skip = 3 + l16; break;
-                case 0xc6 or 0xdb: if (!Length(bytes, position, 4, out var l32)) return bytes.Length; skip = 5 + l32; break;
-                case 0xc7: if (!Length(bytes, position, 1, out var e8)) return bytes.Length; skip = 3 + e8; break;
-                case 0xc8: if (!Length(bytes, position, 2, out var e16)) return bytes.Length; skip = 4 + e16; break;
-                case 0xc9: if (!Length(bytes, position, 4, out var e32)) return bytes.Length; skip = 6 + e32; break;
+                case 0xc4 or 0xd9: if (!Length(bytes, position, 1, out var l8)) return; skip = 2 + l8; break;
+                case 0xc5 or 0xda: if (!Length(bytes, position, 2, out var l16)) return; skip = 3 + l16; break;
+                case 0xc6 or 0xdb: if (!Length(bytes, position, 4, out var l32)) return; skip = 5 + l32; break;
+                case 0xc7: if (!Length(bytes, position, 1, out var e8)) return; skip = 3 + e8; break;
+                case 0xc8: if (!Length(bytes, position, 2, out var e16)) return; skip = 4 + e16; break;
+                case 0xc9: if (!Length(bytes, position, 4, out var e32)) return; skip = 6 + e32; break;
                 case 0xca or 0xce or 0xd2: skip = 5; break;
                 case 0xcb or 0xcf or 0xd3: skip = 9; break;
                 case 0xcc or 0xd0: skip = 2; break;
@@ -62,10 +49,10 @@ internal static class CultPayloadDepth
                 case 0xd6: skip = 6; break;
                 case 0xd7: skip = 10; break;
                 case 0xd8: skip = 18; break;
-                case 0xdc: if (!Length(bytes, position, 2, out var a16)) return bytes.Length; container = true; header = 3; children = a16; break;
-                case 0xdd: if (!Length(bytes, position, 4, out var a32)) return bytes.Length; container = true; header = 5; children = a32; break;
-                case 0xde: if (!Length(bytes, position, 2, out var m16)) return bytes.Length; container = true; header = 3; children = 2 * m16; break;
-                default: if (!Length(bytes, position, 4, out var m32)) return bytes.Length; container = true; header = 5; children = 2 * m32; break;
+                case 0xdc: if (!Length(bytes, position, 2, out var a16)) return; container = true; header = 3; children = a16; break;
+                case 0xdd: if (!Length(bytes, position, 4, out var a32)) return; container = true; header = 5; children = a32; break;
+                case 0xde: if (!Length(bytes, position, 2, out var m16)) return; container = true; header = 3; children = 2 * m16; break;
+                default: if (!Length(bytes, position, 4, out var m32)) return; container = true; header = 5; children = 2 * m32; break;
             }
 
             if (container)
@@ -87,10 +74,14 @@ internal static class CultPayloadDepth
 
             // One element is complete; close every container it was the last element of.
             while (depth > 0 && --remaining[depth - 1] == 0) depth--;
-            if (depth == 0) return position;
+            if (depth == 0)
+            {
+                if (position < bytes.Length)
+                    throw new MessagePackSerializationException(
+                        $"{type.FullName} payload has {bytes.Length - position} bytes after its first MessagePack value (refused on {(direction == PayloadDirection.Read ? "read" : "write")}).");
+                return;
+            }
         }
-
-        return bytes.Length;
     }
 
     // The big-endian length that follows the code byte, when the payload is long enough to hold it.

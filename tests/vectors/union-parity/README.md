@@ -188,4 +188,4 @@ Must: refuse on read, naming the type and the count of bytes after the first val
 
 What a runtime walks: only the first value of the payload, to find where it ends (a leaf counts as complete at its own length, a container when its last child completes). It compares that end with the payload length; a payload that ends early is not bytes after the value and stays the decoder's to refuse. It never walks the tail, so the tail's own shape (a stray `c1`, 300 levels) is never judged.
 
-The CultMesh CDN manifest is not covered by these vectors: its contract (`contracts/cultmesh/content-acceptance-vectors.json`) accepts bytes after the value, and its reader keeps the depth bound through `DeserializeBoundedUntyped`.
+A CDN manifest read as a record follows the same rule; its vectors are `contracts/cultmesh/content-acceptance-vectors.json` (`trailing_*` are refusals).
