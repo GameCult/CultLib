@@ -7,7 +7,7 @@ import { z } from "zod";
 
 import { documentPayloadBytes, documentPayloadFromBytes } from "./document";
 import { commitStoreFile, withStoreWriteLock } from "./store-file";
-import { STORE_FORMAT_VERSION, SchemaConflictError, type StoreFormat, StoreUnreadableError, isStoreSnapshot, refuseUnreadStoreBytes, requireStoreSlots, requireV1RecordSlots } from "./store-format";
+import { STORE_FORMAT_VERSION, SchemaConflictError, type StoreFormat, StoreUnreadableError, isStoreSnapshot, refuseUnreadStoreBytes, requireStoreSlots, requireV1RecordSlots, schemaIdForEnvelope, writtenOwns } from "./store-format";
 import type {
   CacheBackingStore,
   CultCacheEnvelope,
@@ -71,8 +71,10 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       const disk = this.#readDisk();
       this.#format = disk.format;
       const existing = disk.envelopes;
+      // The record the file stores at the key is the one removed when the removal's schema owns its stored id: the
+      // arrived record's type is its schema's name, which a type of another name does not carry.
       const filtered = existing.filter(
-        (candidate) => !(candidate.type === entry.type && candidate.key === entry.key),
+        (candidate) => !(candidate.key === entry.key && (schemaIdForEnvelope(candidate) === schemaIdForEnvelope(entry) || writtenOwns(entry, schemaIdForEnvelope(candidate)))),
       );
       await this.#writeAll([], filtered);
     });
@@ -136,14 +138,6 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
 
     await commitStoreFile(this.filePath, encode(encodeSnapshot(supplied, arrived, this.#format)));
   }
-}
-
-// As C# WrittenOwns' declared half: the written type owns the stored schema id when its catalog entry carries that id as its own
-// or lists it compatible, so a type renamed under a stable id restamps the record it already holds. (The C# half that lets an
-// undeclared older id of the same schema name through when it reads whole is not ported; a same-named type keeps passing.)
-function writtenOwns(written: CultCacheEnvelope, storedId: string): boolean {
-  const entry = written.catalogEntry;
-  return entry !== undefined && (entry.schemaId === storedId || (entry.compatibleSchemaIds ?? []).includes(storedId));
 }
 
 // A store holds a key once, and the reader refuses a file that holds it twice, so a write that would put a second type under a
@@ -381,10 +375,6 @@ function defaultEntryFor(entry: CultCacheEnvelope): CultCacheSchemaCatalogEntry 
     compatibleSchemaIds: [schemaId],
     members: [],
   };
-}
-
-function schemaIdForEnvelope(entry: CultCacheEnvelope): string {
-  return entry.schemaId ?? entry.type;
 }
 
 function encodeCatalogEntry(entry: CultCacheSchemaCatalogEntry): unknown[] {

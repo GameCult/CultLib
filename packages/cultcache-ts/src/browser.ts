@@ -2,7 +2,7 @@
 // (node:fs, koffi). Bring your own CacheBackingStore, or none.
 export * as codecs from "./codec";
 export type { Codec, SlotsCodec } from "./codec";
-export { CultCache, CultCacheBuilder } from "./cult-cache";
+export { CultCache, CultCacheBuilder, type CultCacheForeignRecord } from "./cult-cache";
 export { inspectCultCacheBytes } from "./cult-cache-inspector";
 export {
   decodeDocumentPayload,

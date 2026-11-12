@@ -231,6 +231,16 @@ its exact decimal expansion; NaN and infinities have no value. `roles` name sele
 member's catalog `indexAlias`, so the catalog bytes are the same either way); they imply nothing about uniqueness and
 are never indexed for lookup, so `getByIndex` on a role answers `undefined`. An alias is declared in one of the two.
 
+### One record per key, and foreign records
+
+A cache holds one record per key whatever its type (variants:ruling:cache-refuses-retype). A write of a type that does not
+own the held record's schema id (it carries that id as its own or lists it compatible) is refused with
+`SchemaConflictError` naming the key, with or without a store; retyping a key is `delete` then `put`. A store that holds a
+record no registered type claims still loads: the cache does not serve it, `foreignRecords()` lists it (`key`,
+`schemaId`, `schemaName`, `storedAt`, by key ordinal), every write keeps its bytes, and a `put` or `delete` at its key is
+refused. Registering a type that claims its schema id serves it at the next `pullAllBackingStores`. Two stores that hold
+one key refuse the load and admit nothing.
+
 ### Migrating an existing `indexes` key
 
 Apply per key, and do it BEFORE the CultLib checkout your tools load is rebuilt or updated. A consumer that loads

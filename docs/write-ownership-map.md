@@ -33,8 +33,8 @@ Probes: scratch tests in this worktree, removed. C# filtered runs on Starfire (o
 
 | Probe | C# | TypeScript | Rust | Python |
 |---|---|---|---|---|
-| P1 cache {A,B}: B at k, then A at k | **C**: B's record replaced, k now A's id | C, and **both** records live at k | C, both live at k | C, both live at k |
-| P2 cache {A} only, store holds B at k, write A at k | R `CultSchemaConflictException` (B is foreign, carried) | R at load: "No schema is registered for persisted schema id" | R at load, same | R at load: "Unknown persisted document type" |
+| P1 cache {A,B}: B at k, then A at k | **C**: B's record replaced, k now A's id | R `SchemaConflictError` (cultcache-ts: one record per key) | C, both live at k | C, both live at k |
+| P2 cache {A} only, store holds B at k, write A at k | R `CultSchemaConflictException` (B is foreign, carried) | R `SchemaConflictError` at write (foreign loads, carried; cultcache-ts) | R at load, same | R at load: "Unknown persisted document type" |
 | P3 cacheless `WriteDocument<A>` over B, registry null / {A} / {A,B} | R / R / R | no cacheless write | no cacheless write | no cacheless write |
 | P4 cache {A,B}: remove k and upsert A at k in one batch | C (k is A's) | n/a | n/a | n/a |
 | P5 cache {A,B}: remove, then add in a second commit | C | n/a | n/a | n/a |

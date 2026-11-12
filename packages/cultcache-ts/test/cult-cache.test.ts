@@ -266,10 +266,10 @@ test("CultCache fails closed on unknown or illegal persisted polymorphic state",
     ]))
     .build();
 
-  await assert.rejects(
-    async () => cacheWithUnknownType.pullAllBackingStores(),
-    /No schema is registered for persisted document type "forbidden"\./,
-  );
+  // A record no registered type claims is carried, not a reason to refuse the load.
+  await cacheWithUnknownType.pullAllBackingStores();
+  assert.deepEqual(cacheWithUnknownType.snapshot(), []);
+  assert.deepEqual(cacheWithUnknownType.foreignRecords().map((record) => [record.key, record.schemaName]), [["mystery", "forbidden"]]);
 
   const cacheWithDuplicateGlobal = CultCache.builder()
     .withDocumentType(settingsDocument)
@@ -2653,19 +2653,21 @@ test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", 
 // One key is held once: a push whose type does not own the stored schema id is refused, so the writer cannot emit a store its own
 // reader refuses; one whose type owns it (its own id, or one it lists compatible, as C# WrittenOwns) restamps the record in place.
 test("SingleFileMessagePackBackingStore push asks whether the written type owns the stored id, not what the types are called", async () => {
-  const seed = CultCache.builder().withDocumentType(ownsId).withDocumentType(listsId).build();
-  await seed.put(ownsId, "k", { name: "owner" });
-  await seed.put(listsId, "k", { name: "lister" });
+  // One cache holds one record per key, so each envelope is made in a cache of its own.
+  const owner = CultCache.builder().withDocumentType(ownsId).build();
+  const lister = CultCache.builder().withDocumentType(listsId).build();
+  await owner.put(ownsId, "k", { name: "owner" });
+  await lister.put(listsId, "k", { name: "lister" });
   const file = join(await mkdtemp(join(tmpdir(), "cultcache-push-key-")), "store.msgpack");
   const store = new SingleFileMessagePackBackingStore(file);
   const idsOf = async () => ((decode(await readFile(file)) as unknown[][])[2] as unknown[][]).map((record) => [record[0], record[1]]);
 
-  await store.push(seed.getRequiredEnvelope(listsId, "k"));
-  await assert.rejects(() => store.push(seed.getRequiredEnvelope(ownsId, "k")), SchemaConflictError);
+  await store.push(lister.getRequiredEnvelope(listsId, "k"));
+  await assert.rejects(() => store.push(owner.getRequiredEnvelope(ownsId, "k")), SchemaConflictError);
   assert.deepEqual(await idsOf(), [["k", "id.lister"]]);
 
-  await store.pushAll([seed.getRequiredEnvelope(listsId, "k")]);
-  await store.push(seed.getRequiredEnvelope(listsId, "k"));
+  await store.pushAll([lister.getRequiredEnvelope(listsId, "k")]);
+  await store.push(lister.getRequiredEnvelope(listsId, "k"));
   assert.equal((await store.pullAll()).length, 1);
 });
 
