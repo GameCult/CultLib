@@ -678,6 +678,73 @@ fn a_refused_load_refuses_every_write() {
     }
 }
 
+// A cache attached to a store that holds records, and never pulled, holds no image of them: every write and
+// removal is refused and the store is byte-identical. A store with nothing persisted needs no pull.
+#[test]
+fn a_never_pulled_cache_over_a_populated_store_refuses_every_write() {
+    let one = envelope("one", &vector("union-surface.msgpack"));
+    let two = envelope("two", &vector("union-surface.msgpack"));
+    for redb in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(if redb { "seed.redb" } else { "seed.cc" });
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<UnionSurface>().unwrap();
+        if redb {
+            let mut store = RedbMessagePackBackingStore::new(&path).unwrap();
+            store.push(&one).unwrap();
+            store.push(&two).unwrap();
+            drop(store);
+            cache.add_generic_backing_store(RedbMessagePackBackingStore::new(&path).unwrap()).unwrap();
+        } else {
+            let mut store = SingleFileMessagePackBackingStore::new(&path);
+            store.push(&one).unwrap();
+            store.push(&two).unwrap();
+            cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let value = constructed();
+        let staged = cache.prepare_entry("new", &value).unwrap().0;
+        let results: Vec<(&str, anyhow::Error)> = vec![
+            ("put", cache.put("new", &value).unwrap_err()),
+            ("put_prepared_batch", cache.put_prepared_batch(vec![staged.clone()]).unwrap_err()),
+            ("put_envelope", cache.put_envelope::<UnionSurface>(staged.clone()).unwrap_err()),
+            ("put_raw_envelope", cache.put_raw_envelope(staged.clone()).unwrap_err()),
+            ("update", cache.update::<UnionSurface, _>("one", |current| current.unwrap_or_else(constructed)).unwrap_err()),
+            ("delete", cache.delete::<UnionSurface>("one").unwrap_err()),
+            ("delete a key the image lacks", cache.delete::<UnionSurface>("absent").unwrap_err()),
+        ];
+        for (door, error) in results {
+            let refusal = error.downcast_ref::<CultCacheLoadRefused>().unwrap_or_else(|| panic!("{door} redb={redb}: {error:#}"));
+            assert!(refusal.to_string().contains("not loaded: pull first"), "{door}: {refusal}");
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before, "redb={redb}: the store changed");
+        // A pull lifts it, and the write keeps the records the store held.
+        cache.pull_all_backing_stores().unwrap();
+        cache.put_prepared_batch(vec![staged]).unwrap();
+        assert_eq!(cache.snapshot().len(), 3, "redb={redb}");
+    }
+}
+
+#[test]
+fn a_cache_over_a_store_with_nothing_persisted_writes_without_a_pull() {
+    let temp = tempfile::tempdir().unwrap();
+    for redb in [false, true] {
+        let path = temp.path().join(if redb { "fresh.redb" } else { "fresh.cc" });
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<UnionSurface>().unwrap();
+        if redb {
+            cache.add_generic_backing_store(RedbMessagePackBackingStore::new(&path).unwrap()).unwrap();
+        } else {
+            cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+        }
+        let value = constructed();
+        let staged = cache.prepare_entry("b", &value).unwrap().0;
+        cache.put("a", &value).unwrap();
+        cache.put_prepared_batch(vec![staged]).unwrap();
+        assert!(cache.delete::<UnionSurface>("a").unwrap(), "redb={redb}");
+    }
+}
+
 // A payload that ends early is not bytes after the value: the decoder refuses it, not the check.
 #[test]
 fn a_truncated_payload_is_the_decoders_not_bytes_after() {

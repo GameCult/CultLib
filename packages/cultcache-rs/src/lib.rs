@@ -2937,25 +2937,40 @@ pub struct CultCache {
     /// Records a store holds that no registered type claims: (store index, the envelope as the store read it). Derived from the last
     /// pull and replaced with it; written nowhere else. It decides only refusals at its keys.
     foreign: Vec<(usize, CultCacheEnvelope)>,
-    /// Why the last pull of the backing stores was refused; `None` once a pull succeeds. While set, every write and removal is refused.
-    load_refused: Option<String>,
+    /// Whether the cache holds an image of its stores. Any state but `Loaded` refuses every write and removal.
+    load: LoadState,
 }
 
-/// A write or removal refused because the cache's last load of its backing stores was refused. The cache holds no
-/// image of those stores, so any write would persist an image that lacks the records it never read. Repair the store
-/// named by `reason` (which names a type, a key and a clause, never a payload) and load again.
+/// `Loaded` until a populated store is attached; `NotLoaded` from then until a pull succeeds; `Refused` while the last pull failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CultCacheLoadRefused {
-    pub reason: String,
+enum LoadState {
+    Loaded,
+    NotLoaded,
+    Refused(String),
+}
+
+/// A write or removal refused because the cache holds no image of its backing stores, so any write would persist an
+/// image that lacks the records it never read. `NotLoaded`: a store that holds records was attached and no pull has
+/// succeeded since; pull first. `Failed`: the last pull was refused; repair the store named by `reason` (which names a
+/// type, a key and a clause, never a payload) and pull again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CultCacheLoadRefused {
+    NotLoaded,
+    Failed { reason: String },
 }
 
 impl std::fmt::Display for CultCacheLoadRefused {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "CultCache refuses writes and removals: its load of the backing stores failed ({}); repair the store and load again",
-            self.reason
-        )
+        match self {
+            Self::NotLoaded => write!(
+                formatter,
+                "CultCache refuses writes and removals: not loaded: pull first (a backing store holds records this cache has not read)"
+            ),
+            Self::Failed { reason } => write!(
+                formatter,
+                "CultCache refuses writes and removals: its load of the backing stores failed ({reason}); repair the store and load again"
+            ),
+        }
     }
 }
 
@@ -3022,7 +3037,7 @@ impl CultCache {
             projectors: BTreeMap::new(),
             stores: Vec::new(),
             foreign: Vec::new(),
-            load_refused: None,
+            load: LoadState::Loaded,
         }
     }
 
@@ -3124,6 +3139,9 @@ impl CultCache {
                 claimed
             ));
         }
+        // A store that holds records is an image this cache has not read; a store with nothing persisted is writable unpulled.
+        // An unreadable store counts as populated, so the pull reports why. Costs one read of the store at attach.
+        let populated = store.pull_all().map_or(true, |records| !records.is_empty());
         self.stores.push(CultCacheStoreRegistration {
             store: Box::new(store),
             types,
@@ -3149,6 +3167,9 @@ impl CultCache {
                 return Err(error);
             }
         }
+        if populated && self.load == LoadState::Loaded {
+            self.load = LoadState::NotLoaded;
+        }
         Ok(())
     }
 
@@ -3164,21 +3185,23 @@ impl CultCache {
                 self.entries = loaded;
                 self.foreign = foreign;
                 self.index_holders = holders;
-                self.load_refused = None;
+                self.load = LoadState::Loaded;
                 Ok(())
             }
             Err(error) => {
-                self.load_refused = Some(format!("{error:#}"));
+                self.load = LoadState::Refused(format!("{error:#}"));
                 Err(error)
             }
         }
     }
 
-    /// The one gate of every write and removal: a cache whose load was refused holds no image of its stores.
+    /// The one gate of every write and removal: a cache that never pulled a populated store, or whose last pull was refused,
+    /// holds no image of its stores.
     fn require_loaded(&self) -> Result<()> {
-        match &self.load_refused {
-            Some(reason) => Err(CultCacheLoadRefused { reason: reason.clone() }.into()),
-            None => Ok(()),
+        match &self.load {
+            LoadState::Loaded => Ok(()),
+            LoadState::NotLoaded => Err(CultCacheLoadRefused::NotLoaded.into()),
+            LoadState::Refused(reason) => Err(CultCacheLoadRefused::Failed { reason: reason.clone() }.into()),
         }
     }
 
@@ -4724,6 +4747,7 @@ mod tests {
         let mut cache = CultCache::new();
         cache.register_registry(TestEntries)?;
         cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(path))?;
+        cache.pull_all_backing_stores()?;
         records(&mut cache)
     }
 
@@ -6049,9 +6073,9 @@ mod tests {
         let mut cache = CultCache::new();
         cache.register_entry_type::<Settings>()?;
         cache.add_backing_store(SingleFileMessagePackBackingStore::new(&settings_path), ["settings"])?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&generic_path))?;
-        // The cache already holds a record, in its home store, before the refused load.
+        // The cache already holds a record, in its home store, before the populated generic store is attached.
         cache.put("held", &Settings { theme: "home".to_string(), retries: 0 })?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&generic_path))?;
         let before = cache.snapshot();
         let settings_bytes = fs::read(&settings_path)?;
         let error = cache.pull_all_backing_stores().unwrap_err();
