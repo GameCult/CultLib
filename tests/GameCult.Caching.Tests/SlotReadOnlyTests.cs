@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using GameCult.Caching.MessagePack;
 using MessagePack;
+using MessagePack.Formatters;
 using NUnit.Framework;
 using Surface = GameCult.Caching.Tests.UnionParityVectorTests.UnionSurface;
 
@@ -18,30 +19,6 @@ namespace GameCult.Caching.Tests
     {
         private const string Extra = "extra-slot";
 
-        // Same members as UnionSurface under a new version, listing OldId compatible: the declaration that must not consent to a nested mark.
-        private const string OldId = "tests.slot_readonly.old";
-
-        [CultDocument("tests.union_surface", "tests.union_surface.v2", CompatibleSchemaIds = new[] { OldId })]
-        [MessagePackObject]
-        public sealed class SurfaceDeclaring
-        {
-            [Key(0)] [CultName] public string Id = string.Empty;
-            [Key(1)] public int Version;
-            [Key(2)] public UnionParityVectorTests.Node? Root;
-            [Key(3)] public List<UnionParityVectorTests.Outcome> Outcomes = new();
-            [Key(4)] public UnionParityVectorTests.Item? Part;
-            [Key(5)] public UnionParityVectorTests.CraftedItem? Crafted;
-            [Key(6)] public UnionParityVectorTests.Node? Missing;
-        }
-
-        [CultDocument("tests.slot_unit", "tests.slot_unit.v1")]
-        [MessagePackObject]
-        public sealed class UnitDoc
-        {
-            [Key(0)] [CultName] public string Name = string.Empty;
-            [Key(1)] public UnionParityVectorTests.UnitOutcome? Outcome;
-        }
-
         // Slot 1 and 2 are retired gaps.
         [CultDocument("tests.slot_gap", "tests.slot_gap.v1")]
         [MessagePackObject]
@@ -52,8 +29,6 @@ namespace GameCult.Caching.Tests
         }
 
         private static readonly CultDocumentRegistry SurfaceRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(Surface) });
-        private static readonly CultDocumentRegistry DeclaringRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(SurfaceDeclaring) });
-        private static readonly CultDocumentRegistry UnitRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(UnitDoc) });
         private static readonly CultDocumentRegistry GapRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(GapDoc) });
         private static readonly CultRecordKey Marked = new("marked");
         private static readonly CultRecordKey Clean = new("clean");
@@ -135,22 +110,6 @@ namespace GameCult.Caching.Tests
             Assert.That(cache.IsWritable(Unheld), Is.True, "a key no store holds is writable");
         }
 
-        [Test]
-        public void AUnitArmWithAnExtraSlotHoldsTheRecordReadOnly()
-        {
-            var arm = VectorFiles.Committed("union-parity", "extra-slot-unit-arm.msgpack");
-            var payload = Emit((ref MessagePackWriter w) => { w.WriteArrayHeader(2); w.Write("u"); w.WriteRaw(arm); });
-            var path = Seed(UnitRegistry, typeof(UnitDoc), () => new UnitDoc { Name = "u" }, payload);
-            using var cache = Open(path, UnitRegistry);
-            var unread = Stored(cache, Marked).UnreadSlots;
-            Assert.That(unread, Is.Not.Null);
-            Assert.That(unread!.TypeName, Is.EqualTo(nameof(UnionParityVectorTests.Denied2)));
-            Assert.That(unread.SlotCount, Is.EqualTo(1));
-            Assert.That(unread.DeclaredCount, Is.EqualTo(0));
-            Assert.That(cache.IsWritable(Marked), Is.False);
-            Assert.That(cache.IsWritable(Clean), Is.True);
-        }
-
         // ---- every staged write and removal of a marked key is refused, nothing else is ----
 
         private static void AssertSlotRefusal(TestDelegate act, string what, string type, int slots, int declared)
@@ -194,69 +153,73 @@ namespace GameCult.Caching.Tests
             AssertSlotRefusal(() => cache.Commit(batch => batch.Remove(Marked)), "removal", "UnionSurface", 8, 7);
         }
 
+        // Every row of slot-outcomes.msgpack, from the committed files alone: the mark, Explained and IsWritable of each record of
+        // extra-slot-store.cc and extra-slot-consent.cc, and a removal of the key refused exactly where IsWritable is false.
         [Test]
-        public void AListedCompatibleIdDoesNotConsentToANestedMark()
+        public void EverySlotOutcomeRowHoldsAndARemovalIsRefusedExactlyWhereTheRecordIsNotWritable()
         {
-            // The record's stored id is one the reader lists compatible; the extra slot is nested, so the declaration does not reach it.
-            var path = SeedSurface("extra-slot-nested-record.msgpack");
-            Relabel(path, OldId);
-            using var cache = Open(path, DeclaringRegistry);
-            Assert.That(Stored(cache, Marked).StoredSchemaId, Is.EqualTo(OldId));
-            Assert.That(cache.IsWritable(Marked), Is.False);
-            AssertSlotRefusal(() => cache.Commit(batch => batch.Upsert(new SurfaceDeclaring { Id = "new" }, new CultRecordHandle<SurfaceDeclaring>(Marked))), "nested under a listed id", nameof(UnionParityVectorTests.Composition), 3, 2);
-            Assert.That(cache.IsWritable(Clean), Is.True, "the clean record under the listed id is consented to (declared)");
-            Assert.That(cache.Commit(batch => batch.Upsert(new SurfaceDeclaring { Id = "new" }, new CultRecordHandle<SurfaceDeclaring>(Clean))), Is.True);
-        }
-
-        // The record stored under a listed compatible id whose catalog entry has one more member than the reader (slot 7), the payload
-        // carrying that slot at depth 0: the loss a declaration consents to. With a nested mark beside it, nothing is consented to.
-        [TestCase("union-surface.msgpack", true, TestName = "ADepthZeroSlotTheCatalogReportsUnderAListedIdIsConsentedTo")]
-        [TestCase("extra-slot-nested-record.msgpack", false, TestName = "ANestedMarkBesideACatalogReportedSlotIsNotConsentedTo")]
-        public void ACompatibleIdConsentsOnlyToTheDepthZeroSlotTheCatalogReports(string vector, bool consented)
-        {
-            var original = VectorFiles.Committed("union-parity", vector);
-            var path = Seed(SurfaceRegistry, typeof(Surface), () => new Surface { Id = "x" }, AppendRootSlot(original, "wider writer"));
-            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
-            var entry = snapshot.SchemaCatalog.Single();
-            var last = entry.Members.OrderBy(member => member.Slot).Last();
-            entry.Members = entry.Members.Append(new CultSchemaMemberCatalogEntry { Slot = 7, MemberName = "Wider", TypeName = last.TypeName }).ToArray();
-            entry.SchemaId = OldId;
-            foreach (var record in snapshot.Records) record.SchemaId = OldId;
-            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
-
-            using var cache = Open(path, DeclaringRegistry);
-            var unread = Stored(cache, Marked).UnreadSlots;
-            Assert.That(unread, Is.Not.Null);
-            Assert.That(unread!.Explained, Is.EqualTo(consented));
-            Assert.That(cache.IsWritable(Marked), Is.EqualTo(consented));
-            if (consented)
-                Assert.That(cache.Commit(batch => batch.Upsert(new SurfaceDeclaring { Id = "new" }, new CultRecordHandle<SurfaceDeclaring>(Marked))), Is.True);
-            else
-                Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.Remove(Marked)));
-        }
-
-        // The payload's root array with one string slot appended.
-        private static byte[] AppendRootSlot(byte[] payload, string value)
-        {
-            var reader = new MessagePackReader(payload);
-            var count = reader.ReadArrayHeader();
-            var start = (int)reader.Consumed;
-            for (var i = 0; i < count; i++) reader.Skip();
-            var end = (int)reader.Consumed;
-            return Emit((ref MessagePackWriter w) =>
+            var reader = new MessagePackReader(VectorFiles.Committed("union-parity", "slot-outcomes.msgpack"));
+            var rows = reader.ReadArrayHeader();
+            Assert.That(rows, Is.EqualTo(7));
+            for (var i = 0; i < rows; i++)
             {
-                w.WriteArrayHeader(count + 1);
-                w.WriteRaw(payload.AsSpan(start, end - start));
-                w.Write(value);
-            });
+                Assert.That(reader.ReadArrayHeader(), Is.EqualTo(8));
+                var store = reader.ReadString()!;
+                var key = new CultRecordKey(reader.ReadString()!);
+                var writable = reader.ReadBoolean();
+                bool? explained = reader.TryReadNil() ? null : reader.ReadBoolean();
+                var type = reader.TryReadNil() ? null : reader.ReadString();
+                var counts = new int?[3];
+                for (var c = 0; c < 3; c++) counts[c] = reader.TryReadNil() ? null : reader.ReadInt32();
+                var (slots, declared, occurrences) = (counts[0], counts[1], counts[2]);
+                var row = $"{store} {key.Value}";
+
+                var path = Path.Combine(_directory, $"{i}-{store}");
+                File.WriteAllBytes(path, VectorFiles.Committed("union-parity", store));
+                var before = File.ReadAllBytes(path);
+                using var cache = Open(path, UnionParityVectorTests.SlotReader(store));
+                var unread = Stored(cache, key).UnreadSlots;
+                if (explained == null)
+                {
+                    Assert.That(unread, Is.Null, row);
+                }
+                else
+                {
+                    Assert.That(unread, Is.Not.Null, row);
+                    Assert.That((unread!.Explained, unread.TypeName, unread.SlotCount, unread.DeclaredCount, unread.Occurrences),
+                        Is.EqualTo((explained.Value, type, slots, declared, occurrences)), row);
+                }
+
+                Assert.That(cache.IsWritable(key), Is.EqualTo(writable), row);
+                Assert.That(cache.IsWritable(Unheld), Is.True, "a key no store holds is writable");
+                if (writable)
+                {
+                    Assert.That(cache.Commit(batch => batch.Remove(key)), Is.True, row);
+                }
+                else
+                {
+                    var refusal = Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.Remove(key)), row)!;
+                    Assert.That(refusal.UnreadSlots, Is.Not.Null, row);
+                    Assert.That(File.ReadAllBytes(path), Is.EqualTo(before), $"{row}: a refused removal leaves the store as it was");
+                }
+            }
         }
 
-        private static void Relabel(string path, string id)
+        // Consent reaches only the slots the catalog comparison reports: the wide id's catalog reports slot 7, so a payload carrying
+        // slots 7 and 8 at depth 0 is not consented to, and a payload carrying slot 7 alone is.
+        [Test]
+        public void ConsentStopsAtTheSlotsTheCatalogReports()
         {
-            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
-            snapshot.SchemaCatalog.Single().SchemaId = id;
-            foreach (var record in snapshot.Records) record.SchemaId = id;
-            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            var path = Path.Combine(_directory, "extra-slot-consent.cc");
+            File.WriteAllBytes(path, VectorFiles.Committed("union-parity", "extra-slot-consent.cc"));
+            var before = File.ReadAllBytes(path);
+            using var cache = Open(path, UnionParityVectorTests.SlotReader("extra-slot-consent.cc"));
+            var over = new CultRecordHandle<UnionParityVectorTests.SurfaceDeclaring>(new CultRecordKey("over-consent"));
+            AssertWriteAgrees(cache, over.Key, () => cache.Commit(batch => batch.Upsert(new UnionParityVectorTests.SurfaceDeclaring { Id = "over" }, over)));
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(before), "the refused write leaves the store as it was");
+            var consented = new CultRecordHandle<UnionParityVectorTests.SurfaceDeclaring>(new CultRecordKey("consented"));
+            AssertWriteAgrees(cache, consented.Key, () => cache.Commit(batch => batch.Upsert(new UnionParityVectorTests.SurfaceDeclaring { Id = "consented" }, consented)));
+            Assert.That(cache.IsWritable(consented.Key), Is.True);
         }
 
         // ---- carried verbatim ----
@@ -348,6 +311,242 @@ namespace GameCult.Caching.Tests
             Assert.That(unread.DeclaredCount, Is.EqualTo(2));
             Assert.That(reader.IsWritable(Marked), Is.False, "the wide id is undeclared: unowned, though the mark is explained");
             Assert.Throws<CultSchemaConflictException>(() => reader.Commit(batch => batch.Remove(Marked)));
+        }
+
+        // ---- declared slots are the slots the type's own formatter writes ----
+
+        // MessagePack writes a non-public [Key] member of an AllowPrivate type: 2 slots, where a public-member count says 1.
+        [MessagePackObject(AllowPrivate = true)]
+        public sealed class PrivInner
+        {
+            [Key(0)] public string A = string.Empty;
+            [Key(1)] internal string B = string.Empty;
+        }
+
+        // A [Key] getter that throws on an uninitialized instance; the parameterless constructor's instance is written instead.
+        [MessagePackObject]
+        public sealed class Counted
+        {
+            private List<string> _items = new();
+            [Key(0)] public int Count { get => _items.Count; set => _items = Enumerable.Repeat(string.Empty, value).ToList(); }
+        }
+
+        // The same getter and no parameterless constructor: no instance can be written, so the guard leaves the type alone.
+        [MessagePackObject]
+        public sealed class Uncounted
+        {
+            private readonly List<string> _items;
+            [SerializationConstructor] public Uncounted(int count) => _items = Enumerable.Repeat(string.Empty, count).ToList();
+            [Key(0)] public int Count => _items.Count;
+        }
+
+        // A type naming its own formatter owns its layout: one [Key] slot, but the formatter writes the item count and each item.
+        [MessagePackObject]
+        [MessagePackFormatter(typeof(BagFormatter))]
+        public sealed class Bag
+        {
+            [Key(0)] public List<string> Items = new();
+        }
+
+        public sealed class BagFormatter : IMessagePackFormatter<Bag?>
+        {
+            public void Serialize(ref MessagePackWriter writer, Bag? value, MessagePackSerializerOptions options)
+            {
+                if (value == null) { writer.WriteNil(); return; }
+                writer.WriteArrayHeader(1 + value.Items.Count);
+                writer.Write(value.Items.Count);
+                foreach (var item in value.Items) writer.Write(item);
+            }
+
+            public Bag? Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+            {
+                if (reader.TryReadNil()) return null;
+                var count = reader.ReadArrayHeader();
+                reader.ReadInt32();
+                var bag = new Bag();
+                for (var i = 1; i < count; i++) bag.Items.Add(reader.ReadString()!);
+                return bag;
+            }
+        }
+
+        [CultDocument("tests.slot_measured", "tests.slot_measured.v1")]
+        [MessagePackObject]
+        public sealed class MeasuredDoc
+        {
+            [Key(0)] [CultName] public string Name = string.Empty;
+            [Key(1)] public PrivInner? Private;
+            [Key(2)] public Counted? Counted;
+            [Key(3)] public Uncounted? Uncounted;
+            [Key(4)] public Bag? Bag;
+        }
+
+        private static readonly CultDocumentRegistry MeasuredRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(MeasuredDoc) });
+
+        private static MeasuredDoc Measured(string member) => member switch
+        {
+            "private" => new MeasuredDoc { Name = member, Private = new PrivInner { A = "a", B = "bee" } },
+            "constructed" => new MeasuredDoc { Name = member, Counted = new Counted { Count = 2 } },
+            "unmeasurable" => new MeasuredDoc { Name = member, Uncounted = new Uncounted(2) },
+            "own-formatter" => new MeasuredDoc { Name = member, Bag = new Bag { Items = { "x", "y", "z" } } },
+            _ => throw new ArgumentOutOfRangeException(nameof(member), member, null)
+        };
+
+        [TestCase("private", TestName = "APrivateKeyedMemberDoesNotMark")]
+        [TestCase("constructed", TestName = "ATypeMeasuredThroughItsConstructorDoesNotMark")]
+        [TestCase("unmeasurable", TestName = "AnUnmeasurableTypeIsNotGuarded")]
+        [TestCase("own-formatter", TestName = "ATypeWithItsOwnFormatterIsNotMeasuredByKeys")]
+        public void ARecordWrittenByItsOwnTypeDoesNotMark(string member)
+        {
+            var path = Path.Combine(_directory, "measured.cc");
+            using (var cache = Open(path, MeasuredRegistry))
+            {
+                Assert.That(cache.Commit(batch => batch.Upsert(Measured(member), new CultRecordHandle<MeasuredDoc>(Marked))), Is.True);
+            }
+
+            using (var cache = Open(path, MeasuredRegistry))
+            {
+                Assert.That(Stored(cache, Marked).UnreadSlots, Is.Null, member);
+                Assert.That(cache.IsWritable(Marked), Is.True, member);
+                Assert.That(cache.Commit(batch => batch.Upsert(Measured(member), new CultRecordHandle<MeasuredDoc>(Marked))), Is.True, member);
+                Assert.That(cache.Commit(batch => batch.Remove(Marked)), Is.True, member);
+            }
+        }
+
+        // One slot past what the formatter writes still marks, with the written count as declared.
+        [Test]
+        public void AnExtraSlotPastTheWrittenCountStillMarks()
+        {
+            var privatePayload = Emit((ref MessagePackWriter w) =>
+            {
+                w.WriteArrayHeader(5); w.Write("p");
+                w.WriteArrayHeader(3); w.Write("a"); w.Write("bee"); w.Write(Extra);
+                w.WriteNil(); w.WriteNil(); w.WriteNil();
+            });
+            var path = Seed(MeasuredRegistry, typeof(MeasuredDoc), () => new MeasuredDoc { Name = "c" }, privatePayload, "private.cc");
+            using (var cache = Open(path, MeasuredRegistry))
+            {
+                AssertSlotRefusal(() => cache.Commit(batch => batch.Remove(Marked)), "AllowPrivate type", nameof(PrivInner), 3, 2);
+                Assert.That(cache.IsWritable(Clean), Is.True);
+            }
+
+            var countedPayload = Emit((ref MessagePackWriter w) =>
+            {
+                w.WriteArrayHeader(5); w.Write("c"); w.WriteNil();
+                w.WriteArrayHeader(2); w.Write(0); w.Write(Extra);
+                w.WriteNil(); w.WriteNil();
+            });
+            path = Seed(MeasuredRegistry, typeof(MeasuredDoc), () => new MeasuredDoc { Name = "c" }, countedPayload, "counted.cc");
+            using (var cache = Open(path, MeasuredRegistry))
+                AssertSlotRefusal(() => cache.Commit(batch => batch.Remove(Marked)), "measured through its constructor", nameof(Counted), 2, 1);
+        }
+
+        // ---- a flatten writes its base chain's decoded view: refused when a record on the chain is not owned ----
+
+        private static readonly CultRecordKey Base = new("base");
+        private static readonly CultRecordKey Var = new("var");
+        private static readonly CultRecordKey Fresh = new("fresh");
+
+        // A store holding plain record base and its variant var, base then given the payload.
+        private string SeedVariant(byte[]? basePayload, string name)
+        {
+            var path = Path.Combine(_directory, name);
+            using (var cache = Open(path, SurfaceRegistry))
+            {
+                Assert.That(cache.Commit(batch => batch.Upsert(new Surface { Id = "base" }, new CultRecordHandle<Surface>(Base))), Is.True);
+                Assert.That(cache.Commit(batch => batch.UpsertVariant(Var, Base, Named(cache, Var))), Is.True);
+            }
+
+            if (basePayload == null) return path;
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            snapshot.Records.Single(record => record.Key == Base.Value).Payload = basePayload;
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            return path;
+        }
+
+        // A variant overrides its name.
+        private static CultVariantOverride[] Named(CultCache cache, CultRecordKey key) => new[] { cache.Override<Surface>(nameof(Surface.Id), key.Value) };
+
+        private static void AssertBaseRefusal(TestDelegate act, string what, bool unreadSlots)
+        {
+            var refusal = Assert.Throws<CultSchemaConflictException>(act, what)!;
+            Assert.That(refusal.RecordKey, Is.EqualTo(Base.Value), $"{what}: the refusal is the base's own");
+            Assert.That(refusal.UnreadSlots, unreadSlots ? Is.Not.Null : Is.Null, what);
+        }
+
+        [Test]
+        public void AFlattenThroughABaseHeldForUnreadSlotsIsRefusedAndTheVariantStillWritesItsDelta()
+        {
+            var nested = VectorFiles.Committed("union-parity", "extra-slot-nested-record.msgpack");
+            var path = SeedVariant(nested, "flatten.cc");
+            var before = File.ReadAllBytes(path);
+            using (var cache = Open(path, SurfaceRegistry))
+            {
+                Assert.That(cache.IsWritable(Base), Is.False);
+                Assert.That(cache.IsWritable(Var), Is.True, "the variant persists only its delta");
+                AssertBaseRefusal(() => cache.Commit(batch => batch.Flatten(Var)), "Commit(Flatten)", unreadSlots: true);
+                AssertBaseRefusal(() => cache.FlattenAsync(Var).GetAwaiter().GetResult(), "FlattenAsync", unreadSlots: true);
+                AssertBaseRefusal(() => cache.Commit(batch => { batch.UpsertVariant(Fresh, Base, Named(cache, Fresh)); batch.Flatten(Fresh); }), "a new variant flattened as it lands", unreadSlots: true);
+                Assert.That(File.ReadAllBytes(path), Is.EqualTo(before), "refused flattens leave the store as it was");
+                Assert.That(cache.Commit(batch => batch.UpsertVariant(Var, Base, Named(cache, Var))), Is.True, "a variant write persists only its delta");
+                Assert.That(cache.Commit(batch => batch.Remove(Var)), Is.True);
+            }
+
+            var after = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            Assert.That(after.Records.Single(record => record.Key == Base.Value).Payload, Is.EqualTo(nested), "the base's bytes stay");
+        }
+
+        [Test]
+        public void AFlattenThroughABaseUnderAnUndeclaredDroppingIdIsRefused()
+        {
+            var path = Path.Combine(_directory, "drift.cc");
+            using (var writer = Open(path, CultDocumentRegistry.ForTypes(new[] { typeof(WideDoc) })))
+                Assert.That(writer.Commit(batch => batch.Upsert(new WideDoc { Name = "base", Extra = "kept?" }, new CultRecordHandle<WideDoc>(Base))), Is.True);
+
+            using var reader = Open(path, CultDocumentRegistry.ForTypes(new[] { typeof(NarrowDoc) }));
+            Assert.That(reader.IsWritable(Base), Is.False);
+            Assert.That(reader.Commit(batch => batch.UpsertVariant(Var, Base, new[] { reader.Override<NarrowDoc>(nameof(NarrowDoc.Name), Var.Value) })), Is.True, "a variant over the unowned base persists only its delta");
+            var before = File.ReadAllBytes(path);
+            AssertBaseRefusal(() => reader.Commit(batch => batch.Flatten(Var)), "flatten over undeclared drift", unreadSlots: false);
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(before));
+            Assert.That(reader.Commit(batch => batch.Remove(Var)), Is.True);
+        }
+
+        // ---- IsWritable is the write's own answer ----
+
+        // False exactly where the write throws.
+        private static void AssertWriteAgrees(CultCache cache, CultRecordKey key, Action write)
+        {
+            var writable = cache.IsWritable(key);
+            Exception? thrown = null;
+            try { write(); }
+            catch (InvalidOperationException exception) { thrown = exception; }
+            Assert.That(thrown == null, Is.EqualTo(writable), $"IsWritable({key.Value}) is {writable}; the write {(thrown == null ? "landed" : "threw: " + thrown.Message)}");
+        }
+
+        [Test]
+        public void IsWritableIsFalseInAReadOnlyStoreAndAFlattenThereIsNotRefusedForItsCleanBase()
+        {
+            var path = SeedVariant(null, "readonly.cc");
+            using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = SurfaceRegistry, ReadOnly = true });
+            Assert.That(cache.IsWritable(Base), Is.False);
+            AssertWriteAgrees(cache, Base, () => cache.Commit(batch => batch.Upsert(new Surface { Id = "new" }, new CultRecordHandle<Surface>(Base))));
+            AssertWriteAgrees(cache, Var, () => cache.Commit(batch => batch.Remove(Var)));
+            var refusal = Assert.Throws<InvalidOperationException>(() => cache.Commit(batch => batch.Flatten(Var)))!;
+            Assert.That(refusal, Is.Not.InstanceOf<CultSchemaConflictException>(), "nothing on the chain is lost: the refusal is the store's read-only one");
+            Assert.That(refusal.Message, Does.Contain("read-only backing store"));
+        }
+
+        [Test]
+        public void IsWritableIsFalseForARecordNoAttachedStoreIsHomeTo()
+        {
+            using var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(Surface), typeof(GapDoc) }));
+            Assert.That(cache.Commit(batch => batch.Upsert(new Surface { Id = "memory" }, new CultRecordHandle<Surface>(Clean))), Is.True);
+            Assert.That(cache.IsWritable(Clean), Is.True, "a store-less cache writes its own records");
+            cache.AddBackingStore(new SingleFileMessagePackBackingStore(Path.Combine(_directory, "gaps.cc")), typeof(GapDoc));
+            Assert.That(cache.IsWritable(Clean), Is.False);
+            AssertWriteAgrees(cache, Clean, () => cache.Commit(batch => batch.Upsert(new Surface { Id = "x" }, new CultRecordHandle<Surface>(Clean))));
+            AssertWriteAgrees(cache, Clean, () => cache.Commit(batch => batch.Remove(Clean)));
+            Assert.That(cache.IsWritable(Unheld), Is.True, "an unheld key no store lists foreign is writable");
         }
     }
 }
