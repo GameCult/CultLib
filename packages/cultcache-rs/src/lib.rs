@@ -1253,12 +1253,14 @@ pub trait CacheBackingStore: Send {
     fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()>;
     fn delete(&mut self, entry: &CultCacheEnvelope) -> Result<()>;
 
-    /// Replaces everything the store holds with `entries` in one atomic step:
-    /// on `Err` the store still holds exactly what it held before. A cache
-    /// batch (`put_prepared_batch`) is all-or-nothing only through this. There
-    /// is no default, because a replace assembled from `delete` and `push`
-    /// calls leaves the store emptied or partial when one of them fails; a
-    /// store without an atomic replace does not compile:
+    /// Writes `entries` onto the store as it is when the write lands, in one
+    /// atomic step: a record under the same identity is replaced and no other
+    /// record is removed or changed, so a writer whose image is stale cannot
+    /// drop a record it never saw. On `Err` the store still holds exactly what
+    /// it held before. A cache batch (`put_prepared_batch`) is all-or-nothing
+    /// only through this. There is no default, because a write assembled from
+    /// `push` calls leaves the store partial when one of them fails; a store
+    /// without an atomic write does not compile:
     ///
     /// ```compile_fail,E0046
     /// use cultcache_rs::{CacheBackingStore, CultCacheEnvelope};
@@ -1962,14 +1964,17 @@ impl CacheBackingStore for SingleFileMessagePackBackingStore {
             }
 
             // Of entries sharing a key and a schema id the last one given is the record, whatever their type names (a type
-            // renamed under a stable id); a second schema id under a key reaches the commit guard.
+            // renamed under a stable id); it replaces the held record under that key and schema id. A second schema id
+            // under a key reaches the commit guard, which judges the merged store.
             let mut by_id = BTreeMap::<(String, String), &CultCacheEnvelope>::new();
             for entry in entries {
                 by_id.insert((schema_identity(entry).to_string(), entry.key.clone()), entry);
             }
-            let mut entries: Vec<CultCacheEnvelope> = by_id.into_values().cloned().collect();
-            entries.sort_by_key(entry_id);
-            self.write_all_unlocked(&entries)
+            let mut merged = self.read_all_unlocked()?;
+            merged.retain(|held| !by_id.contains_key(&(schema_identity(held).to_string(), held.key.clone())));
+            merged.extend(by_id.into_values().cloned());
+            merged.sort_by_key(entry_id);
+            self.write_all_unlocked(&merged)
         })
     }
 }
@@ -2757,13 +2762,6 @@ impl CacheBackingStore for OwnedRedbMessagePackBackingStore {
         let write = self.inner.database.begin_write()?;
         {
             let mut table = write.open_table(REDB_ENVELOPES)?;
-            let keys = table
-                .iter()?
-                .map(|row| Ok(row?.0.value().to_vec()))
-                .collect::<Result<Vec<_>>>()?;
-            for key in keys {
-                table.remove(key.as_slice())?;
-            }
             for entry in entries {
                 insert_redb_entry(&mut table, entry)?;
             }
@@ -2899,13 +2897,6 @@ impl CacheBackingStore for RedbMessagePackBackingStore {
             let write = database.begin_write()?;
             {
                 let mut table = write.open_table(REDB_ENVELOPES)?;
-                let keys = table
-                    .iter()?
-                    .map(|row| Ok(row?.0.value().to_vec()))
-                    .collect::<Result<Vec<_>>>()?;
-                for key in keys {
-                    table.remove(key.as_slice())?;
-                }
                 for entry in entries {
                     insert_redb_entry(&mut table, entry)?;
                 }
@@ -3602,18 +3593,10 @@ impl CultCache {
         }
         let change = self.judge_unique(&staged.iter().collect::<Vec<_>>())?;
         if let Some(store_index) = store_index {
-            // The home store receives its own records only: those it already holds in this cache plus the staged ones, and
-            // the records it carries that no registered type claims: push_all replaces the store's records, so a foreign
-            // record is laid back as the store read it.
-            let snapshot: Vec<_> = next
-                .values()
-                .filter(|entry| self.resolve_route_index(&entry.r#type) == Some(store_index))
-                .chain(self.foreign.iter().filter(|(home, _)| *home == store_index).map(|(_, entry)| entry))
-                .cloned()
-                .collect();
+            // The home store is handed the staged records alone and applies them onto what it holds now.
             self.stores[store_index]
                 .store
-                .push_all(&snapshot, PushAllOptions::default())?;
+                .push_all(&staged, PushAllOptions::default())?;
         }
         self.entries = next;
         change.apply(&mut self.index_holders);
@@ -7980,15 +7963,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn r3_decides_resolve_or_refuse_a_push_all_through_a_dangling_link_replaces_the_link() -> Result<()> {
+    fn a_push_all_through_a_dangling_link_is_refused_like_push_and_writes_nothing() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let volume = temp.path().join("volume");
         fs::create_dir(&volume)?;
         let link = temp.path().join("store.cc");
         std::os::unix::fs::symlink(volume.join("store.cc"), &link)?;
 
-        SingleFileMessagePackBackingStore::new(&link).push_all(&[snapshot_envelope("a", b"1")], PushAllOptions::default())?;
-        assert!(fs::symlink_metadata(&link)?.file_type().is_file(), "the link was replaced by a regular file");
+        let mut store = SingleFileMessagePackBackingStore::new(&link);
+        assert!(store.push_all(&[snapshot_envelope("a", b"1")], PushAllOptions::default()).is_err());
+        assert!(store.push(&snapshot_envelope("a", b"1")).is_err());
+        assert!(fs::symlink_metadata(&link)?.file_type().is_symlink(), "the link is left as it was");
         assert_eq!(fs::read_dir(&volume)?.count(), 0, "nothing reached the link's volume");
         Ok(())
     }
@@ -8189,6 +8174,35 @@ mod tests {
         assert!(routed.put("again", &settings).unwrap_err().downcast_ref::<CultCacheLoadRefused>().is_some());
         routed.pull_all_backing_stores()?;
         routed.put("again", &settings)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_stale_cache_batch_keeps_the_records_another_writer_added() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let single = temp.path().join("single.cc");
+        let redb = temp.path().join("redb.db");
+        let open = |path: &Path| -> Result<CultCache> {
+            let mut cache = CultCache::new();
+            cache.register_registry(TestEntries)?;
+            if path.extension().is_some_and(|extension| extension == "db") {
+                cache.add_generic_backing_store(RedbMessagePackBackingStore::new(path)?)?;
+            } else {
+                cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(path))?;
+            }
+            cache.pull_all_backing_stores()?;
+            Ok(cache)
+        };
+        for path in [&single, &redb] {
+            let mut stale = open(path)?;
+            let mut other = open(path)?;
+            other.put("added", &Settings { theme: "other".to_string(), retries: 2 })?;
+            let (staged, _) = stale.prepare_entry("mine", &Note { title: "t".to_string(), body: "b".to_string() })?;
+            stale.put_prepared_batch(vec![staged])?;
+            let reader = open(path)?;
+            assert_eq!(reader.get_required::<Settings>("added")?.theme, "other", "{path:?}");
+            assert_eq!(reader.get_required::<Note>("mine")?.title, "t", "{path:?}");
+        }
         Ok(())
     }
 }
