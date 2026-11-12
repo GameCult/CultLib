@@ -119,6 +119,16 @@ test("a payload that ends early, is empty or carries trailing bytes is the reade
   assert.doesNotThrow(() => checkPayloadDepth(bytes(0xc0)));
 });
 
+test("the walk returns where the first value ends, and undefined when the payload ends early", () => {
+  assert.equal(checkPayloadDepth(bytes(0xc0)), 1);
+  assert.equal(checkPayloadDepth(bytes(0xc0, 0xc1, 0xc1)), 1, "a top-level scalar ends at its own length; the tail is not judged");
+  assert.equal(checkPayloadDepth(bytes(0x92, 0x01, 0xa1, 0x61, 0xc0)), 5 - 1, "a container ends when its last child completes");
+  assert.equal(checkPayloadDepth(cat(bytes(0x90), arrays(L + 50))), 1, "the tail is never walked");
+  assert.equal(checkPayloadDepth(bytes()), undefined);
+  assert.equal(checkPayloadDepth(bytes(0x92, 0x01)), undefined);
+  assert.equal(checkPayloadDepth(bytes(0xd9)), undefined);
+});
+
 test("the walk is iterative: 100000 nested arrays are refused with the depth error, not a RangeError", () => {
   refused(arrays(100_000), "100000 nested arrays");
   refused(chain(bytes(0x81, 0x00), 100_000), "100000 nested maps");

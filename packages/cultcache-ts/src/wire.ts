@@ -128,7 +128,6 @@ export function readWire(payload: Uint8Array): unknown {
     }
   }
 
-  const tree = next();
-  if (offset !== payload.length) throw new Error("the MessagePack payload has bytes after its value.");
-  return tree;
+  // One value is read; the caller owns what follows it (decodeDocumentPayload refuses a payload with a tail).
+  return next();
 }
