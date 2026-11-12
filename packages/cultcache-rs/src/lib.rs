@@ -600,14 +600,21 @@ impl std::error::Error for PayloadTooDeep {}
 
 /// Walks the MessagePack headers of one payload without recursion, counting every array and map and
 /// refusing the first container past [`MAX_PAYLOAD_DEPTH`]. Scalars are skipped by length and nothing
-/// is allocated per element. A payload that ends early is the decoder's to refuse.
+/// is allocated per element. Only the first value is walked; a payload that ends early is the
+/// decoder's to refuse. A depth-only probe: [`decode_payload`] also refuses bytes after the value.
 pub fn check_payload_depth(bytes: &[u8]) -> std::result::Result<(), PayloadTooDeep> {
+    first_value_end(bytes).map(|_| ())
+}
+
+/// Where the first MessagePack value of `bytes` ends, walking only that value (its tail is never
+/// read). `None` when the payload ends before the value does: the decoder's to refuse.
+fn first_value_end(bytes: &[u8]) -> std::result::Result<Option<usize>, PayloadTooDeep> {
     let mut remaining = [0usize; MAX_PAYLOAD_DEPTH];
     let mut depth = 0usize;
     let mut position = 0usize;
     while position < bytes.len() {
         let Some((advance, children)) = element_header(bytes, position) else {
-            return Ok(());
+            return Ok(None);
         };
         position = position.saturating_add(advance);
         if let Some(children) = children {
@@ -629,7 +636,18 @@ pub fn check_payload_depth(bytes: &[u8]) -> std::result::Result<(), PayloadTooDe
             depth -= 1;
         }
         if depth == 0 {
-            return Ok(());
+            return Ok((position <= bytes.len()).then_some(position));
+        }
+    }
+    Ok(None)
+}
+
+/// The one rule for "is this payload one value": the nesting bound, then no bytes after the first
+/// value. The count is all it reports; the tail is never walked or quoted.
+fn check_record_payload(bytes: &[u8]) -> Result<()> {
+    if let Some(end) = first_value_end(bytes)? {
+        if end < bytes.len() {
+            bail!("payload has {} bytes after its first MessagePack value", bytes.len() - end);
         }
     }
     Ok(())
@@ -784,7 +802,7 @@ fn decode_grown<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::result::Re
     grown(&mut reader, |grown| T::deserialize(grown))
 }
 
-/// The one decode of a document payload: the nesting bound first, then [`decode_grown`], whose
+/// The one decode of a document payload: the payload check first (nesting bound, one value), then [`decode_grown`], whose
 /// rmp-serde depth counter (1024) is only a backstop. A failure keeps its kind and never quotes the
 /// bytes. Readers of stored envelope payloads outside this crate decode through it too.
 ///
@@ -796,14 +814,14 @@ fn decode_grown<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::result::Re
 /// verified on x86_64-pc-windows-msvc by hand (`decode_stack`, revision 10a39dac, 13 tests, debug and release); a
 /// `stacker` bump or a change to the stack-size tests repeats it.
 pub fn decode_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T> {
-    check_payload_depth(payload)?;
+    check_record_payload(payload)?;
     decode_grown(payload).map_err(opaque_decode_error)
 }
 
-/// The nesting bound for an envelope admitted without a typed decode, from the same walk that
-/// [`decode_payload`] runs first. Names the entry's type and key, never the payload.
-fn require_payload_depth(entry: &CultCacheEnvelope) -> Result<()> {
-    check_payload_depth(&entry.payload).with_context(|| {
+/// The payload check for an envelope admitted without a typed decode, the one [`decode_payload`]
+/// runs first. Names the entry's type and key, never the payload.
+fn require_record_payload(entry: &CultCacheEnvelope) -> Result<()> {
+    check_record_payload(&entry.payload).with_context(|| {
         format!(
             "refused CultCache envelope {:?} at key {:?}",
             entry.r#type, entry.key
@@ -3265,7 +3283,7 @@ impl CultCache {
                     entry.r#type
                 ));
             }
-            require_payload_depth(entry)?;
+            require_record_payload(entry)?;
             self.refuse_claimed_id(entry)?;
             let Some(home) = self.home_index(&entry.r#type)? else {
                 continue;
@@ -3344,7 +3362,7 @@ impl CultCache {
                 entry.r#type
             ));
         }
-        require_payload_depth(&entry)?;
+        require_record_payload(&entry)?;
         self.refuse_claimed_id(&entry)?;
         self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
         self.refuse_retype(&self.entries, &self.foreign, &entry)?;
@@ -6057,6 +6075,34 @@ mod tests {
                 })
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn put_raw_envelope_refuses_bytes_after_the_value() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("tail.cc");
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<Settings>()?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
+        let tailed = CultCacheEnvelope {
+            key: "app".to_string(),
+            r#type: Settings::TYPE.to_string(),
+            payload: vec![0x91, 0x01, 0xc0],
+            stored_at: now_utc_second(),
+            schema_id: None,
+        };
+        let error = format!("{:#}", cache.put_raw_envelope(tailed.clone()).unwrap_err());
+        assert!(error.contains("payload has 1 bytes after its first MessagePack value"), "{error}");
+        assert!(error.contains("app") && error.contains(Settings::TYPE), "{error}");
+        assert!(cache.snapshot().is_empty());
+        assert!(!store_path.exists() || SingleFileMessagePackBackingStore::new(&store_path).pull_all()?.is_empty());
+        let error = format!("{:#}", cache.put_prepared_batch(vec![tailed.clone()]).unwrap_err());
+        assert!(error.contains("payload has 1 bytes after its first MessagePack value"), "{error}");
+        assert!(cache.snapshot().is_empty());
+        // The same bytes without the tail are admitted: the refusal is the count, not the shape.
+        cache.put_raw_envelope(CultCacheEnvelope { payload: vec![0x91, 0x01], ..tailed })?;
+        assert_eq!(cache.snapshot().len(), 1);
         Ok(())
     }
 

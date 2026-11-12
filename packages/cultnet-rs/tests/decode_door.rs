@@ -190,6 +190,16 @@ fn message_past_the_bound_is_refused_typed() {
     });
 }
 
+// A frame is one message: cultcache's payload rule refuses bytes after it, by count.
+#[test]
+fn frame_with_bytes_after_is_refused() {
+    let mut bytes = hello_with(&nested(0));
+    assert!(decode_message(bytes.clone(), BIG).is_ok());
+    bytes.push(0xc0);
+    let error = format!("{:#}", decode_message(bytes, BIG).unwrap_err());
+    assert!(error.contains("1 bytes after its first MessagePack value"), "{error}");
+}
+
 fn raw_v1_bytes(header_unknown: Option<&[u8]>) -> Vec<u8> {
     let mut header: Vec<(rmpv::Value, rmpv::Value)> = vec![
         ("schemaId".into(), "s".into()),

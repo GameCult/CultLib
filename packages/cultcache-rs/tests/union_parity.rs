@@ -9,6 +9,8 @@ use cultcache_rs::CultCacheEnvelope;
 use cultcache_rs::MAX_PAYLOAD_DEPTH;
 use cultcache_rs::PayloadTooDeep;
 use cultcache_rs::check_payload_depth;
+use cultcache_rs::decode_payload;
+use cultcache_rs::RedbMessagePackBackingStore;
 use cultcache_rs::CultSlots;
 use cultcache_rs::CultUnion;
 use cultcache_rs::DatabaseEntry;
@@ -755,6 +757,66 @@ fn bounds_vectors() {
         }
     }
     assert_eq!((accepted, refused, read_only), (4, 7, 1));
+}
+
+// A payload is one MessagePack value (bytes-after-outcomes.msgpack): every door refuses a tail by
+// its count, names the clause, never the depth limit (the tail is not walked) and never a value.
+#[test]
+fn bytes_after_vectors() {
+    let rows: Vec<serde_json::Value> = rmp_serde::from_slice(&vector("bytes-after-outcomes.msgpack")).unwrap();
+    assert_eq!(rows.len(), 4);
+    let surface = vector("union-surface.msgpack");
+    for row in &rows {
+        let fields = row.as_array().unwrap();
+        let (file, outcome, union, detail) = (fields[0].as_str().unwrap(), fields[1].as_str().unwrap(), fields[2].as_str().unwrap(), fields[4].as_str().unwrap());
+        assert_eq!((outcome, union, detail), ("refused", "UnionSurface", "bytes-after"), "{file}");
+        let bytes = vector(file);
+        assert_eq!(&bytes[..surface.len()], &surface[..], "{file}");
+        let clause = format!("payload has {} bytes after its first MessagePack value", bytes.len() - surface.len());
+        let check = |door: &str, message: &str| {
+            assert!(message.contains(&clause), "{file} {door}: {message}");
+            assert!(!message.contains("the limit is"), "{file} {door} walked the tail: {message}");
+            assert!(!message.contains("CANARY-bytes-after-7d1e"), "{file} {door} echoed the tail: {message}");
+            assert!(!message.contains(CANARY), "{file} {door} echoed a value: {message}");
+        };
+        let error = decode_payload::<UnionSurface>(&bytes).unwrap_err();
+        assert!(error.downcast_ref::<PayloadTooDeep>().is_none(), "{file}");
+        check("decode_payload", &format!("{error:#}"));
+        // A store written behind the cache's back loads (the bound is the read's, as for depth) and
+        // its read refuses, naming the key and the type.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("foreign.cc");
+        SingleFileMessagePackBackingStore::new(&path).push(&envelope("k", &bytes)).unwrap();
+        let mut single = CultCache::new();
+        single.register_entry_type::<UnionSurface>().unwrap();
+        single.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+        single.pull_all_backing_stores().unwrap();
+        let message = format!("{:#}", single.get::<UnionSurface>("k").unwrap_err());
+        check("single-file read", &message);
+        assert!(message.contains("\"k\"") && message.contains(UnionSurface::TYPE), "{file}: {message}");
+        let redb_path = temp.path().join("foreign.redb");
+        RedbMessagePackBackingStore::new(&redb_path).unwrap().push(&envelope("k", &bytes)).unwrap();
+        let mut redb = CultCache::new();
+        redb.register_entry_type::<UnionSurface>().unwrap();
+        redb.add_generic_backing_store(RedbMessagePackBackingStore::new(&redb_path).unwrap()).unwrap();
+        redb.pull_all_backing_stores().unwrap();
+        check("redb read", &format!("{:#}", redb.get::<UnionSurface>("k").unwrap_err()));
+        // Raw admission refuses and stages nothing.
+        let mut raw = CultCache::new();
+        raw.register_entry_type::<UnionSurface>().unwrap();
+        let message = format!("{:#}", raw.put_raw_envelope(envelope("k", &bytes)).unwrap_err());
+        check("put_raw_envelope", &message);
+        assert!(raw.snapshot().is_empty(), "{file}");
+    }
+}
+
+// A payload that ends early is not bytes after the value: the decoder refuses it, not the check.
+#[test]
+fn a_truncated_payload_is_the_decoders_not_bytes_after() {
+    let mut truncated = vec![0x91, 0xd9, 0x40];
+    truncated.extend_from_slice(b"short");
+    let message = format!("{:#}", decode_payload::<UnionSurface>(&truncated).unwrap_err());
+    assert!(!message.contains("bytes after"), "{message}");
 }
 
 fn wrap_chain(wraps: usize, leaf: Node) -> UnionSurface {
