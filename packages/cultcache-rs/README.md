@@ -39,8 +39,8 @@ CultCache is a domain cache with persistence adapters.
   file access with a sidecar lock file.
 
 This is not an ORM, not a database, and not distributed consensus in a novelty
-hat. If multiple processes write the same backing file, use an external lock or
-a coordinator.
+hat. Several processes may write the same single-file store, one at a time under
+its sidecar lock; write ordering across keys or stores needs a coordinator.
 
 ## Current API
 
