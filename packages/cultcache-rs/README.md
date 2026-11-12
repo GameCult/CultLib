@@ -236,6 +236,17 @@ assert_eq!(rmp_serde::from_slice::<Node>(&bytes)?, tree);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+## Records written by a newer build
+
+A payload that carries a slot past the slots its type declares, in a record, a nested record, a list element or a union
+arm (a unit arm declares none), still decodes: the extra slots are skipped. The cache then holds that record read-only,
+because writing it would drop what the newer writer stored. `put`, `put_envelope`, `put_raw_envelope`,
+`put_prepared_batch` and `delete` of its key are refused with `SchemaConflictError`, whose `unread_slots` names the type
+and the slot counts and never a value; `CultCache::is_writable(type, key)` answers the same check. An untouched
+read-only record keeps its bytes through every other write. A short payload (missing trailing slots) is not marked, and
+a payload nested past `MAX_PAYLOAD_DEPTH` is refused before anything is read. `decode_payload_marked` is the decode that
+returns the `UnreadSlots` mark. This runtime has no compatible schema ids, so no mark is consented.
+
 ## Structure Of Arrays
 
 The C# CultCache hot path exposes CPU-local SoA scans as:

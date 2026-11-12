@@ -1,8 +1,6 @@
 //! The Rust runtime held to tests/vectors/union-parity, written by the C# reference.
 //! Bytes and outcomes are read from the committed files; only the constructed value is spelled here.
 
-use std::path::PathBuf;
-
 use cultcache_rs::CultCache;
 use cultcache_rs::CacheBackingStore;
 use cultcache_rs::CultCacheEnvelope;
@@ -13,236 +11,11 @@ use cultcache_rs::PayloadTooDeep;
 use cultcache_rs::check_payload_depth;
 use cultcache_rs::decode_payload;
 use cultcache_rs::RedbMessagePackBackingStore;
-use cultcache_rs::CultSlots;
-use cultcache_rs::CultUnion;
 use cultcache_rs::DatabaseEntry;
 use cultcache_rs::SingleFileMessagePackBackingStore;
 
-#[derive(Clone, Debug, PartialEq, CultUnion)]
-enum Node {
-    #[cultcache(key = 0)]
-    Box(BoxArm),
-    #[cultcache(key = 1)]
-    Text(TextArm),
-    #[cultcache(key = 2)]
-    Use(UseArm),
-    #[cultcache(key = 5)]
-    Image(ImageArm),
-    #[cultcache(key = 6)]
-    Wrap(WrapArm),
-}
-
-#[derive(Clone, Debug, PartialEq, CultSlots)]
-struct WrapArm {
-    #[cultcache(key = 0)]
-    inner: Option<std::boxed::Box<Node>>,
-    #[cultcache(key = 1)]
-    id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, CultSlots)]
-struct BoxArm {
-    #[cultcache(key = 0)]
-    id: String,
-    #[cultcache(key = 1)]
-    children: Vec<Node>,
-}
-
-#[derive(Clone, Debug, PartialEq, CultSlots)]
-struct TextArm {
-    #[cultcache(key = 0)]
-    id: String,
-    #[cultcache(key = 1)]
-    content: String,
-}
-
-#[derive(Clone, Debug, PartialEq, CultSlots)]
-struct UseArm {
-    #[cultcache(key = 0)]
-    id: String,
-    #[cultcache(key = 1)]
-    composition: Composition,
-    #[cultcache(key = 2)]
-    slots: Vec<Option<Node>>,
-}
-
-// Slot 2 is retired: a gap written nil.
-#[derive(Clone, Debug, PartialEq, CultSlots)]
-struct ImageArm {
-    #[cultcache(key = 0)]
-    id: String,
-    #[cultcache(key = 1)]
-    uri: String,
-    #[cultcache(key = 3)]
-    alt: String,
-}
-
-#[derive(Clone, Debug, PartialEq, CultSlots)]
-struct Composition {
-    #[cultcache(key = 0)]
-    name: String,
-    #[cultcache(key = 1)]
-    body: Option<std::boxed::Box<Node>>,
-}
-
-#[derive(Clone, Debug, PartialEq, CultUnion)]
-enum Outcome {
-    #[cultcache(key = 0)]
-    Pending(PendingArm),
-    #[cultcache(key = 1)]
-    Completed(CompletedArm),
-    #[cultcache(key = 2)]
-    Denied(IdArm),
-    #[cultcache(key = -2147483648)]
-    Floor(IdArm),
-    #[cultcache(key = 2147483647)]
-    Ceiling(IdArm),
-}
-
-// The codec's unit arm (no members, written [key, []]), kept apart from the golden: a document list's arms carry ids.
-#[derive(Clone, Debug, PartialEq, CultUnion)]
-enum UnitOutcome {
-    #[cultcache(key = 2)]
-    Denied,
-    #[cultcache(key = -2147483648)]
-    Floor,
-    #[cultcache(key = 2147483647)]
-    Ceiling,
-}
-
-#[derive(Clone, Debug, PartialEq, CultSlots)]
-struct PendingArm {
-    #[cultcache(key = 0)]
-    message: String,
-    #[cultcache(key = 1)]
-    id: String,
-}
-
-// An arm with no members of its own: just its element id.
-#[derive(Clone, Debug, PartialEq, CultSlots)]
-struct IdArm {
-    #[cultcache(key = 0)]
-    id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, CultSlots)]
-struct CompletedArm {
-    #[cultcache(key = 0)]
-    source_version: i32,
-    #[cultcache(key = 1)]
-    id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, CultSlots)]
-struct NamedArm {
-    #[cultcache(key = 0)]
-    name: String,
-}
-
-#[derive(Clone, Debug, PartialEq, CultSlots)]
-struct UsesArm {
-    #[cultcache(key = 0)]
-    name: String,
-    #[cultcache(key = 1)]
-    uses: i32,
-}
-
-#[derive(Clone, Debug, PartialEq, CultSlots)]
-struct CountArm {
-    #[cultcache(key = 0)]
-    name: String,
-    #[cultcache(key = 1)]
-    count: i32,
-}
-
-#[derive(Clone, Debug, PartialEq, CultUnion)]
-enum Item {
-    #[cultcache(key = 0)]
-    Gem(NamedArm),
-    #[cultcache(key = 1)]
-    Tool(UsesArm),
-    #[cultcache(key = 2)]
-    Part(CountArm),
-}
-
-// The same arms as Item under its own keys: key 2 is unknown to it.
-#[derive(Clone, Debug, PartialEq, CultUnion)]
-enum CraftedItem {
-    #[cultcache(key = 0)]
-    Tool(UsesArm),
-    #[cultcache(key = 1)]
-    Part(CountArm),
-}
-
-#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
-#[cultcache(type = "tests.union_surface", schema = "tests.union_surface.v1")]
-struct UnionSurface {
-    #[cultcache(key = 0)]
-    id: String,
-    #[cultcache(key = 1)]
-    version: i32,
-    #[cultcache(key = 2)]
-    root: Option<Node>,
-    #[cultcache(key = 3)]
-    outcomes: Vec<Outcome>,
-    #[cultcache(key = 4)]
-    part: Option<Item>,
-    #[cultcache(key = 5)]
-    crafted: Option<CraftedItem>,
-    #[cultcache(key = 6)]
-    missing: Option<Node>,
-}
-
-fn text(id: &str, content: &str) -> Node {
-    Node::Text(TextArm { id: id.into(), content: content.into() })
-}
-
-fn image(id: &str, uri: &str, alt: &str) -> Node {
-    Node::Image(ImageArm { id: id.into(), uri: uri.into(), alt: alt.into() })
-}
-
-fn boxed(id: &str, children: Vec<Node>) -> Node {
-    Node::Box(BoxArm { id: id.into(), children })
-}
-
-fn constructed() -> UnionSurface {
-    let inner = boxed("0000000000d0", vec![text("0000000000d1", "x"), image("0000000000d2", "uri://a", "alt")]);
-    UnionSurface {
-        id: "surface".into(),
-        version: 3,
-        root: Some(boxed(
-            "0000000000c0",
-            vec![
-                text("0000000000c1", "hello"),
-                Node::Use(UseArm {
-                    id: "0000000000c2".into(),
-                    composition: Composition { name: "comp".into(), body: Some(std::boxed::Box::new(inner)) },
-                    slots: vec![Some(text("0000000000e1", "slot")), None, Some(boxed("0000000000e2", vec![]))],
-                }),
-                image("0000000000c3", "uri://b", ""),
-            ],
-        )),
-        outcomes: vec![
-            Outcome::Pending(PendingArm { message: "wait".into(), id: "0000000000a1".into() }),
-            Outcome::Completed(CompletedArm { source_version: 7, id: "0000000000a2".into() }),
-            Outcome::Denied(id_arm("0000000000a3")),
-        ],
-        part: Some(Item::Tool(UsesArm { name: "hammer".into(), uses: 12 })),
-        crafted: Some(CraftedItem::Part(CountArm { name: "gear".into(), count: 4 })),
-        missing: None,
-    }
-}
-
-fn id_arm(id: &str) -> IdArm {
-    IdArm { id: id.into() }
-}
-
-fn vector(name: &str) -> Vec<u8> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/vectors/union-parity")
-        .join(name);
-    std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
-}
+mod common;
+use common::*;
 
 fn decode(bytes: &[u8]) -> Result<UnionSurface, String> {
     rmp_serde::from_slice(bytes).map_err(|error| error.to_string())
@@ -329,11 +102,10 @@ fn an_unknown_arm_lists_the_declared_keys_and_never_echoes_the_payload() {
 
 #[test]
 fn a_union_that_is_not_a_key_and_slots_pair_is_refused_naming_the_enum() {
-    let cases: [(&str, Vec<u8>); 4] = [
+    let cases: [(&str, Vec<u8>); 3] = [
         ("an empty array", vec![0x90]),
         ("a trailing element", rmp_serde::to_vec(&(1u64, (7u8,), 0u8)).unwrap()),
         ("a string key", rmp_serde::to_vec(&("CANARY-key", (7u8,))).unwrap()),
-        ("a unit arm with slots", rmp_serde::to_vec(&(2u64, ("CANARY-slot",))).unwrap()),
     ];
     for (label, bytes) in cases {
         let message = rmp_serde::from_slice::<UnitOutcome>(&bytes).unwrap_err().to_string();
