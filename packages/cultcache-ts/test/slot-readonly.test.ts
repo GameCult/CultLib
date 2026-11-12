@@ -12,7 +12,7 @@ import { CultCache } from "../src/cult-cache";
 import { defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "../src/document";
 import { SingleFileMessagePackBackingStore, readSingleFileStore } from "../src/single-file-messagepack-backing-store";
 import { SchemaConflictError, StoreUnreadableError } from "../src/store-format";
-import type { CultCacheUnreadSlots } from "../src/types";
+import type { CacheBackingStore, CultCacheEnvelope, CultCacheUnreadSlots } from "../src/types";
 import {
   type Surface, envelopeOf, golden, hex, memoryStore, read, slotUnitDocument, surfaceCodec, surfaceDeclaringDocument, surfaceDocument, surfaceSchema, vectors,
 } from "./union-surface-fixture";
@@ -358,4 +358,49 @@ test("isWritable equals the outcome of put for every key state the write judges"
     .withGenericStore(memoryStore([{ ...envelopeOf(await read("union-surface.msgpack")), key: "f", type: "tests.unknown", schemaId: "tests.unknown.v1" }])).build();
   await stranger2.pullAllBackingStores();
   await assert.rejects(() => stranger2.delete(older, "f"), SchemaConflictError);
+});
+
+// A removal is by key (C# Remove): the owner of a held record's id removes the one record that exists, in one store call and
+// with the cache dropped only once the store has; a type that does not own it is refused like put, and isWritable agrees.
+test("delete of a key held as another type: the owner removes it once, a stranger is refused, a failing store leaves cache and store agreeing", async () => {
+  const typed = (type: string, schemaId: string, extra: Record<string, unknown> = {}) =>
+    defineDocumentType({ type, schemaId, schemaName: type, schemaVersion: `${type}.v1`, schema: surfaceSchema, codec: surfaceCodec, name: "id", ...extra });
+  const older = typed("tests.surface_older", "tests.surface_older.v1");
+  const newer = typed("tests.surface_newer", "tests.surface_newer.v1", { compatibleSchemaIds: ["tests.surface_older.v1"] });
+  const stranger = typed("tests.surface_stranger", "tests.surface_stranger.v1");
+  const heldRecord = async (): Promise<CultCacheEnvelope> => ({ ...envelopeOf(await read("union-surface.msgpack")), key: "k", type: older.type, schemaId: older.schemaId });
+  const open = async (failing = false) => {
+    const rows = [await heldRecord()];
+    const calls: string[] = [];
+    const store: CacheBackingStore = {
+      async pullAll() { return rows.map((row) => ({ ...row })); },
+      async push(entry) { rows.push(entry); },
+      async delete(entry) {
+        calls.push(entry.key);
+        if (failing) throw new Error("store refused the removal");
+        rows.splice(rows.findIndex((row) => row.key === entry.key), 1);
+      },
+    };
+    const cache = CultCache.builder().withDocumentType(older).withDocumentType(newer).withDocumentType(stranger).withGenericStore(store).build();
+    await cache.pullAllBackingStores();
+    return { cache, rows, calls };
+  };
+
+  const owner = await open();
+  assert.equal(owner.cache.isWritable(newer, "k"), true);
+  assert.equal(await owner.cache.delete(newer, "k"), true, "the owner's removal removes the one record");
+  assert.deepEqual([owner.rows.length, owner.calls.length, owner.cache.get(older, "k")], [0, 1, undefined], "one store call, record gone from store and cache");
+
+  const refused = await open();
+  assert.equal(refused.cache.isWritable(stranger, "k"), false);
+  await assert.rejects(() => refused.cache.delete(stranger, "k"), SchemaConflictError);
+  assert.deepEqual([refused.rows.length, refused.calls.length, refused.cache.get(older, "k") !== undefined], [1, 0, true]);
+
+  const failing = await open(true);
+  await assert.rejects(() => failing.cache.delete(newer, "k"), /store refused/u);
+  assert.deepEqual([failing.rows.length, failing.calls.length, failing.cache.get(older, "k") !== undefined], [1, 1, true], "the store failed: neither side dropped it");
+
+  const same = await open();
+  assert.equal(await same.cache.delete(older, "k"), true);
+  assert.equal(await same.cache.delete(older, "k"), false, "an unheld key is still the plain false");
 });

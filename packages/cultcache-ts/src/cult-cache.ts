@@ -616,12 +616,8 @@ export class CultCache {
    */
   isWritable(definition: AnyCultCacheDocumentDefinition, key: string): boolean {
     const registered = this.#requireDefinition(definition);
-    const written: CultCacheEnvelope = {
-      key, type: registered.definition.type, payload: documentPayloadFromBytes(new Uint8Array(0)), storedAt: "",
-      schemaId: registered.catalogEntry.schemaId, catalogEntry: registered.catalogEntry,
-    };
     try {
-      this.#judge(registered, key, written);
+      this.#judge(registered, key, this.#probe(registered, key));
       return true;
     } catch {
       return false;
@@ -757,6 +753,14 @@ export class CultCache {
     this.#installEntry(this.#hydrated, registered, hydrated);
   }
 
+  // An envelope of the definition's type at the key, carrying nothing: what the judge asks about a write or a removal by that type.
+  #probe(registered: RegisteredDefinition, key: string): CultCacheEnvelope {
+    return {
+      key, type: registered.definition.type, payload: documentPayloadFromBytes(new Uint8Array(0)), storedAt: "",
+      schemaId: registered.catalogEntry.schemaId, catalogEntry: registered.catalogEntry,
+    };
+  }
+
   // The one judge of whether a key may be written (a written envelope) or removed (none), before any store is touched: it throws the
   // refusal, and #writeNow, #deleteNow and isWritable all ask it, so the query cannot disagree with the write. For a write it
   // returns the held record of another type that the write owns and so restamps, if any. A refusal names keys and schemas,
@@ -765,9 +769,27 @@ export class CultCache {
     const type = registered.definition.type;
     const held = this.#hydrated.entries.get(this.#entryId(type, key));
     if (written === undefined) {
+      // A removal is by key: the record it removes is the one held at the key, of this type or of another type whose schema id
+      // this type owns (the record a write of this type would replace). A held record of a type it does not own is refused.
       this.#refuseForeignKey(key, type, "removed");
       this.#refuseUnread(held);
-      return undefined;
+      if (held !== undefined) {
+        return undefined;
+      }
+      const other = this.#heldUnderOtherType(this.#hydrated, type, key);
+      if (other === undefined) {
+        return undefined;
+      }
+      if (!writtenOwns(this.#probe(registered, key), schemaIdForEnvelope(other))) {
+        throw new SchemaConflictError(
+          registered.catalogEntry.schemaId,
+          [other.type, type],
+          key,
+          `CultCache holds record "${key}" as type "${other.type}", so type "${type}" cannot remove it.`,
+        );
+      }
+      this.#refuseUnread(other);
+      return other;
     }
     this.#requireGlobalKey(registered, key);
     const retyped = this.#refuseRetype(written);
@@ -867,18 +889,20 @@ export class CultCache {
     key: string,
   ): Promise<boolean> {
     const registered = this.#requireDefinition(definition);
-    // variants:ruling:unheld-removal-refused-at-commit: a key a store carries foreign is refused, a key held under
-    // another type or by nobody is the existing false.
-    this.#judge(registered, key);
-    const entry = this.#hydrated.entries.get(this.#entryId(definition.type, key));
+    // variants:ruling:unheld-removal-refused-at-commit: a key a store carries foreign is refused, a key held by nobody is the
+    // existing false; a key held as another type is removed by an owner of its id and refused to any other type.
+    // Removal is by key, in one store call: the record held at the key of this type, else the one of another type this type owns.
+    const owned = this.#judge(registered, key);
+    const entry = this.#hydrated.entries.get(this.#entryId(definition.type, key)) ?? owned;
     if (!entry) {
       return false;
     }
 
-    const home = this.#homeStore(definition.type);
-    await home?.delete(this.#hydrated.legacyGlobals.get(definition.type) ?? this.#toEnvelope(entry));
-    this.#hydrated.legacyGlobals.delete(definition.type);
-    this.#removeEntry(this.#hydrated, registered, entry);
+    // The cache drops the record only once the store has removed it.
+    const home = this.#homeStore(entry.type);
+    await home?.delete(this.#hydrated.legacyGlobals.get(entry.type) ?? this.#toEnvelope(entry));
+    this.#hydrated.legacyGlobals.delete(entry.type);
+    this.#removeEntry(this.#hydrated, this.#definitions.get(entry.type)!, entry);
     return true;
   }
 
