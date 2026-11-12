@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import threading
 from dataclasses import MISSING, dataclass, field
 from collections.abc import Mapping, Sequence, Set
 from itertools import chain
@@ -28,6 +29,49 @@ MAX_SLOT_KEY = 65535
 """The largest slot key a record may define: the largest MessagePack array16 length."""
 
 _STACK_FAULTS: tuple[type[BaseException], ...] = (_MsgpackStackError,)
+
+
+@dataclass(frozen=True)
+class UnreadSlots:
+    """What a payload decode found past the slots this runtime declares, at any depth: the first type read with extra slots, how
+    many slots it carried against how many it declares, and how many objects in the payload did. It holds no slot value, so a
+    refusal can name it. `depth0_only` is True when every mark sat in the document's own record (the half of consent the payload
+    decides). A record carrying it is read-only unless the schema comparison explains every mark (see `CultCache.is_writable`)."""
+
+    type_name: str
+    slot_count: int
+    declared_count: int
+    occurrences: int
+    depth0_only: bool
+
+
+class _SlotScope:
+    """Opened by `DocumentDefinition.decode_payload_marked`; the record codec and the union codec note into it. It is thread-local,
+    so no codec signature carries it, and a codec decoded outside a payload decode notes nothing."""
+
+    def __init__(self) -> None:
+        self.depth = 0  # records entered: 0 while the document's own record is read
+        self.first: tuple[str, int, int] | None = None
+        self.occurrences = 0
+        self.depth0_only = True
+
+    def note(self, type_name: str, slot_count: int, declared_count: int, depth0: bool) -> None:
+        if self.first is None:
+            self.first = (type_name, slot_count, declared_count)
+        self.occurrences += 1
+        self.depth0_only = self.depth0_only and depth0
+
+    def result(self) -> UnreadSlots | None:
+        if self.first is None:
+            return None
+        return UnreadSlots(*self.first, self.occurrences, self.depth0_only)
+
+
+_scope = threading.local()
+
+
+def _current_scope() -> _SlotScope | None:
+    return getattr(_scope, "open", None)
 
 
 _CONTAINERS = (Mapping, Sequence, Set)
@@ -185,15 +229,25 @@ class DocumentDefinition(Generic[T]):
         return self.payload_encoder(tree)
 
     def decode_payload(self, payload: bytes) -> T:
+        return self.decode_payload_marked(payload)[0]
+
+    def decode_payload_marked(self, payload: bytes) -> tuple[T, UnreadSlots | None]:
+        """The value and what the decode found past the declared slots, at any depth. The payload depth check runs first: a
+        payload past the limit is refused, never marked."""
         try:
             tree = self.payload_decoder(payload)
         except _STACK_FAULTS:
             raise CultCachePayloadDepthError(self.type, "read") from None
         _refuse_past_depth_limit(tree, self.type, "read")
-        value = self.decode(tree)
+        outer, opened = _current_scope(), _SlotScope()
+        _scope.open = opened
+        try:
+            value = self.decode(tree)
+        finally:
+            _scope.open = outer
         if self.validate:
             self.validate(value)
-        return value
+        return value, opened.result()
 
     def __post_init__(self) -> None:
         # Judged here so every constructor passes it: the factories, the dataclass constructor and dataclasses.replace.
@@ -418,6 +472,9 @@ def define_union(
             raise ValueError(f"Union {name!r} value is malformed: expected [armKey, [armSlots]]")
         arm_name, codec = by_key[key]
         if codec is None:
+            scope = _current_scope()
+            if scope is not None and raw[1]:
+                scope.note(arm_name, len(raw[1]), 0, False)
             return UnionArm(arm_name, None)
         try:
             return UnionArm(arm_name, codec.decode(raw[1]))
@@ -479,17 +536,26 @@ def _record_codec(
     def decode(raw: Any) -> Any:
         if not isinstance(raw, list):
             raise ValueError(f"DatabaseEntry document type {type!r} expected a MessagePack array")
+        scope = _current_scope()
+        if scope is not None and len(raw) > max_key + 1:
+            scope.note(type, len(raw), max_key + 1, scope.depth == 0)
         values: dict[str, Any] = {}
-        for field in normalized:
-            if field.key < len(raw):
-                try:
-                    values[field.name] = field.codec.decode(raw[field.key])
-                except ValueError as error:
-                    raise ValueError(f"{type} slot {field.key} ({field.name}): {error}") from None
-            elif field.default is MISSING:
-                values[field.name] = None
-            else:
-                values[field.name] = field.default() if callable(field.default) else field.default
+        if scope is not None:
+            scope.depth += 1
+        try:
+            for field in normalized:
+                if field.key < len(raw):
+                    try:
+                        values[field.name] = field.codec.decode(raw[field.key])
+                    except ValueError as error:
+                        raise ValueError(f"{type} slot {field.key} ({field.name}): {error}") from None
+                elif field.default is MISSING:
+                    values[field.name] = None
+                else:
+                    values[field.name] = field.default() if callable(field.default) else field.default
+        finally:
+            if scope is not None:
+                scope.depth -= 1
         if cls is None:
             return values
         return cls(**values)
