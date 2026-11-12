@@ -10,6 +10,7 @@ using MessagePack.Formatters;
 [assembly: CultCacheFormatterResolver(typeof(UnionArmGuardTests.OrderResolver))]
 [assembly: CultCacheFormatterResolver(typeof(UnionArmGuardTests.ListClaimResolver))]
 [assembly: CultCacheFormatterResolver(typeof(UnionArmGuardTests.FbLaterClaimResolver))]
+[assembly: CultCacheFormatterResolver(typeof(SlotReadOnlyTests.ResolvedBagResolver))]
 
 namespace GameCult.Caching.Tests
 {

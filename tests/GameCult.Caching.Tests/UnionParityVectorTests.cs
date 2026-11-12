@@ -378,14 +378,16 @@ namespace GameCult.Caching.Tests
             _ => throw new ArgumentOutOfRangeException(nameof(store), store, null)
         };
 
-        // One row of slot-outcomes.msgpack: what the store's reader holds at the key. The mark fields are null for an unmarked record.
-        private sealed record SlotOutcome(string Store, string Key, bool Writable, bool? Explained, string? Type, int? Slots, int? Declared, int? Occurrences);
+        // One row of slot-outcomes.msgpack: what the store's reader holds at the key. The mark fields are null for an unmarked record;
+        // FlattenRefusedBy is the key whose refusal refuses a Flatten of the record, null when the record is no variant or flattens.
+        private sealed record SlotOutcome(string Store, string Key, bool Writable, bool? Explained, string? Type, int? Slots, int? Declared, int? Occurrences, string? FlattenRefusedBy = null);
 
         private static readonly SlotOutcome[] SlotOutcomes =
         {
             new("extra-slot-store.cc", "marked", false, false, nameof(Composition), 3, 2, 1),
             new("extra-slot-store.cc", "clean", true, null, null, null, null, null),
             new("extra-slot-store.cc", "unit-arm", false, false, nameof(Denied2), 1, 0, 1),
+            new("extra-slot-store.cc", "marked-variant", true, null, null, null, null, null, "marked"),
             new("extra-slot-consent.cc", "consented", true, true, nameof(SurfaceDeclaring), 8, 7, 1),
             new("extra-slot-consent.cc", "over-consent", false, false, nameof(SurfaceDeclaring), 9, 7, 1),
             new("extra-slot-consent.cc", "nested", false, false, nameof(SurfaceDeclaring), 8, 7, 2),
@@ -397,12 +399,13 @@ namespace GameCult.Caching.Tests
             w.WriteArrayHeader(SlotOutcomes.Length);
             foreach (var row in SlotOutcomes)
             {
-                w.WriteArrayHeader(8);
+                w.WriteArrayHeader(9);
                 w.Write(row.Store); w.Write(row.Key); w.Write(row.Writable);
                 if (row.Explained is { } explained) w.Write(explained); else w.WriteNil();
                 if (row.Type is { } type) w.Write(type); else w.WriteNil();
                 foreach (var count in new[] { row.Slots, row.Declared, row.Occurrences })
                     if (count is { } value) w.Write(value); else w.WriteNil();
+                if (row.FlattenRefusedBy is { } refusedBy) w.Write(refusedBy); else w.WriteNil();
             }
         });
 
@@ -482,8 +485,10 @@ namespace GameCult.Caching.Tests
         }
 
         // A single-file store of the records, each written as its type's value with the store's clock pinned as union-surface.cc's, then
-        // its payload replaced by bytes no current writer produces; edit changes the snapshot further before it is serialized.
-        private static byte[] SlotStore(CultDocumentRegistry registry, (string Key, object Value, byte[] Payload)[] records, Action<CultPersistedStoreSnapshot>? edit = null)
+        // its payload replaced by bytes no current writer produces; each variant is written over its base (overriding the name to its
+        // key) before the payloads are replaced; edit changes the snapshot further before it is serialized.
+        private static byte[] SlotStore(CultDocumentRegistry registry, (string Key, object Value, byte[] Payload)[] records, Action<CultPersistedStoreSnapshot>? edit = null,
+            params (string Key, string Base)[] variants)
         {
             var work = Path.Combine(Path.GetTempPath(), $"cultlib-unionparity-{Guid.NewGuid():N}");
             Directory.CreateDirectory(work);
@@ -495,6 +500,9 @@ namespace GameCult.Caching.Tests
                     cache.Clock = () => StoredAt;
                     foreach (var (key, value, _) in records)
                         cache.UpsertAsync(value.GetType(), value, new CultRecordKey(key)).GetAwaiter().GetResult();
+                    foreach (var (key, baseKey) in variants)
+                        Assert.That(cache.Commit(batch => batch.UpsertVariant(new CultRecordKey(key), new CultRecordKey(baseKey),
+                            new[] { cache.Override(typeof(UnionSurface), nameof(UnionSurface.Id), key) })), Is.True);
                     cache.FlushAsync().GetAwaiter().GetResult();
                 }
 
@@ -511,7 +519,8 @@ namespace GameCult.Caching.Tests
         }
 
         // The store the slot-readonly tests open and the other runtimes read: "marked" holds the extra-slot-nested-record payload,
-        // "clean" the ordinary value, and "unit-arm" a tests.slot_unit document ["unit-arm", [2, ["extra-slot"]]].
+        // "clean" the ordinary value, "unit-arm" a tests.slot_unit document ["unit-arm", [2, ["extra-slot"]]], and "marked-variant" a
+        // variant of "marked" overriding only its Id: writable, but a flatten of it is refused for its base.
         [Test]
         public void ExtraSlotStoreVectorHoldsAMarkedACleanAndAUnitArmRecord()
         {
@@ -520,7 +529,7 @@ namespace GameCult.Caching.Tests
                 ("marked", Constructed(), Committed("extra-slot-nested-record.msgpack")),
                 ("clean", Constructed(), Surface()),
                 ("unit-arm", new UnitDoc { Name = "unit-arm", Outcome = new Denied2() }, Raw(Slots(Str("unit-arm"), ArmOf(2, ExtraSlot)))),
-            }));
+            }, null, ("marked-variant", "marked")));
         }
 
         // The consent store: every record under the wide id, whose catalog entry is UnionSurface's 7 members plus slot 7. Its reader

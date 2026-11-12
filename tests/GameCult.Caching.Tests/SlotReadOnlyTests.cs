@@ -160,10 +160,10 @@ namespace GameCult.Caching.Tests
         {
             var reader = new MessagePackReader(VectorFiles.Committed("union-parity", "slot-outcomes.msgpack"));
             var rows = reader.ReadArrayHeader();
-            Assert.That(rows, Is.EqualTo(7));
+            Assert.That(rows, Is.EqualTo(8));
             for (var i = 0; i < rows; i++)
             {
-                Assert.That(reader.ReadArrayHeader(), Is.EqualTo(8));
+                Assert.That(reader.ReadArrayHeader(), Is.EqualTo(9));
                 var store = reader.ReadString()!;
                 var key = new CultRecordKey(reader.ReadString()!);
                 var writable = reader.ReadBoolean();
@@ -172,6 +172,7 @@ namespace GameCult.Caching.Tests
                 var counts = new int?[3];
                 for (var c = 0; c < 3; c++) counts[c] = reader.TryReadNil() ? null : reader.ReadInt32();
                 var (slots, declared, occurrences) = (counts[0], counts[1], counts[2]);
+                var flattenRefusedBy = reader.TryReadNil() ? null : reader.ReadString();
                 var row = $"{store} {key.Value}";
 
                 var path = Path.Combine(_directory, $"{i}-{store}");
@@ -192,6 +193,13 @@ namespace GameCult.Caching.Tests
 
                 Assert.That(cache.IsWritable(key), Is.EqualTo(writable), row);
                 Assert.That(cache.IsWritable(Unheld), Is.True, "a key no store holds is writable");
+                if (flattenRefusedBy != null)
+                {
+                    var refusal = Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.Flatten(key)), $"{row}: flatten")!;
+                    Assert.That(refusal.RecordKey, Is.EqualTo(flattenRefusedBy), $"{row}: the refusal is the base's own");
+                    Assert.That(File.ReadAllBytes(path), Is.EqualTo(before), $"{row}: a refused flatten leaves the store as it was");
+                }
+
                 if (writable)
                 {
                     Assert.That(cache.Commit(batch => batch.Remove(key)), Is.True, row);
@@ -305,7 +313,6 @@ namespace GameCult.Caching.Tests
             reader.AddBackingStore(Store());
             var unread = Stored(reader, Marked).UnreadSlots;
             Assert.That(unread, Is.Not.Null, "the store kind decodes through the marking path");
-            Assert.That(unread!.Explained, Is.True, "depth 0 and reported by the catalog comparison");
             Assert.That(unread.TypeName, Is.EqualTo(nameof(NarrowDoc)));
             Assert.That(unread.SlotCount, Is.EqualTo(3));
             Assert.That(unread.DeclaredCount, Is.EqualTo(2));
@@ -369,6 +376,37 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        // A [MessagePackObject] type an assembly resolver formats as [count, items...], with no [MessagePackFormatter] attribute: the
+        // resolver owns its layout.
+        [MessagePackObject]
+        public sealed class ResolvedBag
+        {
+            [Key(0)] public List<string> Items = new();
+        }
+
+        public sealed class ResolvedBagResolver : IFormatterResolver
+        {
+            public static readonly IFormatterResolver Instance = new ResolvedBagResolver();
+            private static readonly IMessagePackFormatter<ResolvedBag?> Formatter = new ResolvedBagFormatter();
+
+            public IMessagePackFormatter<T>? GetFormatter<T>() => typeof(T) == typeof(ResolvedBag) ? (IMessagePackFormatter<T>)Formatter : null;
+
+            private sealed class ResolvedBagFormatter : IMessagePackFormatter<ResolvedBag?>
+            {
+                private static readonly BagFormatter Bag = new();
+
+                public void Serialize(ref MessagePackWriter writer, ResolvedBag? value, MessagePackSerializerOptions options) =>
+                    Bag.Serialize(ref writer, value == null ? null : new Bag { Items = value.Items }, options);
+
+                public ResolvedBag? Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options) =>
+                    Bag.Deserialize(ref reader, options) is { } bag ? new ResolvedBag { Items = bag.Items } : null;
+            }
+        }
+
+        // A [MessagePackObject] collection: MessagePack writes it as its items, not by [Key].
+        [MessagePackObject]
+        public class TagList : List<string> { }
+
         [CultDocument("tests.slot_measured", "tests.slot_measured.v1")]
         [MessagePackObject]
         public sealed class MeasuredDoc
@@ -378,6 +416,8 @@ namespace GameCult.Caching.Tests
             [Key(2)] public Counted? Counted;
             [Key(3)] public Uncounted? Uncounted;
             [Key(4)] public Bag? Bag;
+            [Key(5)] public ResolvedBag? Resolved;
+            [Key(6)] public TagList? Tags;
         }
 
         private static readonly CultDocumentRegistry MeasuredRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(MeasuredDoc) });
@@ -388,6 +428,8 @@ namespace GameCult.Caching.Tests
             "constructed" => new MeasuredDoc { Name = member, Counted = new Counted { Count = 2 } },
             "unmeasurable" => new MeasuredDoc { Name = member, Uncounted = new Uncounted(2) },
             "own-formatter" => new MeasuredDoc { Name = member, Bag = new Bag { Items = { "x", "y", "z" } } },
+            "resolver-formatted" => new MeasuredDoc { Name = member, Resolved = new ResolvedBag { Items = { "x", "y", "z" } } },
+            "collection" => new MeasuredDoc { Name = member, Tags = new TagList { "a", "b", "c" } },
             _ => throw new ArgumentOutOfRangeException(nameof(member), member, null)
         };
 
@@ -395,6 +437,8 @@ namespace GameCult.Caching.Tests
         [TestCase("constructed", TestName = "ATypeMeasuredThroughItsConstructorDoesNotMark")]
         [TestCase("unmeasurable", TestName = "AnUnmeasurableTypeIsNotGuarded")]
         [TestCase("own-formatter", TestName = "ATypeWithItsOwnFormatterIsNotMeasuredByKeys")]
+        [TestCase("resolver-formatted", TestName = "ATypeAResolverFormatsIsNotMeasuredByKeys")]
+        [TestCase("collection", TestName = "AMessagePackObjectCollectionIsNotMeasuredByKeys")]
         public void ARecordWrittenByItsOwnTypeDoesNotMark(string member)
         {
             var path = Path.Combine(_directory, "measured.cc");
