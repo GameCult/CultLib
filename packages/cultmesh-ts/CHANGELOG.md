@@ -29,6 +29,8 @@ All notable changes to `@gamecult/cultmesh-ts` are recorded here, following
 
 - Needs the cultcache-ts release that ships with this change (its manifest range moves with that release): it imports `schemaIdentityOf` and `SchemaConflictError`, which 0.14.x does not export.
 
+- Needs `@gamecult/cultnet-ts` `^0.4.0` (was `^0.3.0`): this package imports names that `cultnet-ts` 0.3.0 does not export (`cultNetMessageInvalidError`, `cultNetTextError`, `cultNetWriteNotAuthorizedError`, `WriteTracker`, `CULTNET_WRITE_RECEIPT_MESSAGE_VERSIONS`, `helloAdvertisesWriteReceipts`, `resultWindowMs`). The declared-range check (`npm run test:pack:ts`) found the old range admitting a release that lacks them.
+
 ## [0.2.0]
 
 ### Added

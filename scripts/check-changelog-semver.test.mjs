@@ -857,7 +857,7 @@ test("workflow: each job releases only through release-after-suite.mjs", () => {
 });
 
 test("release-after-suite checks the tag, then runs the suite, the semver check and the package's tests, and releases only when all passed", async () => {
-  const { releaseAfterSuite, suite, checker } = await import("./release-after-suite.mjs");
+  const { releaseAfterSuite, suite, checker, rangeCheck } = await import("./release-after-suite.mjs");
   const npmVersion = JSON.parse(readFileSync(join(repoRoot, "packages", "cultcache-ts", "package.json"), "utf8")).version;
   const npmDir = join(repoRoot, "packages", "cultcache-ts");
   const pyDir = join(repoRoot, "packages", "cultnet-py");
@@ -881,13 +881,15 @@ test("release-after-suite checks the tag, then runs the suite, the semver check 
   const npmCalls = [
     suiteCall,
     checkerCall("@gamecult/cultcache-ts", npmVersion),
+    ["npm", ["run", "build:ts"], repoRoot, checked],
+    [process.execPath, [rangeCheck], repoRoot, checked],
     ["npm", ["test"], npmDir, checked],
     ["npm", ["publish", "--access", "public"], npmDir, env],
   ];
   assert.equal(go(["npm-publish", npmDir, npmTag]), 0);
   assert.deepEqual(calls, npmCalls);
   // any check that fails stops the release at that check
-  for (const fail of [0, 1, 2]) {
+  for (const fail of [0, 1, 2, 3, 4]) {
     assert.equal(go(["npm-publish", npmDir, npmTag], fail), 1, `check ${fail}`);
     assert.deepEqual(calls, npmCalls.slice(0, fail + 1), `check ${fail}`);
   }
