@@ -57,6 +57,12 @@ from each. The fifth is a bare arm of union `UnitOutcome` (0 Waiting `[Message]`
 
 An object's declared slots are the slots its type's own formatter writes for one instance (for these fixtures,
 the highest key plus one); a reader derives them from the layout it writes, never from a list of public members.
+Only a type the runtime writes by its own positional `[Key]` layout is checked. Exempt, as in the C# reference
+(`cultlib-gaps:ruling:leaf-acceptance-follows-reference`): a type the runtime formats some other way (a
+user codec or formatter, a hand-written serializer, a resolver ahead of the runtime's own, a collection type
+written as its items), and a type no instance of which the runtime can write for measuring
+(`cultlib-gaps:ruling:slot-unmeasurable-type`). Neither is ever marked. No vector carries an exempt type: each
+runtime pins its own exemption with its own fixture.
 Only an array longer than that marks: a short array
 (missing trailing slots) keeps the defaults and is writable, and a non-nil value in a retired slot below the highest
 key (Image's slot 2) does not mark. A union adds no depth: an arm's array is counted against the arm's own slots.
@@ -104,7 +110,7 @@ Two single-file stores, each record written as a value and its payload then repl
   (schema `tests.slot_unit.v1`, a document `[Name, Outcome: UnitOutcome]`). `marked` is
   `extra-slot-nested-record.msgpack`; `clean` is `union-surface.msgpack`; `unit-arm` is the `tests.slot_unit`
   document `["unit-arm", [2, ["extra-slot"]]]`, whose Denied2 arm sits at depth 1 (the document is depth 0; a union
-  adds none).
+  adds none); `marked-variant` is a variant of `marked` overriding only `Id` (slot 0) to `"marked-variant"`.
 - `extra-slot-consent.cc`: every record is stored under `tests.union_surface.wide`, whose catalog entry is
   `tests.union_surface`'s seven members plus slot 7 (`Wider`). Read it with a `tests.union_surface` type of schema
   `tests.union_surface.v2` (the reference names it `SurfaceDeclaring`) that lists `tests.union_surface.wide`
@@ -113,12 +119,15 @@ Two single-file stores, each record written as a value and its payload then repl
   `extra-slot-nested-record.msgpack` plus one root slot; `clean` is `union-surface.msgpack`.
 
 `slot-outcomes.msgpack` is a second outcomes file, as `bounds-outcomes.msgpack` is, so readers of `outcomes.msgpack`
-stay green. It is an array of rows `[store, key, writable, explained, type, slots, declared, occurrences]`, one
-per record of both stores: `writable` is what `IsWritable` answers; for an unmarked record the last five are nil,
-otherwise they are the mark: whether it is explained, the first type read with extra slots, the slots it carried,
+stay green. It is an array of rows `[store, key, writable, explained, type, slots, declared, occurrences, flattenRefusedBy]`,
+one per record of both stores: `writable` is what `IsWritable` answers; `flattenRefusedBy` is nil unless the record
+is a variant whose flatten is refused, and then it is the key of the base-chain record whose own refusal refuses
+it (the refusal names that key; the store is unchanged). For an unmarked record `explained` through `occurrences`
+are nil, otherwise they are the mark: whether it is explained, the first type read with extra slots, the slots it carried,
 the slots the reader declares, and how many objects carried extra slots. A depth-0 type is the reader's document
 type (the reference's names: `SurfaceDeclaring` for the consent store). For each row, open a copy of the store,
-assert the mark and `IsWritable`, then remove the key: refused (with the mark, the file unchanged) exactly where
+assert the mark and `IsWritable`, flatten the key when `flattenRefusedBy` is set and assert the refusal, then
+remove the key: refused (with the mark, the file unchanged) exactly where
 `writable` is false. In the consent store a write of `consented` lands and a write of `over-consent` is refused.
 
 The carried-verbatim check: open `extra-slot-store.cc`, assert `marked` read-only and `clean` writable, write

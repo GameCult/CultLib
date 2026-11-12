@@ -123,12 +123,22 @@ reports ignored under that id, and only up to the highest slot it reports: a pay
 one is not consented to. Any other mark (nested, list element, arm, unit arm, or depth 0 under the reader's
 own id) keeps the record read-only whatever is declared.
 
-A type's declared slots are the array its own formatter writes for one instance (an uninitialized instance,
-else one from a parameterless constructor), never a reflected member list, so a non-public `[Key]` member of
-an `AllowPrivate` type counts. Only concrete int-keyed `[MessagePackObject]` types are checked. A type that
-names its own `[MessagePackFormatter]` owns its layout and its tolerance and is not checked, and neither is a
-type no instance of which can be written (no parameterless constructor and a `[Key]` getter that throws on an
-uninitialized one): extra slots in such a type are read past and dropped on the next write, as before.
+A type's declared slots are the array its own formatter writes for one instance, never a reflected member
+list, so a non-public `[Key]` member of an `AllowPrivate` type counts. Only a concrete int-keyed
+`[MessagePackObject]` type whose formatter is MessagePack's own `[Key]`-layout formatter is checked. Not
+checked, and so read past with any extra slots dropped on the next write, as before:
+
+- a type formatted by anything else: its own `[MessagePackFormatter]`, a `CultCacheFormatterResolver` (or any
+  resolver ahead of MessagePack's), or the collection formatter of a `[MessagePackObject]` collection type
+  such as a `List<T>` subclass. Such a formatter owns its layout and its tolerance;
+- a type no instance of which can be written: no write of an uninitialized instance and no write of one
+  from a parameterless constructor succeeds (for example a `[Key]` getter that throws on an uninitialized
+  instance and no parameterless constructor). This gap is ruled: `cultlib-gaps:ruling:slot-unmeasurable-type`.
+
+Measuring runs user code once per type per process, on the first read of the type in a store load: the
+type's `[Key]` getters on an uninitialized instance and, if that write throws, its parameterless
+constructor (public or not) and the getters on that instance. Any failure of both leaves the type unchecked
+for the rest of the process, and nothing else: it does not fail the read.
 
 `Flatten` of a variant writes its base chain's decoded view into a plain record, so it is refused when any
 record on that chain is not owned by its home store (a mark nothing explains, or undeclared drift that drops

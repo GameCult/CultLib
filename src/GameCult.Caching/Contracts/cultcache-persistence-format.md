@@ -206,8 +206,10 @@ A record whose payload carries a slot past the slots its reader declares, at any
 element, union arm, unit arm), is read-only the same way, whatever id it is stored under. The one consent
 is the declaration above, and it reaches only depth-0 slots the schema comparison reports ignored under a
 listed compatible id, up to the highest slot it reports: a mark anywhere else, past that slot, or at depth 0
-under the reader's own id, is not consented to. Declared slots are what the type's own formatter writes; a
-type with its own `[MessagePackFormatter]`, or one no instance of which can be written, is not checked.
+under the reader's own id, is not consented to. Declared slots are what the type's own formatter writes; only
+a type MessagePack writes by its `[Key]` layout is checked, and one no instance of which can be written is not
+(`cultlib-gaps:ruling:slot-unmeasurable-type`; see the schema-compatibility contract for both exemptions and
+for the user code the measure runs).
 A flatten of a variant whose base chain holds a record that is not owned is refused with that record's
 refusal, because it would write the base's decoded view; the variant's own writes persist only its delta and
 stay allowed. A plain write to another key of a value read from a read-only record is a copy this rule does
