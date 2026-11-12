@@ -1,7 +1,9 @@
 // How publish-packages.yml releases a package. From this one process, in order: the release tag must name
 // the package's declared prefix and its manifest version, the release-checks suite must pass, the semver
-// policy check must pass for that version, the package's own tests must pass, and only then the release
-// action runs. No workflow condition can then release what any of those checks did not pass.
+// policy check must pass for that version, an npm release's declared dependency ranges must hold (the
+// workspace is built, then every tagged release a sibling's range admits is checked against what the
+// sibling imports), the package's own tests must pass, and only then the release action runs. No workflow
+// condition can then release what any of those checks did not pass.
 // docs/semver-policy.md, "The suite gates every release".
 //
 //   node scripts/release-after-suite.mjs npm-publish <package dir> <git ref>    npm publish --access public in <dir>
@@ -18,6 +20,7 @@ import releasePackages from "./release-packages.mjs";
 
 export const suite = fileURLToPath(new URL("./check-changelog-semver.test.mjs", import.meta.url));
 export const checker = fileURLToPath(new URL("./check-changelog-semver.mjs", import.meta.url));
+export const rangeCheck = fileURLToPath(new URL("./test-declared-dependency-ranges.mjs", import.meta.url));
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
 // The checks run without the variables that can make `node --test` run nothing and exit 0
@@ -34,6 +37,8 @@ export const actions = {
   "npm-publish": {
     manifest: (dir) => JSON.parse(readFileSync(join(dir, "package.json"), "utf8")),
     test: (dir) => ["npm", ["test"], dir],
+    // The range check builds each tagged release against the workspace's built dists, so it follows a workspace build.
+    ranges: [["npm", ["run", "build:ts"], repoRoot], [process.execPath, [rangeCheck], repoRoot]],
     release: (dir) => ["npm", ["publish", "--access", "public"], dir],
     tagOnly: true,
   },
@@ -82,6 +87,9 @@ export function releaseAfterSuite(argv, run = spawn, env = process.env) {
   }
   if (isTag && run(process.execPath, [checker, "--package", manifest.name, "--version", manifest.version, "--cwd", repoRoot], undefined, clean) !== 0) {
     return refuse(`${manifest.name} ${manifest.version} fails the semver policy (docs/semver-policy.md)`);
+  }
+  for (const [command, args, cwd] of isTag ? action.ranges ?? [] : []) {
+    if (run(command, args, cwd, clean) !== 0) return refuse(`${manifest.name}'s declared dependency ranges do not hold (scripts/test-declared-dependency-ranges.mjs)`);
   }
   if (run(...action.test(dir), clean) !== 0) return refuse(`${manifest.name}'s own tests failed`);
   return run(...action.release(dir), env);
