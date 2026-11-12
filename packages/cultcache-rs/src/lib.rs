@@ -4772,7 +4772,8 @@ fn injected_write_fault(_step: WriteStep) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn sync_parent_directory(_path: &Path) -> Result<()> {
-    // MoveFileExW with MOVEFILE_WRITE_THROUGH owns publication durability.
+    // Publication durability is the replace's: the MoveFileExW fallback writes through; the POSIX-semantics
+    // rename has no write-through flag and its durability is unmeasured (follow-up windows-replace-run-and-durability).
     Ok(())
 }
 
