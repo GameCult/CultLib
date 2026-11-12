@@ -16,6 +16,8 @@ namespace GameCult.Caching.Tests
             private readonly Queue<int> _moveEx;
             public readonly List<string> Log = new List<string>();
             public readonly List<int> Sleeps = new List<int>();
+            public Exception? PosixThrows;
+            public Exception? MoveExThrows;
 
             public FakeKernel(int[] posix, int[] moveEx)
             {
@@ -26,12 +28,14 @@ namespace GameCult.Caching.Tests
             public int RenamePosix(string staged, string destination)
             {
                 Log.Add("posix");
+                if (PosixThrows != null) throw PosixThrows;
                 return _posix.Count > 0 ? _posix.Dequeue() : 0;
             }
 
             public int MoveFileEx(string staged, string destination, uint flags)
             {
                 Log.Add("moveex:" + flags);
+                if (MoveExThrows != null) throw MoveExThrows;
                 return _moveEx.Count > 0 ? _moveEx.Dequeue() : 0;
             }
 
@@ -89,6 +93,67 @@ namespace GameCult.Caching.Tests
             var error = Fails(kernel);
             Assert.That(error.Message, Does.Contain("Win32 error " + unsupported));
             Assert.That(kernel.Log, Is.EqualTo(new[] { "posix", "moveex:9" }));
+        }
+
+        private static IEnumerable<Exception> Unresolved()
+        {
+            yield return new DllNotFoundException("kernel32.dll");
+            yield return new EntryPointNotFoundException("SetFileInformationByHandle");
+        }
+
+        [TestCaseSource(nameof(Unresolved))]
+        public void APosixCallThatDoesNotResolveTakesTheUnsupportedFallback(Exception unresolved)
+        {
+            var kernel = new FakeKernel(new int[0], new[] { 0 }) { PosixThrows = unresolved };
+            StoreReplace.ReplaceWindows("a", "b", kernel);
+            Assert.That(kernel.Log, Is.EqualTo(new[] { "posix", "moveex:9" }));
+        }
+
+        [TestCaseSource(nameof(Unresolved))]
+        public void AMoveFileExThatDoesNotResolveDegradesToThePortableReplace(Exception unresolved)
+        {
+            var dir = Path.Combine(TestContext.CurrentContext.WorkDirectory, "storereplace-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var destination = Path.Combine(dir, "store.cc");
+                var staged = Path.Combine(dir, "staged");
+                File.WriteAllBytes(destination, new byte[] { 1 });
+                File.WriteAllBytes(staged, new byte[] { 2 });
+                var kernel = new FakeKernel(new[] { 87 }, new int[0]) { MoveExThrows = unresolved };
+                StoreReplace.ReplaceWindows(staged, destination, kernel);
+                Assert.That(kernel.Log, Is.EqualTo(new[] { "posix", "moveex:9" }));
+                Assert.That(File.ReadAllBytes(destination), Is.EqualTo(new byte[] { 2 }));
+                Assert.That(File.Exists(staged), Is.False);
+
+                // Both calls unresolved: the same portable replace, here onto an absent destination.
+                File.Delete(destination);
+                File.WriteAllBytes(staged, new byte[] { 3 });
+                var both = new FakeKernel(new int[0], new int[0]) { PosixThrows = unresolved, MoveExThrows = unresolved };
+                StoreReplace.ReplaceWindows(staged, destination, both);
+                Assert.That(File.ReadAllBytes(destination), Is.EqualTo(new byte[] { 3 }));
+            }
+            finally { Directory.Delete(dir, true); }
+        }
+
+        [Test]
+        public void TheFallbackRunsInTheSameAttemptEvenOnTheLastOne()
+        {
+            var posix = new int[25].Fill(32);
+            posix[24] = 87;
+            var kernel = new FakeKernel(posix, new[] { 0 });
+            StoreReplace.ReplaceWindows("a", "b", kernel);
+            Assert.That(kernel.Log.Count, Is.EqualTo(26));
+            Assert.That(kernel.Log[24], Is.EqualTo("posix"));
+            Assert.That(kernel.Log[25], Is.EqualTo("moveex:9"));
+        }
+
+        [Test]
+        public void ARetriedMoveFileExThatAnswersUnsupportedFailsAfterOneCallNotTwo()
+        {
+            var kernel = new FakeKernel(new[] { 87 }, new[] { 32, 87 });
+            Assert.That(Fails(kernel).Message, Does.Contain("Win32 error 87"));
+            Assert.That(kernel.Log, Is.EqualTo(new[] { "posix", "moveex:9", "moveex:9" }));
         }
 
         [Test]

@@ -19,8 +19,10 @@ namespace GameCult.Caching
 
     /// <summary>
     /// Owns how a staged file becomes the store, for the single-file and directory stores. Windows tries a POSIX-semantics
-    /// rename first (a lock-free reader never sees the path empty), falls back to write-through MoveFileExW where that is
-    /// unsupported, and retries transient sharing errors; other OSes keep rename. Mirrors cultcache-ts store-file.ts
+    /// rename first (which makes a moment with the path absent rare for a lock-free reader, not impossible: a stalled rename was
+    /// measured leaving it absent for 5-47 ms), falls back to write-through MoveFileExW where that is unsupported or does not
+    /// resolve, falls back to the portable File.Replace if MoveFileExW itself does not resolve, and retries transient sharing
+    /// errors; other OSes keep rename. Mirrors cultcache-ts store-file.ts
     /// replaceStoreFile (ruling variants:ruling:windows-replace-posix-first).
     /// </summary>
     internal static class StoreReplace
@@ -44,7 +46,15 @@ namespace GameCult.Caching
             {
                 ReplaceWindows(staged, destination, WindowsKernel);
             }
-            else if (File.Exists(destination))
+            else
+            {
+                ReplacePortable(staged, destination);
+            }
+        }
+
+        private static void ReplacePortable(string staged, string destination)
+        {
+            if (File.Exists(destination))
             {
                 File.Replace(staged, destination, null);
             }
@@ -54,20 +64,30 @@ namespace GameCult.Caching
             }
         }
 
+        private static bool Unresolved(Exception ex) => ex is DllNotFoundException || ex is EntryPointNotFoundException;
+
         internal static void ReplaceWindows(string staged, string destination, IReplaceKernel kernel)
         {
             var posix = true;
             var lastCode = 0;
             for (var attempt = 1; attempt <= ReplaceAttempts; attempt++)
             {
-                var code = posix
-                    ? kernel.RenamePosix(staged, destination)
-                    : kernel.MoveFileEx(staged, destination, MoveFileReplaceWriteThrough);
-                if (posix && (code == 1 || code == ErrorNotSupported || code == ErrorInvalidParameter))
+                int code;
+                try
                 {
-                    // POSIX semantics are unsupported here (FAT, exFAT, before Windows 10 1607): the rest of this call is write-through.
-                    posix = false;
-                    code = kernel.MoveFileEx(staged, destination, MoveFileReplaceWriteThrough);
+                    code = posix ? RenamePosixOrUnsupported(kernel, staged, destination) : kernel.MoveFileEx(staged, destination, MoveFileReplaceWriteThrough);
+                    if (posix && (code == 1 || code == ErrorNotSupported || code == ErrorInvalidParameter))
+                    {
+                        // POSIX semantics are unsupported here (FAT, exFAT, before Windows 10 1607): the rest of this call is write-through.
+                        posix = false;
+                        code = kernel.MoveFileEx(staged, destination, MoveFileReplaceWriteThrough);
+                    }
+                }
+                catch (Exception ex) when (Unresolved(ex))
+                {
+                    // kernel32's MoveFileExW does not resolve here (a sandboxed player): the runtime-owned replace is all that is left.
+                    ReplacePortable(staged, destination);
+                    return;
                 }
 
                 if (code == 0)
@@ -87,6 +107,19 @@ namespace GameCult.Caching
             throw new IOException($"CultCache could not replace the store after {ReplaceAttempts} attempts: last Win32 error {lastCode}.");
         }
 
+        private static int RenamePosixOrUnsupported(IReplaceKernel kernel, string staged, string destination)
+        {
+            try
+            {
+                return kernel.RenamePosix(staged, destination);
+            }
+            catch (Exception ex) when (Unresolved(ex))
+            {
+                // The POSIX call does not resolve: the same answer as "unsupported", so the replace falls back to MoveFileExW.
+                return ErrorNotSupported;
+            }
+        }
+
         private sealed class Kernel32Replace : IReplaceKernel
         {
             private const uint DeleteSynchronize = 0x00110000;
@@ -98,39 +131,31 @@ namespace GameCult.Caching
 
             public int RenamePosix(string staged, string destination)
             {
+                var handle = CreateFileW(staged, DeleteSynchronize, ShareAll, IntPtr.Zero, OpenExisting, FileAttributeNormal, IntPtr.Zero);
+                if (handle == new IntPtr(-1))
+                {
+                    return Marshal.GetLastWin32Error();
+                }
+
                 try
                 {
-                    var handle = CreateFileW(staged, DeleteSynchronize, ShareAll, IntPtr.Zero, OpenExisting, FileAttributeNormal, IntPtr.Zero);
-                    if (handle == new IntPtr(-1))
-                    {
-                        return Marshal.GetLastWin32Error();
-                    }
-
+                    // FILE_RENAME_INFO: Flags u32 at 0, RootDirectory handle, FileNameLength u32, FileName (UTF-16, offsets for this pointer size).
+                    var name = System.Text.Encoding.Unicode.GetBytes(Path.GetFullPath(destination));
+                    var lengthOffset = 2 * IntPtr.Size;
+                    var nameOffset = lengthOffset + 4;
+                    var size = nameOffset + name.Length + 2;
+                    var info = Marshal.AllocHGlobal(size);
                     try
                     {
-                        // FILE_RENAME_INFO: Flags u32 at 0, RootDirectory handle, FileNameLength u32, FileName (UTF-16, offsets for this pointer size).
-                        var name = System.Text.Encoding.Unicode.GetBytes(Path.GetFullPath(destination));
-                        var lengthOffset = 2 * IntPtr.Size;
-                        var nameOffset = lengthOffset + 4;
-                        var size = nameOffset + name.Length + 2;
-                        var info = Marshal.AllocHGlobal(size);
-                        try
-                        {
-                            for (var i = 0; i < size; i++) Marshal.WriteByte(info, i, 0);
-                            Marshal.WriteInt32(info, 0, (int)RenameReplacePosix);
-                            Marshal.WriteInt32(info, lengthOffset, name.Length);
-                            Marshal.Copy(name, 0, info + nameOffset, name.Length);
-                            return SetFileInformationByHandle(handle, FileRenameInfoEx, info, (uint)size) ? 0 : Marshal.GetLastWin32Error();
-                        }
-                        finally { Marshal.FreeHGlobal(info); }
+                        for (var i = 0; i < size; i++) Marshal.WriteByte(info, i, 0);
+                        Marshal.WriteInt32(info, 0, (int)RenameReplacePosix);
+                        Marshal.WriteInt32(info, lengthOffset, name.Length);
+                        Marshal.Copy(name, 0, info + nameOffset, name.Length);
+                        return SetFileInformationByHandle(handle, FileRenameInfoEx, info, (uint)size) ? 0 : Marshal.GetLastWin32Error();
                     }
-                    finally { CloseHandle(handle); }
+                    finally { Marshal.FreeHGlobal(info); }
                 }
-                catch (Exception ex) when (ex is DllNotFoundException || ex is EntryPointNotFoundException)
-                {
-                    // The call does not resolve here: report "unsupported" so the replace falls back to MoveFileExW.
-                    return ErrorNotSupported;
-                }
+                finally { CloseHandle(handle); }
             }
 
             public int MoveFileEx(string staged, string destination, uint flags)
