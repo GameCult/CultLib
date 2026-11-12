@@ -739,7 +739,8 @@ impl CultMeshNode {
     /// of unread slots from a newer peer or a payload this build cannot read, or any other the cache judges) applies
     /// nothing. A schema id the registry does not know is skipped, except one with a `.vN` suffix, which is taken as
     /// registered and refuses the commit when its type is not (C# throws on an unknown schema too). The commit lands in
-    /// one backing store, so a snapshot spanning stores is refused whole.
+    /// one backing store, so a snapshot spanning stores is refused whole; C# `CultCache.Commit` refuses a cross-store batch too
+    /// ("The batch spans A and B; a commit lands in one home store"), so the two agree.
     fn apply_raw_snapshot_documents(
         &mut self,
         documents: Vec<cultnet_rs::CultNetRawDocumentRecord>,
@@ -1210,8 +1211,20 @@ mod tests {
         body: String,
     }
 
+    #[derive(Clone, Debug, PartialEq, Eq, cultcache_rs::DatabaseEntry)]
+    #[cultcache(type = "cultmesh.test.memo", schema = "CultMeshTestMemo")]
+    struct Memo {
+        #[cultcache(key = 0)]
+        body: String,
+    }
+
     cultmesh_documents!(TestDocuments {
         Note => "cultmesh.test.note.v0",
+    });
+
+    cultmesh_documents!(TwoTypeDocuments {
+        Note => "cultmesh.test.note.v0",
+        Memo => "cultmesh.test.memo.v0",
     });
 
     fn raw_note(key: &str, payload: Vec<u8>) -> cultnet_rs::CultNetRawDocumentRecord {
@@ -1252,6 +1265,39 @@ mod tests {
         assert!(node.get::<Note>("before")?.is_none());
         assert_eq!(node.get_required::<Note>("held")?.body, "newer body");
         assert!(node.get::<Note>("after")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn a_snapshot_spanning_two_backing_stores_is_refused_whole_and_applies_nothing() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut node = CultMesh::create_node(temp.path().join("m.cc"), TwoTypeDocuments, Default::default())?;
+        // A node has one store through the public API; route Memo to a second one by hand (C# refuses the same commit).
+        node.cache.add_backing_store(
+            SingleFileMessagePackBackingStore::new(temp.path().join("memo.cc")),
+            [Memo::TYPE],
+        )?;
+        node.cache.pull_all_backing_stores()?;
+        let plain = |body: &str| rmp_serde::to_vec(&(body,));
+        let memo = |key: &str, payload| {
+            let mut record = raw_note(key, payload);
+            record.schema_id = "cultmesh.test.memo.v0".to_string();
+            record
+        };
+        let error = node
+            .apply_raw_snapshot_documents(vec![
+                raw_note("n", plain("note")?),
+                memo("m", plain("memo")?),
+            ])
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot span backing stores"), "{error}");
+        assert!(node.get::<Note>("n")?.is_none());
+        assert!(node.get::<Memo>("m")?.is_none());
+        assert!(!temp.path().join("m.cc").exists() && !temp.path().join("memo.cc").exists());
+
+        // Each store alone still takes its own snapshot.
+        assert_eq!(node.apply_raw_snapshot_documents(vec![memo("m", plain("memo")?)])?, 1);
+        assert_eq!(node.get_required::<Memo>("m")?.body, "memo");
         Ok(())
     }
 
