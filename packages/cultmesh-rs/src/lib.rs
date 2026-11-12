@@ -732,6 +732,17 @@ impl CultMeshNode {
         let cultnet_rs::CultNetMessage::SnapshotResponseRaw { documents, .. } = response else {
             anyhow::bail!("expected cultnet.snapshot_response_raw.v0");
         };
+        self.apply_raw_snapshot_documents(documents)
+    }
+
+    /// Applies each snapshot document of a registered schema with `put_raw_envelope`. The first refusal ends the pull
+    /// and the documents before it stay applied; a key this node holds read-only (unread slots from a newer peer, or a
+    /// payload this build cannot read) is refused like any other, as C# CultMesh holds no per-key handling either
+    /// (follow-up mesh-unread-slots).
+    fn apply_raw_snapshot_documents(
+        &mut self,
+        documents: Vec<cultnet_rs::CultNetRawDocumentRecord>,
+    ) -> Result<usize> {
         let mut applied = 0usize;
         for document in documents {
             let Some(document_type) =
@@ -1198,6 +1209,47 @@ mod tests {
     cultmesh_documents!(TestDocuments {
         Note => "cultmesh.test.note.v0",
     });
+
+    fn raw_note(key: &str, payload: Vec<u8>) -> cultnet_rs::CultNetRawDocumentRecord {
+        cultnet_rs::CultNetRawDocumentRecord {
+            schema_id: "cultmesh.test.note.v0".to_string(),
+            record_key: key.to_string(),
+            stored_at: "2026-01-01T00:00:00Z".to_string(),
+            payload_encoding: cultnet_rs::CultNetRawPayloadEncoding::Messagepack,
+            payload,
+            source_runtime_id: None,
+            source_agent_id: None,
+            source_role: None,
+            tags: None,
+        }
+    }
+
+    #[test]
+    fn a_snapshot_document_for_a_read_only_key_ends_the_pull_and_keeps_the_applied_ones() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut node = CultMesh::create_node(temp.path().join("m.cc"), TestDocuments, Default::default())?;
+        // A newer peer's note: one slot past the declared one.
+        let newer = rmp_serde::to_vec(&("newer body", "extra slot"))?;
+        let plain = |body: &str| rmp_serde::to_vec(&(body,));
+        assert_eq!(node.apply_raw_snapshot_documents(vec![raw_note("held", newer)])?, 1);
+        assert_eq!(node.get_required::<Note>("held")?.body, "newer body");
+
+        let error = node
+            .apply_raw_snapshot_documents(vec![
+                raw_note("before", plain("b")?),
+                raw_note("held", plain("overwrite")?),
+                raw_note("after", plain("a")?),
+            ])
+            .unwrap_err();
+        let conflict = error.downcast_ref::<cultcache_rs::SchemaConflictError>().expect("typed refusal");
+        assert_eq!(conflict.record_key, "held");
+        assert!(conflict.unread_slots.is_some());
+        assert!(!error.to_string().contains("extra slot"));
+        assert_eq!(node.get_required::<Note>("before")?.body, "b");
+        assert_eq!(node.get_required::<Note>("held")?.body, "newer body");
+        assert!(node.get::<Note>("after")?.is_none());
+        Ok(())
+    }
 
     #[test]
     fn node_round_trips_registered_documents() -> Result<()> {
