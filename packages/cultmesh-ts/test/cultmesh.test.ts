@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { decodeWireValue, encodeWireValue } from "@gamecult/cultnet-ts/wire";
 import { z } from "zod";
-import { SchemaConflictError, defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "@gamecult/cultcache-ts";
+import { SchemaConflictError, SingleFileMessagePackBackingStore, defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "@gamecult/cultcache-ts";
 import {
   CultNetDocumentRegistry,
   CultNetPeer,
@@ -107,6 +107,34 @@ test("CultMesh TS opens a durable local node and registers document bindings", a
   );
   assert.ok(reopened.documents.get("cultmesh.note"));
   assert.ok(reopened.documents.getBySchemaId("cultmesh.note.v0"));
+});
+
+test("CultMesh TS flush from a node that never pulled leaves the records the store holds", async () => {
+  const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-flush-")), "node.ccmp");
+  const first = await CultMesh.startNode(filePath, { documents: [noteDocument] });
+  await first.put(noteDocument, "note:held", { noteId: "note:held", body: "already in the store" });
+  await first.flush();
+
+  const unpulled = await CultMesh.startNode(filePath, { documents: [noteDocument], pullOnStart: false });
+  await unpulled.flush();
+
+  const reopened = await CultMesh.startNode(filePath, { documents: [noteDocument] });
+  assert.equal(reopened.getRequired(noteDocument, "note:held").body, "already in the store");
+});
+
+test("CultMesh TS flush of a node that loaded a legacy-key global leaves the store reopenable", async () => {
+  const settings = defineDocumentType({ type: "cultmesh.settings", schema: z.object({ theme: z.string() }), global: true });
+  const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-legacy-flush-")), "node.ccmp");
+  const seed = await CultMesh.startNode(join(await mkdtemp(join(tmpdir(), "cultmesh-ts-seed-")), "seed.ccmp"), { documents: [settings] });
+  await seed.cache.putGlobal(settings, { theme: "iron" });
+  const legacy = { ...seed.cache.getRequiredEnvelope(settings, "__global__"), key: "legacy" };
+  await new SingleFileMessagePackBackingStore(filePath).push(legacy);
+
+  const node = await CultMesh.startNode(filePath, { documents: [settings] });
+  await node.flush();
+
+  const reopened = await CultMesh.startNode(filePath, { documents: [settings] });
+  assert.deepEqual(reopened.cache.getRequiredGlobal(settings), { theme: "iron" });
 });
 
 test("CultMesh TS document handles hide local cache plumbing behind typed reactive reads", async () => {

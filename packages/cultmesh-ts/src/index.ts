@@ -3933,7 +3933,7 @@ export class CultMeshNode {
   }
 
   public async flush(soft = false): Promise<void> {
-    await this.store.pushAll?.(this.cache.snapshot(), { soft });
+    await this.store.pushAll?.(this.cache.storedSnapshot(), { soft });
   }
 }
 

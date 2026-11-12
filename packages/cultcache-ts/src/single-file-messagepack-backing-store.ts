@@ -82,10 +82,12 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
 
   async pushAll(entries: CultCacheEnvelope[], options: PushAllOptions = {}): Promise<void> {
     await this.#enqueue(async () => {
-      // A flush of the whole store writes the header the file on disk carries, read now: a file marked for element ids
-      // stays marked, and one that is not (or is gone or legacy) is written unmarked. The file is read by the same
-      // reader as `pullAll`, so one it would refuse (not exactly one store, a variant, a body it cannot decode) is refused
-      // and left as it is. A soft flush asks that reader too: nothing at the path is written, a store is left alone.
+      // A flush writes `entries` onto the store as it is under the lock, the way a push does: a record under the same key
+      // is replaced and no other is removed, so a cache whose image is stale (or empty, never pulled) cannot drop what
+      // another writer added. The store is read by the same reader as `pullAll`, so one it would refuse (not exactly one
+      // store, a variant, a body it cannot decode) is refused and left as it is. A soft flush asks that reader too: nothing
+      // at the path is written, a store is left alone.
+      let held: CultCacheEnvelope[] = [];
       try {
         const disk = this.#readDisk();
         if (options.soft && !disk.absent) {
@@ -93,10 +95,11 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
         }
 
         this.#format = disk.format;
+        held = disk.envelopes;
       } catch (error) {
-        // Only a dangling link reaches here with ENOENT: it holds no store, so a whole-store flush has no header to keep and
-        // replaces the link (R3 pins this). A soft flush does not replace what it cannot read, and every merging writer
-        // has already refused the link when it read the current entries.
+        // Only a dangling link reaches here with ENOENT: it holds no store, so a flush has nothing to merge with and no
+        // header to keep, and replaces the link (R3 pins this). A soft flush does not replace what it cannot read, and every
+        // merging writer has already refused the link when it read the current entries.
         if (options.soft || (error as NodeJS.ErrnoException).code !== "ENOENT") {
           throw error;
         }
@@ -104,9 +107,10 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
         this.#format = STORE_FORMAT_VERSION;
       }
 
-      requireOneTypePerKey(this.filePath, entries, []);
       // A key is held once: of same-type entries sharing a key in one batch, the last is kept.
-      await this.#writeAll([...new Map(entries.map((entry) => [entry.key, entry])).values()], []);
+      const supplied = [...new Map(entries.map((entry) => [entry.key, entry])).values()];
+      requireOneTypePerKey(this.filePath, entries, held);
+      await this.#writeAll(supplied, held);
     });
   }
 

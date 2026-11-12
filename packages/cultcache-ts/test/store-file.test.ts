@@ -670,7 +670,7 @@ test("delete removes only the record at that type and key", async () => {
   }
 });
 
-test("pushAll replaces the whole store, and a soft pushAll leaves an existing store alone", async () => {
+test("pushAll writes onto the store as it is: it replaces by key and removes nothing, and a soft pushAll leaves an existing store alone", async () => {
   const directory = await scratch();
   try {
     const path = join(directory, "store.cc");
@@ -681,7 +681,14 @@ test("pushAll replaces the whole store, and a soft pushAll leaves an existing st
     await store.pushAll([entryOf("b", "t", 2)], { soft: true });
     assert.deepEqual([...(await readFile(path))], [...before], "soft leaves an existing store byte for byte");
     await store.pushAll([entryOf("b", "t", 2)]);
-    assert.deepEqual(await snapshotOf(store), ["t/b:2"]);
+    assert.deepEqual(await snapshotOf(store), ["t/a:1", "t/b:2"], "a record the batch does not name stays");
+    await store.pushAll([entryOf("a", "t", 7)]);
+    assert.deepEqual(await snapshotOf(store), ["t/a:7", "t/b:2"], "a record the batch names is replaced");
+    await store.pushAll([]);
+    assert.deepEqual(await snapshotOf(store), ["t/a:7", "t/b:2"], "an empty flush from a cache that holds nothing wipes nothing");
+    const before2 = [...(await readFile(path))];
+    await assert.rejects(() => store.pushAll([entryOf("a", "u", 1)]), SchemaConflictError);
+    assert.deepEqual([...(await readFile(path))], before2, "a batch that retypes a held key is refused and the file is unchanged");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

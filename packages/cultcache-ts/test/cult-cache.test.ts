@@ -1019,6 +1019,7 @@ test("legacyKeyGlobalLoadsWithoutWritingAndFirstWriteLeavesOneGlobal", async () 
   assert.deepEqual(reloaded.getRequiredGlobal(settingsDocument), { t: "new" });
 
   // Deleting an adopted global removes the legacy record.
+  await rm(storePath);
   await new SingleFileMessagePackBackingStore(storePath).pushAll([legacy]);
   const deleting = build();
   await deleting.pullAllBackingStores();
@@ -1026,8 +1027,28 @@ test("legacyKeyGlobalLoadsWithoutWritingAndFirstWriteLeavesOneGlobal", async () 
   assert.deepEqual(await new SingleFileMessagePackBackingStore(storePath).pullAll(), []);
 
   // Two globals of one type on disk, under any keys, are refused.
+  await rm(storePath);
   await new SingleFileMessagePackBackingStore(storePath).pushAll([legacy, { ...legacy, key: CultCache.GLOBAL_KEY }]);
   await assert.rejects(build().pullAllBackingStores(), /has multiple persisted entries/u);
+});
+
+test("a flush of a cache that loaded a legacy-key global leaves the store reopenable", async () => {
+  const settingsDocument = defineDocumentType({ type: "settings", schema: z.object({ t: z.string() }), global: true });
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-legacy-flush-")), "generic.cc");
+  const store = new SingleFileMessagePackBackingStore(storePath);
+  const build = () => CultCache.builder().withRegistry(defineDocumentRegistry(settingsDocument)).withGenericStore(store).build();
+  const seed = CultCache.builder().withRegistry(defineDocumentRegistry(settingsDocument)).build();
+  await seed.putGlobal(settingsDocument, { t: "old" });
+  await store.push({ ...seed.getRequiredEnvelope(settingsDocument, CultCache.GLOBAL_KEY), key: "legacy" });
+
+  const cache = build();
+  await cache.pullAllBackingStores();
+  assert.equal(cache.snapshot()[0]!.key, CultCache.GLOBAL_KEY, "the logical image names the global by the global key");
+  await store.pushAll(cache.storedSnapshot());
+  assert.deepEqual((await store.pullAll()).map((entry) => entry.key), ["legacy"], "the flush wrote the record under the key the store holds it");
+  const reopened = build();
+  await reopened.pullAllBackingStores();
+  assert.deepEqual(reopened.getRequiredGlobal(settingsDocument), { t: "old" });
 });
 
 test("concurrentPutAndAttachCannotLandRecordInNonHomeStore", async () => {
@@ -2261,7 +2282,7 @@ test("a stamp this runtime reads, followed by bytes that are not UTF-8, gets the
   }
 });
 
-test("pushAll leaves a store it reads alone when soft, and replaces one it reads otherwise", async () => {
+test("pushAll leaves a store it reads alone when soft, and writes onto one it reads otherwise", async () => {
   const vector = await readFile(resolve(cultLibRoot, "tests", "vectors", "document-variants-c2a", "v3-base.msgpack"));
   const envelope = { key: "probe", type: "probe", payload: documentPayloadFromBytes(new Uint8Array([0x80])), storedAt: "2026-10-22T00:00:00Z" };
   const existing = join(await mkdtemp(join(tmpdir(), "cultcache-pushall-soft-")), "store.msgpack");
@@ -2273,7 +2294,7 @@ test("pushAll leaves a store it reads alone when soft, and replaces one it reads
   const store = new SingleFileMessagePackBackingStore(own);
   await store.pushAll([envelope]);
   await store.pushAll([{ ...envelope, key: "second" }]);
-  assert.deepEqual((await store.pullAll()).map((entry) => entry.key), ["second"]);
+  assert.deepEqual((await store.pullAll()).map((entry) => entry.key), ["probe", "second"]);
 });
 
 test("SingleFileMessagePackBackingStore reads only a missing store as empty", async () => {
@@ -2575,7 +2596,7 @@ test("SingleFileMessagePackBackingStore pushAll refuses a store whose header it 
 
 // A file is replaced by a rewrite exactly when this runtime's own reader opens it: one verdict per file, asked by pullAll,
 // pushAll, soft pushAll, push and delete alike; a soft flush leaves the files that read as they are. The bytes and every runtime's verdict: tests/vectors/document-variants-c2a/readability.
-test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", async () => {
+test("SingleFileMessagePackBackingStore rewrites a file exactly when it reads", async () => {
   const root = join(c2aVectors, "readability");
   const rows = (await readFile(join(root, "manifest.txt"), "utf8"))
     .split(/\r?\n/u)
@@ -2612,6 +2633,7 @@ test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", 
                 ? store.push(envelopes[0]!)
                 : store.delete(envelopes[0]!);
       if (reads) {
+        const heldBefore = operation === "pushAll" ? (await new SingleFileMessagePackBackingStore(file).pullAll()).map((entry) => entry.key) : [];
         await run();
         if (operation === "pullAll") {
           continue;
@@ -2628,7 +2650,8 @@ test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", 
         assert.equal((decode(await readFile(file)) as unknown[])[0], vector.includes("v3") ? "cultcache.store.v3" : "cultcache.store.v1", `${vector} ${operation}`);
         const keys = (await new SingleFileMessagePackBackingStore(file).pullAll()).map((entry) => entry.key);
         if (operation === "pushAll") {
-          assert.deepEqual(keys, envelopes.map((entry) => entry.key).sort(), `${vector} ${operation}`);
+          assert.deepEqual(envelopes.map((entry) => entry.key).filter((key) => !keys.includes(key)), [], `${vector} ${operation}: every written key is held`);
+          assert.deepEqual(heldBefore.filter((key) => !keys.includes(key)), [], `${vector} ${operation}: nothing else is removed`);
         } else if (operation === "push") {
           assert.ok(keys.includes(envelopes[0]!.key), `${vector} ${operation}`);
         } else {
