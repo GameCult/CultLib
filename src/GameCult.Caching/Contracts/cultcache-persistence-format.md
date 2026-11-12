@@ -202,6 +202,20 @@ flatten, remove, commit) is refused with the typed schema conflict before anythi
 Declaring its id compatible on any registered type makes it writable and is the consent to the loss:
 the next write stores it under the writing type's own id and sheds the slots.
 
+A record whose payload carries a slot past the slots its reader declares, at any depth (nested object, list
+element, union arm, unit arm), is read-only the same way, whatever id it is stored under. The one consent
+is the declaration above, and it reaches only depth-0 slots the schema comparison reports ignored under a
+listed compatible id, up to the highest slot it reports: a mark anywhere else, past that slot, or at depth 0
+under the reader's own id, is not consented to. Declared slots are what the type's own formatter writes; only
+a type MessagePack writes by its `[Key]` layout is checked, and one no instance of which can be written is not
+(`cultlib-gaps:ruling:slot-unmeasurable-type`; see the schema-compatibility contract for both exemptions and
+for the user code the measure runs).
+A flatten of a variant whose base chain holds a record that is not owned is refused with that record's
+refusal, because it would write the base's decoded view; the variant's own writes persist only its delta and
+stay allowed. A plain write to another key of a value read from a read-only record is a copy this rule does
+not police. `CultCache.IsWritable(key)` answers what the staging refusal answers for a removal or a write of
+the record's type, read-only and missing home stores included; it does not predict that flatten.
+
 The rule is checked again where the write lands, under the store's lock: a write or removal at a key
 whose durable record is not owned, because another writer rewrote it after this cache
 loaded, is refused typed, and the record is reloaded as the store holds it, read-only when a type can
@@ -535,15 +549,14 @@ Read directly when:
 Allowed when:
 
 - persisted schema has missing slots that the local schema can default
-- persisted schema has extra slots the local reader can safely ignore or preserve
 - slot meanings remain compatible
 
-Soft migration should emit warnings, not silent shrugs.
+A persisted schema with extra slots the local reader lacks is not soft: the record is read-only (see the ownership
+rule above). Soft migration should emit warnings, not silent shrugs.
 
 Typical warnings:
 
 - missing slot defaulted
-- unknown extra slot ignored
 - nullable/default behavior widened
 - field preserved but not surfaced natively
 

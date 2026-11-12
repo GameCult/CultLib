@@ -252,7 +252,7 @@ namespace GameCult.Caching.Tests
         private static Emit ImageArm(string id, string uri, string alt) => ArmOf(5, Str(id), Str(uri), Nil, Str(alt));
 
         // The constructed value's payload, with a part of the structure replaceable to build a refusal or an extra-slot case.
-        private static byte[] Surface(Emit? root = null, Emit? outcomes = null, Emit? crafted = null, Extra? extra = null, Emit? trailing = null)
+        private static byte[] Surface(Emit? root = null, Emit? outcomes = null, Emit? crafted = null, Extra? extra = null, params Emit[] trailing)
         {
             extra ??= new Extra();
             root ??= BoxArm("0000000000c0", Slots(
@@ -264,7 +264,7 @@ namespace GameCult.Caching.Tests
             outcomes ??= Slots(ArmOf(0, Str("wait"), Str("0000000000a1")), ArmOf(1, Num(7), Str("0000000000a2")), ArmOf(2, Str("0000000000a3")));
             crafted ??= ArmOf(1, Str("gear"), Num(4));
             var slots = new[] { Str("surface"), Num(3), root, outcomes, ArmOf(1, Str("hammer"), Num(12)), crafted, Nil };
-            return Raw(Slots(trailing != null ? slots.Append(trailing).ToArray() : extra.Record ? slots.Append(ExtraSlot).ToArray() : slots));
+            return Raw(Slots(trailing.Length > 0 ? slots.Concat(trailing).ToArray() : extra.Record ? slots.Append(ExtraSlot).ToArray() : slots));
         }
 
         private static byte[] SerializeValue(UnionSurface value) => CultDocumentMessagePackSerialization.SerializeUntyped(value, typeof(UnionSurface), Registry);
@@ -337,6 +337,73 @@ namespace GameCult.Caching.Tests
         [MessagePackObject] public sealed class Denied2 : UnitOutcome { }
         [MessagePackObject] public sealed class Floor2 : UnitOutcome { }
         [MessagePackObject] public sealed class Ceiling2 : UnitOutcome { }
+
+        // The document a unit arm is placed in for a store: [Name, Outcome].
+        [CultDocument("tests.slot_unit", "tests.slot_unit.v1")]
+        [MessagePackObject]
+        public sealed class UnitDoc
+        {
+            [Key(0)] [CultName] public string Name = string.Empty;
+            [Key(1)] public UnitOutcome? Outcome;
+        }
+
+        // ---- the slot stores: extra-slot-store.cc, extra-slot-consent.cc and their outcomes as data ----
+
+        // The id extra-slot-consent.cc's records are stored under: UnionSurface's catalog entry with one more member, slot 7.
+        internal const string WideId = "tests.union_surface.wide";
+
+        // UnionSurface's members under a new version, listing the wide id compatible: the consent vector's reader.
+        [CultDocument("tests.union_surface", "tests.union_surface.v2", CompatibleSchemaIds = new[] { WideId })]
+        [MessagePackObject]
+        public sealed class SurfaceDeclaring
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public int Version;
+            [Key(2)] public Node? Root;
+            [Key(3)] public List<Outcome> Outcomes = new();
+            [Key(4)] public Item? Part;
+            [Key(5)] public CraftedItem? Crafted;
+            [Key(6)] public Node? Missing;
+        }
+
+        // The registry each slot store is read with.
+        internal static CultDocumentRegistry SlotReader(string store) => store switch
+        {
+            "extra-slot-store.cc" => CultDocumentRegistry.ForTypes(new[] { typeof(UnionSurface), typeof(UnitDoc) }),
+            "extra-slot-consent.cc" => CultDocumentRegistry.ForTypes(new[] { typeof(SurfaceDeclaring) }),
+            _ => throw new ArgumentOutOfRangeException(nameof(store), store, null)
+        };
+
+        // One row of slot-outcomes.msgpack: what the store's reader holds at the key. The mark fields are null for an unmarked record;
+        // FlattenRefusedBy is the key whose refusal refuses a Flatten of the record, null when the record is no variant or flattens.
+        private sealed record SlotOutcome(string Store, string Key, bool Writable, bool? Explained, string? Type, int? Slots, int? Declared, int? Occurrences, string? FlattenRefusedBy = null);
+
+        private static readonly SlotOutcome[] SlotOutcomes =
+        {
+            new("extra-slot-store.cc", "marked", false, false, nameof(Composition), 3, 2, 1),
+            new("extra-slot-store.cc", "clean", true, null, null, null, null, null),
+            new("extra-slot-store.cc", "unit-arm", false, false, nameof(Denied2), 1, 0, 1),
+            new("extra-slot-store.cc", "marked-variant", true, null, null, null, null, null, "marked"),
+            new("extra-slot-consent.cc", "consented", true, true, nameof(SurfaceDeclaring), 8, 7, 1),
+            new("extra-slot-consent.cc", "over-consent", false, false, nameof(SurfaceDeclaring), 9, 7, 1),
+            new("extra-slot-consent.cc", "nested", false, false, nameof(SurfaceDeclaring), 8, 7, 2),
+            new("extra-slot-consent.cc", "clean", true, null, null, null, null, null),
+        };
+
+        private static byte[] SlotOutcomesFile() => Raw((ref MessagePackWriter w) =>
+        {
+            w.WriteArrayHeader(SlotOutcomes.Length);
+            foreach (var row in SlotOutcomes)
+            {
+                w.WriteArrayHeader(9);
+                w.Write(row.Store); w.Write(row.Key); w.Write(row.Writable);
+                if (row.Explained is { } explained) w.Write(explained); else w.WriteNil();
+                if (row.Type is { } type) w.Write(type); else w.WriteNil();
+                foreach (var count in new[] { row.Slots, row.Declared, row.Occurrences })
+                    if (count is { } value) w.Write(value); else w.WriteNil();
+                if (row.FlattenRefusedBy is { } refusedBy) w.Write(refusedBy); else w.WriteNil();
+            }
+        });
 
         private static MessagePackSerializerOptions UnitOptions => CultDocumentMessagePackSerialization.OptionsFor(typeof(UnionSurface).Assembly);
 
@@ -413,6 +480,79 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        // A single-file store of the records, each written as its type's value with the store's clock pinned as union-surface.cc's, then
+        // its payload replaced by bytes no current writer produces; each variant is written over its base (overriding the name to its
+        // key) before the payloads are replaced; edit changes the snapshot further before it is serialized.
+        private static byte[] SlotStore(CultDocumentRegistry registry, (string Key, object Value, byte[] Payload)[] records, Action<CultPersistedStoreSnapshot>? edit = null,
+            params (string Key, string Base)[] variants)
+        {
+            var work = Path.Combine(Path.GetTempPath(), $"cultlib-unionparity-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(work);
+            try
+            {
+                var scratch = Path.Combine(work, "slots.cc");
+                using (var cache = CultCacheMessagePack.Create(scratch, new CultCacheOpenOptions { Registry = registry, StoreFlushOnDispose = true }))
+                {
+                    cache.Clock = () => StoredAt;
+                    foreach (var (key, value, _) in records)
+                        cache.UpsertAsync(value.GetType(), value, new CultRecordKey(key)).GetAwaiter().GetResult();
+                    foreach (var (key, baseKey) in variants)
+                        Assert.That(cache.Commit(batch => batch.UpsertVariant(new CultRecordKey(key), new CultRecordKey(baseKey),
+                            new[] { cache.Override(typeof(UnionSurface), nameof(UnionSurface.Id), key) })), Is.True);
+                    cache.FlushAsync().GetAwaiter().GetResult();
+                }
+
+                var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(scratch));
+                foreach (var (key, _, payload) in records)
+                    snapshot.Records.Single(record => record.Key == key).Payload = payload;
+                edit?.Invoke(snapshot);
+                return CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot);
+            }
+            finally
+            {
+                Directory.Delete(work, recursive: true);
+            }
+        }
+
+        // The store the slot-readonly tests open and the other runtimes read: "marked" holds the extra-slot-nested-record payload,
+        // "clean" the ordinary value, "unit-arm" a tests.slot_unit document ["unit-arm", [2, ["extra-slot"]]], and "marked-variant" a
+        // variant of "marked" overriding only its Id: writable, but a flatten of it is refused for its base.
+        [Test]
+        public void ExtraSlotStoreVectorHoldsAMarkedACleanAndAUnitArmRecord()
+        {
+            Check("extra-slot-store.cc", SlotStore(SlotReader("extra-slot-store.cc"), new (string, object, byte[])[]
+            {
+                ("marked", Constructed(), Committed("extra-slot-nested-record.msgpack")),
+                ("clean", Constructed(), Surface()),
+                ("unit-arm", new UnitDoc { Name = "unit-arm", Outcome = new Denied2() }, Raw(Slots(Str("unit-arm"), ArmOf(2, ExtraSlot)))),
+            }, null, ("marked-variant", "marked")));
+        }
+
+        // The consent store: every record under the wide id, whose catalog entry is UnionSurface's 7 members plus slot 7. Its reader
+        // lists the wide id compatible, so the comparison reports slot 7 ignored; only a depth-0 mark within that slot is consented to.
+        [Test]
+        public void ExtraSlotConsentVectorHoldsTheConsentCases()
+        {
+            Check("extra-slot-consent.cc", SlotStore(Registry, new (string, object, byte[])[]
+            {
+                ("consented", Constructed(), Surface(trailing: ExtraSlot)),
+                ("over-consent", Constructed(), Surface(trailing: new[] { ExtraSlot, ExtraSlot })),
+                ("nested", Constructed(), Surface(extra: new Extra(Composition: true), trailing: ExtraSlot)),
+                ("clean", Constructed(), Surface()),
+            }, snapshot =>
+            {
+                var entry = snapshot.SchemaCatalog.Single();
+                var last = entry.Members.OrderBy(member => member.Slot).Last();
+                entry.Members = entry.Members.Append(new CultSchemaMemberCatalogEntry { Slot = 7, MemberName = "Wider", TypeName = last.TypeName }).ToArray();
+                entry.SchemaId = WideId;
+                foreach (var record in snapshot.Records) record.SchemaId = WideId;
+            }));
+        }
+
+        // The outcomes of both slot stores as data; SlotReadOnlyTests asserts every row from the committed files.
+        [Test]
+        public void SlotOutcomesVectorMatches() => Check("slot-outcomes.msgpack", SlotOutcomesFile());
+
         // The value names every arm shape the vectors exist to hold other runtimes to.
         [Test]
         public void ConstructedValueExercisesEveryArmShape()
@@ -475,7 +615,7 @@ namespace GameCult.Caching.Tests
                 else
                 {
                     Assert.That(outcome, Is.EqualTo("read-only"), file);
-                    // The record is read whole; what makes it read-only is the slot rule of the slot-tolerance cut, not asserted here.
+                    // The extra slot is read past; that the record then loads read-only is asserted in SlotReadOnlyTests, store by store.
                     Assert.That(Describe(Decode(payload)), Is.EqualTo(golden), $"{file}: the extra slot is read past");
                 }
             }
@@ -781,7 +921,8 @@ namespace GameCult.Caching.Tests
                     Assert.That(File.ReadAllBytes(path), Is.EqualTo(new byte[] { 0x91 }), $"switch {off ?? "unset"} rewrites nothing");
                     File.Delete(path);
 
-                    foreach (var body in new Action[] { UnionSurfaceVectorMatches, UnionRefusalVectorsRefused, BoundsOutcomesFromCommittedFiles })
+                    foreach (var body in new Action[] { UnionSurfaceVectorMatches, UnionRefusalVectorsRefused, BoundsOutcomesFromCommittedFiles,
+                                 ExtraSlotStoreVectorHoldsAMarkedACleanAndAUnitArmRecord, ExtraSlotConsentVectorHoldsTheConsentCases, SlotOutcomesVectorMatches })
                         body();
                 }
 

@@ -11,6 +11,7 @@
     <PackageReference Include="System.Text.Json" Version="9.0.10" />
     <PackageReference Include="MessagePackAnalyzer" Version="3.1.7" PrivateAssets="all" />
     <InternalsVisibleTo Include="GameCult.Caching.Tests" />
+    <InternalsVisibleTo Include="GameCult.Caching.GeneratorConsumer" />
     <None Include="buildTransitive\GameCult.Caching.MessagePack.targets" Pack="true" PackagePath="buildTransitive\" />
   </ItemGroup>
 </Project>

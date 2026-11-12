@@ -107,9 +107,47 @@ persisted slots honestly:
 
 - persisted schema id differs, but the embedded catalog points to a compatible
   local schema id
-- persisted slot is missing locally and can be ignored
+- persisted slot is missing locally and the record is read-only until its id is declared compatible
+  (see Extra slots are read-only, below)
 - local slot is missing in persisted data and can fall back to the local
   default value
+
+Extra slots are read-only. A record whose payload carries a slot past the slots its reader declares, at any
+depth (the record, a nested object, a list element, a union arm, a unit arm), is loaded read-only: it is
+served, `CultStoredDocument.UnreadSlots` names the first type read with extra slots and both counts, and
+`CultCache.IsWritable(key)` is false. A staged write or removal of it is refused with
+`CultSchemaConflictException` (`UnreadSlots` set; the message names the type and the counts, never a slot
+value). A missing trailing slot keeps its default and stays writable; a non-nil value in a retired gap below
+the highest key is not extra. Declaring an id compatible consents only to depth-0 slots the schema comparison
+reports ignored under that id, and only up to the highest slot it reports: a payload carrying a slot past that
+one is not consented to. Any other mark (nested, list element, arm, unit arm, or depth 0 under the reader's
+own id) keeps the record read-only whatever is declared.
+
+A type's declared slots are the array its own formatter writes for one instance, never a reflected member
+list, so a non-public `[Key]` member of an `AllowPrivate` type counts. Only a concrete int-keyed
+`[MessagePackObject]` type whose formatter is MessagePack's own `[Key]`-layout formatter is checked. Not
+checked, and so read past with any extra slots dropped on the next write, as before:
+
+- a type formatted by anything else: its own `[MessagePackFormatter]`, a formatter of its own that a
+  `CultCacheFormatterResolver` (or any resolver ahead of MessagePack's) hands out, or the collection formatter
+  of a `[MessagePackObject]` collection type such as a `List<T>` subclass. Such a formatter owns its layout and
+  its tolerance. A resolver that hands out MessagePack's own `[Key]`-layout formatter (StandardResolver's, or
+  StandardResolverAllowPrivate's) does not exempt the type: it is checked and marks;
+- a type no instance of which can be written: no write of an uninitialized instance and no write of one
+  from a parameterless constructor succeeds (for example a `[Key]` getter that throws on an uninitialized
+  instance and no parameterless constructor). This gap is ruled: `cultlib-gaps:ruling:slot-unmeasurable-type`.
+
+Measuring runs user code once per type per process, on the first read of the type in a store load: the
+type's `[Key]` getters on an uninitialized instance and, if that write throws, its parameterless
+constructor (public or not) and the getters on that instance. Any failure of both leaves the type unchecked
+for the rest of the process, and nothing else: it does not fail the read.
+
+`Flatten` of a variant writes its base chain's decoded view into a plain record, so it is refused when any
+record on that chain is not owned by its home store (a mark nothing explains, or undeclared drift that drops
+slots), with that record's own refusal naming its key. Writing or removing the variant itself stays allowed:
+it persists only its delta. `CultCache.IsWritable(key)` is the write's own answer for a removal or a write of
+the record's type: it is also false when the record's home store is read-only or no attached store is home to
+its type. The one write it does not predict is that flatten.
 
 The cache emits a typed migration report with:
 

@@ -166,7 +166,7 @@ public static class CultDocumentMessagePackSerialization
 
     private static (MessagePackSerializerOptions Options, IFormatterResolver[] Ahead) Compose(IFormatterResolver[] consumerResolvers)
     {
-        // The guard goes first and wraps whatever formatter the rest of the composite would hand out, so a consumer
+        // The guard goes first and wraps whatever formatter the rest of the composite would hand out (a union, or a concrete int-keyed object for its slot count), so a consumer
         // resolver still encodes an arm while the key check runs.
         var ahead = consumerResolvers.Append(CultDocumentResolver.Instance).Append(CultMathResolver.Instance).Append(CultMathExprResolver.Instance).ToArray();
         var inner = CompositeResolver.Create(ahead.Append(StandardResolver.Instance).ToArray());
@@ -212,6 +212,19 @@ public static class CultDocumentMessagePackSerialization
         CultPayloadDepth.Check(payload, type, PayloadDirection.Read);
         return MessagePackSerializer.Deserialize(type, payload, OptionsForDocument(type))
             ?? throw new InvalidOperationException($"MessagePack returned null for Cult document type {type.FullName}.");
+    }
+
+    // The same decode, with the slots it read past noted (CultSlotScope). Opened around the one decode and after the depth check,
+    // so a payload past the nesting limit is refused, never marked.
+    internal static CultDecoded DeserializeMarked(Type type, byte[] payload, CultDocumentRegistry registry)
+    {
+        if (registry == null) throw new ArgumentNullException(nameof(registry));
+        registry.GetRequired(type);
+        CultPayloadDepth.Check(payload, type, PayloadDirection.Read);
+        using var scope = CultSlotScope.Open();
+        var document = MessagePackSerializer.Deserialize(type, payload, OptionsForDocument(type))
+            ?? throw new InvalidOperationException($"MessagePack returned null for Cult document type {type.FullName}.");
+        return new CultDecoded(document, scope.Finding());
     }
 
     /// <summary>
@@ -823,4 +836,7 @@ public class SingleFileMessagePackBackingStore : SingleFileBackingStore
     {
         return CultDocumentMessagePackSerialization.DeserializeUntyped(documentType, payload, Registry);
     }
+
+    internal override CultDecoded DeserializeMarked(Type documentType, byte[] payload) =>
+        CultDocumentMessagePackSerialization.DeserializeMarked(documentType, payload, Registry);
 }

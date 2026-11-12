@@ -516,13 +516,21 @@ namespace GameCult.Caching
         // resolved to Descriptor, until a write of this record puts it under Descriptor's id (a write of an owned record moves it).
         public string StoredSchemaId { get; internal set; }
 
-        // True when the schema this record was loaded under left none of its persisted slots unread by Descriptor, so the type reads
-        // it whole and owns it (CultDocumentRegistry.Owns). Set by ToStoredDocument from the schema comparison's ignored slots,
+        // True when the schema this record was loaded under left none of its persisted slots unread by Descriptor and its payload
+        // carried none past Descriptor's, so the type reads it whole and owns it (CultDocumentRegistry.Owns). Set by ToStoredDocument from the schema comparison's ignored slots,
         // before any variant override is shed. A record this cache constructed or wrote is stored under Descriptor's own id, which
         // the registry declares, so only a loaded record under another id is ever asked. The staging half asks it;
         // ConditionsHold never reads it. Only the store's loaded view carries it: the cache's resolved copies and flattens are never
         // asked.
         internal bool StoredSchemaReadWhole { get; set; }
+
+        /// <summary>
+        /// What the store's decode of this record's payload found past the slots this build declares, at any depth; null when none. Set by
+        /// ToStoredDocument on the store's loaded view only (the cache's resolved copy of a variant does not carry it; ask
+        /// <see cref="CultCache.IsWritable"/>). A mark that is not <see cref="CultUnreadSlots.Explained"/> keeps the record
+        /// unowned even under a declared id: it cannot be written or removed (HeldOwned).
+        /// </summary>
+        public CultUnreadSlots? UnreadSlots { get; internal set; }
 
         // The catalog entry that publishes StoredSchemaId in the store this record was loaded from, with the id it was published for,
         // so staging can ask WrittenOwns the question the store's judge asks, over the catalog the record came with. Null for a record
@@ -2300,8 +2308,9 @@ namespace GameCult.Caching
 
         // The one-shot rewrite for stores written before element ids existed: upserts every record whose ids exist only in
         // memory (minted when it loaded), through the normal write path, one commit per home store. Returns how many records
-        // it rewrote; a second call finds none. A selected record that is neither declared nor read whole is read-only,
-        // so its home store's commit is refused with CultSchemaConflictException; commits to earlier stores stand.
+        // it rewrote; a second call finds none. A selected record that is not owned (neither declared nor read whole, or held
+        // read-only for slots past this build's, see CultStoredDocument.UnreadSlots) is read-only, so its home store's commit is
+        // refused with CultSchemaConflictException until a build that reads those slots rewrites it; commits to earlier stores stand.
         public int MintElementIds()
         {
             var groups = Held(() => _entries.Values
@@ -2654,6 +2663,22 @@ namespace GameCult.Caching
         {
             lock (Gate())
                 return _entries.TryGetValue(key.Value, out var stored) ? stored : null;
+        }
+
+        /// <summary>
+        /// Whether a removal of the key, or a write of the record's own type, would be let through: the write's own decision, asked of
+        /// the record the cache holds. False when no attached store is home to the record's type, when its home store is read-only, or
+        /// when that store holds it unowned (undeclared drift that drops persisted slots, or a payload carrying slots past this build's,
+        /// see <see cref="CultStoredDocument.UnreadSlots"/>). For a key the cache does not hold, the removal check every store makes of it
+        /// (false when a store lists it foreign). One write it does not predict: a Flatten of a variant whose base chain holds an unowned record is refused, though
+        /// the variant itself is writable. Live and advisory: the write still decides.
+        /// </summary>
+        public bool IsWritable(CultRecordKey key)
+        {
+            lock (Gate())
+                return _entries.TryGetValue(key.Value, out var held)
+                    ? WriteRefusal(held, upsert: false, null, out _) == null
+                    : _stores.All(entry => entry.Store.Refusal(key.Value, null) == null);
         }
 
         public object? Get(CultRecordKey key)
@@ -3151,6 +3176,8 @@ namespace GameCult.Caching
             IReadOnlyCollection<string>? removed)
         {
             var removedKeys = removed?.ToHashSet(StringComparer.Ordinal) ?? new HashSet<string>(StringComparer.Ordinal);
+            var batch = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
+            foreach (var stored in admitted) batch[stored.Key.Value] = stored;
             var homes = new List<CacheBackingStore>();
             var globals = new Dictionary<Type, string>(_globals);
             var evictedKeys = evicted.Select(stored => stored.Key.Value).ToHashSet(StringComparer.Ordinal);
@@ -3199,23 +3226,57 @@ namespace GameCult.Caching
 
             void Claim(CultStoredDocument stored, bool upsert)
             {
-                var home = Home(stored.Descriptor.DocumentType);
-                if (home == null)
+                if (WriteRefusal(stored, upsert, batch, out var home) is { } refusal) throw refusal;
+                if (home != null) homes.Add(home);
+            }
+        }
+
+        // The one answer to whether a record may be written (upsert: a write of its type) or its key removed, before anything is staged.
+        // Claim throws it; IsWritable asks it of the held record's removal form. Null when the write may land; home is where it lands,
+        // null for a store-less cache. batch holds the records the same batch admits, by key.
+        private Exception? WriteRefusal(CultStoredDocument stored, bool upsert, IReadOnlyDictionary<string, CultStoredDocument>? batch, out CacheBackingStore? home)
+        {
+            home = Home(stored.Descriptor.DocumentType);
+            if (home == null)
+            {
+                if (_stores.Count > 0)
+                    return new InvalidOperationException($"No backing store is home to {stored.Descriptor.SchemaName}.");
+                // No store, no file to judge, but the same rule: a record is replaced only by its own type's write.
+                return upsert && _entries.TryGetValue(stored.Key.Value, out var inMemory) && !CacheBackingStore.UpsertOwned(inMemory, stored.Descriptor)
+                    ? CacheBackingStore.Retyped(inMemory, stored.Key.Value, stored.Descriptor)
+                    : null;
+            }
+
+            if (home.IsReadOnly)
+                return new InvalidOperationException(
+                    $"{stored.Descriptor.SchemaName} record {stored.Key.Value} routes to read-only backing store {home}.");
+            return home.Refusal(stored.Key.Value, upsert ? stored.Descriptor : null)
+                   ?? (upsert && stored.Flattens ? FlattenRefusal(stored, batch) : null);
+        }
+
+        // A flatten writes its base chain's decoded view into a plain record, so it is refused when a record on that chain is not owned
+        // by its home store (the slots or drift that record's decode dropped would be lost): that ancestor's own refusal. The chain starts
+        // at the staged delta's base when the variant is flattened as it lands, else at the held variant's; a key the batch admits is
+        // judged by its own claim, and the walk follows its staged form.
+        private CultSchemaConflictException? FlattenRefusal(CultStoredDocument flatten, IReadOnlyDictionary<string, CultStoredDocument>? batch)
+        {
+            var delta = flatten.Variant ?? (_entries.TryGetValue(flatten.Key.Value, out var variant) ? variant.Variant : null);
+            var walked = new HashSet<string>(StringComparer.Ordinal) { flatten.Key.Value };
+            for (var key = delta?.BaseKey; key != null && walked.Add(key);)
+            {
+                CultStoredDocument? ancestor;
+                if (batch == null || !batch.TryGetValue(key, out ancestor))
                 {
-                    if (_stores.Count > 0)
-                        throw new InvalidOperationException($"No backing store is home to {stored.Descriptor.SchemaName}.");
-                    // No store, no file to judge, but the same rule: a record is replaced only by its own type's write.
-                    if (upsert && _entries.TryGetValue(stored.Key.Value, out var inMemory) && !CacheBackingStore.UpsertOwned(inMemory, stored.Descriptor))
-                        throw CacheBackingStore.Retyped(inMemory, stored.Key.Value, stored.Descriptor);
-                    return;
+                    if (!_entries.TryGetValue(key, out ancestor))
+                        return null;
+                    if (Home(ancestor.Descriptor.DocumentType)?.Refusal(key, null) is { } refusal)
+                        return refusal;
                 }
 
-                if (home.IsReadOnly)
-                    throw new InvalidOperationException(
-                        $"{stored.Descriptor.SchemaName} record {stored.Key.Value} routes to read-only backing store {home}.");
-                home.RefuseUndeclared(stored.Key.Value, upsert ? stored.Descriptor : null);
-                homes.Add(home);
+                key = ancestor.Variant?.BaseKey;
             }
+
+            return null;
         }
 
         private sealed class VariantPlan
@@ -3937,11 +3998,21 @@ namespace GameCult.Caching
             string version,
             IReadOnlyCollection<CultSchemaCatalogEntry> catalog,
             Func<Type, byte[], object> deserializePayload,
+            out CultSchemaMigrationReport report) =>
+            ToStoredDocument(record, version, catalog, (type, payload) => new CultDecoded(deserializePayload(type, payload), null), out report);
+
+        // The same, for a decode that notes the extra slots it read past (DeserializeMarked): the mark is turned into
+        // CultStoredDocument.UnreadSlots here, the one place that knows both the payload's marks and the catalog comparison.
+        internal CultStoredDocument ToStoredDocument(
+            CultPersistedRecord record,
+            string version,
+            IReadOnlyCollection<CultSchemaCatalogEntry> catalog,
+            Func<Type, byte[], CultDecoded> deserializePayload,
             out CultSchemaMigrationReport report)
         {
             var resolution = Registry.ResolvePersistedSchemaDetailed(record.SchemaId, catalog);
             report = resolution.Report;
-            var readWhole = report.IgnoredExtraSlots.Length == 0;
+            CultUnreadSlots? unread = null;
             if (record.Variant != null)
             {
                 var descriptor = resolution.Descriptor;
@@ -3955,13 +4026,22 @@ namespace GameCult.Caching
                     .ToArray();
                 if (shed.Length > 0)
                 {
-                    // A slot the schema diff already reported is not reported twice.
+                    // A slot the schema diff already reported is not reported twice. One it did not report is a mark nothing explains:
+                    // the variant is read-only and is never rewritten.
                     var unreported = shed.Except(report.IgnoredExtraSlots).ToArray();
+                    if (unreported.Length > 0)
+                        unread = new CultUnreadSlots(
+                            descriptor.DocumentType.Name,
+                            unreported.Max() + 1,
+                            descriptor.RichMembers.Select(member => member.Slot + 1).DefaultIfEmpty(0).Max(),
+                            1,
+                            allAtDepthZero: true,
+                            explained: false);
                     report.IgnoredExtraSlots = report.IgnoredExtraSlots.Concat(unreported).OrderBy(slot => slot).ToArray();
                     report.Warnings = report.Warnings.Concat(unreported.Select(slot => new CultSchemaMigrationWarning
                     {
                         Code = "ignored_extra_slot",
-                        Message = $"Variant {record.Key} overrides slot {slot}, which {descriptor.DocumentType.Name} does not have; the override is ignored and shed on flush."
+                        Message = $"Variant {record.Key} overrides slot {slot}, which {descriptor.DocumentType.Name} does not have; the variant is read-only."
                     })).ToArray();
                 }
 
@@ -3977,16 +4057,17 @@ namespace GameCult.Caching
                     null)
                 {
                     StoredSchemaId = record.SchemaId,
-                    StoredSchemaReadWhole = readWhole,
+                    StoredSchemaReadWhole = report.IgnoredExtraSlots.Length == 0,
+                    UnreadSlots = unread,
                     StoredPublishedBy = PublishedByIn(record.SchemaId, catalog),
                     StoredVersion = version
                 };
             }
 
-            object document;
+            CultDecoded decoded;
             try
             {
-                document = deserializePayload(resolution.Descriptor.DocumentType, record.Payload);
+                decoded = deserializePayload(resolution.Descriptor.DocumentType, record.Payload);
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
@@ -3995,14 +4076,20 @@ namespace GameCult.Caching
                 for (var cause = exception; cause != null; cause = cause.InnerException) causes.Add(cause.Message);
                 throw new InvalidDataException($"Record '{record.Key}' (schema '{record.SchemaId}') cannot be decoded: {string.Join(" <- ", causes.Distinct())}", exception);
             }
+            // Explained only when every mark is at depth 0 and the schema comparison under this id reported every slot the mark carries
+            // past the reader: consent reaches no slot above the highest reported (none when nothing was reported).
+            unread = decoded.UnreadSlots is { } marked
+                ? marked.Explaining(marked.AllAtDepthZero && marked.SlotCount <= report.IgnoredExtraSlots.DefaultIfEmpty(-1).Max() + 1)
+                : null;
             return new CultStoredDocument(
                 new CultRecordKey(record.Key),
                 record.StoredAt,
                 resolution.Descriptor,
-                document)
+                decoded.Document)
             {
                 StoredSchemaId = record.SchemaId,
-                StoredSchemaReadWhole = readWhole,
+                StoredSchemaReadWhole = report.IgnoredExtraSlots.Length == 0 && unread == null,
+                UnreadSlots = unread,
                 StoredPublishedBy = PublishedByIn(record.SchemaId, catalog),
                 StoredVersion = version
             };
@@ -4041,22 +4128,37 @@ namespace GameCult.Caching
         // catalog entry that published the held record's id when it was loaded, the question the store's judge asks of the file.
         internal void RefuseUndeclared(string key, CultDocumentDescriptor? written)
         {
-            var foreign = _foreignRecords.FirstOrDefault(record => string.Equals(record.Key, key, StringComparison.Ordinal));
-            if (foreign != null)
-                throw Overwrites(null, new[] { (foreign.Key, foreign.SchemaId, foreign.SchemaName) });
-            if (Entries.TryGetValue(key, out var held) && !HeldOwned(held, written))
-                throw Overwrites(null, new[] { (key, held.StoredSchemaId, held.Descriptor.SchemaName) });
+            if (Refusal(key, written) is { } refusal) throw refusal;
         }
 
+        // The refusal of a write (of the written type) or a removal (written null) of the key, or null when this store's view lets it
+        // through. The one answer behind RefuseUndeclared and CultCache.IsWritable, so the query and the write cannot disagree.
+        internal CultSchemaConflictException? Refusal(string key, CultDocumentDescriptor? written)
+        {
+            var foreign = _foreignRecords.FirstOrDefault(record => string.Equals(record.Key, key, StringComparison.Ordinal));
+            if (foreign != null)
+                return Overwrites(null, new[] { (foreign.Key, foreign.SchemaId, foreign.SchemaName) });
+            if (!Entries.TryGetValue(key, out var held) || HeldOwned(held, written))
+                return null;
+            return held.UnreadSlots is { Explained: false } unread
+                ? UnreadSlotsRefusal(held, key, unread)
+                : Overwrites(null, new[] { (key, held.StoredSchemaId, held.Descriptor.SchemaName) });
+        }
+
+        // The one ownership predicate of a held record. A mark nothing explains (anything but a depth-0 slot the catalog comparison
+        // reported ignored) keeps the record unowned whatever is declared: declaring the reader's own id consents to nothing.
         private bool HeldOwned(CultStoredDocument held, CultDocumentDescriptor? written) =>
             written == null
-                ? Registry.Declared(held.StoredSchemaId) || held.StoredSchemaReadWhole
+                ? !Unexplained(held) && (Registry.Declared(held.StoredSchemaId) || held.StoredSchemaReadWhole)
                 : UpsertOwned(held, written);
+
+        private static bool Unexplained(CultStoredDocument held) => held.UnreadSlots is { Explained: false };
 
         // Whether a write of the written type may replace the record a cache holds: WrittenOwns over the entry that published the held
         // record's id when it was loaded (a record this cache wrote is published by its own type). The one answer for a store-backed
         // cache's staging and a store-less cache's.
         internal static bool UpsertOwned(CultStoredDocument held, CultDocumentDescriptor written) =>
+            !Unexplained(held) &&
             CultDocumentRegistry.WrittenOwns(
                 written.ToCatalogEntry(),
                 held.StoredSchemaId,
@@ -4358,6 +4460,16 @@ namespace GameCult.Caching
             refused[0].Key,
             inner);
 
+        // The refusal of a write or removal of a record held read-only for the slots its payload carries past this build's. It names the
+        // type and the counts, never a slot value.
+        private CultSchemaConflictException UnreadSlotsRefusal(CultStoredDocument held, string key, CultUnreadSlots unread) => new(
+            $"{held.Descriptor.SchemaName} record {key} is read-only: {unread.TypeName} was read with {unread.SlotCount} slots where this build declares {unread.DeclaredCount} " +
+            $"({unread.Occurrences} object(s) in the record). Writing it would drop data a newer writer stored; read it with types that declare those slots, or write it from that build.",
+            held.StoredSchemaId,
+            new[] { held.Descriptor.SchemaName },
+            key,
+            unread);
+
         // A flush or commit succeeded: nothing staged is left, writes or checks.
         protected void MarkFlushSucceeded()
         {
@@ -4461,6 +4573,9 @@ namespace GameCult.Caching
         protected abstract byte[] SerializePayload(object document, Type documentType);
         protected abstract object DeserializePayload(Type documentType, byte[] payload);
 
+        // A decode that also notes the slots it read past. A store kind that does not override it never marks.
+        internal virtual CultDecoded DeserializeMarked(Type documentType, byte[] payload) => new(DeserializePayload(documentType, payload), null);
+
         public override string ToString() => FileInfo.FullName;
 
         public override void PullAll() => Held(PullAllCore);
@@ -4495,7 +4610,7 @@ namespace GameCult.Caching
                     continue;
                 }
 
-                var stored = ToStoredDocument(record, version, snapshot.SchemaCatalog, DeserializePayload, out var report);
+                var stored = ToStoredDocument(record, version, snapshot.SchemaCatalog, DeserializeMarked, out var report);
                 reports.Add(report);
                 persisted[stored.Key.Value] = stored;
             }
@@ -4963,7 +5078,7 @@ namespace GameCult.Caching
             var record = durable?.Snapshot.Records.FirstOrDefault(candidate => string.Equals(candidate.Key, key, StringComparison.Ordinal));
             if (record == null || Foreign(record, durable!.Snapshot.SchemaCatalog, durable.Version(key)) != null)
                 return null;
-            return ToStoredDocument(record, durable.Version(key), durable.Snapshot.SchemaCatalog, DeserializePayload, out _);
+            return ToStoredDocument(record, durable.Version(key), durable.Snapshot.SchemaCatalog, DeserializeMarked, out _);
         }
 
         // The file now holds every record written, under the id and at the storedAt the write gave it, and the version of those bytes:

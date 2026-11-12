@@ -636,7 +636,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             record,
             VersionOf(metadata.Payload),
             catalog,
-            (type, payload) => CultDocumentMessagePackSerialization.DeserializeUntyped(type, payload, Registry),
+            (type, payload) => CultDocumentMessagePackSerialization.DeserializeMarked(type, payload, Registry),
             out report);
         // The manifest is this store's record of what is on disk: the stored id and the version a commit condition compares with.
         stored.StoredSchemaId = metadata.SchemaId;
