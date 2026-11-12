@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 import msgpack
+from cultcache_py.cache import CultCacheError
 
 from cultcache_py import (
     CultCache,
@@ -339,6 +340,85 @@ class StoreRowTests(unittest.TestCase):
         cache = CultCache.builder().register_document_type(declaring_document).add_generic_store(Held()).build()
         cache.pull_all_backing_stores()
         self.assertFalse(cache.is_writable(declaring_document, "consented"))
+
+    def test_a_removal_is_refused_where_is_writable_says_no(self) -> None:
+        path, cache = self._store("extra-slot-store.cc")
+        before = path.read_bytes()
+        other = define_database_entry_type("tests.other", [database_entry_field("a", 0, codec=t.string)], name="a")
+        cache2 = _open(self.tmp / "extra-slot-store.cc", surface_document, slot_unit_document, other)
+        self.assertFalse(cache2.is_writable(other, "clean"))
+        with self.assertRaises(SchemaConflictError):
+            cache2.delete(other, "clean")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertIsNotNone(cache2.get(surface_document, "clean"))
+        self.assertTrue(cache2.is_writable(other, "nothing-here"))
+
+    def test_a_global_document_is_not_writable_at_a_key_other_than_the_global_one(self) -> None:
+        solo = define_database_entry_type("tests.solo", [database_entry_field("a", 0, codec=t.string)], global_document=True)
+        cache = CultCache.builder().register_document_type(solo).build()
+        self.assertFalse(cache.is_writable(solo, "elsewhere"))
+        with self.assertRaises(CultCacheError):
+            cache.put(solo, "elsewhere", {"a": "x"})
+        with self.assertRaises(CultCacheError):
+            cache.delete(solo, "elsewhere")
+        self.assertTrue(cache.is_writable(solo, CultCache.GLOBAL_KEY))
+
+    def test_a_reload_replaces_the_marks_wholesale(self) -> None:
+        path, cache = self._store("extra-slot-store.cc")
+        self.assertFalse(cache.is_writable(surface_document, "marked"))
+        # The store is repaired by its owner: the marked record is rewritten clean. The reload must forget the old mark.
+        [snapshot] = list(msgpack.Unpacker(open(path, "rb"), raw=False))
+        clean = next(r for r in snapshot[2] if r[0] == "clean")
+        for record in snapshot[2]:
+            if record[0] in ("marked", "unit-arm"):
+                record[3] = clean[3] if record[0] == "marked" else record[3]
+        snapshot[2] = [r for r in snapshot[2] if r[0] != "unit-arm"]
+        path.write_bytes(msgpack.packb(snapshot, use_bin_type=True))
+        cache.pull_all_backing_stores()
+        self.assertTrue(cache.is_writable(surface_document, "marked"))
+        self.assertEqual(cache._state.unread, {})
+
+    def test_a_listed_id_whose_catalog_reports_no_extra_slot_does_not_consent(self) -> None:
+        wide = next(e for e in SingleFileMessagePackBackingStore(VECTORS / "extra-slot-consent.cc").pull_all() if e.key == "consented")
+        same = dataclasses.replace(wide, catalog_entry=declaring_document.catalog_entry())  # the stored entry has no slot past the reader's
+
+        class Held:
+            def pull_all(self):
+                return [same]
+
+            def push(self, envelope): ...
+
+            def push_all(self, envelopes): ...
+
+            def delete(self, type, key): ...
+
+        cache = CultCache.builder().register_document_type(declaring_document).add_generic_store(Held()).build()
+        cache.pull_all_backing_stores()
+        self.assertFalse(cache.is_writable(declaring_document, "consented"))
+
+    def test_a_record_stored_under_the_readers_own_id_is_never_consented(self) -> None:
+        own = dataclasses.replace(
+            next(e for e in SingleFileMessagePackBackingStore(VECTORS / "extra-slot-consent.cc").pull_all() if e.key == "consented"),
+            schema_id="tests.union_surface.v2",
+        )
+        wider = dataclasses.replace(own.catalog_entry, schema_id="tests.union_surface.v2", compatible_schema_ids=("tests.union_surface.v2",))
+        listing = dataclasses.replace(
+            declaring_document, schema_id="tests.union_surface.v2", compatible_schema_ids=("tests.union_surface.wide", "tests.union_surface.v2")
+        )
+
+        class Held:
+            def pull_all(self):
+                return [dataclasses.replace(own, catalog_entry=wider)]
+
+            def push(self, envelope): ...
+
+            def push_all(self, envelopes): ...
+
+            def delete(self, type, key): ...
+
+        cache = CultCache.builder().register_document_type(listing).add_generic_store(Held()).build()
+        cache.pull_all_backing_stores()
+        self.assertFalse(cache.is_writable(listing, "consented"))
 
     def test_writing_another_record_and_flushing_carries_the_marked_one_unchanged(self) -> None:
         path, cache = self._store("extra-slot-store.cc")
