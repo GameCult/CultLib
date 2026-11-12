@@ -1253,12 +1253,14 @@ pub trait CacheBackingStore: Send {
     fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()>;
     fn delete(&mut self, entry: &CultCacheEnvelope) -> Result<()>;
 
-    /// Replaces everything the store holds with `entries` in one atomic step:
-    /// on `Err` the store still holds exactly what it held before. A cache
-    /// batch (`put_prepared_batch`) is all-or-nothing only through this. There
-    /// is no default, because a replace assembled from `delete` and `push`
-    /// calls leaves the store emptied or partial when one of them fails; a
-    /// store without an atomic replace does not compile:
+    /// Writes `entries` onto the store as it is when the write lands, in one
+    /// atomic step: a record under the same identity is replaced and no other
+    /// record is removed or changed, so a writer whose image is stale cannot
+    /// drop a record it never saw. On `Err` the store still holds exactly what
+    /// it held before. A cache batch (`put_prepared_batch`) is all-or-nothing
+    /// only through this. There is no default, because a write assembled from
+    /// `push` calls leaves the store partial when one of them fails; a store
+    /// without an atomic write does not compile:
     ///
     /// ```compile_fail,E0046
     /// use cultcache_rs::{CacheBackingStore, CultCacheEnvelope};
@@ -1675,13 +1677,7 @@ impl SingleFileMessagePackBackingStore {
         // payloads this store passes through may hold ids), one that is gone or legacy is written v1. The file is read by
         // the same reader as an open, so a store this runtime cannot read completely, a variant included, is refused
         // and never overwritten.
-        let disk = match self.read_store_unlocked() {
-            // A dangling link holds no store, so a whole-file replace has no header to keep and replaces the link (R3 pins
-            // this). The only NotFound the reader returns is that one: a merging writer has already refused it when it
-            // read the current entries.
-            Err(error) if io_not_found(&error) => DiskStore::absent(),
-            other => other?,
-        };
+        let disk = self.read_store_unlocked()?;
         let entries = settle_one_record_per_key(entries, &disk)?;
         let bytes = encode_store_snapshot(&entries, &disk)
             .and_then(|snapshot| rmp_serde::to_vec(&snapshot).context("failed to encode MessagePack"))
@@ -1962,14 +1958,18 @@ impl CacheBackingStore for SingleFileMessagePackBackingStore {
             }
 
             // Of entries sharing a key and a schema id the last one given is the record, whatever their type names (a type
-            // renamed under a stable id); a second schema id under a key reaches the commit guard.
+            // renamed under a stable id); it replaces the held record under that key and schema id. A second schema id
+            // under a key reaches the commit guard, which judges the merged store.
             let mut by_id = BTreeMap::<(String, String), &CultCacheEnvelope>::new();
             for entry in entries {
                 by_id.insert((schema_identity(entry).to_string(), entry.key.clone()), entry);
             }
-            let mut entries: Vec<CultCacheEnvelope> = by_id.into_values().cloned().collect();
-            entries.sort_by_key(entry_id);
-            self.write_all_unlocked(&entries)
+            let mut merged = self.read_all_unlocked()?;
+            let replaced: BTreeSet<_> = by_id.values().map(|entry| entry_id(entry)).collect();
+            merged.retain(|held| !replaced.contains(&entry_id(held)));
+            merged.extend(by_id.into_values().cloned());
+            merged.sort_by_key(entry_id);
+            self.write_all_unlocked(&merged)
         })
     }
 }
@@ -2757,13 +2757,6 @@ impl CacheBackingStore for OwnedRedbMessagePackBackingStore {
         let write = self.inner.database.begin_write()?;
         {
             let mut table = write.open_table(REDB_ENVELOPES)?;
-            let keys = table
-                .iter()?
-                .map(|row| Ok(row?.0.value().to_vec()))
-                .collect::<Result<Vec<_>>>()?;
-            for key in keys {
-                table.remove(key.as_slice())?;
-            }
             for entry in entries {
                 insert_redb_entry(&mut table, entry)?;
             }
@@ -2899,13 +2892,6 @@ impl CacheBackingStore for RedbMessagePackBackingStore {
             let write = database.begin_write()?;
             {
                 let mut table = write.open_table(REDB_ENVELOPES)?;
-                let keys = table
-                    .iter()?
-                    .map(|row| Ok(row?.0.value().to_vec()))
-                    .collect::<Result<Vec<_>>>()?;
-                for key in keys {
-                    table.remove(key.as_slice())?;
-                }
                 for entry in entries {
                     insert_redb_entry(&mut table, entry)?;
                 }
@@ -3602,18 +3588,12 @@ impl CultCache {
         }
         let change = self.judge_unique(&staged.iter().collect::<Vec<_>>())?;
         if let Some(store_index) = store_index {
-            // The home store receives its own records only: those it already holds in this cache plus the staged ones, and
-            // the records it carries that no registered type claims: push_all replaces the store's records, so a foreign
-            // record is laid back as the store read it.
-            let snapshot: Vec<_> = next
-                .values()
-                .filter(|entry| self.resolve_route_index(&entry.r#type) == Some(store_index))
-                .chain(self.foreign.iter().filter(|(home, _)| *home == store_index).map(|(_, entry)| entry))
-                .cloned()
-                .collect();
+            // The home store is handed the staged records alone and applies them onto what it holds now.
+            // A key staged twice lands as its last record, whatever the store.
+            let landing: BTreeMap<_, _> = staged.iter().map(|entry| (entry_id(entry), entry.clone())).collect();
             self.stores[store_index]
                 .store
-                .push_all(&snapshot, PushAllOptions::default())?;
+                .push_all(&landing.into_values().collect::<Vec<_>>(), PushAllOptions::default())?;
         }
         self.entries = next;
         change.apply(&mut self.index_holders);
@@ -4322,12 +4302,6 @@ fn release_lock<T>(lock: File, result: Result<T>) -> Result<T> {
         injected_write_fault(WriteStep::Unlock).and_then(|()| fs2::FileExt::unlock(&lock));
     drop(lock);
     result
-}
-
-fn io_not_found(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound))
 }
 
 /// True only when nothing is at `path`; a symbolic link, dangling or not, is something.
@@ -5398,6 +5372,12 @@ mod tests {
         assert_eq!(rows[0].key, "current");
         let _: u64 = rmp_serde::from_slice(&rows[0].payload)?;
         Ok(())
+    }
+
+    fn io_not_found(error: &anyhow::Error) -> bool {
+        error
+            .chain()
+            .any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound))
     }
 
     fn test_envelope(r#type: &str, key: &str, payload: &[u8]) -> CultCacheEnvelope {
@@ -7980,15 +7960,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn r3_decides_resolve_or_refuse_a_push_all_through_a_dangling_link_replaces_the_link() -> Result<()> {
+    fn a_push_all_through_a_dangling_link_is_refused_like_push_and_writes_nothing() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let volume = temp.path().join("volume");
         fs::create_dir(&volume)?;
         let link = temp.path().join("store.cc");
         std::os::unix::fs::symlink(volume.join("store.cc"), &link)?;
 
-        SingleFileMessagePackBackingStore::new(&link).push_all(&[snapshot_envelope("a", b"1")], PushAllOptions::default())?;
-        assert!(fs::symlink_metadata(&link)?.file_type().is_file(), "the link was replaced by a regular file");
+        let mut store = SingleFileMessagePackBackingStore::new(&link);
+        assert!(store.push_all(&[snapshot_envelope("a", b"1")], PushAllOptions::default()).is_err());
+        assert!(store.push(&snapshot_envelope("a", b"1")).is_err());
+        assert!(fs::symlink_metadata(&link)?.file_type().is_symlink(), "the link is left as it was");
         assert_eq!(fs::read_dir(&volume)?.count(), 0, "nothing reached the link's volume");
         Ok(())
     }
@@ -8189,6 +8171,91 @@ mod tests {
         assert!(routed.put("again", &settings).unwrap_err().downcast_ref::<CultCacheLoadRefused>().is_some());
         routed.pull_all_backing_stores()?;
         routed.put("again", &settings)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_stale_cache_batch_keeps_the_records_another_writer_added() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let single = temp.path().join("single.cc");
+        let redb = temp.path().join("redb.db");
+        let open = |path: &Path| -> Result<CultCache> {
+            let mut cache = CultCache::new();
+            cache.register_registry(TestEntries)?;
+            if path.extension().is_some_and(|extension| extension == "db") {
+                cache.add_generic_backing_store(RedbMessagePackBackingStore::new(path)?)?;
+            } else {
+                cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(path))?;
+            }
+            cache.pull_all_backing_stores()?;
+            Ok(cache)
+        };
+        for path in [&single, &redb] {
+            let mut seed = open(path)?;
+            seed.put("held", &Settings { theme: "held".to_string(), retries: 1 })?;
+            let mut stale = open(path)?;
+            let mut other = open(path)?;
+            other.put("held", &Settings { theme: "other-newer".to_string(), retries: 3 })?;
+            other.put("added", &Settings { theme: "other".to_string(), retries: 2 })?;
+            let (staged, _) = stale.prepare_entry("mine", &Note { title: "t".to_string(), body: "b".to_string() })?;
+            stale.put_prepared_batch(vec![staged])?;
+            let reader = open(path)?;
+            assert_eq!(reader.get_required::<Settings>("added")?.theme, "other", "{path:?}");
+            assert_eq!(reader.get_required::<Settings>("held")?.theme, "other-newer", "a record another writer updated is not reverted");
+            assert_eq!(reader.get_required::<Note>("mine")?.title, "t", "{path:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_store_merges_push_all_and_lands_the_last_of_a_repeated_key() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let stores: Vec<Box<dyn CacheBackingStore>> = vec![
+            Box::new(SingleFileMessagePackBackingStore::new(temp.path().join("single.cc"))),
+            Box::new(RedbMessagePackBackingStore::new(temp.path().join("redb.db"))?),
+            Box::new(OwnedRedbMessagePackBackingStore::new(temp.path().join("owned.db"))?),
+        ];
+        for mut store in stores {
+            store.push(&test_envelope("pushall.merge", "kept", b"kept"))?;
+            store.push_all(&[test_envelope("pushall.merge", "new", b"new")], PushAllOptions::default())?;
+            let keys: Vec<_> = store.pull_all()?.into_iter().map(|entry| entry.key).collect();
+            assert_eq!(keys, ["kept", "new"]);
+        }
+        // A batch naming a key twice lands the last, in the single-file and the redb stores alike.
+        for path in [temp.path().join("dup.cc"), temp.path().join("dup.db")] {
+            let mut cache = CultCache::new();
+            cache.register_registry(TestEntries)?;
+            if path.extension().is_some_and(|extension| extension == "db") {
+                cache.add_generic_backing_store(RedbMessagePackBackingStore::new(&path)?)?;
+            } else {
+                cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+            }
+            cache.pull_all_backing_stores()?;
+            let (first, _) = cache.prepare_entry("k", &Settings { theme: "first".to_string(), retries: 1 })?;
+            let (last, _) = cache.prepare_entry("k", &Settings { theme: "last".to_string(), retries: 2 })?;
+            cache.put_prepared_batch(vec![first, last])?;
+            assert_eq!(cache.get_required::<Settings>("k")?.theme, "last");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn push_all_replaces_a_record_held_under_another_schema_id_as_push_does() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut store = SingleFileMessagePackBackingStore::new(temp.path().join("store.cc"));
+        let mut held = snapshot_envelope("k", b"old");
+        held.schema_id = Some("legacy.id".to_string());
+        store.push(&held)?;
+        let mut replacement = snapshot_envelope("k", b"new");
+        replacement.schema_id = None;
+        let mut by_push = store.clone();
+        by_push.push(&replacement)?;
+        assert_eq!(store.pull_all()?.len(), 1);
+        store.push(&held)?;
+        store.push_all(&[replacement.clone()], PushAllOptions::default())?;
+        let held_now = store.pull_all()?;
+        assert_eq!(held_now.len(), 1, "one record under the key");
+        assert_eq!(held_now[0].payload, replacement.payload);
         Ok(())
     }
 }

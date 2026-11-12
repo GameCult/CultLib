@@ -384,10 +384,9 @@ an empty store. Any other failure to reach it, such as a symlink loop, a file
 where a parent directory should be, or a missing permission, is an I/O error.
 A store file that exists and holds zero bytes is `Undecodable`: no CultCache
 writer leaves one. A symbolic link whose target is gone is not a missing store:
-reading it is an I/O error, so a read-then-write (`push`, `delete`, the exchanges)
-fails before writing. Writes do not yet follow links: a write through a live link,
-and a `push_all` through a dangling one, replace the link with a regular file and
-leave its target alone. A refusal names no
+reading it is an I/O error, so a read-then-write (`push`, `push_all`, `delete`, the exchanges)
+fails before writing. Writes do not yet follow links: a write through a live link
+replaces the link with a regular file and leaves its target alone. A refusal names no
 value read from the file; it names a record only by its key and schema id, and
 a header only when it has the shape `cultcache.store.v<digits>`.
 
