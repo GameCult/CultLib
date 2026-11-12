@@ -13,6 +13,7 @@ from typing import Any, Callable, Iterator, TypeVar
 
 import msgpack
 
+from .documents import UnreadSlots
 from .backing_store import (
     CultCacheEnvelope,
     CultCacheSchemaCatalogEntry,
@@ -46,9 +47,19 @@ class SchemaConflictError(ValueError):
     """A write the catalog cannot describe: records of different types under one schema id, two arrived schemas that share an id
     and disagree on the schema name, or a record no chosen entry publishes. Nothing is written. It names the id, the names
     involved (`schema_names`) and a record key (`record_key`). A cache raises it too, with an empty record key, when a
-    document registers a schema id another registered document already carries."""
+    document registers a schema id another registered document already carries. `unread_slots` is None except for the refusal to
+    write or remove a record held read-only because its payload carries slots past the declared ones; its message names the type
+    and both slot counts and never holds a slot value."""
 
-    def __init__(self, schema_id: str, schema_names: list[str], record_key: str, *, message: str | None = None) -> None:
+    def __init__(
+        self,
+        schema_id: str,
+        schema_names: list[str],
+        record_key: str,
+        *,
+        message: str | None = None,
+        unread_slots: UnreadSlots | None = None,
+    ) -> None:
         super().__init__(
             message
             or f"Schema id {schema_id!r} cannot describe record {record_key!r}: {', '.join(repr(name) for name in schema_names)}"
@@ -56,6 +67,7 @@ class SchemaConflictError(ValueError):
         self.schema_id = schema_id
         self.schema_names = schema_names
         self.record_key = record_key
+        self.unread_slots = unread_slots
 
 
 class JsonLinesBackingStore:

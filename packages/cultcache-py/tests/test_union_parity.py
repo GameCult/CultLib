@@ -261,7 +261,9 @@ class UnionSurfaceVectorTests(unittest.TestCase):
             else:
                 read_only += 1
                 self.assertEqual(outcome_kind, "read-only", file)
-                self.assertEqual(surface_document.decode_payload(payload), _surface_value(), file)
+                value, mark = surface_document.decode_payload_marked(payload)
+                self.assertEqual(value, _surface_value(), file)
+                self.assertIsNotNone(mark, file)  # read past and marked: tests/test_slot_readonly.py pins what the mark holds
         self.assertEqual((refused, read_only), (5, 4))
 
 
@@ -526,7 +528,9 @@ class BoundsVectorTests(unittest.TestCase):
                     surface_document.encode_payload(surface_document.decode_payload(payload)), _vector(detail), file
                 )
             elif outcome_kind == "read-only":
-                self.assertEqual(surface_document.decode_payload(payload), _surface_value(), file)
+                value, mark = surface_document.decode_payload_marked(payload)
+                self.assertEqual(value, _surface_value(), file)
+                self.assertIsNotNone(mark, file)
             else:
                 with self.assertRaises(ValueError, msg=file) as caught:
                     surface_document.decode_payload(payload)
