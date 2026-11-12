@@ -793,6 +793,27 @@ test("every bytes-after vector is refused by the one owner, by count, on the cod
   }
 });
 
+test("a payload with an unread slot and a tail is refused by count before any slot is marked or the record held", async () => {
+  const withSlot = await read("extra-slot-record.msgpack");
+  const surface = surfaceDocument();
+  const tailed = Uint8Array.from([...withSlot, 0xc0]);
+  const whole = CultCache.builder().withDocumentType(surface).withGenericStore(memoryStore([envelopeOf(withSlot)])).build();
+  await whole.pullAllBackingStores();
+  assert.ok(whole.unreadSlots(surface, "surface"), "without a tail the record is held with its unread slots");
+
+  const loading = CultCache.builder().withDocumentType(surface).withGenericStore(memoryStore([envelopeOf(tailed)])).build();
+  await assertBytesAfterRefused("extra-slot-record+tail", 1, () => loading.pullAllBackingStores(), surface.type);
+  assert.equal(loading.get(surface, "surface"), undefined);
+  assert.equal(loading.unreadSlots(surface, "surface"), undefined);
+
+  const written: CultCacheEnvelope[] = [];
+  const putting = CultCache.builder().withDocumentType(surface).withGenericStore(memoryStore(written)).build();
+  await assertBytesAfterRefused("extra-slot-record+tail", 1, () => putting.putEnvelope(surface, envelopeOf(tailed)), surface.type);
+  assert.equal(written.length, 0);
+  assert.equal(putting.get(surface, "surface"), undefined);
+  assert.equal(putting.unreadSlots(surface, "surface"), undefined);
+});
+
 test("a payload that ends early is not bytes after its value: the decoder refuses it, and a user formatter's bytes are not walked", async () => {
   const whole = await read("union-surface.msgpack");
   const surface = surfaceDocument();
