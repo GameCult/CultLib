@@ -1677,13 +1677,7 @@ impl SingleFileMessagePackBackingStore {
         // payloads this store passes through may hold ids), one that is gone or legacy is written v1. The file is read by
         // the same reader as an open, so a store this runtime cannot read completely, a variant included, is refused
         // and never overwritten.
-        let disk = match self.read_store_unlocked() {
-            // A dangling link holds no store, so a whole-file replace has no header to keep and replaces the link (R3 pins
-            // this). The only NotFound the reader returns is that one: a merging writer has already refused it when it
-            // read the current entries.
-            Err(error) if io_not_found(&error) => DiskStore::absent(),
-            other => other?,
-        };
+        let disk = self.read_store_unlocked()?;
         let entries = settle_one_record_per_key(entries, &disk)?;
         let bytes = encode_store_snapshot(&entries, &disk)
             .and_then(|snapshot| rmp_serde::to_vec(&snapshot).context("failed to encode MessagePack"))
@@ -1971,7 +1965,8 @@ impl CacheBackingStore for SingleFileMessagePackBackingStore {
                 by_id.insert((schema_identity(entry).to_string(), entry.key.clone()), entry);
             }
             let mut merged = self.read_all_unlocked()?;
-            merged.retain(|held| !by_id.contains_key(&(schema_identity(held).to_string(), held.key.clone())));
+            let replaced: BTreeSet<_> = by_id.values().map(|entry| entry_id(entry)).collect();
+            merged.retain(|held| !replaced.contains(&entry_id(held)));
             merged.extend(by_id.into_values().cloned());
             merged.sort_by_key(entry_id);
             self.write_all_unlocked(&merged)
@@ -3594,9 +3589,11 @@ impl CultCache {
         let change = self.judge_unique(&staged.iter().collect::<Vec<_>>())?;
         if let Some(store_index) = store_index {
             // The home store is handed the staged records alone and applies them onto what it holds now.
+            // A key staged twice lands as its last record, whatever the store.
+            let landing: BTreeMap<_, _> = staged.iter().map(|entry| (entry_id(entry), entry.clone())).collect();
             self.stores[store_index]
                 .store
-                .push_all(&staged, PushAllOptions::default())?;
+                .push_all(&landing.into_values().collect::<Vec<_>>(), PushAllOptions::default())?;
         }
         self.entries = next;
         change.apply(&mut self.index_holders);
@@ -4305,12 +4302,6 @@ fn release_lock<T>(lock: File, result: Result<T>) -> Result<T> {
         injected_write_fault(WriteStep::Unlock).and_then(|()| fs2::FileExt::unlock(&lock));
     drop(lock);
     result
-}
-
-fn io_not_found(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound))
 }
 
 /// True only when nothing is at `path`; a symbolic link, dangling or not, is something.
@@ -5381,6 +5372,12 @@ mod tests {
         assert_eq!(rows[0].key, "current");
         let _: u64 = rmp_serde::from_slice(&rows[0].payload)?;
         Ok(())
+    }
+
+    fn io_not_found(error: &anyhow::Error) -> bool {
+        error
+            .chain()
+            .any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound))
     }
 
     fn test_envelope(r#type: &str, key: &str, payload: &[u8]) -> CultCacheEnvelope {
@@ -8194,14 +8191,50 @@ mod tests {
             Ok(cache)
         };
         for path in [&single, &redb] {
+            let mut seed = open(path)?;
+            seed.put("held", &Settings { theme: "held".to_string(), retries: 1 })?;
             let mut stale = open(path)?;
             let mut other = open(path)?;
+            other.put("held", &Settings { theme: "other-newer".to_string(), retries: 3 })?;
             other.put("added", &Settings { theme: "other".to_string(), retries: 2 })?;
             let (staged, _) = stale.prepare_entry("mine", &Note { title: "t".to_string(), body: "b".to_string() })?;
             stale.put_prepared_batch(vec![staged])?;
             let reader = open(path)?;
             assert_eq!(reader.get_required::<Settings>("added")?.theme, "other", "{path:?}");
+            assert_eq!(reader.get_required::<Settings>("held")?.theme, "other-newer", "a record another writer updated is not reverted");
             assert_eq!(reader.get_required::<Note>("mine")?.title, "t", "{path:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_store_merges_push_all_and_lands_the_last_of_a_repeated_key() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let stores: Vec<Box<dyn CacheBackingStore>> = vec![
+            Box::new(SingleFileMessagePackBackingStore::new(temp.path().join("single.cc"))),
+            Box::new(RedbMessagePackBackingStore::new(temp.path().join("redb.db"))?),
+            Box::new(OwnedRedbMessagePackBackingStore::new(temp.path().join("owned.db"))?),
+        ];
+        for mut store in stores {
+            store.push(&test_envelope("pushall.merge", "kept", b"kept"))?;
+            store.push_all(&[test_envelope("pushall.merge", "new", b"new")], PushAllOptions::default())?;
+            let keys: Vec<_> = store.pull_all()?.into_iter().map(|entry| entry.key).collect();
+            assert_eq!(keys, ["kept", "new"]);
+        }
+        // A batch naming a key twice lands the last, in the single-file and the redb stores alike.
+        for path in [temp.path().join("dup.cc"), temp.path().join("dup.db")] {
+            let mut cache = CultCache::new();
+            cache.register_registry(TestEntries)?;
+            if path.extension().is_some_and(|extension| extension == "db") {
+                cache.add_generic_backing_store(RedbMessagePackBackingStore::new(&path)?)?;
+            } else {
+                cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+            }
+            cache.pull_all_backing_stores()?;
+            let (first, _) = cache.prepare_entry("k", &Settings { theme: "first".to_string(), retries: 1 })?;
+            let (last, _) = cache.prepare_entry("k", &Settings { theme: "last".to_string(), retries: 2 })?;
+            cache.put_prepared_batch(vec![first, last])?;
+            assert_eq!(cache.get_required::<Settings>("k")?.theme, "last");
         }
         Ok(())
     }
