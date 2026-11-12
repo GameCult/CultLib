@@ -2027,6 +2027,7 @@ impl std::fmt::Debug for RedbMessagePackBackingStore {
 impl RedbMessagePackBackingStore {
     pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
+        refuse_linked(&path)?;
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -2400,6 +2401,7 @@ impl std::fmt::Debug for OwnedRedbMessagePackBackingStore {
 impl OwnedRedbMessagePackBackingStore {
     pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
+        refuse_linked(&path)?;
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -7991,6 +7993,25 @@ mod tests {
         assert!(error.downcast_ref::<StoreLinkedError>().is_some(), "{error:#}");
         assert!(fs::symlink_metadata(&link)?.file_type().is_symlink());
         assert_eq!(fs::read_dir(&real)?.count(), 0);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_redb_store_at_a_live_link_is_refused_before_it_opens_the_target() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let volume = temp.path().join("volume");
+        fs::create_dir(&volume)?;
+        let target = volume.join("store.redb");
+        fs::write(&target, b"untouched")?;
+        let link = temp.path().join("link.redb");
+        std::os::unix::fs::symlink(&target, &link)?;
+        let error = RedbMessagePackBackingStore::new(&link).unwrap_err();
+        assert!(error.downcast_ref::<StoreLinkedError>().is_some(), "{error:#}");
+        let error = OwnedRedbMessagePackBackingStore::new(&link).unwrap_err();
+        assert!(error.downcast_ref::<StoreLinkedError>().is_some(), "{error:#}");
+        assert!(fs::symlink_metadata(&link)?.file_type().is_symlink());
+        assert_eq!(fs::read(&target)?, b"untouched");
         Ok(())
     }
 
