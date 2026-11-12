@@ -1,6 +1,8 @@
 use anyhow::Result;
 use anyhow::anyhow;
 use cultcache_rs::CultCache;
+use cultcache_rs::CultSlots;
+use cultcache_rs::CultUnion;
 use cultcache_rs::DatabaseEntry;
 use cultcache_rs::SingleFileMessagePackBackingStore;
 use serde_json::json;
@@ -39,6 +41,100 @@ struct CultCacheInteropDeck {
     marks: Vec<CultCacheInteropMark>,
 }
 
+// A union field and nested bytes: the shapes a Bifrost-style store holds beyond plain strings.
+#[derive(Clone, Debug, PartialEq, Eq, CultUnion)]
+enum InteropArm {
+    #[cultcache(key = 0)]
+    Text(InteropTextArm),
+    #[cultcache(key = 1)]
+    Pack(InteropPackArm),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, CultSlots)]
+struct InteropTextArm {
+    #[cultcache(key = 0)]
+    text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, CultSlots)]
+struct InteropPackArm {
+    #[cultcache(key = 0)]
+    label: String,
+    #[cultcache(key = 1)]
+    chunks: Vec<serde_bytes::ByteBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "cultcache.interop-shape", schema = "CultCacheInteropShape")]
+struct CultCacheInteropShape {
+    #[cultcache(key = 0)]
+    document_id: String,
+    #[cultcache(key = 1)]
+    arm: InteropArm,
+    #[cultcache(key = 2)]
+    raw: serde_bytes::ByteBuf,
+}
+
+fn shapes() -> Vec<CultCacheInteropShape> {
+    vec![
+        CultCacheInteropShape {
+            document_id: "shape:text".into(),
+            arm: InteropArm::Text(InteropTextArm { text: "union arm 0".into() }),
+            raw: (0..=255u8).collect::<Vec<_>>().into(),
+        },
+        CultCacheInteropShape {
+            document_id: "shape:pack".into(),
+            arm: InteropArm::Pack(InteropPackArm {
+                label: "union arm 1".into(),
+                chunks: vec![vec![0xc0, 0xc1, 0x00].into(), vec![].into(), vec![0x92, 0x01, 0x02].into()],
+            }),
+            raw: vec![0xde, 0xad, 0xbe, 0xef].into(),
+        },
+    ]
+}
+
+fn write_shapes(file: &str) -> Result<()> {
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<CultCacheInteropShape>()?;
+    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(file))?;
+    cache.pull_all_backing_stores()?;
+    for shape in shapes() {
+        cache.put(&shape.document_id, &shape)?;
+    }
+    print_shapes(shapes())
+}
+
+/// Opens the store through the read-only snapshot door: no lock file, no staging file, no rewrite.
+fn read_shapes(file: &str) -> Result<()> {
+    let envelopes = SingleFileMessagePackBackingStore::new(file).pull_all_read_only_snapshot()?;
+    let mut found = Vec::new();
+    for envelope in envelopes.iter().filter(|envelope| envelope.r#type == CultCacheInteropShape::TYPE) {
+        found.push(cultcache_rs::decode_payload::<CultCacheInteropShape>(&envelope.payload)?);
+    }
+    print_shapes(found)
+}
+
+fn print_shapes(mut found: Vec<CultCacheInteropShape>) -> Result<()> {
+    let hex = |bytes: &[u8]| bytes.iter().map(|byte| format!("{byte:02X}")).collect::<String>();
+    found.sort_by(|a, b| a.document_id.cmp(&b.document_id));
+    let rows: Vec<_> = found
+        .iter()
+        .map(|shape| {
+            let arm = match &shape.arm {
+                InteropArm::Text(text) => json!({ "kind": "text", "text": text.text }),
+                InteropArm::Pack(pack) => json!({
+                    "kind": "pack",
+                    "label": pack.label,
+                    "chunks": pack.chunks.iter().map(|chunk| hex(chunk)).collect::<Vec<_>>(),
+                }),
+            };
+            json!({ "documentId": shape.document_id, "arm": arm, "raw": hex(&shape.raw) })
+        })
+        .collect();
+    println!("{}", serde_json::to_string(&rows)?);
+    Ok(())
+}
+
 fn read_deck(file: &str) -> Result<()> {
     let mut cache = CultCache::new();
     cache.register_entry_type::<CultCacheInteropDeck>()?;
@@ -70,6 +166,8 @@ fn main() -> Result<()> {
         "write" => write_note(file, require_arg(&options, "runtime-id")?)?,
         "read" => read_note(file)?,
         "read-deck" => read_deck(file)?,
+        "write-shapes" => write_shapes(file)?,
+        "read-shapes" => read_shapes(file)?,
         "hold-lock" => hold_lock(file, require_arg(&options, "ms")?.parse()?)?,
         _ => return Err(anyhow!("unknown mode {mode}")),
     }

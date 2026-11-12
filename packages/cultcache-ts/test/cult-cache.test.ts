@@ -33,8 +33,7 @@ const cultcacheRsRoot = existsSync(resolve(cultLibRoot, "packages", "cultcache-r
   ? resolve(cultLibRoot, "packages", "cultcache-rs")
   : resolve(cultCacheTsRoot, "..", "cultcache-rs");
 const rustInteropBinary = resolve(
-  cultcacheRsRoot,
-  "target",
+  process.env.CARGO_TARGET_DIR ?? resolve(cultcacheRsRoot, "target"),
   "debug",
   "examples",
   process.platform === "win32" ? "cultcache_interop.exe" : "cultcache_interop",
@@ -1270,6 +1269,48 @@ test("CultCache v1 MessagePack stores are readable across TS, Rust, C#, and Pyth
     const read = await reader.read(catalogFile);
     assert.equal(read.documentId, routed.documentId, `${reader.name} failed to read the routed catalog store`);
     assert.equal(read.body, "One home store per document type.");
+  }
+});
+
+// A Bifrost-shaped store (a union field, nested bytes) written by one of C# and Rust is opened by the other: C# reads through
+// its store, Rust through the read-only snapshot door, which takes no lock and writes nothing. Leftover staging files from an
+// interrupted write of either runtime sit beside the store; a read neither deletes them nor lets them change what it reads, and
+// the store file's bytes are the same after every read.
+test("A store written by C# or Rust with a union and nested bytes is read back equal by the other, read-only, past leftover staging files", async () => {
+  await buildInteropPeers();
+  const tempDir = await mkdtemp(join(tmpdir(), "cultcache-shapes-"));
+  const rustRead = (file: string) => runJsonCommand("rust-read-shapes", rustInteropBinary, ["read-shapes", "--file", file], cultcacheRsRoot);
+  const csharpRead = (file: string) => runJsonCommand("csharp-read-shapes", dotnetCommand, [csharpInteropDll, "read-shapes", "--file", file], cultLibRoot);
+  const peers = [
+    {
+      writer: "csharp",
+      write: (file: string) => runJsonCommand("csharp-write-shapes", dotnetCommand, [csharpInteropDll, "write-shapes", "--file", file], cultLibRoot),
+      read: rustRead,
+    },
+    {
+      writer: "rust",
+      write: (file: string) => runJsonCommand("rust-write-shapes", rustInteropBinary, ["write-shapes", "--file", file], cultcacheRsRoot),
+      read: csharpRead,
+    },
+  ];
+  for (const { writer, write, read } of peers) {
+    const file = join(tempDir, `${writer}.cc`);
+    const written = await write(file);
+    assert.equal(written.length, 2);
+    // The leftovers an interrupted write leaves: C# stages as `.<name>.<guid N>.tmp`, Rust as `<name>.<guid>.tmp`; both hold partial bytes.
+    const leftovers = [
+      join(tempDir, `.${writer}.cc.0123456789abcdef0123456789abcdef.tmp`),
+      join(tempDir, `${writer}.cc.00000000-0000-4000-8000-000000000000.tmp`),
+    ];
+    for (const leftover of leftovers) {
+      await writeFile(leftover, Buffer.from([0x93, 0xb2]));
+    }
+    const before = await readFile(file);
+    assert.deepEqual(await read(file), written, `${writer}'s store did not read back equal`);
+    assert.deepEqual(await readFile(file), before, `reading ${writer}'s store changed its bytes`);
+    for (const leftover of leftovers) {
+      assert.ok(await exists(leftover), `reading ${writer}'s store removed ${leftover}`);
+    }
   }
 });
 
