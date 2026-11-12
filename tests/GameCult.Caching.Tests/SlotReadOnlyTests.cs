@@ -313,6 +313,7 @@ namespace GameCult.Caching.Tests
             reader.AddBackingStore(Store());
             var unread = Stored(reader, Marked).UnreadSlots;
             Assert.That(unread, Is.Not.Null, "the store kind decodes through the marking path");
+            Assert.That(unread!.Explained, Is.True, "depth 0 and reported by the catalog comparison");
             Assert.That(unread.TypeName, Is.EqualTo(nameof(NarrowDoc)));
             Assert.That(unread.SlotCount, Is.EqualTo(3));
             Assert.That(unread.DeclaredCount, Is.EqualTo(2));
@@ -578,6 +579,21 @@ namespace GameCult.Caching.Tests
             var refusal = Assert.Throws<InvalidOperationException>(() => cache.Commit(batch => batch.Flatten(Var)))!;
             Assert.That(refusal, Is.Not.InstanceOf<CultSchemaConflictException>(), "nothing on the chain is lost: the refusal is the store's read-only one");
             Assert.That(refusal.Message, Does.Contain("read-only backing store"));
+        }
+
+        // A key the cache does not hold, but a store carries as a foreign record: the store's removal check refuses it.
+        [Test]
+        public void IsWritableIsFalseForAnUnheldKeyAStoreListsForeign()
+        {
+            var path = Path.Combine(_directory, "foreign.cc");
+            using (var writer = Open(path, GapRegistry))
+                Assert.That(writer.Commit(batch => batch.Upsert(new GapDoc { Name = "g" }, new CultRecordHandle<GapDoc>(Marked))), Is.True);
+
+            using var cache = Open(path, SurfaceRegistry);
+            Assert.That(cache.GetStored(Marked), Is.Null, "the cache does not hold a record no registered type reads");
+            Assert.That(cache.IsWritable(Marked), Is.False);
+            AssertWriteAgrees(cache, Marked, () => cache.Commit(batch => batch.Remove(Marked)));
+            Assert.That(cache.IsWritable(Unheld), Is.True);
         }
 
         [Test]
