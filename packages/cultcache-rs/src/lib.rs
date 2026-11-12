@@ -4488,7 +4488,9 @@ impl ReplaceKernel for WindowsKernel {
         };
 
         let staged_wide = wide(staged);
-        let destination_wide = wide(destination);
+        // FileName with a null RootDirectory must be a full path; MoveFileExW takes a relative one.
+        let destination_wide =
+            wide(&std::path::absolute(destination).unwrap_or_else(|_| destination.to_path_buf()));
         // FILE_RENAME_INFO ends in a variable-length name: allocate it as u64s for alignment.
         let name_bytes = (destination_wide.len() - 1) * 2;
         let header = std::mem::size_of::<FILE_RENAME_INFO>();
