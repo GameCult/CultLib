@@ -2661,6 +2661,23 @@ class CultNetTests(unittest.TestCase):
                 self.assertEqual(responses[0]["details"]["value"], schema_version)
                 self.assertNotIn("messageId", responses[0])
 
+    def test_witness_artifact_bundle_payload_is_one_value_and_depth_wins_over_a_tail(self) -> None:
+        import msgpack  # type: ignore
+        from cultcache_py import CultCachePayloadDepthError
+
+        payload = msgpack.packb(["b", "k", "t", {}, [], [], [], {}], use_bin_type=True)
+        decode_witness_artifact_bundle_payload(payload)
+        for tail, count in ((b"\xc0", 1), (b"\xc1\xc1", 2)):
+            with self.assertRaises(ValueError) as caught:
+                decode_witness_artifact_bundle_payload(payload + tail)
+            self.assertIs(type(caught.exception), ValueError)
+            self.assertEqual(
+                str(caught.exception),
+                f"cultnet.witness_artifact_bundle payload has {count} bytes after its first MessagePack value (refused on read).",
+            )
+        with self.assertRaises(CultCachePayloadDepthError):
+            decode_witness_artifact_bundle_payload(b"\x91" * 300 + b"\xc0\xc0")
+
     def test_cultnet_simulation_consensus_dedupes_witnesses_and_requires_quorum(self) -> None:
         from cultnet_py import CultNetSimulationConsensus
 

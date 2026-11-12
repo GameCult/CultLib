@@ -711,6 +711,22 @@ class BytesAfterVectorTests(unittest.TestCase):
             self.assertIn(surface_document.type, str(caught.exception))
             self.assertIsNone(cache.get(surface_document, "surface"))
 
+    def test_depth_wins_over_a_tail_whatever_the_unpackers_own_stack_limit(self) -> None:
+        # Vector-independent: a value nested past 256 is the depth refusal even with a tail, as C# throws at container 257
+        # before it reaches the tail; 2000 is past msgpack's own stack, so the winner is not a library constant.
+        for depth in (257, 300, 900, 2000, 100000):
+            for tail in (b"\xc0", b"\xc1\xc1"):
+                with self.subTest(depth=depth, tail=len(tail)):
+                    with self.assertRaises(CultCachePayloadDepthError) as caught:
+                        surface_document.decode_payload(b"\x91" * depth + b"\xc0" + tail)
+                    self.assertIn("refused on read", str(caught.exception))
+        for depth in (1, 255, 256):
+            with self.subTest(at=depth):
+                with self.assertRaises(ValueError) as caught:
+                    surface_document.decode_payload(b"\x91" * depth + b"\xc0\xc0")
+                self.assertNotIsInstance(caught.exception, CultCachePayloadDepthError)
+                self.assertIn(f"1 {self.CLAUSE}", str(caught.exception))
+
     def test_a_payload_that_ends_early_is_the_decoders_not_bytes_after(self) -> None:
         truncated = _vector("union-surface.msgpack")[:-1]
         with self.assertRaises(Exception) as caught:
