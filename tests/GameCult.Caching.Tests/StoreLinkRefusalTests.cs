@@ -261,6 +261,21 @@ namespace GameCult.Caching.Tests
             Assert.That(Directory.GetFileSystemEntries(link + ".records").OrderBy(entry => entry), Is.EqualTo(pages), "the refused write left files beside the manifest");
         }
 
+        // The refusal comes before the records folder or the lease file is made: a store that was never written leaves nothing behind.
+        [Test]
+        public void ADirectoryStoreCommitAtAManifestLinkPutThereAfterOpenCreatesNothing()
+        {
+            var link = PathOf("link.cc");
+            using var cache = OpenDirectory(new DirectoryMessagePackBackingStore(link));
+            Link(link, PathOf("unmounted.cc"));
+
+            Assert.Throws<CultStoreLinkedException>(() =>
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "b" }, new CultRecordKey("b"))));
+
+            Assert.That(IsALink(link), "the link was replaced");
+            Assert.That(Directory.Exists(link + ".records"), Is.False, "the refused write made the records folder or its lease");
+        }
+
         [Test]
         public void ADirectoryStoreFlushAtALiveManifestLinkIsRefused()
         {
