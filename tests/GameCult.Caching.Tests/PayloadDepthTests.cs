@@ -148,10 +148,25 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void OnlyTheFirstValueIsThePayload()
+        public void OnlyOneValueIsAPayload()
         {
-            Accepts(Cat(Bytes(0x90), Chain(Limit + 10)), "bytes after the first value are not walked");
-            Accepts(Cat(Bytes(0x01), Chain(Limit + 10)), "nor after a scalar");
+            var tails = new[]
+            {
+                (Cat(Bytes(0x90), Chain(Limit + 10)), Chain(Limit + 10).Length),
+                (Cat(Bytes(0x01), Chain(Limit + 10)), Chain(Limit + 10).Length),
+                (Bytes(0x90, 0xc1, 0xc1), 2),
+            };
+            foreach (var (payload, count) in tails)
+            foreach (var direction in new[] { PayloadDirection.Read, PayloadDirection.Write })
+            {
+                var message = Assert.Throws<MessagePackSerializationException>(() => CultPayloadDepth.Check(payload, typeof(PayloadDepthTests), direction))!.Message;
+                var word = direction == PayloadDirection.Read ? "read" : "write";
+                Assert.That(message, Is.EqualTo($"{typeof(PayloadDepthTests).FullName} payload has {count} bytes after its first MessagePack value (refused on {word})."));
+            }
+
+            // The tail is not walked: a tail nested past the limit is refused as bytes after the value, not as depth.
+            var deep = Assert.Throws<MessagePackSerializationException>(() => CultPayloadDepth.Check(Cat(Bytes(0x90), Chain(Limit + 10)), typeof(object), PayloadDirection.Read))!;
+            Assert.That(deep.Message, Does.Not.Contain("the limit is"));
         }
     }
 }
