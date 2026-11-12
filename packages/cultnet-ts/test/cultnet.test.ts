@@ -14,6 +14,8 @@ import {
   SchemaConflictError,
   SingleFileMessagePackBackingStore,
   defineDocumentType,
+  documentPayloadBytes,
+  documentPayloadFromBytes,
   schemaIdentityOf,
 } from "@gamecult/cultcache-ts";
 
@@ -3139,4 +3141,25 @@ test("CultNet registry names the canonical schema id of a compatible alias, and 
   assert.equal(registry.canonicalSchemaId("p3.owner.v2"), "p3.owner.v2");
   assert.equal(registry.canonicalSchemaId("p3.nobody"), undefined);
   assert.equal(registry.canonicalSchemaId("p3.shared"), undefined, "an id several bindings claim resolves to none");
+});
+
+test("a replicated record with bytes after its first MessagePack value is refused by count and held nowhere", async () => {
+  const definition = defineDocumentType({ type: "tails.note", schemaId: "tails.note.v1", schema: z.object({ body: z.string() }) });
+  const registry = new CultNetDocumentRegistry([defineCultNetDocumentBinding({ definition })]);
+  const origin = CultCache.builder().withDocumentType(definition).build();
+  await origin.put(definition, "k", { body: "x" });
+  const document = registry.createRawSnapshotResponse(origin, "tails").documents[0]!;
+  const whole = documentPayloadBytes(document.payload);
+  const target = CultCache.builder().withDocumentType(definition).build();
+  await assert.rejects(
+    registry.applyRawDocumentPutMessage(target, {
+      schemaVersion: "cultnet.document_put_raw.v0",
+      messageId: "tails",
+      document: { ...document, payload: documentPayloadFromBytes(Uint8Array.from([...whole, 0xc0, 0xc1])) },
+    }),
+    (error: Error) => error.message.includes('document type "tails.note" payload has 2 bytes after its first MessagePack value'),
+  );
+  assert.deepEqual(target.snapshot(), []);
+  await registry.applyRawDocumentPutMessage(target, { schemaVersion: "cultnet.document_put_raw.v0", messageId: "whole", document });
+  assert.deepEqual(target.getRequired(definition, "k"), { body: "x" });
 });

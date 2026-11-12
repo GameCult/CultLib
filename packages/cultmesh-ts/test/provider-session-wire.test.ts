@@ -83,3 +83,16 @@ test("a provider command that is not a map, or lacks a required field, is refuse
     (error: Error) => error.message === "CultMesh provider command must be a MessagePack map.",
   );
 });
+
+test("a provider command payload with bytes after its first value is refused by count, without echoing the tail", () => {
+  const command = { commandId: "c1", commandKind: "k", providerId: "p", serviceInstanceId: "s", payload: { n: 1 } };
+  const whole = documentPayloadBytes(encodeDocumentPayload(providerCommandDocument, command));
+  const tailed = documentPayloadFromBytes(Uint8Array.from([...whole, ...Buffer.from("canary-tail-8c1f")]));
+  assert.throws(
+    () => decodeProviderCommandDocument({
+      schemaId: cultMeshProviderSessionSchemas.command, recordKey: "p/s/c1", storedAt: "2026-10-11T00:00:00Z",
+      payloadEncoding: "messagepack" as const, payload: tailed,
+    }),
+    (error: Error) => error.message.includes("16 bytes after its first MessagePack value") && !error.message.includes("canary-tail-8c1f"),
+  );
+});

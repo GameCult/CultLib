@@ -975,8 +975,11 @@ test("every bytes-after vector is refused by the one owner, by count, on the cod
     await assertBytesAfterRefused(file, tail, () => cache.pullAllBackingStores(), surface.type);
 
     // The put path: an envelope arriving with the tail is refused and held nowhere.
-    const held = CultCache.builder().withDocumentType(surface).withGenericStore(memoryStore([])).build();
+    const written: CultCacheEnvelope[] = [];
+    const held = CultCache.builder().withDocumentType(surface).withGenericStore(memoryStore(written)).build();
     await assertBytesAfterRefused(file, tail, () => held.putEnvelope(surface, envelopeOf(bytes)), surface.type);
+    assert.equal(written.length, 0, `${file}: nothing reached the store`);
+    assert.equal(held.get(surface, "surface"), undefined, `${file}: nothing is held in memory`);
   }
 });
 

@@ -392,6 +392,13 @@ test("decodeManifest accepts and refuses exactly what the reference does, and re
   }
 });
 
+test("a manifest with bytes after its first value is refused by count, whatever the tail is", () => {
+  const whole = encodeManifest(manifestOf());
+  for (const tail of [[0xc0], [0xc1, 0xc1], [0x90]]) {
+    assert.throws(() => decodeManifest(Uint8Array.from([...whole, ...tail])), new RegExp(`${tail.length} bytes after its first MessagePack value`));
+  }
+});
+
 test("a manifest written as a map names the manifest, not a field inside it", () => {
   assert.throws(() => decodeManifest(encode({ 0: "a", 9: { k: "v" } })), /field 'manifest' has the wrong type/);
 });
