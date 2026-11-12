@@ -34,6 +34,7 @@ export type {
   CultCacheIndexScalar,
   InferCultCacheSchemaValue,
   CultCacheStoreRegistration,
+  CultCacheUnreadSlots,
   PushAllOptions,
 } from "./types";
 export type {

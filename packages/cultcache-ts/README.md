@@ -371,8 +371,11 @@ const sceneDocument = defineDocumentType({
 });
 ```
 
-- A slot is `[name, codec, default?]`. A gap is written nil and skipped on read; an extra trailing slot is skipped; a
-  slot missing from the payload (or nil, when a default is declared) takes its default, and is refused without one.
+- A slot is `[name, codec, default?]`. A gap is written nil and skipped on read; an extra trailing slot is read past and
+  marks the record read-only (every write or removal of its key is refused with `SchemaConflictError`, `cache.isWritable`
+  asks first). The one writable case is a depth-0 extra slot of a record that arrived under a schema id other than the reader's own, which the
+  reader lists in `compatibleSchemaIds`, whose catalog entry lists those slots: declaring that id consents to the loss, and a write restamps
+  the record. A nested slot, or a writer that keeps the reader's own id, is never consented to. A slot missing from the payload (or nil, when a default is declared) takes its default, and is refused without one.
 - A union refuses an undeclared arm key on read, naming the union, the key and the declared keys. Nothing falls back
   to a default arm. An arm with no slots is `codecs.unit` and is written `[key, []]`.
 - A refusal names the union, the field and the slot; it never echoes the value it refused.

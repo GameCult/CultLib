@@ -1,6 +1,6 @@
 import {
   declaresRole,
-  decodeDocumentPayload,
+  decodeDocumentPayloadMarked,
   documentPayloadBytes,
   documentPayloadFromBytes,
   encodeDocumentPayload,
@@ -8,6 +8,7 @@ import {
   schemaIdentityOf,
 } from "./document";
 import { resolveDocumentFormatter } from "./document-formatter";
+import type { NotedSlots } from "./codec";
 import type { DocumentPayload } from "./document";
 import { SchemaConflictError, schemaIdForEnvelope, writtenOwns } from "./store-format";
 import type {
@@ -20,6 +21,7 @@ import type {
   CultCacheEnvelope,
   CultCacheSchemaCatalogEntry,
   CultCacheStoreRegistration,
+  CultCacheUnreadSlots,
 } from "./types";
 
 type Accessor = (value: unknown) => string | undefined;
@@ -27,7 +29,7 @@ type Accessor = (value: unknown) => string | undefined;
 // A registered definition reads and writes its documents through the owner, on payloads the cache has cloned.
 type RegisteredFormatter = {
   encode(value: unknown): DocumentPayload;
-  decode(payload: DocumentPayload): unknown;
+  decode(payload: DocumentPayload): { value: unknown; unreadSlots?: NotedSlots };
 };
 
 type RegisteredDefinition = {
@@ -50,6 +52,10 @@ type HydratedEntry = CultCacheEnvelope & {
   catalogEntry: NonNullable<CultCacheEnvelope["catalogEntry"]>;
   value: unknown;
   lookups: EntryLookups;
+  // What the payload decode read past: set when the record was admitted, and it makes the record read-only unless explained.
+  unreadSlots?: CultCacheUnreadSlots;
+  // The schema id the record arrived under, before it was admitted under its reader's: what an unread-slots refusal names.
+  storedSchemaId?: string;
 };
 
 // Everything a pull replaces. Built whole, then swapped in with one assignment.
@@ -83,6 +89,20 @@ type DerivedTypeLookups = {
   readonly nameMap?: Map<string, string>;
   readonly indexMaps: Map<string, Map<string, string>>;
 };
+
+// The consent a compatible-id declaration gives (cultlib-gaps:ruling:slot-mark-consent): a mark is explained only when the record
+// arrived under an id other than the reader's own that the reader lists compatible, it is at
+// depth 0 and the schema comparison of the catalog entry the record arrived with against the reader's own reported the slots it
+// carries as ignored, so its slot count is at most the highest ignored slot plus one. A record written or put through the cache
+// arrives under the reader's own entry, which ignores nothing, so no mark of it is explained.
+function explainedBy(noted: NotedSlots, reader: CultCacheSchemaCatalogEntry, arrivedId: string, arrived: CultCacheSchemaCatalogEntry | undefined): boolean {
+  if (arrivedId === reader.schemaId || !(reader.compatibleSchemaIds ?? []).includes(arrivedId)) {
+    return false;
+  }
+  const declared = new Set((reader.members ?? []).map((member) => member.slot));
+  const ignored = (arrived?.members ?? []).map((member) => member.slot).filter((slot) => !declared.has(slot));
+  return noted.depth0Only && noted.slotCount <= Math.max(-1, ...ignored) + 1;
+}
 
 function emptyHydratedState(): HydratedState {
   return {
@@ -312,7 +332,7 @@ export class CultCache {
           }
 
           const payload = this.#cloneBytes(entry.payload);
-          const value = registered.formatter.decode(payload);
+          const { value, unreadSlots } = registered.formatter.decode(payload);
           let admitted: CultCacheEnvelope = { ...entry, type, payload };
           if (registered.global) {
             const persistedKey = persistedGlobalKeys.get(type);
@@ -327,7 +347,7 @@ export class CultCache {
               admitted = { ...admitted, key: CultCache.GLOBAL_KEY };
             }
           }
-          const hydrated = this.#admitEntry(next, registered, admitted, value);
+          const hydrated = this.#admitEntry(next, registered, admitted, value, unreadSlots);
           const other = this.#heldUnderOtherType(next, type, hydrated.key);
           if (other !== undefined) {
             throw new Error(`Record ${hydrated.key} is held by two stores, as type "${other.type}" and as type "${type}".`);
@@ -518,10 +538,9 @@ export class CultCache {
       if (!envelope.storedAt || envelope.storedAt.trim().length === 0) {
         throw new Error(`CultCache envelope storedAt for type "${definition.type}" must be non-empty.`);
       }
-      this.#requireGlobalKey(registered, envelope.key);
 
       const payload = this.#cloneBytes(envelope.payload);
-      const parsed = registered.formatter.decode(payload) as CultCacheDocumentValue<TDefinition>;
+      const { value: parsed, unreadSlots } = registered.formatter.decode(payload) as { value: CultCacheDocumentValue<TDefinition>; unreadSlots?: NotedSlots };
       const entry: CultCacheEnvelope = {
         key: envelope.key,
         type: envelope.type,
@@ -532,7 +551,7 @@ export class CultCache {
         schemaId: registered.catalogEntry.schemaId,
         catalogEntry: registered.catalogEntry,
       };
-      await this.#writeNow(registered, entry, parsed);
+      await this.#writeNow(registered, entry, parsed, unreadSlots);
       return parsed;
     });
   }
@@ -583,6 +602,29 @@ export class CultCache {
       const globalKey = this.#hydrated.globalKeys.get(definition.type);
       return globalKey ? this.#deleteNow(definition, globalKey) : false;
     });
+  }
+
+  /** What the record's payload carried past this build's declared slots, or undefined: the held record is read-only unless `explained`. */
+  unreadSlots(definition: AnyCultCacheDocumentDefinition, key: string): CultCacheUnreadSlots | undefined {
+    return this.#hydrated.entries.get(this.#entryId(this.#requireDefinition(definition).definition.type, key))?.unreadSlots;
+  }
+
+  /**
+   * Whether a write of the record's own type at the key would be let through: it asks the judge #writeNow asks, of the record the
+   * cache holds (a key a store carries foreign, a record of another type the write does not own or cannot replace, a global at
+   * another key, a record carrying unread slots nothing consents to). It answers the WRITE form. A removal asks the judge's
+   * removal form and differs in two states: an owner's `delete` of a record held in another store than its own home succeeds
+   * where this is false (a write would push to the wrong store), and `delete` of a global type at a key other than __global__ is
+   * the plain false of an unheld key where this is false. Live and advisory: the write or removal still decides.
+   */
+  isWritable(definition: AnyCultCacheDocumentDefinition, key: string): boolean {
+    const registered = this.#requireDefinition(definition);
+    try {
+      this.#judge(registered, key, this.#probe(registered, key));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   // What the last pull found that no registered type claims, by key ordinal. A later registration claims a record at the next pull.
@@ -680,9 +722,8 @@ export class CultCache {
     value: CultCacheDocumentValue<TDefinition>,
   ): Promise<CultCacheDocumentValue<TDefinition>> {
     const registered = this.#requireDefinition(definition);
-    this.#requireGlobalKey(registered, key);
     const payload = registered.formatter.encode(value);
-    const parsed = registered.formatter.decode(payload) as CultCacheDocumentValue<TDefinition>;
+    const { value: parsed, unreadSlots } = registered.formatter.decode(payload) as { value: CultCacheDocumentValue<TDefinition>; unreadSlots?: NotedSlots };
     const entry: CultCacheEnvelope = {
       key,
       type: definition.type,
@@ -691,26 +732,16 @@ export class CultCache {
       schemaId: registered.catalogEntry.schemaId,
       catalogEntry: registered.catalogEntry,
     };
-    await this.#writeNow(registered, entry, parsed);
+    await this.#writeNow(registered, entry, parsed, unreadSlots);
     return parsed;
   }
 
   // Validates the whole write (home, global singleton, name and index accessors) before the store
   // is touched; once the store accepts, applying to the cache has no fallible step.
-  async #writeNow(registered: RegisteredDefinition, entry: CultCacheEnvelope, value: unknown): Promise<void> {
+  async #writeNow(registered: RegisteredDefinition, entry: CultCacheEnvelope, value: unknown, unreadSlots?: NotedSlots): Promise<void> {
     const home = this.#homeStore(entry.type);
-    const retyped = this.#refuseRetype(entry);
-    if (retyped !== undefined && this.#homeStore(retyped.type) !== home) {
-      // The write owns the held record's id and would replace it, but the held record is in another store; the push
-      // reaches only this type's home, so the old record would stay in its own file and load as a second holder.
-      throw new SchemaConflictError(
-        schemaIdForEnvelope(entry),
-        [retyped.type, entry.type],
-        entry.key,
-        `CultCache holds record "${entry.key}" as type "${retyped.type}" in another store than the home of type "${entry.type}", so the rename cannot replace it; remove the record first.`,
-      );
-    }
-    const hydrated = this.#admitEntry(this.#hydrated, registered, entry, value);
+    const retyped = this.#judge(registered, entry.key, entry);
+    const hydrated = this.#admitEntry(this.#hydrated, registered, entry, value, unreadSlots);
     this.#refuseIndexSharing(this.#hydrated, entry.type, registered.catalogEntry.schemaName, entry.key, hydrated.lookups);
     const legacy = this.#hydrated.legacyGlobals.get(entry.type);
     await home?.push(entry);
@@ -723,6 +754,85 @@ export class CultCache {
       this.#removeEntry(this.#hydrated, this.#definitions.get(retyped.type)!, retyped);
     }
     this.#installEntry(this.#hydrated, registered, hydrated);
+  }
+
+  // An envelope of the definition's type at the key, carrying nothing: what the judge asks about a write or a removal by that type.
+  #probe(registered: RegisteredDefinition, key: string): CultCacheEnvelope {
+    return {
+      key, type: registered.definition.type, payload: documentPayloadFromBytes(new Uint8Array(0)), storedAt: "",
+      schemaId: registered.catalogEntry.schemaId, catalogEntry: registered.catalogEntry,
+    };
+  }
+
+  // The one judge of whether a key may be written (a written envelope) or removed (none), before any store is touched: it throws the
+  // refusal, and #writeNow, #deleteNow and isWritable all ask it, so the query cannot disagree with the write. For a write it
+  // returns the held record of another type that the write owns and so restamps, if any. A refusal names keys and schemas,
+  // never a payload or a slot value.
+  #judge(registered: RegisteredDefinition, key: string, written?: CultCacheEnvelope): HydratedEntry | undefined {
+    const type = registered.definition.type;
+    const held = this.#hydrated.entries.get(this.#entryId(type, key));
+    if (written === undefined) {
+      // A removal is by key: the record it removes is the one held at the key, of this type or of another type whose schema id
+      // this type owns (the record a write of this type would replace). A held record of a type it does not own is refused.
+      this.#refuseForeignKey(key, type, "removed");
+      this.#refuseUnread(held);
+      if (held !== undefined) {
+        return undefined;
+      }
+      const other = this.#heldUnderOtherType(this.#hydrated, type, key);
+      if (other === undefined) {
+        return undefined;
+      }
+      if (!writtenOwns(this.#probe(registered, key), schemaIdForEnvelope(other))) {
+        throw new SchemaConflictError(
+          registered.catalogEntry.schemaId,
+          [other.type, type],
+          key,
+          `CultCache holds record "${key}" as type "${other.type}", so type "${type}" cannot remove it.`,
+        );
+      }
+      this.#refuseUnread(other);
+      return other;
+    }
+    this.#requireGlobalKey(registered, key);
+    const retyped = this.#refuseRetype(written);
+    this.#refuseUnread(held);
+    this.#refuseUnread(retyped);
+    if (retyped !== undefined && this.#homeStore(retyped.type) !== this.#homeStore(type)) {
+      // The write owns the held record's id and would replace it, but the held record is in another store; the push
+      // reaches only this type's home, so the old record would stay in its own file and load as a second holder.
+      throw new SchemaConflictError(
+        schemaIdForEnvelope(written),
+        [retyped.type, type],
+        key,
+        `CultCache holds record "${key}" as type "${retyped.type}" in another store than the home of type "${type}", so the rename cannot replace it; remove the record first.`,
+      );
+    }
+    return retyped;
+  }
+
+  // The one refusal of a record held read-only for the slots its payload carries past this build's: a write or a removal of
+  // its key. It names the type and the counts, never a slot value. A mark that is explained (see #admitEntry) is consented to.
+  #unreadRefusal(held: HydratedEntry | undefined): SchemaConflictError | undefined {
+    const unread = held?.unreadSlots;
+    if (held === undefined || unread === undefined || unread.explained) {
+      return undefined;
+    }
+    return new SchemaConflictError(
+      held.storedSchemaId ?? held.schemaId ?? held.type,
+      [held.catalogEntry.schemaName],
+      held.key,
+      `${held.catalogEntry.schemaName} record ${held.key} is read-only: ${unread.typeName} was read with ${unread.slotCount} slots where this build declares ${unread.declaredCount} ` +
+        `(${unread.occurrences} object(s) in the record). Writing it would drop data a newer writer stored; read it with types that declare those slots, or write it from that build.`,
+      unread,
+    );
+  }
+
+  #refuseUnread(held: HydratedEntry | undefined): void {
+    const refusal = this.#unreadRefusal(held);
+    if (refusal !== undefined) {
+      throw refusal;
+    }
   }
 
   // The one key-identity judge of the cache: may this write land at its key, given what the cache holds there under
@@ -782,18 +892,20 @@ export class CultCache {
     key: string,
   ): Promise<boolean> {
     const registered = this.#requireDefinition(definition);
-    const entry = this.#hydrated.entries.get(this.#entryId(definition.type, key));
+    // variants:ruling:unheld-removal-refused-at-commit: a key a store carries foreign is refused, a key held by nobody is the
+    // existing false; a key held as another type is removed by an owner of its id and refused to any other type.
+    // Removal is by key, in one store call: the record held at the key of this type, else the one of another type this type owns.
+    const owned = this.#judge(registered, key);
+    const entry = this.#hydrated.entries.get(this.#entryId(definition.type, key)) ?? owned;
     if (!entry) {
-      // variants:ruling:unheld-removal-refused-at-commit: a key a store carries foreign is refused, a key held under
-      // another type or by nobody is the existing false.
-      this.#refuseForeignKey(key, definition.type, "removed");
       return false;
     }
 
-    const home = this.#homeStore(definition.type);
-    await home?.delete(this.#hydrated.legacyGlobals.get(definition.type) ?? this.#toEnvelope(entry));
-    this.#hydrated.legacyGlobals.delete(definition.type);
-    this.#removeEntry(this.#hydrated, registered, entry);
+    // The cache drops the record only once the store has removed it.
+    const home = this.#homeStore(entry.type);
+    await home?.delete(this.#hydrated.legacyGlobals.get(entry.type) ?? this.#toEnvelope(entry));
+    this.#hydrated.legacyGlobals.delete(entry.type);
+    this.#removeEntry(this.#hydrated, this.#definitions.get(entry.type)!, entry);
     return true;
   }
 
@@ -820,7 +932,7 @@ export class CultCache {
 
     return {
       encode: (value: unknown) => this.#cloneBytes(encodeDocumentPayload(definition, value)),
-      decode: (payload: DocumentPayload) => decodeDocumentPayload(definition, this.#cloneBytes(payload)),
+      decode: (payload: DocumentPayload) => decodeDocumentPayloadMarked(definition, this.#cloneBytes(payload)),
     };
   }
 
@@ -1000,6 +1112,7 @@ export class CultCache {
     registered: RegisteredDefinition,
     entry: CultCacheEnvelope,
     value: unknown,
+    noted?: NotedSlots,
   ): HydratedEntry {
     if (registered.global) {
       const currentGlobalKey = state.globalKeys.get(entry.type);
@@ -1020,6 +1133,8 @@ export class CultCache {
       catalogEntry: registered.catalogEntry,
       value,
       lookups,
+      storedSchemaId: entry.schemaId ?? entry.type,
+      ...(noted ? { unreadSlots: { ...noted, explained: explainedBy(noted, registered.catalogEntry, entry.schemaId ?? entry.type, entry.catalogEntry) } } : {}),
     };
   }
 

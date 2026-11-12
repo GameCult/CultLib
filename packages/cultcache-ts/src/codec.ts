@@ -198,6 +198,66 @@ type SlotSpec<TValue, TName extends string = string> =
 
 type SlotsSpec<TValue> = Readonly<Record<number, { [K in keyof TValue & string]: SlotSpec<TValue[K], K> }[keyof TValue & string]>>;
 
+// The slots a payload decode read past, noted by `slots` and the unit arm while the one decode entry (decodeNoting) has a scope
+// open, and read out by that entry. Module-scoped as the reference's is thread-bound: a decode is synchronous, and a decode
+// outside the entry (a codec called directly, a CultMesh read) notes nothing. No codec signature carries it.
+export interface NotedSlots {
+  /** The first type read with extra slots, outermost first. */
+  readonly typeName: string;
+  readonly slotCount: number;
+  readonly declaredCount: number;
+  readonly occurrences: number;
+  /** True when every noted object was the document's own: a union adds no depth, each record or arm inside a field adds one. */
+  readonly depth0Only: boolean;
+}
+
+interface SlotScope {
+  depth: number;
+  found?: { typeName: string; slotCount: number; declaredCount: number; occurrences: number; depth0Only: boolean };
+}
+
+let scope: SlotScope | undefined;
+
+/** The one decode entry: runs the decode with a scope open and returns its value with what it noted. */
+export function decodeNoting<T>(decode: () => T): { value: T; unreadSlots?: NotedSlots } {
+  const outer = scope;
+  const mine: SlotScope = { depth: 0 };
+  scope = mine;
+  try {
+    const value = decode();
+    return mine.found ? { value, unreadSlots: mine.found } : { value };
+  } finally {
+    scope = outer;
+  }
+}
+
+function noteExtraSlots(typeName: string, slotCount: number, declaredCount: number): void {
+  if (!scope) return;
+  const found = scope.found;
+  if (found) {
+    found.occurrences += 1;
+    found.depth0Only &&= scope.depth === 0;
+  } else {
+    scope.found = { typeName, slotCount, declaredCount, occurrences: 1, depth0Only: scope.depth === 0 };
+  }
+}
+
+// What a record inside a field reads at: one deeper than the record holding the field.
+function nested<T>(read: () => T): T {
+  if (!scope) return read();
+  scope.depth += 1;
+  try {
+    return read();
+  } finally {
+    scope.depth -= 1;
+  }
+}
+
+// The reference's type name for a mark: the type, not its namespace or the type it is nested in.
+function simpleTypeName(typeName: string | undefined): string {
+  return typeName === undefined ? "record" : typeName.slice(Math.max(typeName.lastIndexOf("."), typeName.lastIndexOf("+")) + 1);
+}
+
 const INT32_MIN = -(2 ** 31);
 const INT32_MAX = 2 ** 31 - 1;
 
@@ -232,7 +292,7 @@ function pascalCase(name: string): string {
 }
 
 // A positional record: slot `key` holds field `name`. Gaps are written nil and skipped on read, extra trailing slots
-// are skipped, and a slot missing from the payload takes its declared default or is refused. A default fills only a
+// are read past and noted (decodeNoting): the record that carried them is read-only, never rewritten without them, and a slot missing from the payload takes its declared default or is refused. A default fills only a
 // missing trailing slot, never a nil: as in the reference, a nil in a reference slot (string, bytes, record, union,
 // list) reads as null and writes back as nil, so a record the reference wrote re-encodes byte-identical, and a nil in
 // a value slot (int, float, bool) is refused unless the slot is nullable.
@@ -281,6 +341,9 @@ export function slots<TValue extends object>(spec: SlotsSpec<TValue>, typeName?:
     decode(raw) {
       expect(raw, "an array of slots", Array.isArray(raw));
       const input = raw as unknown[];
+      if (input.length > length) {
+        noteExtraSlots(simpleTypeName(typeName), input.length, length);
+      }
       const out: Record<string, unknown> = {};
       for (const field of fields) {
         const present = field.key < input.length;
@@ -291,7 +354,7 @@ export function slots<TValue extends object>(spec: SlotsSpec<TValue>, typeName?:
           ? defaultOf(field)
           : input[field.key] === null && !field.codec.valueType
             ? null
-            : at(`${field.name} (slot ${field.key})`, () => field.codec.decode(input[field.key]));
+            : at(`${field.name} (slot ${field.key})`, () => nested(() => field.codec.decode(input[field.key])));
       }
       return out as TValue;
     },
@@ -362,6 +425,9 @@ export function union<TValue extends { kind: string }>(
       const arm = byKey.get(Number(key));
       if (arm === undefined) {
         throw new Error(`Union ${name}: unknown arm key ${key} (declared keys: ${declared}).`);
+      }
+      if (arm.body === unit && raw[1].length > 0) {
+        noteExtraSlots(arm.armName, raw[1].length, 0);
       }
       const fields = arm.body === unit ? {} : at(`arm ${arm.armName}`, () => (arm.body as SlotsCodec<any>).decode(raw[1]));
       return { kind: arm.armName, ...fields } as unknown as TValue;

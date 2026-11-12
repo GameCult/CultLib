@@ -99,6 +99,26 @@ export interface CultCacheEnvelope {
   catalogEntry?: CultCacheSchemaCatalogEntry;
 }
 
+/**
+ * What a payload decode found past the slots this build declares, at any depth: the first type read with extra slots, how many
+ * slots it carried against how many it declares, and how many objects in the record did. It holds no slot value, so a refusal
+ * can name it. A record carrying it is read-only unless `explained`.
+ */
+export interface CultCacheUnreadSlots {
+  /** The first type read with extra slots (the unit arm's arm name for a unit arm). */
+  readonly typeName: string;
+  readonly slotCount: number;
+  readonly declaredCount: number;
+  readonly occurrences: number;
+  /** True when every mark sat in the document's own object. */
+  readonly depth0Only: boolean;
+  /**
+   * True only when every mark is at depth 0 and the schema comparison of the id the record was stored under reported every slot
+   * the mark carries (slotCount is at most the highest reported slot plus one): the loss a compatible-id declaration consents to.
+   */
+  readonly explained: boolean;
+}
+
 export interface PushAllOptions {
   soft?: boolean;
 }
