@@ -234,10 +234,17 @@ class DocumentDefinition(Generic[T]):
     def decode_payload_marked(self, payload: bytes) -> tuple[T, UnreadSlots | None]:
         """The value and what the decode found past the declared slots, at any depth. The payload depth check runs first: a
         payload past the limit is refused, never marked."""
+        after = -1
         try:
             tree = self.payload_decoder(payload)
         except _STACK_FAULTS:
             raise CultCachePayloadDepthError(self.type, "read") from None
+        except msgpack.ExtraData as error:
+            after = len(error.extra)
+        if after >= 0:
+            # A payload is one MessagePack value: the tail is refused by count, never echoed. Raised outside the handler so
+            # no __context__ keeps error.extra (`from None` only hides the context from the traceback).
+            raise ValueError(f"{self.type} payload has {after} bytes after its first MessagePack value (refused on read).")
         _refuse_past_depth_limit(tree, self.type, "read")
         outer, opened = _current_scope(), _SlotScope()
         _scope.open = opened

@@ -661,6 +661,62 @@ def _as_tuple(tree: object) -> object:
     return tuple(_as_tuple(child) for child in tree) if isinstance(tree, list) else tree
 
 
+
+class BytesAfterVectorTests(unittest.TestCase):
+    CLAUSE = "bytes after its first MessagePack value (refused on read)"
+
+    def _assert_chain_clean(self, error: BaseException, file: str) -> None:
+        link: BaseException | None = error
+        while link is not None:
+            self.assertNotIn(CANARY, str(link), file)
+            self.assertNotIsInstance(link, msgpack.ExtraData, file)
+            link = link.__cause__ or link.__context__
+
+    def test_every_bytes_after_vector_is_refused(self) -> None:
+        base = _vector("union-surface.msgpack")
+        entries = msgpack.unpackb(_vector("bytes-after-outcomes.msgpack"), raw=False)
+        self.assertEqual(len(entries), 4)
+        for file, outcome_kind, union, key, detail in entries:
+            self.assertEqual((outcome_kind, union, key, detail), ("refused", "UnionSurface", None, "bytes-after"), file)
+            payload = _vector(file)
+            self.assertTrue(payload.startswith(base), file)
+            count = len(payload) - len(base)
+            with self.assertRaises(ValueError, msg=file) as caught:
+                surface_document.decode_payload(payload)
+            error = caught.exception
+            self.assertIs(type(error), ValueError, file)
+            self.assertNotIsInstance(error, CultCachePayloadDepthError, file)
+            self.assertEqual(
+                str(error), f"{surface_document.type} payload has {count} {self.CLAUSE}.", file
+            )
+            self.assertNotIn("the limit is", str(error), file)
+            self._assert_chain_clean(error, file)
+
+    def test_a_single_file_store_holding_a_tail_as_a_record_payload_refuses_on_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tail.cc"
+            shutil.copyfile(VECTORS / "union-surface.cc", path)
+            store = SingleFileMessagePackBackingStore(path)
+            [envelope] = store.pull_all()
+            store.push(dataclasses.replace(envelope, payload=_vector("bytes-after-nil.msgpack")))
+            cache = (
+                CultCache.builder()
+                .register_document_type(surface_document)
+                .add_generic_store(SingleFileMessagePackBackingStore(path))
+                .build()
+            )
+            with self.assertRaises(ValueError) as caught:
+                cache.pull_all_backing_stores()
+            self.assertIn(f"1 {self.CLAUSE}", str(caught.exception))
+            self.assertIn(surface_document.type, str(caught.exception))
+            self.assertIsNone(cache.get(surface_document, "surface"))
+
+    def test_a_payload_that_ends_early_is_the_decoders_not_bytes_after(self) -> None:
+        truncated = _vector("union-surface.msgpack")[:-1]
+        with self.assertRaises(Exception) as caught:
+            surface_document.decode_payload(truncated)
+        self.assertNotIn("bytes after", str(caught.exception))
+
 class PayloadDepthRuleTests(unittest.TestCase):
     """The nesting rule at its seam, on definitions that are not unions: the same routine serves any payload codec."""
 
