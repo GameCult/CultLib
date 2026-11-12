@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use cultcache_rs::{
-    CultCache, CultCacheEnvelope, CultCacheSoaTable, DatabaseEntry, SingleFileMessagePackBackingStore,
+    CultCache, CultCacheEnvelope, CultCacheLoadRefused, CultCacheSoaTable, DatabaseEntry, SingleFileMessagePackBackingStore,
 };
 use serde::Deserialize;
 
@@ -417,6 +417,54 @@ fn a_load_of_a_duplicate_image_is_refused_and_keeps_the_prior_view() {
     assert_eq!(soa.get_by_index::<Unique>("Sku", "K").unwrap(), None);
     assert!(soa.get_by_index::<Unique>("Sku", "X").unwrap().is_some());
     soa.put("item:y", &unique("K")).unwrap();
+}
+
+// A pull refused for a duplicate unique-index value, or for one key held under two types in two stores, closes the same
+// write gate a payload refusal does: the cache holds no image of its stores, so a write would lay the empty image over them.
+#[test]
+fn a_pull_refused_for_a_duplicate_index_or_a_retype_closes_every_write() {
+    fn assert_gated(cache: &mut CultCache, path: &Path, door_label: &str) {
+        let before = std::fs::read(path).unwrap();
+        let errors = [
+            ("put", cache.put("item:new", &unique("N")).unwrap_err()),
+            ("put_raw_envelope", cache.put_raw_envelope(cache.prepare_entry("item:new", &unique("N")).unwrap().0).unwrap_err()),
+            ("delete", cache.delete::<Unique>("item:keep").unwrap_err()),
+        ];
+        for (door, error) in errors {
+            assert!(error.downcast_ref::<CultCacheLoadRefused>().is_some(), "{door_label} {door}: {error:#}");
+        }
+        assert_eq!(std::fs::read(path).unwrap(), before, "{door_label}: the store changed");
+    }
+
+    // Duplicate index value found in the stored image.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dup.cc");
+    let mut cache = cache_at(&path);
+    cache.put("item:keep", &unique("K")).unwrap();
+    let mut twin = twin_cache_at(&path);
+    twin.put("item:b", &Twin { sku: "S".into(), category: "c".into() }).unwrap();
+    twin.put("item:a", &Twin { sku: "S".into(), category: "c".into() }).unwrap();
+    assert!(error_text(cache.pull_all_backing_stores()).contains("both hold unique index 'Sku'"));
+    assert_gated(&mut cache, &path, "duplicate index");
+
+    // One key held under two types by two stores. The cache pulled cleanly first, so only the refused pull can close the gate.
+    let (first, second) = (dir.path().join("first.cc"), dir.path().join("second.cc"));
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<Plain>().unwrap();
+    cache.register_entry_type::<Other>().unwrap();
+    cache.register_entry_type::<Unique>().unwrap();
+    cache.add_backing_store(SingleFileMessagePackBackingStore::new(&first), [Plain::TYPE]).unwrap();
+    cache.add_backing_store(SingleFileMessagePackBackingStore::new(&second), [Other::TYPE]).unwrap();
+    cache.pull_all_backing_stores().unwrap();
+    cache.put("k", &Plain { value: "p".into() }).unwrap();
+    let mut seed = CultCache::new();
+    seed.register_entry_type::<Other>().unwrap();
+    seed.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&second)).unwrap();
+    seed.pull_all_backing_stores().unwrap();
+    seed.put("k", &Other { sku: "o".into() }).unwrap();
+    assert!(error_text(cache.pull_all_backing_stores()).contains("\"k\""));
+    assert_gated(&mut cache, &first, "retype");
+    assert_eq!(cache.get::<Plain>("k").unwrap().unwrap().value, "p", "a refused pull keeps the prior view");
 }
 
 #[test]

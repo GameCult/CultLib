@@ -619,6 +619,23 @@ fn depth_is_refused_at_load() {
     assert!(cache.snapshot().is_empty());
 }
 
+// load_soa is a load too: a table holding a payload nested past the bound is refused with the typed depth refusal, the
+// prior view is kept, and a tail behind the depth is still the depth refusal.
+#[test]
+fn load_soa_refuses_a_payload_nested_past_the_bound() {
+    let mut deep = vec![0x91u8; MAX_PAYLOAD_DEPTH + 1];
+    deep.push(0xc0);
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<UnionSurface>().unwrap();
+    cache.load_soa(CultCacheSoaTable::from_envelopes(vec![envelope("kept", &vector("union-surface.msgpack"))])).unwrap();
+    let before = cache.snapshot();
+    for payload in [deep.clone(), [deep.clone(), vec![0xc0]].concat()] {
+        let error = cache.load_soa(CultCacheSoaTable::from_envelopes(vec![envelope("k", &payload)])).unwrap_err();
+        assert_eq!(error.downcast_ref::<PayloadTooDeep>(), Some(&TOO_DEEP), "{error:#}");
+        assert_eq!(cache.snapshot(), before, "a refused load keeps the prior view");
+    }
+}
+
 // A cache whose load was refused refuses every write and removal and leaves the store as it was: a
 // later write would otherwise persist the empty image over the records it never read.
 #[test]
