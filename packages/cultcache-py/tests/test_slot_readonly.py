@@ -226,6 +226,31 @@ class StoreRowTests(unittest.TestCase):
         cache.pull_all_backing_stores()
         self.assertFalse(cache.is_writable(surface_document, "arrived"))
 
+    def test_a_batch_of_envelopes_that_carry_extra_slots_is_held_read_only(self) -> None:
+        path, cache = self._store("extra-slot-store.cc")
+        envelope = cache.get_required_envelope(surface_document, "clean")
+        batch = [
+            type(envelope)(**{**envelope.__dict__, "key": key, "payload": _vector(file)})
+            for key, file in (("b1", "extra-slot-arm.msgpack"), ("b2", "union-surface.msgpack"))
+        ]
+        cache.put_envelopes(surface_document, batch)
+        self.assertEqual([cache.is_writable(surface_document, key) for key in ("b1", "b2")], [False, True])
+
+    def test_a_mark_under_an_id_the_reader_does_not_list_compatible_is_not_consented(self) -> None:
+        unlisted = define_database_entry_type(
+            "tests.union_surface",
+            [database_entry_field("id", 0, codec=t.string)] + [database_entry_field(n, i, codec=c) for n, i, c in (
+                ("version", 1, t.int32), ("root", 2, _parity._node), ("outcomes", 3, t.list(_parity.outcome)),
+                ("part", 4, t.nullable(_parity.item)), ("crafted", 5, t.nullable(_parity.crafted)), ("missing", 6, _parity._node))],
+            name="id",
+            schema_id="tests.union_surface.v2",
+            schema_name="tests.union_surface",
+        )
+        path = self.tmp / "unlisted.cc"
+        _copy_store_without_variants(VECTORS / "extra-slot-consent.cc", path)
+        cache = _open(path, unlisted)
+        self.assertFalse(cache.is_writable(unlisted, "consented"))
+
     def test_writing_another_record_and_flushing_carries_the_marked_one_unchanged(self) -> None:
         path, cache = self._store("extra-slot-store.cc")
         original = {e.key: e for e in SingleFileMessagePackBackingStore(path).pull_all()}
