@@ -735,9 +735,11 @@ impl CultMeshNode {
         self.apply_raw_snapshot_documents(documents)
     }
 
-    /// Applies the snapshot documents of registered schemas as one cache commit, as C# does: a refusal (a key this node
-    /// holds read-only because of unread slots from a newer peer or a payload this build cannot read, or any other the cache
-    /// judges) applies nothing. The commit lands in one backing store, so a snapshot spanning stores is refused whole.
+    /// Applies the snapshot documents as one cache commit, as C# does: a refusal (a key this node holds read-only because
+    /// of unread slots from a newer peer or a payload this build cannot read, or any other the cache judges) applies
+    /// nothing. A schema id the registry does not know is skipped, except one with a `.vN` suffix, which is taken as
+    /// registered and refuses the commit when its type is not (C# throws on an unknown schema too). The commit lands in
+    /// one backing store, so a snapshot spanning stores is refused whole.
     fn apply_raw_snapshot_documents(
         &mut self,
         documents: Vec<cultnet_rs::CultNetRawDocumentRecord>,
@@ -1250,6 +1252,21 @@ mod tests {
         assert!(node.get::<Note>("before")?.is_none());
         assert_eq!(node.get_required::<Note>("held")?.body, "newer body");
         assert!(node.get::<Note>("after")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn a_snapshot_applied_to_a_stale_node_keeps_the_records_another_writer_added() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("m.cc");
+        let mut node = CultMesh::create_node(&path, TestDocuments, Default::default())?;
+        let mut other = CultMesh::create_node(&path, TestDocuments, Default::default())?;
+        other.put("added", &Note { body: "other writer".to_string() })?;
+        let plain = |body: &str| rmp_serde::to_vec(&(body,));
+        assert_eq!(node.apply_raw_snapshot_documents(vec![raw_note("snap", plain("s")?)])?, 1);
+        let reopened = CultMesh::create_node(&path, TestDocuments, Default::default())?;
+        assert_eq!(reopened.get_required::<Note>("added")?.body, "other writer");
+        assert_eq!(reopened.get_required::<Note>("snap")?.body, "s");
         Ok(())
     }
 
