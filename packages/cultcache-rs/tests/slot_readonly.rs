@@ -337,14 +337,128 @@ fn the_variant_row_of_the_slot_store_is_refused_whole_by_the_store_reader() {
     assert!(format!("{error:#}").contains("is not decodable"), "{error:#}");
 }
 
+fn slot_unit_envelope(key: &str, payload: Vec<u8>) -> CultCacheEnvelope {
+    CultCacheEnvelope { r#type: SlotUnit::TYPE.into(), ..envelope(key, payload) }
+}
+
 #[test]
-fn a_held_payload_the_type_cannot_decode_carries_no_finding_and_stays_repairable() {
+fn a_held_payload_the_type_cannot_read_is_read_only_and_refused_by_name() {
     let mut cache = registered();
-    // A text where the document's version belongs: not a record this type reads, marked or otherwise.
-    let broken = rmp_serde::to_vec(&("surface", "not-a-version")).unwrap();
-    cache.put_raw_envelope(envelope("k", broken)).unwrap();
-    assert!(cache.is_writable(UnionSurface::TYPE, "k").unwrap());
-    cache.put("k", &constructed()).unwrap();
-    assert!(cache.delete::<UnionSurface>("k").unwrap());
-    assert!(cache.is_writable("tests.unregistered", "k").is_err());
+    // A newer writer's record: an arm this build lacks and an extra root slot. get cannot read it, and it is the data
+    // read-only exists to protect.
+    let newer = rmp_serde::to_vec(&("newer", (99u64, ("x",)), "extra")).unwrap();
+    cache.put_raw_envelope(slot_unit_envelope("n", newer)).unwrap();
+    assert!(cache.get::<SlotUnit>("n").is_err());
+    assert!(!cache.is_writable(SlotUnit::TYPE, "n").unwrap());
+    let replacement = SlotUnit { name: "n".into(), outcome: UnitOutcome::Denied };
+    let held = cache.snapshot_envelopes();
+    for error in [
+        cache.put("n", &replacement).unwrap_err(),
+        cache.put_raw_envelope(slot_unit_envelope("n", rmp_serde::to_vec(&replacement).unwrap())).unwrap_err(),
+        cache.delete::<SlotUnit>("n").unwrap_err(),
+    ] {
+        let message = format!("{error:#}");
+        assert!(message.contains("\"n\"") && message.contains("tests.slot_unit") && message.contains("read-only"), "{message}");
+        assert!(!message.contains("newer") && !message.contains("extra"), "{message}");
+    }
+    assert_eq!(cache.snapshot_envelopes(), held);
+}
+
+#[test]
+fn a_corrupt_held_payload_is_refused_naming_the_key_never_its_bytes() {
+    let mut cache = registered();
+    cache.put_raw_envelope(envelope("broken", rmp_serde::to_vec(&("CANARY-id", "CANARY-version")).unwrap())).unwrap();
+    assert!(!cache.is_writable(UnionSurface::TYPE, "broken").unwrap());
+    let error = cache.delete::<UnionSurface>("broken").unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("\"broken\"") && message.contains("repair"), "{message}");
+    assert!(!message.contains("CANARY"), "{message}");
+    assert!(cache.is_writable("tests.unregistered", "broken").is_err());
+}
+
+fn held_marked_and_clean() -> (CultCache, tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let (cache, path) = open_copy("extra-slot-store.cc", dir.path());
+    (cache, dir, path)
+}
+
+#[test]
+fn load_soa_does_not_replace_or_drop_a_marked_record() {
+    use cultcache_rs::CultCacheSoaTable;
+    let (mut cache, _dir, path) = held_marked_and_clean();
+    let all = cache.snapshot_envelopes();
+    let held = all.iter().find(|held| held.key == "marked").unwrap().clone();
+    let without: Vec<_> = all.iter().filter(|held| held.key != "marked").cloned().collect();
+    let mut replaced = all.clone();
+    replaced.iter_mut().find(|held| held.key == "marked").unwrap().payload = rmp_serde::to_vec(&constructed()).unwrap();
+    for table in [without, replaced] {
+        let error = cache.load_soa(CultCacheSoaTable::from_envelopes(table)).unwrap_err();
+        assert_refused_with(&error, "marked", &mark("Composition", 3, 2, 1));
+        assert_eq!(cache.snapshot_envelopes(), all, "a refused load changed the image");
+    }
+    // The same record carried unchanged, with another key added, loads.
+    let mut kept = all.clone();
+    kept.push(envelope("added", rmp_serde::to_vec(&constructed()).unwrap()));
+    cache.load_soa(CultCacheSoaTable::from_envelopes(kept)).unwrap();
+    assert_eq!(cache.snapshot_envelopes().iter().find(|held| held.key == "marked"), Some(&held));
+    // A clean record may be dropped by a load.
+    let no_clean: Vec<_> = cache.snapshot_envelopes().into_iter().filter(|held| held.key != "clean").collect();
+    cache.load_soa(CultCacheSoaTable::from_envelopes(no_clean)).unwrap();
+    // The marked record is still on disk after the next batch.
+    let rewrite = envelope("added", rmp_serde::to_vec(&UnionSurface { version: 5, ..constructed() }).unwrap());
+    cache.put_prepared_batch(vec![rewrite]).unwrap();
+    let mut reopened = registered();
+    reopened.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+    reopened.pull_all_backing_stores().unwrap();
+    assert_eq!(reopened.snapshot_envelopes().iter().find(|held| held.key == "marked"), Some(&held));
+}
+
+#[test]
+fn is_writable_agrees_with_the_writes_for_foreign_keys_and_other_types() {
+    let dir = tempfile::tempdir().unwrap();
+    // Only UnionSurface registered: the store's unit-arm record is foreign here.
+    let path = dir.path().join("extra-slot-store.cc");
+    std::fs::write(&path, without_variant_row(&vector("extra-slot-store.cc"))).unwrap();
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<UnionSurface>().unwrap();
+    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+    cache.pull_all_backing_stores().unwrap();
+    assert!(cache.put("unit-arm", &constructed()).is_err());
+    assert!(!cache.is_writable(UnionSurface::TYPE, "unit-arm").unwrap());
+    assert!(cache.is_writable(UnionSurface::TYPE, "unheld").unwrap());
+
+    // Another registered type at a key a record of this one holds.
+    let (mut cache, _dir, _) = held_marked_and_clean();
+    let other = SlotUnit { name: "clean".into(), outcome: UnitOutcome::Denied };
+    assert!(cache.put("clean", &other).is_err());
+    assert!(!cache.is_writable(SlotUnit::TYPE, "clean").unwrap());
+    assert!(!cache.is_writable(SlotUnit::TYPE, "marked").unwrap());
+    assert!(cache.is_writable(UnionSurface::TYPE, "clean").unwrap());
+}
+
+#[test]
+fn a_marked_key_refuses_a_batch_wherever_it_sits() {
+    let (mut cache, _dir, path) = held_marked_and_clean();
+    let before = std::fs::read(&path).unwrap();
+    let marked = envelope("marked", rmp_serde::to_vec(&constructed()).unwrap());
+    let clean = |key: &str| envelope(key, rmp_serde::to_vec(&constructed()).unwrap());
+    for batch in [
+        vec![marked.clone(), clean("a"), clean("b")],
+        vec![clean("a"), marked.clone(), clean("b")],
+        vec![clean("a"), clean("b"), marked.clone()],
+    ] {
+        let error = cache.put_prepared_batch(batch).unwrap_err();
+        assert_refused_with(&error, "marked", &mark("Composition", 3, 2, 1));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(cache.snapshot_envelopes().iter().all(|held| held.key != "a" && held.key != "b"));
+    }
+}
+
+#[test]
+fn a_marked_decode_leaves_no_scope_open() {
+    assert_eq!(cultcache_rs::__enter_slots(), 0);
+    decode_payload_marked::<UnionSurface>(&vector("extra-slot-record.msgpack")).unwrap();
+    assert_eq!(cultcache_rs::__enter_slots(), 0, "a marked decode left its scope open on this thread");
+    let _ = decode_payload_marked::<UnionSurface>(&vector("depth-skipped-past-limit.msgpack"));
+    assert_eq!(cultcache_rs::__enter_slots(), 0);
 }

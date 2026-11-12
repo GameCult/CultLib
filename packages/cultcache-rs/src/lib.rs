@@ -929,16 +929,23 @@ pub fn decode_payload_marked<T: serde::de::DeserializeOwned>(payload: &[u8]) -> 
 
 /// The registered check of a held payload: monomorphized by [`CultCache::register_entry_type`] so the untyped write
 /// entries can decode a payload they cannot name.
-/// A payload the type cannot decode at all carries no finding: replacing or removing it stays allowed, as it was before
-/// the mark, so a corrupt record can still be repaired.
-fn unread_slots_of<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Option<UnreadSlots> {
-    decode_payload_marked::<T>(payload).ok().and_then(|(_, mark)| mark)
+/// A payload the type cannot decode at all (an arm this build lacks, a corrupt record) is an error here, and the held
+/// record is read-only: the cache cannot tell what a writer of another build stored in it.
+fn unread_slots_of<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<Option<UnreadSlots>> {
+    decode_payload_marked::<T>(payload).map(|(_, mark)| mark)
+}
+
+/// What the cache finds in a held payload when asked to write or remove its key.
+enum HeldFinding {
+    Free,
+    Marked(UnreadSlots),
+    Unreadable(anyhow::Error),
 }
 
 /// What a registered type is to the cache: its schema name and how to read the slots a held payload carries.
 struct Definition {
     schema_name: &'static str,
-    unread_slots: fn(&[u8]) -> Option<UnreadSlots>,
+    unread_slots: fn(&[u8]) -> Result<Option<UnreadSlots>>,
 }
 
 /// The nesting bound for an envelope admitted without a typed decode, from the same walk that
@@ -3193,38 +3200,58 @@ impl CultCache {
         Ok(Some(payload))
     }
 
-    /// Whether a write or removal of `(type_id, key)` would be admitted by the unread-slots rule: false when the held
-    /// payload carries slots past its registered type's declared slots, at any depth, which makes the record read-only.
-    /// True for a key the cache does not hold, and for a held payload the registered type cannot decode at all (it
-    /// carries no finding). An unregistered type is an error. Advisory: the write entries ask the same check themselves.
+    /// Whether a write or removal of `(type_id, key)` would be admitted: false when the held payload carries slots past
+    /// its registered type's declared slots, at any depth, or cannot be read by this build at all (the record is
+    /// read-only), when a store carries a foreign record at the key, or when another registered type holds it. True for a
+    /// key nothing holds. An unregistered type is an error. Advisory: the write entries ask the same checks themselves.
     pub fn is_writable(&self, type_id: &str, key: &str) -> Result<bool> {
-        Ok(self.unread_slots_held(type_id, key)?.is_none())
+        if !matches!(self.held_finding(type_id, key)?, HeldFinding::Free) {
+            return Ok(false);
+        }
+        let probe = CultCacheEnvelope {
+            key: key.to_string(),
+            r#type: type_id.to_string(),
+            payload: Vec::new(),
+            stored_at: String::new(),
+            schema_id: None,
+        };
+        Ok(self.refuse_retype(&self.entries, &self.foreign, &probe).is_ok())
     }
 
-    /// The one check behind every write entry and [`CultCache::is_writable`]: the held envelope at `(type_id, key)`
-    /// decoded under the registered type's mark.
-    fn unread_slots_held(&self, type_id: &str, key: &str) -> Result<Option<UnreadSlots>> {
+    /// The one decode behind every write entry and [`CultCache::is_writable`]: the held envelope at `(type_id, key)`
+    /// read under the registered type's mark.
+    fn held_finding(&self, type_id: &str, key: &str) -> Result<HeldFinding> {
         let Some(definition) = self.definitions.get(type_id) else {
             bail!("No entry type registered for CultCache envelope type {type_id:?}");
         };
         let Some(held) = self.entries.get(&entry_id_parts(type_id, key)) else {
-            return Ok(None);
+            return Ok(HeldFinding::Free);
         };
-        Ok((definition.unread_slots)(&held.payload))
+        Ok(match (definition.unread_slots)(&held.payload) {
+            Ok(None) => HeldFinding::Free,
+            Ok(Some(unread)) => HeldFinding::Marked(unread),
+            Err(error) => HeldFinding::Unreadable(error),
+        })
     }
 
-    /// Refuses a write or removal of a record held read-only for its unread slots, before any store is touched.
+    /// Refuses a write or removal of a record held read-only, before any store is touched: for the slots its payload
+    /// carries past this build's, or because this build cannot read the payload at all.
     fn refuse_unread_slots(&self, type_id: &str, key: &str) -> Result<()> {
-        let Some(unread) = self.unread_slots_held(type_id, key)? else {
-            return Ok(());
-        };
-        let held = &self.entries[&entry_id_parts(type_id, key)];
-        Err(anyhow::Error::new(SchemaConflictError {
-            schema_id: schema_identity(held).to_string(),
-            schema_names: vec![self.definitions[type_id].schema_name.to_string()],
-            record_key: key.to_string(),
-            unread_slots: Some(unread),
-        }))
+        match self.held_finding(type_id, key)? {
+            HeldFinding::Free => Ok(()),
+            HeldFinding::Unreadable(error) => Err(error.context(format!(
+                "CultCache entry {type_id:?} at key {key:?} is held read-only: this build cannot read its payload; repair it with the build that wrote it"
+            ))),
+            HeldFinding::Marked(unread) => {
+                let held = &self.entries[&entry_id_parts(type_id, key)];
+                Err(anyhow::Error::new(SchemaConflictError {
+                    schema_id: schema_identity(held).to_string(),
+                    schema_names: vec![self.definitions[type_id].schema_name.to_string()],
+                    record_key: key.to_string(),
+                    unread_slots: Some(unread),
+                }))
+            }
+        }
     }
 
     pub fn get_required<T: DatabaseEntry>(&self, key: &str) -> Result<T> {
@@ -3623,7 +3650,9 @@ impl CultCache {
     /// Replaces the cache's view with the table's records. Every record is
     /// checked (registered type, and a home store once any store is attached)
     /// into a local image first, so a refused load admits nothing and leaves
-    /// the prior view intact. Loading writes no store.
+    /// the prior view intact. Loading writes no store, but a held record that is read-only (unread slots, or a payload
+    /// this build cannot read) may not be omitted or replaced by the table: the next batch would lay the image over the
+    /// store.
     pub fn load_soa(&mut self, table: CultCacheSoaTable) -> Result<()> {
         let mut loaded = BTreeMap::new();
         for entry in table.into_envelopes()? {
@@ -3637,6 +3666,12 @@ impl CultCache {
             self.refuse_claimed_id(&entry)?;
             self.refuse_retype(&loaded, &self.foreign, &entry)?;
             loaded.insert(entry_id(&entry), entry);
+        }
+        // A load is a write of every held key it omits or changes: the one check refuses those held read-only.
+        for ((type_id, key), held) in &self.entries {
+            if loaded.get(&(type_id.clone(), key.clone())).is_none_or(|incoming| incoming.payload != held.payload) {
+                self.refuse_unread_slots(type_id, key)?;
+            }
         }
         self.refuse_second_globals(&loaded)?;
         let holders = self.judge_image(&loaded)?;
