@@ -1,4 +1,5 @@
-import { resolveDocumentFormatter } from "./document-formatter";
+import type { NotedSlots } from "./codec";
+import { decodeMarked, resolveDocumentFormatter } from "./document-formatter";
 import { checkPayloadDepth } from "./payload-depth";
 import type {
   AnyCultCacheDocumentDefinition,
@@ -118,10 +119,20 @@ export function decodeDocumentPayload<TDefinition extends AnyCultCacheDocumentDe
   definition: TDefinition,
   payload: DocumentPayload,
 ): CultCacheDocumentValue<TDefinition> {
+  return decodeDocumentPayloadMarked(definition, payload).value;
+}
+
+// The same read with the slots it read past (cult-cache-ts slot-readonly). The depth check runs first: a payload past the
+// limit is refused, never marked.
+export function decodeDocumentPayloadMarked<TDefinition extends AnyCultCacheDocumentDefinition>(
+  definition: TDefinition,
+  payload: DocumentPayload,
+): { value: CultCacheDocumentValue<TDefinition>; unreadSlots?: NotedSlots } {
   const bytes = documentPayloadBytes(payload);
   if (writesLibraryMessagePack(definition)) checkPayloadDepth(bytes, `document type "${definition.type}" payload`);
-  const decoded = resolveDocumentFormatter(definition).decode(bytes);
-  return definition.schema.parse(decoded) as CultCacheDocumentValue<TDefinition>;
+  const { value: decoded, unreadSlots } = decodeMarked(definition, bytes);
+  const value = definition.schema.parse(decoded) as CultCacheDocumentValue<TDefinition>;
+  return unreadSlots ? { value, unreadSlots } : { value };
 }
 
 // The one writer: the definition's schema first, then its formatter, codec or plain map.

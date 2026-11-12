@@ -1,6 +1,6 @@
 import { decode } from "@msgpack/msgpack";
 
-import type { CultCacheEnvelope } from "./types";
+import type { CultCacheEnvelope, CultCacheUnreadSlots } from "./types";
 
 export const STORE_FORMAT_VERSION = "cultcache.store.v1";
 
@@ -83,13 +83,16 @@ export class SchemaConflictError extends Error {
   readonly schemaId: string;
   readonly schemaNames: string[];
   readonly recordKey: string;
+  /** Set when the refusal is for unread slots; undefined for every other refusal. */
+  readonly unreadSlots?: CultCacheUnreadSlots;
 
-  constructor(schemaId: string, schemaNames: string[], recordKey: string, message?: string) {
+  constructor(schemaId: string, schemaNames: string[], recordKey: string, message?: string, unreadSlots?: CultCacheUnreadSlots) {
     super(message ?? `Schema id "${schemaId}" cannot describe record "${recordKey}": ${schemaNames.map((name) => `"${name}"`).join(", ")}.`);
     this.name = "SchemaConflictError";
     this.schemaId = schemaId;
     this.schemaNames = schemaNames;
     this.recordKey = recordKey;
+    this.unreadSlots = unreadSlots;
   }
 }
 

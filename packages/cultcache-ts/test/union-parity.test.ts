@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { decode, encode } from "@msgpack/msgpack";
@@ -22,189 +21,13 @@ import {
   encodeDocumentPayload,
 } from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
-import type { AnyCultCacheDocumentDefinition, CacheBackingStore, CultCacheEnvelope } from "../src/types";
+import type { AnyCultCacheDocumentDefinition, CultCacheEnvelope } from "../src/types";
+
+import {
+  CANARY, type Node, type Surface, golden, hex, node, outcome, read, surfaceCodec, surfaceDocument, surfaceSchema, vectors, envelopeOf, memoryStore,
+} from "./union-surface-fixture";
 
 const { array, boolean, bytes, float32, float64, int32, int64, lazy, list, nullable, slots, string, union, unit } = codecs;
-
-// The names the C# reference gives the fixture's types (CultSchemaTypeNames.FromType), as union-surface.cc carries them.
-const CS = "GameCult.Caching.Tests.UnionParityVectorTests+";
-
-// The golden is tests/vectors/union-parity, written by the C# reference. Everything below that is bytes or an expected
-// outcome is read from those committed files; only the value the payload must decode to is spelled here.
-function findVectors(from: string): string {
-  for (let dir = from; ; dir = resolve(dir, "..")) {
-    if (existsSync(join(dir, "tests", "vectors", "union-parity"))) return join(dir, "tests", "vectors", "union-parity");
-    if (resolve(dir, "..") === dir) throw new Error("tests/vectors/union-parity not found above the test.");
-  }
-}
-const vectors = findVectors(__dirname);
-const read = async (name: string) => new Uint8Array(await readFile(join(vectors, name)));
-
-// The string the C# writer put inside every refusal payload, to prove a refusal never echoes the payload.
-const CANARY = "CANARY-union-golden-4c2a";
-
-type Node =
-  | { kind: "Box"; id: string; children: (Node | null)[] }
-  | { kind: "Text"; id: string; content: string }
-  | { kind: "Use"; id: string; composition: Composition; slots: (Node | null)[] }
-  | { kind: "Image"; id: string; uri: string; alt: string }
-  | { kind: "Wrap"; inner: Node | null; id: string };
-interface Composition { name: string; body: Node | null }
-type Outcome = { kind: "Pending"; message: string } | { kind: "Completed"; sourceVersion: number } | { kind: "Denied" } | { kind: "Floor" } | { kind: "Ceiling" };
-// The golden's Outcome: the arms of a list carry an element id, so Denied, Floor and Ceiling are one-slot records.
-type GoldenOutcome =
-  | { kind: "Pending"; message: string; id: string }
-  | { kind: "Completed"; sourceVersion: number; id: string }
-  | { kind: "Denied"; id: string }
-  | { kind: "Floor"; id: string }
-  | { kind: "Ceiling"; id: string };
-type Item = { kind: "Gem"; name: string } | { kind: "Tool"; name: string; uses: number } | { kind: "Part"; name: string; count: number };
-type CraftedItem = { kind: "Tool"; name: string; uses: number } | { kind: "Part"; name: string; count: number };
-interface Surface {
-  id: string;
-  version: number;
-  root: Node | null;
-  outcomes: (GoldenOutcome | null)[];
-  part: Item | null;
-  crafted: CraftedItem | null;
-  missing: Node | null;
-}
-
-const composition = slots<Composition>({ 0: ["name", string], 1: ["body", lazy(() => node)] }, `${CS}Composition`);
-const node: Codec<Node | null> = union<Node>("Node", {
-  0: ["Box", slots<{ id: string; children: (Node | null)[] }>({ 0: ["id", string], 1: ["children", list(lazy(() => node))] })],
-  1: ["Text", slots<{ id: string; content: string }>({ 0: ["id", string], 1: ["content", string] })],
-  2: ["Use", slots<{ id: string; composition: Composition; slots: (Node | null)[] }>({
-    0: ["id", string], 1: ["composition", composition], 2: ["slots", list(lazy(() => node))],
-  })],
-  5: ["Image", slots<{ id: string; uri: string; alt: string }>({ 0: ["id", string], 1: ["uri", string], 3: ["alt", string] })],
-  6: ["Wrap", slots<{ inner: Node | null; id: string }>({ 0: ["inner", lazy(() => node)], 1: ["id", string] })],
-}, `${CS}Node`);
-const outcome = union<Outcome>("Outcome", {
-  0: ["Pending", slots<{ message: string }>({ 0: ["message", string] })],
-  1: ["Completed", slots<{ sourceVersion: number }>({ 0: ["sourceVersion", int32] })],
-  2: ["Denied", unit],
-  [-2147483648]: ["Floor", unit],
-  2147483647: ["Ceiling", unit],
-}, `${CS}Outcome`);
-const idOnly = slots<{ id: string }>({ 0: ["id", string] });
-const goldenOutcome = union<GoldenOutcome>("Outcome", {
-  0: ["Pending", slots<{ message: string; id: string }>({ 0: ["message", string], 1: ["id", string] })],
-  1: ["Completed", slots<{ sourceVersion: number; id: string }>({ 0: ["sourceVersion", int32], 1: ["id", string] })],
-  2: ["Denied", idOnly],
-  [-2147483648]: ["Floor", idOnly],
-  2147483647: ["Ceiling", idOnly],
-}, `${CS}Outcome`);
-const toolArm = slots<{ name: string; uses: number }>({ 0: ["name", string], 1: ["uses", int32] });
-const partArm = slots<{ name: string; count: number }>({ 0: ["name", string], 1: ["count", int32] });
-const item = union<Item>("Item", {
-  0: ["Gem", slots<{ name: string }>({ 0: ["name", string] })],
-  1: ["Tool", toolArm],
-  2: ["Part", partArm],
-}, `${CS}Item`);
-const craftedItem = union<CraftedItem>("CraftedItem", { 0: ["Tool", toolArm], 1: ["Part", partArm] }, `${CS}CraftedItem`);
-const surfaceCodec = slots<Surface>({
-  0: ["id", string],
-  1: ["version", int32],
-  2: ["root", node],
-  3: ["outcomes", list(goldenOutcome)],
-  4: ["part", item],
-  5: ["crafted", craftedItem],
-  6: ["missing", node, null],
-}, `${CS}UnionSurface`);
-
-const nodeSchema: z.ZodType<Node | null> = z.lazy(() =>
-  z.union([
-    z.null(),
-    z.discriminatedUnion("kind", [
-      z.object({ kind: z.literal("Box"), id: z.string(), children: z.array(nodeSchema) }),
-      z.object({ kind: z.literal("Text"), id: z.string(), content: z.string() }),
-      z.object({
-        kind: z.literal("Use"),
-        id: z.string(),
-        composition: z.object({ name: z.string(), body: nodeSchema }),
-        slots: z.array(nodeSchema),
-      }),
-      z.object({ kind: z.literal("Image"), id: z.string(), uri: z.string(), alt: z.string() }),
-      z.object({ kind: z.literal("Wrap"), inner: nodeSchema, id: z.string() }),
-    ]),
-  ]));
-const surfaceSchema = z.object({
-  id: z.string(),
-  version: z.number(),
-  root: nodeSchema,
-  outcomes: z.array(z.union([
-    z.null(),
-    z.discriminatedUnion("kind", [
-      z.object({ kind: z.literal("Pending"), message: z.string(), id: z.string() }),
-      z.object({ kind: z.literal("Completed"), sourceVersion: z.number(), id: z.string() }),
-      z.object({ kind: z.literal("Denied"), id: z.string() }),
-      z.object({ kind: z.literal("Floor"), id: z.string() }),
-      z.object({ kind: z.literal("Ceiling"), id: z.string() }),
-    ]),
-  ])),
-  part: z.union([z.null(), z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("Gem"), name: z.string() }),
-    z.object({ kind: z.literal("Tool"), name: z.string(), uses: z.number() }),
-    z.object({ kind: z.literal("Part"), name: z.string(), count: z.number() }),
-  ])]),
-  crafted: z.union([z.null(), z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("Tool"), name: z.string(), uses: z.number() }),
-    z.object({ kind: z.literal("Part"), name: z.string(), count: z.number() }),
-  ])]),
-  missing: nodeSchema,
-}) as unknown as z.ZodType<Surface>;
-
-function surfaceDocument(schemaId?: string) {
-  return defineDocumentType({
-    type: "tests.union_surface",
-    schemaId: schemaId ?? "tests.union_surface.v1",
-    schemaName: "tests.union_surface",
-    schemaVersion: "tests.union_surface.v1",
-    schema: surfaceSchema,
-    codec: surfaceCodec,
-    name: "id",
-  });
-}
-
-const golden: Surface = {
-  id: "surface",
-  version: 3,
-  root: {
-    kind: "Box",
-    id: "0000000000c0",
-    children: [
-      { kind: "Text", id: "0000000000c1", content: "hello" },
-      {
-        kind: "Use",
-        id: "0000000000c2",
-        composition: {
-          name: "comp",
-          body: {
-            kind: "Box",
-            id: "0000000000d0",
-            children: [
-              { kind: "Text", id: "0000000000d1", content: "x" },
-              { kind: "Image", id: "0000000000d2", uri: "uri://a", alt: "alt" },
-            ],
-          },
-        },
-        slots: [{ kind: "Text", id: "0000000000e1", content: "slot" }, null, { kind: "Box", id: "0000000000e2", children: [] }],
-      },
-      { kind: "Image", id: "0000000000c3", uri: "uri://b", alt: "" },
-    ],
-  },
-  outcomes: [
-    { kind: "Pending", message: "wait", id: "0000000000a1" },
-    { kind: "Completed", sourceVersion: 7, id: "0000000000a2" },
-    { kind: "Denied", id: "0000000000a3" },
-  ],
-  part: { kind: "Tool", name: "hammer", uses: 12 },
-  crafted: { kind: "Part", name: "gear", count: 4 },
-  missing: null,
-};
-
-const hex = (data: Uint8Array) => Buffer.from(data).toString("hex");
 
 async function outcomeEntries() {
   const entries = decode(await read("outcomes.msgpack")) as [string, string, string, number | null, string][];
@@ -728,19 +551,6 @@ test("the Int32 edges of an arm key: the largest is an arm, one past either end 
   assert.throws(() => edge.decode(readWire(fromHex("92d3ffffffff7fffffff90"))), { message: "Union U: the arm key is outside Int32 (declared keys: 2147483647)." });
   assert.throws(() => edge.decode(readWire(fromHex("92d3ffffffff8000000090"))), { message: "Union U: unknown arm key -2147483648 (declared keys: 2147483647)." });
 });
-
-function envelopeOf(payload: Uint8Array): CultCacheEnvelope {
-  return { key: "surface", type: "tests.union_surface", payload: documentPayloadFromBytes(payload), storedAt: new Date().toISOString() };
-}
-
-function memoryStore(entries: CultCacheEnvelope[]): CacheBackingStore & { entries: CultCacheEnvelope[] } {
-  return {
-    entries,
-    async pullAll() { return entries.map((entry) => ({ ...entry })); },
-    async push(entry) { entries.push(entry); },
-    async delete() {},
-  };
-}
 
 test("arm keys span Int32 and are listed ascending; slot keys are non-negative Int32", () => {
   const keys = union<{ kind: "High" | "Zero" | "Neg" | "Low" }>("U", {

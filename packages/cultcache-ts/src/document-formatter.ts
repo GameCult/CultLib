@@ -1,7 +1,7 @@
 import { decode, encode } from "@msgpack/msgpack";
 
 import { MAX_PAYLOAD_DEPTH } from "./payload-depth";
-import type { SlotsCodec } from "./codec";
+import { decodeNoting, type NotedSlots, type SlotsCodec } from "./codec";
 import type { AnyCultCacheDocumentDefinition, CultCacheDocumentFormatter } from "./types";
 import { readWire, writeWire } from "./wire";
 
@@ -14,6 +14,13 @@ export function resolveDocumentFormatter(definition: AnyCultCacheDocumentDefinit
     throw new Error(`CultCache document type "${definition.type}" declares both a codec and a formatter.`);
   }
   return definition.formatter ?? (definition.codec ? codecFormatter(definition.codec) : plainDocumentFormatter);
+}
+
+// The one decode of a document's bytes, with the slots it read past. A plain formatter or a user formatter has no slot codec
+// and carries everything, so it notes nothing.
+export function decodeMarked(definition: AnyCultCacheDocumentDefinition, bytes: Uint8Array): { value: unknown; unreadSlots?: NotedSlots } {
+  const formatter = resolveDocumentFormatter(definition);
+  return decodeNoting(() => formatter.decode(bytes));
 }
 
 const plainDocumentFormatter: CultCacheDocumentFormatter<unknown> = {
