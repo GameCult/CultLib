@@ -644,7 +644,7 @@ class CultCache:
             return False
         return True
 
-    def _refuse_at(self, document: DocumentDefinition[Any], key: str) -> None:
+    def _refuse_at(self, document: DocumentDefinition[Any], key: str) -> list[tuple[str, str]]:
         """The judges a write or removal of the key by this document passes before any store is touched, asked by `is_writable` and
         by `delete`: a global document writes only its global key, a record held read-only is never replaced, and a key held as
         another type's record or carried foreign is refused (`_refuse_retype`)."""
@@ -653,7 +653,7 @@ class CultCache:
         self._refuse_unread([key])
         entry = document.catalog_entry()
         probe = CultCacheEnvelope.create(key=key, type=document.type, payload=b"", schema_id=entry.schema_id, catalog_entry=entry)
-        self._refuse_retype(document, [probe])
+        return self._refuse_retype(document, [probe])
 
     def _refuse_unread(self, keys: list[str]) -> None:
         """The one check every write and removal asks before any store is touched."""
@@ -727,13 +727,18 @@ class CultCache:
 
     def _delete(self, document: DocumentDefinition[Any], key: str) -> None:
         self._assert_registered(document)
-        self._refuse_at(document, key)
+        # A key held as another type's record this document owns is removed, as a write of the key would replace it (C# Remove is by key).
+        owned = self._refuse_at(document, key)
         store = self._store_for_type(document.type)
         legacy_key = self._state.legacy_global_keys.get(document.type) if key == GLOBAL_KEY else None
         if store is not None:
+            for other, _ in owned:
+                store.delete(other, key)
             store.delete(document.type, key if legacy_key is None else legacy_key)
         if legacy_key is not None:
             del self._state.legacy_global_keys[document.type]
+        for other, _ in owned:
+            self._drop(other, key)
         self._drop(document.type, key)
 
     def _drop(self, type: str, key: str) -> None:

@@ -420,6 +420,27 @@ class StoreRowTests(unittest.TestCase):
         cache.pull_all_backing_stores()
         self.assertFalse(cache.is_writable(listing, "consented"))
 
+    def test_a_removal_by_the_owner_of_a_key_held_as_another_type_removes_it_as_a_write_would_replace_it(self) -> None:
+        a = define_database_entry_type(
+            "tests.owned_a", [database_entry_field("a", 0, codec=t.string)], name="a", indexes={"by_a": "a"}
+        )
+        b = define_database_entry_type(
+            "tests.owned_b",
+            [database_entry_field("a", 0, codec=t.string)],
+            compatible_schema_ids=(a.catalog_entry().schema_id,),
+        )
+        path = self.tmp / "owned.cc"
+        writer = _open(path, a)
+        writer.put(a, "k", {"a": "x"})
+        writer.put(a, "other", {"a": "y"})
+        cache = _open(path, a, b)
+        self.assertTrue(cache.is_writable(b, "k"))
+        cache.delete(b, "k")
+        self.assertIsNone(cache.get(a, "k"))
+        self.assertIsNone(cache.get_by_index(a, "by_a", "x"))
+        self.assertEqual([e.key for e in SingleFileMessagePackBackingStore(path).pull_all()], ["other"])
+        self.assertTrue(cache.is_writable(b, "k"))
+
     def test_writing_another_record_and_flushing_carries_the_marked_one_unchanged(self) -> None:
         path, cache = self._store("extra-slot-store.cc")
         original = {e.key: e for e in SingleFileMessagePackBackingStore(path).pull_all()}
