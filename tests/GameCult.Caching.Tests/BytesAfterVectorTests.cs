@@ -37,18 +37,11 @@ namespace GameCult.Caching.Tests
             ("bytes-after-second-document.msgpack", Base),
         };
 
-        private static byte[] Raw(Action<MessagePackWriter> write)
+        // The bounds row shape: [file, outcome, union, key|nil, detail].
+        private static byte[] OutcomesFile()
         {
             var buffer = new System.Buffers.ArrayBufferWriter<byte>();
-            var writer = new MessagePackWriter(buffer);
-            write(writer);
-            writer.Flush();
-            return buffer.WrittenSpan.ToArray();
-        }
-
-        // The bounds row shape: [file, outcome, union, key|nil, detail].
-        private static byte[] OutcomesFile() => Raw(w =>
-        {
+            var w = new MessagePackWriter(buffer);
             var cases = Cases();
             w.WriteArrayHeader(cases.Length);
             foreach (var (file, _) in cases)
@@ -60,7 +53,10 @@ namespace GameCult.Caching.Tests
                 w.WriteNil();
                 w.Write("bytes-after");
             }
-        });
+
+            w.Flush();
+            return buffer.WrittenSpan.ToArray();
+        }
 
         private static string Message(Action action)
         {
@@ -135,10 +131,11 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.two_values", "tests.two_values.v1")]
+        [MessagePackObject]
         [MessagePackFormatter(typeof(TwoValueFormatter))]
         public sealed class TwoValues
         {
-            public string Id = string.Empty;
+            [Key(0)] [CultName] public string Id = string.Empty;
         }
 
         [Test]
