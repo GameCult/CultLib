@@ -158,6 +158,26 @@ def _messagepack_payload_decoder(payload: bytes) -> Any:
     return msgpack.unpackb(payload, raw=False)
 
 
+def read_payload_tree(type_name: str, payload: bytes, decoder: Callable[[bytes], Any] | None = None) -> Any:
+    """The one read of a payload's tree: exactly one MessagePack value, within the nesting limit. Depth is judged first,
+    on the value read so far, so a tail never pre-empts it (C# throws at container 257 before it reaches the tail); then a
+    tail is refused by count and never echoed. Raised outside the handler so no `__context__` keeps the tail."""
+    after = -1
+    unpacked: Any = None
+    try:
+        tree = (decoder or _messagepack_payload_decoder)(payload)
+    except _STACK_FAULTS:
+        raise CultCachePayloadDepthError(type_name, "read") from None
+    except msgpack.ExtraData as error:
+        after = len(error.extra)
+        unpacked = error.unpacked
+    if after >= 0:
+        _refuse_past_depth_limit(unpacked, type_name, "read")
+        raise ValueError(f"{type_name} payload has {after} bytes after its first MessagePack value (refused on read).")
+    _refuse_past_depth_limit(tree, type_name, "read")
+    return tree
+
+
 @dataclass(frozen=True)
 class DatabaseEntryField:
     name: str
@@ -234,18 +254,7 @@ class DocumentDefinition(Generic[T]):
     def decode_payload_marked(self, payload: bytes) -> tuple[T, UnreadSlots | None]:
         """The value and what the decode found past the declared slots, at any depth. The payload depth check runs first: a
         payload past the limit is refused, never marked."""
-        after = -1
-        try:
-            tree = self.payload_decoder(payload)
-        except _STACK_FAULTS:
-            raise CultCachePayloadDepthError(self.type, "read") from None
-        except msgpack.ExtraData as error:
-            after = len(error.extra)
-        if after >= 0:
-            # A payload is one MessagePack value: the tail is refused by count, never echoed. Raised outside the handler so
-            # no __context__ keeps error.extra (`from None` only hides the context from the traceback).
-            raise ValueError(f"{self.type} payload has {after} bytes after its first MessagePack value (refused on read).")
-        _refuse_past_depth_limit(tree, self.type, "read")
+        tree = read_payload_tree(self.type, payload, self.payload_decoder)
         outer, opened = _current_scope(), _SlotScope()
         _scope.open = opened
         try:
