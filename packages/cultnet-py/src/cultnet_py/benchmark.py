@@ -137,7 +137,9 @@ class InMemoryBackingStore:
     def push(self, envelope: CultCacheEnvelope) -> None:
         self._records[(envelope.type, envelope.key)] = envelope
 
-    def push_all(self, envelopes: list[CultCacheEnvelope]) -> None:
+    def push_all(self, envelopes: list[CultCacheEnvelope], soft: bool = False) -> None:
+        if soft and self._records:
+            return
         for envelope in envelopes:
             self.push(envelope)
 

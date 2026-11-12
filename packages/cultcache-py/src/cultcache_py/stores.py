@@ -106,9 +106,11 @@ class JsonLinesBackingStore:
             existing[(envelope.type, envelope.key)] = envelope
             self._replace_all(list(existing.values()))
 
-    def push_all(self, envelopes: list[CultCacheEnvelope]) -> None:
+    def push_all(self, envelopes: list[CultCacheEnvelope], soft: bool = False) -> None:
         with self._lock:
             existing = {(item.type, item.key): item for item in self.pull_all()}
+            if soft and self.path.exists():
+                return
             for envelope in envelopes:
                 existing[(envelope.type, envelope.key)] = envelope
             self._replace_all(list(existing.values()))
@@ -163,9 +165,14 @@ class SingleFileMessagePackBackingStore:
         with self._write_transaction():
             self._replace_all([envelope], self.pull_all())
 
-    def push_all(self, envelopes: list[CultCacheEnvelope]) -> None:
+    def push_all(self, envelopes: list[CultCacheEnvelope], soft: bool = False) -> None:
+        """A soft push writes only where nothing is at the path: a store the reader reads is left byte for byte, and a file it
+        cannot read is refused by the same read, as in TS and Rust."""
         with self._write_transaction():
-            self._replace_all(list(envelopes), self.pull_all())
+            arrived = self.pull_all()
+            if soft and self.path.exists():
+                return
+            self._replace_all(list(envelopes), arrived)
 
     def delete(self, type: str, key: str) -> None:
         with self._write_transaction():

@@ -67,10 +67,12 @@ class BackingStore(Protocol):
     def delete(self, type: str, key: str) -> None:
         ...
 
-    def push_all(self, envelopes: list[CultCacheEnvelope]) -> None:
+    def push_all(self, envelopes: list[CultCacheEnvelope], soft: bool = False) -> None:
         existing = {
             (envelope.type, envelope.key): envelope for envelope in self.pull_all()
         }
+        if soft and existing:
+            return
         for envelope in envelopes:
             existing[(envelope.type, envelope.key)] = envelope
         self._replace_all(list(existing.values()))
