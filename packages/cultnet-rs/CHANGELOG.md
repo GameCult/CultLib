@@ -15,5 +15,6 @@ only in git history.
 
 ### Breaking
 
+- A CultNet frame with bytes after its message is refused, by count (through `cultcache_rs::decode_payload`); the decoder used to read the message and drop the tail. No producer emits one. Behaviour change: the next release is a minor bump (0.x breaking).
 - `CultNetDocumentRegistry::register` returns `Result<&mut Self>` where it returned `&mut Self`. A binding that claims a document type or a schema id another binding already holds is refused with `cultcache_rs::SchemaConflictError` (naming the new binding's schema id and both document types) and nothing is bound; binding a type to the schema id it already holds still replaces that binding. Callers chain `register(...)?`.
 - `CultMeshCdnChunkRef` gains a public `id` field, the decimal text of `offset` (the reference's element id, slot 4). A manifest written before ids reads `""`; encoding writes the slot.

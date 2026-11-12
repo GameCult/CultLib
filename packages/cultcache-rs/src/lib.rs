@@ -600,14 +600,22 @@ impl std::error::Error for PayloadTooDeep {}
 
 /// Walks the MessagePack headers of one payload without recursion, counting every array and map and
 /// refusing the first container past [`MAX_PAYLOAD_DEPTH`]. Scalars are skipped by length and nothing
-/// is allocated per element. A payload that ends early is the decoder's to refuse.
+/// is allocated per element. Only the first value is walked; a payload that ends early is the
+/// decoder's to refuse. A depth-only probe: [`decode_payload`] also refuses bytes after the value.
 pub fn check_payload_depth(bytes: &[u8]) -> std::result::Result<(), PayloadTooDeep> {
+    first_value_end(bytes).map(|_| ())
+}
+
+/// Where the first MessagePack value of `bytes` ends, walking only that value (its tail is never
+/// read). `None` when the payload ends inside a header; a final scalar cut short ends past the
+/// payload's length, which is not bytes after the value either. Both are the decoder's to refuse.
+fn first_value_end(bytes: &[u8]) -> std::result::Result<Option<usize>, PayloadTooDeep> {
     let mut remaining = [0usize; MAX_PAYLOAD_DEPTH];
     let mut depth = 0usize;
     let mut position = 0usize;
     while position < bytes.len() {
         let Some((advance, children)) = element_header(bytes, position) else {
-            return Ok(());
+            return Ok(None);
         };
         position = position.saturating_add(advance);
         if let Some(children) = children {
@@ -629,7 +637,18 @@ pub fn check_payload_depth(bytes: &[u8]) -> std::result::Result<(), PayloadTooDe
             depth -= 1;
         }
         if depth == 0 {
-            return Ok(());
+            return Ok(Some(position));
+        }
+    }
+    Ok(None)
+}
+
+/// The one rule for "is this payload one value": the nesting bound, then no bytes after the first
+/// value. The count is all it reports; the tail is never walked or quoted.
+fn check_record_payload(bytes: &[u8]) -> Result<()> {
+    if let Some(end) = first_value_end(bytes)? {
+        if end < bytes.len() {
+            bail!("payload has {} bytes after its first MessagePack value", bytes.len() - end);
         }
     }
     Ok(())
@@ -784,7 +803,7 @@ fn decode_grown<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::result::Re
     grown(&mut reader, |grown| T::deserialize(grown))
 }
 
-/// The one decode of a document payload: the nesting bound first, then [`decode_grown`], whose
+/// The one decode of a document payload: the payload check first (nesting bound, one value), then [`decode_grown`], whose
 /// rmp-serde depth counter (1024) is only a backstop. A failure keeps its kind and never quotes the
 /// bytes. Readers of stored envelope payloads outside this crate decode through it too.
 ///
@@ -796,7 +815,7 @@ fn decode_grown<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::result::Re
 /// verified on x86_64-pc-windows-msvc by hand (`decode_stack`, revision 10a39dac, 13 tests, debug and release); a
 /// `stacker` bump or a change to the stack-size tests repeats it.
 pub fn decode_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T> {
-    check_payload_depth(payload)?;
+    check_record_payload(payload)?;
     decode_grown(payload).map_err(opaque_decode_error)
 }
 
@@ -918,10 +937,11 @@ impl Drop for UnreadScope {
     }
 }
 
-/// [`decode_payload`] with the mark: the same depth check and grown decode, inside a scope the derives' slot
-/// visitors note into. A payload past the nesting limit is refused before the decode, never marked.
+/// [`decode_payload`] with the mark: the same payload check and grown decode, inside a scope the derives' slot
+/// visitors note into. A payload past the nesting limit or with bytes after its value is refused before the
+/// decode, never marked.
 pub fn decode_payload_marked<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<(T, Option<UnreadSlots>)> {
-    check_payload_depth(payload)?;
+    check_record_payload(payload)?;
     let scope = UnreadScope::open();
     let value = decode_grown(payload).map_err(opaque_decode_error)?;
     Ok((value, scope.mark()))
@@ -948,10 +968,10 @@ struct Definition {
     unread_slots: fn(&[u8]) -> Result<Option<UnreadSlots>>,
 }
 
-/// The nesting bound for an envelope admitted without a typed decode, from the same walk that
-/// [`decode_payload`] runs first. Names the entry's type and key, never the payload.
-fn require_payload_depth(entry: &CultCacheEnvelope) -> Result<()> {
-    check_payload_depth(&entry.payload).with_context(|| {
+/// The payload check for an envelope admitted without a typed decode, the one [`decode_payload`]
+/// runs first. Names the entry's type and key, never the payload.
+fn require_record_payload(entry: &CultCacheEnvelope) -> Result<()> {
+    check_record_payload(&entry.payload).with_context(|| {
         format!(
             "refused CultCache envelope {:?} at key {:?}",
             entry.r#type, entry.key
@@ -2917,7 +2937,29 @@ pub struct CultCache {
     /// Records a store holds that no registered type claims: (store index, the envelope as the store read it). Derived from the last
     /// pull and replaced with it; written nowhere else. It decides only refusals at its keys.
     foreign: Vec<(usize, CultCacheEnvelope)>,
+    /// Why the last pull of the backing stores was refused; `None` once a pull succeeds. While set, every write and removal is refused.
+    load_refused: Option<String>,
 }
+
+/// A write or removal refused because the cache's last load of its backing stores was refused. The cache holds no
+/// image of those stores, so any write would persist an image that lacks the records it never read. Repair the store
+/// named by `reason` (which names a type, a key and a clause, never a payload) and load again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CultCacheLoadRefused {
+    pub reason: String,
+}
+
+impl std::fmt::Display for CultCacheLoadRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "CultCache refuses writes and removals: its load of the backing stores failed ({}); repair the store and load again",
+            self.reason
+        )
+    }
+}
+
+impl std::error::Error for CultCacheLoadRefused {}
 
 /// A record a store holds that no registered type claims: carried, never served.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2980,6 +3022,7 @@ impl CultCache {
             projectors: BTreeMap::new(),
             stores: Vec::new(),
             foreign: Vec::new(),
+            load_refused: None,
         }
     }
 
@@ -3116,12 +3159,39 @@ impl CultCache {
     /// Reads every store into a staged image and replaces the cache's view
     /// only when all of them loaded, so a refused load admits nothing.
     pub fn pull_all_backing_stores(&mut self) -> Result<()> {
+        match self.stage_pull() {
+            Ok((loaded, foreign, holders)) => {
+                self.entries = loaded;
+                self.foreign = foreign;
+                self.index_holders = holders;
+                self.load_refused = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.load_refused = Some(format!("{error:#}"));
+                Err(error)
+            }
+        }
+    }
+
+    /// The one gate of every write and removal: a cache whose load was refused holds no image of its stores.
+    fn require_loaded(&self) -> Result<()> {
+        match &self.load_refused {
+            Some(reason) => Err(CultCacheLoadRefused { reason: reason.clone() }.into()),
+            None => Ok(()),
+        }
+    }
+
+    /// The image every store holds, judged whole, installed nowhere.
+    #[allow(clippy::type_complexity)]
+    fn stage_pull(&self) -> Result<(BTreeMap<(String, String), CultCacheEnvelope>, Vec<(usize, CultCacheEnvelope)>, IndexHolders)> {
         let mut loaded = BTreeMap::new();
         let mut foreign = Vec::new();
         let known_types: BTreeSet<String> = self.definitions.keys().cloned().collect();
         let schema_name_definitions = self.schema_name_definitions.clone();
         for (index, registration) in self.stores.iter().enumerate() {
             for mut entry in registration.store.pull_all()? {
+                require_record_payload(&entry)?;
                 let Some(canonical_type) = resolve_registered_type(
                     &known_types,
                     &schema_name_definitions,
@@ -3154,10 +3224,7 @@ impl CultCache {
         }
         self.refuse_second_globals(&loaded)?;
         let holders = self.judge_image(&loaded)?;
-        self.entries = loaded;
-        self.foreign = foreign;
-        self.index_holders = holders;
-        Ok(())
+        Ok((loaded, foreign, holders))
     }
 
     /// The records the last pull found in a store that no registered type claims, sorted by key (UTF-16 order). The cache does not
@@ -3383,6 +3450,7 @@ impl CultCache {
     }
 
     pub fn put<T: DatabaseEntry>(&mut self, key: impl Into<String>, value: &T) -> Result<T> {
+        self.require_loaded()?;
         let (entry, parsed) = self.prepare_entry(key, value)?;
         self.refuse_unread_slots(&entry.r#type, &entry.key)?;
         self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
@@ -3460,6 +3528,7 @@ impl CultCache {
     }
 
     pub fn put_prepared_batch(&mut self, staged: Vec<CultCacheEnvelope>) -> Result<()> {
+        self.require_loaded()?;
         if staged.is_empty() {
             return Err(anyhow!("CultCache batch must contain at least one entry"));
         }
@@ -3484,7 +3553,7 @@ impl CultCache {
                     entry.r#type
                 ));
             }
-            require_payload_depth(entry)?;
+            require_record_payload(entry)?;
             self.refuse_unread_slots(&entry.r#type, &entry.key)?;
             self.refuse_claimed_id(entry)?;
             let Some(home) = self.home_index(&entry.r#type)? else {
@@ -3527,6 +3596,7 @@ impl CultCache {
     }
 
     pub fn put_envelope<T: DatabaseEntry>(&mut self, entry: CultCacheEnvelope) -> Result<T> {
+        self.require_loaded()?;
         let parsed = self.validate_envelope::<T>(&entry)?;
         self.refuse_unread_slots(&entry.r#type, &entry.key)?;
         self.refuse_claimed_id(&entry)?;
@@ -3547,6 +3617,7 @@ impl CultCache {
     /// admission; CultCache still enforces registered type, identity, timestamp,
     /// the payload nesting bound ([`MAX_PAYLOAD_DEPTH`]), routing, and persistence.
     pub fn put_raw_envelope(&mut self, entry: CultCacheEnvelope) -> Result<()> {
+        self.require_loaded()?;
         if !self.definitions.contains_key(&entry.r#type) {
             return Err(anyhow!(
                 "No entry type registered for CultCache envelope type {:?}",
@@ -3565,7 +3636,7 @@ impl CultCache {
                 entry.r#type
             ));
         }
-        require_payload_depth(&entry)?;
+        require_record_payload(&entry)?;
         self.refuse_unread_slots(&entry.r#type, &entry.key)?;
         self.refuse_claimed_id(&entry)?;
         self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
@@ -3621,6 +3692,7 @@ impl CultCache {
     }
 
     pub fn delete<T: DatabaseEntry>(&mut self, key: &str) -> Result<bool> {
+        self.require_loaded()?;
         self.require_entry_type::<T>()?;
         self.refuse_unread_slots(T::TYPE, key)?;
         let id = entry_id_parts(T::TYPE, key);
@@ -3662,6 +3734,7 @@ impl CultCache {
                     entry.r#type
                 ));
             }
+            require_record_payload(&entry)?;
             self.home_index(&entry.r#type)?;
             self.refuse_claimed_id(&entry)?;
             self.refuse_retype(&loaded, &self.foreign, &entry)?;
@@ -6293,6 +6366,34 @@ mod tests {
                 })
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn put_raw_envelope_refuses_bytes_after_the_value() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("tail.cc");
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<Settings>()?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
+        let tailed = CultCacheEnvelope {
+            key: "app".to_string(),
+            r#type: Settings::TYPE.to_string(),
+            payload: vec![0x91, 0x01, 0xc0],
+            stored_at: now_utc_second(),
+            schema_id: None,
+        };
+        let error = format!("{:#}", cache.put_raw_envelope(tailed.clone()).unwrap_err());
+        assert!(error.contains("payload has 1 bytes after its first MessagePack value"), "{error}");
+        assert!(error.contains("app") && error.contains(Settings::TYPE), "{error}");
+        assert!(cache.snapshot().is_empty());
+        assert!(!store_path.exists() || SingleFileMessagePackBackingStore::new(&store_path).pull_all()?.is_empty());
+        let error = format!("{:#}", cache.put_prepared_batch(vec![tailed.clone()]).unwrap_err());
+        assert!(error.contains("payload has 1 bytes after its first MessagePack value"), "{error}");
+        assert!(cache.snapshot().is_empty());
+        // The same bytes without the tail are admitted: the refusal is the count, not the shape.
+        cache.put_raw_envelope(CultCacheEnvelope { payload: vec![0x91, 0x01], ..tailed })?;
+        assert_eq!(cache.snapshot().len(), 1);
         Ok(())
     }
 

@@ -1810,12 +1810,10 @@ fn a_replicated_payload_nested_past_the_bound_is_refused_typed_on_apply() -> Res
     };
     assert_eq!(documents.len(), 1);
 
-    backing.push(&envelope("past", limit + 1))?;
-    let mut cache = CultCache::new();
-    cache.register_entry_type::<GhostlightAgentStateFixture>()?;
-    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store))?;
-    cache.pull_all_backing_stores()?;
-    let past = registry.create_raw_snapshot_response(&cache, "past", None, Some(&["past".to_string()]))?;
+    // The sender cannot load a payload past the bound, so the frame is the at-limit one with its bytes swapped.
+    let mut past = at_limit.clone();
+    let CultNetMessage::SnapshotResponseRaw { documents, .. } = &mut past else { unreachable!() };
+    documents[0].payload = envelope("past", limit + 1).payload;
     let mut target = CultCache::new();
     target.register_entry_type::<GhostlightAgentStateFixture>()?;
     let error = registry

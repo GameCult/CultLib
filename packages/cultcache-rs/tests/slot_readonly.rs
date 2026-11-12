@@ -481,13 +481,59 @@ fn load_soa_refuses_a_same_length_replacement_of_a_marked_record() {
     let (mut cache, _dir, _) = held_marked_and_clean();
     let all = cache.snapshot_envelopes();
     let marked = all.iter().find(|held| held.key == "marked").unwrap();
-    // The clean record's bytes padded to the marked record's length: same length, different bytes.
-    let mut same_length = vec![0xc0; marked.payload.len()];
-    same_length[..2].copy_from_slice(&[0x91, 0xa1]);
+    // One value (a bin16) of the marked record's length: same length, different bytes. A value followed by padding
+    // would be refused at admission as bytes after the value, before the read-only check is reached.
+    let length = marked.payload.len();
+    let mut same_length = vec![0u8; length];
+    same_length[..3].copy_from_slice(&[0xc5, ((length - 3) >> 8) as u8, (length - 3) as u8]);
     assert_eq!(same_length.len(), marked.payload.len());
     let mut replaced = all.clone();
     replaced.iter_mut().find(|held| held.key == "marked").unwrap().payload = same_length;
     let error = cache.load_soa(CultCacheSoaTable::from_envelopes(replaced)).unwrap_err();
     assert_refused_with(&error, "marked", &mark("Composition", 3, 2, 1));
     assert_eq!(cache.snapshot_envelopes(), all);
+}
+
+// The payload check runs before the mark scope opens: a tail on a slot-bearing payload is refused by count, never marked.
+#[test]
+fn a_tail_on_a_slot_payload_is_refused_before_any_mark() {
+    let mut tailed = vector("extra-slot-record.msgpack");
+    tailed.push(0xc0);
+    let error = decode_payload_marked::<UnionSurface>(&tailed).unwrap_err();
+    assert!(format!("{error:#}").contains("payload has 1 bytes after its first MessagePack value"), "{error:#}");
+    // Nothing leaked: the next marked decode finds exactly its own mark.
+    let found = decode_payload_marked::<UnionSurface>(&vector("extra-slot-record.msgpack")).unwrap().1.unwrap();
+    assert_eq!(found.occurrences, 1);
+}
+
+// A store holding marked records and one with a tail is refused at load; the cache then refuses every write with the load
+// refusal (not a per-key mark conflict), and the store file is untouched.
+#[test]
+fn a_store_with_marked_records_and_a_tail_is_refused_and_its_cache_writes_nothing() {
+    use cultcache_rs::CacheBackingStore;
+    use cultcache_rs::CultCacheLoadRefused;
+    let (mut held, _dir, path) = held_marked_and_clean();
+    let mut tailed = vector("union-surface.msgpack");
+    tailed.push(0xc0);
+    SingleFileMessagePackBackingStore::new(&path).push(&envelope("tailed", tailed)).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    // The cache that held the store re-reads it and is refused.
+    assert!(format!("{:#}", held.pull_all_backing_stores().unwrap_err()).contains("bytes after"));
+    let fresh_value = constructed();
+    let mut fresh = registered();
+    fresh.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+    assert!(fresh.pull_all_backing_stores().is_err());
+    for cache in [&mut held, &mut fresh] {
+        let staged = cache.prepare_entry("new", &fresh_value).unwrap().0;
+        let errors = [
+            cache.put("new", &fresh_value).unwrap_err(),
+            cache.put_prepared_batch(vec![staged.clone()]).unwrap_err(),
+            cache.put_raw_envelope(staged).unwrap_err(),
+            cache.delete::<UnionSurface>("new").unwrap_err(),
+        ];
+        for error in errors {
+            assert!(error.downcast_ref::<CultCacheLoadRefused>().is_some(), "{error:#}");
+        }
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
