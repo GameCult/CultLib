@@ -7490,6 +7490,70 @@ namespace GameCult.Networking.Tests
             Assert.That(File.ReadAllBytes(cachePath), Is.Not.EqualTo(before), "a plain node flush after a skipped soft flush did not land the staged write");
         }
 
+        // The cache HOLDS a record in every step: a passthrough that decides soft from the cache's memory instead of
+        // handing the store the flag fails the absent step (it skips and writes nothing) or the unreadable step (it
+        // never reaches the reader that refuses).
+        [Test]
+        public async Task CultNetLocal_Host_SoftFlush_With_A_Held_Record_Writes_Absent_Skips_Readable_Refuses_Unreadable()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultnet-host-soft-held-{Guid.NewGuid():N}.msgpack");
+            CultNetHost? host = null;
+            try
+            {
+                host = await CultNetLocal.CreateHostAsync(filePath, new CultNetHostOptions { StartServer = false });
+                await host.Cache.UpsertAsync(new PlayerData { PlayerId = Guid.NewGuid(), Email = "a@example.test", PasswordHash = "hash", Username = "First" });
+                Assert.That(File.Exists(filePath), Is.False);
+
+                await host.FlushAsync(soft: true);
+                Assert.That(File.Exists(filePath), Is.True, "a soft host flush over an absent store, with a record held, wrote nothing");
+                var written = File.ReadAllBytes(filePath);
+
+                await host.Cache.UpsertAsync(new PlayerData { PlayerId = Guid.NewGuid(), Email = "b@example.test", PasswordHash = "hash", Username = "Second" });
+                await host.FlushAsync(soft: true);
+                Assert.That(File.ReadAllBytes(filePath), Is.EqualTo(written), "a soft host flush rewrote a readable store");
+
+                var junk = new byte[] { 0xC1, 0x01, 0x02, 0x03 };
+                File.WriteAllBytes(filePath, junk);
+                Assert.That(async () => await host.FlushAsync(soft: true), Throws.InstanceOf<CultStoreUnreadableException>());
+                Assert.That(File.ReadAllBytes(filePath), Is.EqualTo(junk));
+            }
+            finally
+            {
+                host?.Dispose();
+                if (File.Exists(filePath)) File.Delete(filePath);
+            }
+        }
+
+        [Test]
+        public async Task CultMeshNode_SoftFlush_With_A_Held_Record_Writes_Absent_Skips_Readable_Refuses_Unreadable()
+        {
+            var rootPath = Path.Combine(TestContext.CurrentContext.WorkDirectory, "cultmesh-soft-held", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(rootPath);
+            var cachePath = Path.Combine(rootPath, "world.ccmp");
+            var documents = new CultNetDocumentRegistry()
+                .Register(CultNetDocumentBinding.ForDocument<MeshQuickstartNote>());
+            using var node = await CultMesh.CreateNodeAsync(cachePath, new CultMeshNodeOptions
+            {
+                StartServer = false,
+                DatabaseOptions = new CultNetDatabaseOptions { RuntimeId = "soft-held-local", DocumentRegistry = documents }
+            });
+            await node.Database.PutAsync(new CultRecordKey("note:one"), new MeshQuickstartNote { NoteId = "note:one", Body = "one" });
+            Assert.That(File.Exists(cachePath), Is.False);
+
+            await node.FlushAsync(soft: true);
+            Assert.That(File.Exists(cachePath), Is.True, "a soft node flush over an absent store, with a record held, wrote nothing");
+            var written = File.ReadAllBytes(cachePath);
+
+            await node.Database.PutAsync(new CultRecordKey("note:two"), new MeshQuickstartNote { NoteId = "note:two", Body = "two" });
+            await node.FlushAsync(soft: true);
+            Assert.That(File.ReadAllBytes(cachePath), Is.EqualTo(written), "a soft node flush rewrote a readable store");
+
+            var junk = new byte[] { 0xC1, 0x01, 0x02, 0x03 };
+            File.WriteAllBytes(cachePath, junk);
+            Assert.That(async () => await node.FlushAsync(soft: true), Throws.InstanceOf<CultStoreUnreadableException>());
+            Assert.That(File.ReadAllBytes(cachePath), Is.EqualTo(junk));
+        }
+
         [Test]
         public async Task CultNetLocal_CreateHostAsync_Wires_Durable_Cache_Without_Starting_Server()
         {

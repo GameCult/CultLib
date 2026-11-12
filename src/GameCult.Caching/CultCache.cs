@@ -2547,6 +2547,11 @@ namespace GameCult.Caching
             return true;
         });
 
+        /// <summary>
+        /// Flushes every dirty backing store. With <paramref name="soft"/> the flush has one meaning, decided by each store's
+        /// own read: a store with nothing at its path is written; a store that reads (empty included) is skipped and its
+        /// staged writes stay staged; a store that cannot be read refuses with <see cref="CultStoreUnreadableException"/>.
+        /// </summary>
         public Task FlushAsync(bool soft = false)
         {
             FlushAllBackingStores(soft);

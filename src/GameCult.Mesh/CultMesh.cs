@@ -428,7 +428,10 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
-        /// Flushes the durable cache.
+        /// Flushes the durable cache. With <paramref name="soft"/> the flush has one meaning, decided by the store's own
+        /// read and never by what the cache holds in memory: a store with nothing at its path is written; a store that reads
+        /// (empty included) is skipped and its staged writes stay staged; a store that cannot be read refuses with
+        /// <see cref="CultStoreUnreadableException"/> and is left untouched.
         /// </summary>
         public Task FlushAsync(bool soft = false)
         {
