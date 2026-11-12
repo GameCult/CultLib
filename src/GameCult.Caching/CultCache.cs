@@ -2669,8 +2669,8 @@ namespace GameCult.Caching
         /// Whether a removal of the key, or a write of the record's own type, would be let through: the write's own decision, asked of
         /// the record the cache holds. False when no attached store is home to the record's type, when its home store is read-only, or
         /// when that store holds it unowned (undeclared drift that drops persisted slots, or a payload carrying slots past this build's,
-        /// see <see cref="CultStoredDocument.UnreadSlots"/>). For a key the cache does not hold, false only when a store lists it
-        /// foreign. One write it does not predict: a Flatten of a variant whose base chain holds an unowned record is refused, though
+        /// see <see cref="CultStoredDocument.UnreadSlots"/>). For a key the cache does not hold, the removal check every store makes of it
+        /// (false when a store lists it foreign). One write it does not predict: a Flatten of a variant whose base chain holds an unowned record is refused, though
         /// the variant itself is writable. Live and advisory: the write still decides.
         /// </summary>
         public bool IsWritable(CultRecordKey key)
@@ -2678,7 +2678,7 @@ namespace GameCult.Caching
             lock (Gate())
                 return _entries.TryGetValue(key.Value, out var held)
                     ? WriteRefusal(held, upsert: false, null, out _) == null
-                    : _stores.All(entry => entry.Store.ForeignRecords.All(record => !string.Equals(record.Key, key.Value, StringComparison.Ordinal)));
+                    : _stores.All(entry => entry.Store.Refusal(key.Value, null) == null);
         }
 
         public object? Get(CultRecordKey key)
