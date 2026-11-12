@@ -100,6 +100,16 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public void TheBoundedEntryKeepsTheDepthBoundAndToleratesATail()
+        {
+            foreach (var (file, _) in Cases())
+                Assert.That(CultDocumentMessagePackSerialization.DeserializeBoundedUntyped(typeof(UnionSurface), VectorFiles.Committed(Vector, file), Registry), Is.TypeOf<UnionSurface>(), file);
+
+            var deep = VectorFiles.Committed(Vector, "depth-past-limit.msgpack");
+            Assert.That(Message(() => CultDocumentMessagePackSerialization.DeserializeBoundedUntyped(typeof(UnionSurface), deep, Registry)), Does.Contain($"the limit is {Limit}"));
+        }
+
+        [Test]
         public void StoreLoadRefuses()
         {
             var work = Path.Combine(Path.GetTempPath(), $"cultlib-bytesafter-{Guid.NewGuid():N}");

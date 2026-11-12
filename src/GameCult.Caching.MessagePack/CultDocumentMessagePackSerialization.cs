@@ -228,6 +228,20 @@ public static class CultDocumentMessagePackSerialization
     }
 
     /// <summary>
+    /// Reads a document payload that is not a stored record under the nesting bound alone: bytes after the first value are
+    /// ignored, as the CultMesh CDN manifest contract has them (contracts/cultmesh/content-acceptance-vectors.json). A record
+    /// payload goes through <see cref="DeserializeUntyped(Type, byte[], CultDocumentRegistry)"/>, which refuses them.
+    /// </summary>
+    public static object DeserializeBoundedUntyped(Type type, byte[] payload, CultDocumentRegistry registry)
+    {
+        if (registry == null) throw new ArgumentNullException(nameof(registry));
+        registry.GetRequired(type);
+        CultPayloadDepth.CheckDepth(payload, type, PayloadDirection.Read);
+        return MessagePackSerializer.Deserialize(type, payload, OptionsForDocument(type))
+            ?? throw new InvalidOperationException($"MessagePack returned null for Cult document type {type.FullName}.");
+    }
+
+    /// <summary>
     /// Replaces slots of a serialized document payload (a MessagePack array indexed by slot) with already-encoded member
     /// values, leaving every other slot byte for byte as it was. A slot past the end extends the array with nil.
     /// </summary>

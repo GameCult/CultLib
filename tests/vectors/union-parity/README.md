@@ -187,3 +187,5 @@ A record's payload is exactly one MessagePack value. Each file is `union-surface
 Must: refuse on read, naming the type and the count of bytes after the first value (`1`, `2`, the tail length) in a clause that says "bytes after its first MessagePack value"; never echo the canary; never report the depth refusal ("the limit is") for any of them, because the tail is not walked; and a single-file store holding `bytes-after-nil.msgpack` as a record payload refuses on open.
 
 What a runtime walks: only the first value of the payload, to find where it ends (a leaf counts as complete at its own length, a container when its last child completes). It compares that end with the payload length; a payload that ends early is not bytes after the value and stays the decoder's to refuse. It never walks the tail, so the tail's own shape (a stray `c1`, 300 levels) is never judged.
+
+The CultMesh CDN manifest is not covered by these vectors: its contract (`contracts/cultmesh/content-acceptance-vectors.json`) accepts bytes after the value, and its reader keeps the depth bound through `DeserializeBoundedUntyped`.
