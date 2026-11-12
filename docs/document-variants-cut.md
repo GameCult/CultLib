@@ -1620,7 +1620,7 @@ The one door per runtime, and who walks through it:
 - **Shared paths.** Open, flush, commit, `ReadDurable`, `ReplaceDurable`. Rust `pull_all` RS:1243 also checks `is_absent` on the store and on the lock path before it takes the shared lock; that skips lock creation only, and the verdict stays with the reader.
 - **Cut line.** `merge-r1` h2 (C#) and h4/h6 (TS `readStoreBytes`); `mesh-single-file-reader` h1.
 - **Pinned by.** C#: `StoreReadabilityTests` `ADanglingFileLinkIsAnIoErrorOnOpenNotAnEmptyStore` :208, `ADanglingDirectoryLinkIsAnIoErrorOnOpenNotAnEmptyStore` :185, and the commit variants :196, :219. Mesh: `ADanglingLinkIsAnIoErrorOnTypedWriteRawWriteAndReadNeverAMissingFile` :107 and `OnlyNothingAtThePathIsAMissingFile` :134 (`CultMeshSingleFileStoreTests.cs`). Rust: `a_dangling_symlink_at_the_store_path_is_an_error_and_nothing_is_written` RS:5832. TS: "readStoreBytes reports nothing at the path only when the lstat finds nothing too".
-- **Known gaps.** The writer side still tolerates a dangling link: Rust `write_all_unlocked` RS:992-996 and TS `pushAll` TS:94-100 replace it on a whole-store write (`variants:follow_up:writer-dangling-link-tolerance`, owner `c2a-write-set`). What a replace does to a live link is `variants:follow_up:store-replace-cut` item 2. Windows junction behavior was proven at `42f05f66` and `b1ff2dcb`, not at the final head.
+- **Known gaps.** The writer no longer tolerates a dangling link: the reader's refusal stands for every write, whole-store `pushAll` included (Rust `a_push_all_through_a_dangling_link_is_refused_like_push_and_writes_nothing`, TS `a pushAll through a dangling link is refused like push`; `variants:follow_up:writer-dangling-link-tolerance`). What a replace does to a live link is `variants:follow_up:store-replace-cut` item 2. Windows junction behavior was proven at `42f05f66` and `b1ff2dcb`, not at the final head.
 
 ### C. Zero-byte file
 
@@ -1672,7 +1672,7 @@ The one door per runtime, and who walks through it:
 - **Shared paths.** TS `pushAll` and Rust `push_all` only.
 - **Cut line.** `merge-r1` h4 (TS) and h6 (Rust).
 - **Pinned by.** The manifest walks run a soft flush over every vector in TS (the `softPushAll` operation, TS test :2336) and Rust (`soft_push_all`, RS:5149), each with an absent and a dangling-link case; `a_soft_push_all_writes_where_nothing_is_and_refuses_a_dangling_link` RS:6019.
-- **Known gaps.** C# and Python have no soft decision, and the C# Mesh flag is dead; no follow-up is registered (h6 `undone` names it). `writer-dangling-link-tolerance` applies to the non-soft branch.
+- **Known gaps.** C# and Python have no soft decision, and the C# Mesh flag is dead; no follow-up is registered (h6 `undone` names it). `writer-dangling-link-tolerance` is settled: the non-soft branch refuses a dangling link too.
 
 ### What no cut owns yet
 

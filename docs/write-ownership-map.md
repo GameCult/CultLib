@@ -107,8 +107,8 @@ Authority map (also in the spec):
 - `variants:follow_up:public-store-writes-behind-cache`: **leave**. It asks who may stage behind an attached cache (API
   shape); this cut changes what any staging is judged by. No collision: direct `Push`/`CommitBatch` reach the same on-disk
   judge, so they get the per-key rule for free. Hands must not give direct staging a different predicate.
-- `variants:follow_up:writer-dangling-link-tolerance`: **leave**. Rust/TS whole-store `push_all` reading a dangling link is
-  a reader/writer tolerance question, not ownership; this cut touches no leaf.
+- `variants:follow_up:writer-dangling-link-tolerance`: **settled** (the reader owns the verdict; every runtime's whole-store
+  `push_all` refuses a dangling link, as `push` does).
 
 ## Deferred doc findings this cut fixes
 

@@ -4120,7 +4120,7 @@ struct DiskStore {
 }
 
 impl DiskStore {
-    /// A file that is gone, or a dangling link a whole-file replace is about to replace: an empty v1 store.
+    /// Nothing at the path: an empty v1 store. A dangling link is something at the path and is refused, not read as this.
     fn absent() -> Self {
         Self { absent: true, format: STORE_FORMAT_V1, envelopes: Vec::new(), catalog: Vec::new() }
     }

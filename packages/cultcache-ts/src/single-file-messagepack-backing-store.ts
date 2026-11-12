@@ -87,25 +87,14 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       // another writer added. The store is read by the same reader as `pullAll`, so one it would refuse (not exactly one
       // store, a variant, a body it cannot decode) is refused and left as it is. A soft flush asks that reader too: nothing
       // at the path is written, a store is left alone.
-      let held: CultCacheEnvelope[] = [];
-      try {
-        const disk = this.#readDisk();
-        if (options.soft && !disk.absent) {
-          return;
-        }
-
-        this.#format = disk.format;
-        held = disk.envelopes;
-      } catch (error) {
-        // Only a dangling link reaches here with ENOENT: it holds no store, so a flush has nothing to merge with and no
-        // header to keep, and replaces the link (R3 pins this). A soft flush does not replace what it cannot read, and every
-        // merging writer has already refused the link when it read the current entries.
-        if (options.soft || (error as NodeJS.ErrnoException).code !== "ENOENT") {
-          throw error;
-        }
-
-        this.#format = STORE_FORMAT_VERSION;
+      // The reader owns the verdict on what is at the path: a dangling link is refused here as it is for open and push.
+      const disk = this.#readDisk();
+      if (options.soft && !disk.absent) {
+        return;
       }
+
+      this.#format = disk.format;
+      const held = disk.envelopes;
 
       // A key is held once: of same-type entries sharing a key in one batch, the last is kept.
       const supplied = [...new Map(entries.map((entry) => [entry.key, entry])).values()];

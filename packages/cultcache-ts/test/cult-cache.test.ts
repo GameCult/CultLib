@@ -2525,14 +2525,15 @@ test("R3 decides resolve-or-refuse: a push through a live link replaces the link
   assert.deepEqual(await readFile(target), before);
 });
 
-test("R3 decides resolve-or-refuse: a pushAll through a dangling link replaces the link", { skip: process.platform === "win32" }, async () => {
+test("a pushAll through a dangling link is refused like push, and the link and its volume are left as they were", { skip: process.platform === "win32" }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-dangling-push-all-"));
   const volume = join(dir, "volume");
   await mkdir(volume);
   const link = join(dir, "store.cc");
   await symlink(join(volume, "store.cc"), link);
-  await new SingleFileMessagePackBackingStore(link).pushAll([{ key: "a", type: "t", payload: documentPayloadFromBytes(Uint8Array.of(0x90)), storedAt: "2026-09-30T00:00:00Z" }]);
-  assert.ok((await lstat(link)).isFile());
+  const envelope = { key: "a", type: "t", payload: documentPayloadFromBytes(Uint8Array.of(0x90)), storedAt: "2026-09-30T00:00:00Z" };
+  await assert.rejects(() => new SingleFileMessagePackBackingStore(link).pushAll([envelope]), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+  assert.ok((await lstat(link)).isSymbolicLink());
   assert.deepEqual(await readdir(volume), []);
 });
 
