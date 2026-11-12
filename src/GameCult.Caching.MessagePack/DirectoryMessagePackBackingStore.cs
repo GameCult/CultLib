@@ -710,17 +710,23 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     // Only a writer creates the records folder and the lock, so opening the store creates nothing. A reader opens an
     // existing lock and returns null when there is none; that does not mean no writer committed (a store may be copied
     // without its lock, and a first writer may create it mid-load), so an unleased load checks that it settled.
+    // A writer's lease is also where a link at the manifest path is refused (a commit would replace the link with a file): before
+    // the records folder or the lock is made, and again once the lease is held, because a link can be put there while it waited.
     private FileStream? AcquireCommitLease(bool wait, bool create)
     {
         if (create)
+        {
+            CultStoreLinks.Refuse(_manifestFile.FullName);
             Directory.CreateDirectory(_recordDirectory.FullName);
+        }
         var lockPath = Path.Combine(_recordDirectory.FullName, ".commit.lock");
         var started = Stopwatch.StartNew();
         while (true)
         {
+            FileStream held;
             try
             {
-                return new FileStream(
+                held = new FileStream(
                     lockPath,
                     create ? FileMode.OpenOrCreate : FileMode.Open,
                     FileAccess.ReadWrite,
@@ -743,7 +749,23 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             catch (IOException) when (started.Elapsed < TimeSpan.FromSeconds(30))
             {
                 Thread.Sleep(10);
+                continue;
             }
+
+            if (create)
+            {
+                try
+                {
+                    CultStoreLinks.Refuse(_manifestFile.FullName);
+                }
+                catch
+                {
+                    held.Dispose();
+                    throw;
+                }
+            }
+
+            return held;
         }
     }
 

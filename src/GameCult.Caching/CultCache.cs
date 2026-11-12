@@ -5154,24 +5154,15 @@ namespace GameCult.Caching
         }
 
         // Something is at the path even when the path cannot be opened: a link keeps the reparse-point attribute whether or not its
-        // target is there. A path with nothing at it reports no attributes at all (-1).
-        private bool PathIsALink()
-        {
-            FileInfo.Refresh();
-            var attributes = FileInfo.Attributes;
-            return (int)attributes != -1 && (attributes & FileAttributes.ReparsePoint) != 0;
-        }
+        // target is there.
+        private bool PathIsALink() => CultStoreLinks.IsLink(FileInfo.FullName);
 
-        // A write never goes through a link at the store path: replacing it would silently detach the store from its link. Every
-        // write takes the lock first, so this is the one place a link is refused, before the lock file or anything else is made.
-        private void RefuseLinkedStore()
-        {
-            if (PathIsALink())
-                throw new CultStoreLinkedException(
-                    $"The store path {FileInfo.FullName} is a link; a write is refused so it does not replace the link. Configure the link's target as the store path to write to it.");
-        }
+        // A write never goes through a link at the store path: replacing it would silently detach the store from its link.
+        private void RefuseLinkedStore() => CultStoreLinks.Refuse(FileInfo.FullName);
 
         // The lock is a sidecar opened exclusively, which excludes other handles in this process and in others alike.
+        // Every write takes the lock first, so the link is refused here twice: before the lock file or anything else is made, and
+        // again once the lock is held, because a link can be put at the path while this writer waited on another's lock.
         private FileStream? AcquireLock(bool wait)
         {
             RefuseLinkedStore();
@@ -5180,9 +5171,10 @@ namespace GameCult.Caching
             var started = Stopwatch.StartNew();
             while (true)
             {
+                FileStream held;
                 try
                 {
-                    return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, bufferSize: 1);
+                    held = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, bufferSize: 1);
                 }
                 catch (IOException) when (!wait)
                 {
@@ -5191,7 +5183,20 @@ namespace GameCult.Caching
                 catch (IOException) when (started.Elapsed < TimeSpan.FromSeconds(30))
                 {
                     Thread.Sleep(10);
+                    continue;
                 }
+
+                try
+                {
+                    RefuseLinkedStore();
+                }
+                catch
+                {
+                    held.Dispose();
+                    throw;
+                }
+
+                return held;
             }
         }
 
