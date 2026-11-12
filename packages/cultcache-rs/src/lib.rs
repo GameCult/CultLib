@@ -8238,4 +8238,24 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn push_all_replaces_a_record_held_under_another_schema_id_as_push_does() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut store = SingleFileMessagePackBackingStore::new(temp.path().join("store.cc"));
+        let mut held = snapshot_envelope("k", b"old");
+        held.schema_id = Some("legacy.id".to_string());
+        store.push(&held)?;
+        let mut replacement = snapshot_envelope("k", b"new");
+        replacement.schema_id = None;
+        let mut by_push = store.clone();
+        by_push.push(&replacement)?;
+        assert_eq!(store.pull_all()?.len(), 1);
+        store.push(&held)?;
+        store.push_all(&[replacement.clone()], PushAllOptions::default())?;
+        let held_now = store.pull_all()?;
+        assert_eq!(held_now.len(), 1, "one record under the key");
+        assert_eq!(held_now[0].payload, replacement.payload);
+        Ok(())
+    }
 }
