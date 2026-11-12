@@ -735,30 +735,31 @@ impl CultMeshNode {
         self.apply_raw_snapshot_documents(documents)
     }
 
-    /// Applies each snapshot document of a registered schema with `put_raw_envelope`. The first refusal ends the pull
-    /// and the documents before it stay applied; a key this node holds read-only (unread slots from a newer peer, or a
-    /// payload this build cannot read) is refused like any other. C# applies a raw snapshot as one cache commit, so a
-    /// refusal there applies nothing: this is a divergence, owed by follow-up mesh-snapshot-atomic (stage the pull through
-    /// `put_prepared_batch`).
+    /// Applies the snapshot documents of registered schemas as one cache commit, as C# does: a refusal (a key this node
+    /// holds read-only because of unread slots from a newer peer or a payload this build cannot read, or any other the cache
+    /// judges) applies nothing. The commit lands in one backing store, so a snapshot spanning stores is refused whole.
     fn apply_raw_snapshot_documents(
         &mut self,
         documents: Vec<cultnet_rs::CultNetRawDocumentRecord>,
     ) -> Result<usize> {
-        let mut applied = 0usize;
+        let mut staged = Vec::new();
         for document in documents {
             let Some(document_type) =
                 registered_document_type_for_schema(&self.documents, &document.schema_id)
             else {
                 continue;
             };
-            self.cache.put_raw_envelope(CultCacheEnvelope {
+            staged.push(CultCacheEnvelope {
                 key: document.record_key,
                 r#type: document_type,
                 payload: document.payload,
                 stored_at: document.stored_at,
                 schema_id: Some(document.schema_id),
-            })?;
-            applied += 1;
+            });
+        }
+        let applied = staged.len();
+        if applied > 0 {
+            self.cache.put_prepared_batch(staged)?;
         }
         Ok(applied)
     }
@@ -1226,7 +1227,7 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_document_for_a_read_only_key_ends_the_pull_unlike_csharp_which_applies_nothing() -> Result<()> {
+    fn a_snapshot_document_for_a_read_only_key_refuses_the_whole_pull_as_csharp_does() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let mut node = CultMesh::create_node(temp.path().join("m.cc"), TestDocuments, Default::default())?;
         // A newer peer's note: one slot past the declared one.
@@ -1246,7 +1247,7 @@ mod tests {
         assert_eq!(conflict.record_key, "held");
         assert!(conflict.unread_slots.is_some());
         assert!(!error.to_string().contains("extra slot"));
-        assert_eq!(node.get_required::<Note>("before")?.body, "b");
+        assert!(node.get::<Note>("before")?.is_none());
         assert_eq!(node.get_required::<Note>("held")?.body, "newer body");
         assert!(node.get::<Note>("after")?.is_none());
         Ok(())
