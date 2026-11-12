@@ -23,7 +23,7 @@ All notable changes to `@gamecult/cultcache-ts` are recorded here, following
 
 ### Added
 
-- `checkPayloadDepth` returns the offset where the first value ends, or `undefined` when the payload ends early (a header, a container or a str/bin/scalar body cut short; it was `void`); it still refuses only depth. `checkPayloadIsOneValue(bytes, subject)` is the depth walk plus the bytes-after refusal.
+- `checkPayloadDepth` returns the offset where the first value ends, or `undefined` when the payload ends early (a header, a container or a str/bin/scalar body cut short; it was `void`); it still refuses only depth. The bytes-after refusal is internal (`checkPayloadIsOneValue`, not exported); no new public name.
 - `CultCache.foreignRecords()`: the `{key, schemaId, schemaName, storedAt}` of every record the last pull carried and no registered type claims, sorted by key ordinal.
 
 ### Changed
