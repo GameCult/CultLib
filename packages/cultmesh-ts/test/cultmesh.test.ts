@@ -109,6 +109,19 @@ test("CultMesh TS opens a durable local node and registers document bindings", a
   assert.ok(reopened.documents.getBySchemaId("cultmesh.note.v0"));
 });
 
+test("CultMesh TS flush from a node that never pulled leaves the records the store holds", async () => {
+  const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-flush-")), "node.ccmp");
+  const first = await CultMesh.startNode(filePath, { documents: [noteDocument] });
+  await first.put(noteDocument, "note:held", { noteId: "note:held", body: "already in the store" });
+  await first.flush();
+
+  const unpulled = await CultMesh.startNode(filePath, { documents: [noteDocument], pullOnStart: false });
+  await unpulled.flush();
+
+  const reopened = await CultMesh.startNode(filePath, { documents: [noteDocument] });
+  assert.equal(reopened.getRequired(noteDocument, "note:held").body, "already in the store");
+});
+
 test("CultMesh TS document handles hide local cache plumbing behind typed reactive reads", async () => {
   const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-doc-")), "node.ccmp");
   const node = await CultMesh.startNode(filePath, {
