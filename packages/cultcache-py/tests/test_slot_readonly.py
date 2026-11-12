@@ -16,6 +16,7 @@ from cultcache_py import (
     SlotCodec,
     SchemaConflictError,
     SingleFileMessagePackBackingStore,
+    StoreUnreadableError,
     UnionArm,
     UnreadSlots,
     database_entry_field,
@@ -177,6 +178,22 @@ class StoreRowTests(unittest.TestCase):
         if key == "unit-arm":
             return slot_unit_document
         return declaring_document if store == "extra-slot-consent.cc" else surface_document
+
+    def test_the_variant_row_is_refused_as_a_store_not_walked_and_the_rest_of_the_store_reads_without_it(self) -> None:
+        # This runtime holds no variant records (ruling: refuse, not carry; the reference's marked-variant row, the one
+        # row with a flattenRefusedBy, is the C# reader's). A five-slot persisted record makes the whole store
+        # unreadable, the file is left as it was, and the store without exactly that row reads.
+        variants = [row for row in _rows() if row[8] is not None]
+        self.assertEqual([(row[0], row[1], row[8]) for row in variants], [("extra-slot-store.cc", "marked-variant", "marked")])
+        path = self.tmp / "extra-slot-store.cc"
+        shutil.copyfile(VECTORS / "extra-slot-store.cc", path)
+        before = path.read_bytes()
+        with self.assertRaises(StoreUnreadableError):
+            _open(path, surface_document, slot_unit_document)
+        self.assertEqual(path.read_bytes(), before)
+        _, cache = self._store("extra-slot-store.cc")
+        self.assertIsNone(cache.get(surface_document, "marked-variant"))
+        self.assertIsNotNone(cache.get(surface_document, "marked"))
 
     def test_every_row_is_writable_exactly_where_the_vector_says_and_refuses_with_its_mark(self) -> None:
         walked = 0
