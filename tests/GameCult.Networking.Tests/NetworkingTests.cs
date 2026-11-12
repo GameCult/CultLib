@@ -7378,6 +7378,59 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultNetLocal_Host_SoftFlush_Passes_The_Flag_To_The_Store()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultnet-host-soft-{Guid.NewGuid():N}.msgpack");
+            CultNetHost? host = null;
+
+            try
+            {
+                host = await CultNetLocal.CreateHostAsync(filePath, new CultNetHostOptions { StartServer = false });
+                await host.Cache.UpsertAsync(new PlayerData { PlayerId = Guid.NewGuid(), Email = "a@example.test", PasswordHash = "hash", Username = "First" });
+                await host.FlushAsync();
+                var before = File.ReadAllBytes(filePath);
+
+                await host.Cache.UpsertAsync(new PlayerData { PlayerId = Guid.NewGuid(), Email = "b@example.test", PasswordHash = "hash", Username = "Second" });
+                await host.FlushAsync(soft: true);
+                Assert.That(File.ReadAllBytes(filePath), Is.EqualTo(before), "a soft host flush rewrote a store it reads");
+
+                await host.FlushAsync();
+                Assert.That(File.ReadAllBytes(filePath), Is.Not.EqualTo(before), "a plain host flush after a skipped soft flush did not land the staged write");
+            }
+            finally
+            {
+                host?.Dispose();
+                if (File.Exists(filePath)) File.Delete(filePath);
+            }
+        }
+
+        [Test]
+        public async Task CultMeshNode_SoftFlush_Passes_The_Flag_To_The_Store()
+        {
+            var rootPath = Path.Combine(TestContext.CurrentContext.WorkDirectory, "cultmesh-soft-flush", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(rootPath);
+            var cachePath = Path.Combine(rootPath, "world.ccmp");
+            var documents = new CultNetDocumentRegistry()
+                .Register(CultNetDocumentBinding.ForDocument<MeshQuickstartNote>());
+
+            using var node = await CultMesh.CreateNodeAsync(cachePath, new CultMeshNodeOptions
+            {
+                StartServer = false,
+                DatabaseOptions = new CultNetDatabaseOptions { RuntimeId = "soft-flush-local", DocumentRegistry = documents }
+            });
+            await node.Database.PutAsync(new CultRecordKey("note:one"), new MeshQuickstartNote { NoteId = "note:one", Body = "one" });
+            await node.FlushAsync();
+            var before = File.ReadAllBytes(cachePath);
+
+            await node.Database.PutAsync(new CultRecordKey("note:two"), new MeshQuickstartNote { NoteId = "note:two", Body = "two" });
+            await node.FlushAsync(soft: true);
+            Assert.That(File.ReadAllBytes(cachePath), Is.EqualTo(before), "a soft node flush rewrote a store it reads");
+
+            await node.FlushAsync();
+            Assert.That(File.ReadAllBytes(cachePath), Is.Not.EqualTo(before), "a plain node flush after a skipped soft flush did not land the staged write");
+        }
+
+        [Test]
         public async Task CultNetLocal_CreateHostAsync_Wires_Durable_Cache_Without_Starting_Server()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultnet-host-{Guid.NewGuid():N}.msgpack");

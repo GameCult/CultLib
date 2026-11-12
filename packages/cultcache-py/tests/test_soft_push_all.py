@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from cultcache_py import JsonLinesBackingStore, SingleFileMessagePackBackingStore, StoreUnreadableError
-from cultcache_py.backing_store import CultCacheEnvelope
+from cultcache_py.backing_store import BackingStore, CultCacheEnvelope
 
 
 def envelope(key: str) -> CultCacheEnvelope:
@@ -47,6 +47,32 @@ class SoftPushAllTests(unittest.TestCase):
         with self.assertRaises(StoreUnreadableError):
             SingleFileMessagePackBackingStore(self.path).push_all([envelope("a")], soft=True)
         self.assertEqual(junk, self.path.read_bytes())
+
+    def test_over_an_unreadable_jsonl_file_it_refuses_and_leaves_it(self) -> None:
+        junk = b"this is not json\n"
+        self.path.write_bytes(junk)
+        with self.assertRaises(ValueError):
+            JsonLinesBackingStore(self.path).push_all([envelope("a")], soft=True)
+        self.assertEqual(junk, self.path.read_bytes())
+
+    def test_the_protocol_default_push_all_has_the_same_three_branches(self) -> None:
+        class Memory(BackingStore):
+            def __init__(self) -> None:
+                self.items: list[CultCacheEnvelope] = []
+
+            def pull_all(self) -> list[CultCacheEnvelope]:
+                return list(self.items)
+
+            def _replace_all(self, envelopes: list[CultCacheEnvelope]) -> None:
+                self.items = list(envelopes)
+
+        store = Memory()
+        store.push_all([envelope("a")], soft=True)  # nothing there: writes
+        self.assertEqual(["a"], [item.key for item in store.items])
+        store.push_all([envelope("b")], soft=True)  # something there: skips
+        self.assertEqual(["a"], [item.key for item in store.items])
+        store.push_all([envelope("b")])  # plain: lands
+        self.assertEqual(["a", "b"], sorted(item.key for item in store.items))
 
 
 if __name__ == "__main__":

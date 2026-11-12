@@ -88,6 +88,31 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task PlainPushAll_Over_Readable_Store_Writes_The_Staged_Records()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.msgpack");
+            try
+            {
+                var store = new SingleFileMessagePackBackingStore(filePath);
+                var cache = new CultCache();
+                cache.AddBackingStore(store);
+                await cache.AddAsync(new NamedTestEntry { Name = "first", Value = "one" });
+                store.PushAll();
+                var before = File.ReadAllBytes(filePath);
+
+                await cache.AddAsync(new NamedTestEntry { Name = "second", Value = "two" });
+                store.PushAll();
+
+                Assert.That(File.ReadAllBytes(filePath), Is.Not.EqualTo(before), "a plain PushAll skipped a store it reads");
+                Assert.That(store.IsDirty, Is.False);
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+            }
+        }
+
+        [Test]
         public async Task SoftFlush_Over_Absent_Path_Writes()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.msgpack");
