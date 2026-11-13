@@ -7,7 +7,7 @@
 //! traffic crosses the same schedule. The schedule is `policy.rs`.
 //!
 //! ```text
-//! cargo run --release --example cultnet_impair -- \
+//! cargo run --locked --release --example cultnet_impair -- \
 //!   --listen 0.0.0.0:17890 --upstream 127.0.0.1:17990 \
 //!   --profile tests/impairment/loss-1pct.toml --seed 424242 --metrics loss-1pct.csv
 //! ```

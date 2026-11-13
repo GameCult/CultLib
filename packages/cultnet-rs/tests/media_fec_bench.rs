@@ -3,7 +3,7 @@
 //! Ignored by default; run in release, where the numbers mean something:
 //!
 //! ```text
-//! cargo test --release --test media_fec_bench -- --ignored --nocapture
+//! cargo test --locked --release --test media_fec_bench -- --ignored --nocapture
 //! ```
 //!
 //! Each line is nanoseconds per call through the public surface, so record

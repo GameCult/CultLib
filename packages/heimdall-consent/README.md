@@ -7,7 +7,7 @@ plus the rules that need no store to state (`Answer::is_training_data`, `Answer:
 (comments 682 and 759). Specification only: no collector, tally, export or tombstone hashing lives here.
 
 Entry points: `src/lib.rs`; golden vectors `tests/vectors/consent_golden.csv`, run by `tests/golden.rs`
-(`cargo test`). Planned, not live: the collector, the tally, the training export.
+(`cargo test --locked`). Planned, not live: the collector, the tally, the training export.
 
 ## Where each ruling lands (doc lines at aaeb175)
 
