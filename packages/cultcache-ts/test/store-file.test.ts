@@ -428,18 +428,20 @@ test("a link put while a writer waits on the store lock is refused once it holds
       ["pushAll", (store) => store.pushAll([noteEnvelope("b")])],
       ["delete", (store) => store.delete(noteEnvelope("a"))],
     ];
-    for (const [name, write] of writes) {
-      const link = join(directory, `${name}.cc`);
+    const missing = join(directory, "missing.cc");
+    for (const [name, write, linkTo] of writes.flatMap(([n, w]) => [[n, w, target], [`${n} (dangling)`, w, missing]] as const)) {
+      const link = join(directory, `${name.replace(/\W+/g, "-")}.cc`);
       let writer: Promise<void> | undefined;
       await withStoreWriteLock(link, async () => {
         writer = write(new SingleFileMessagePackBackingStore(link));
         writer.catch(() => undefined);
         await sleepFor(150);
-        await fsp.symlink(target, link); // after the writer's pre-lock look, while it waits
+        await fsp.symlink(linkTo, link); // after the writer's pre-lock look, while it waits
       });
       await assert.rejects(writer!, (error: unknown) => error instanceof PackageStoreLinkedError, name);
       assert.ok((await fsp.lstat(link)).isSymbolicLink(), `${name}: the link was replaced`);
       assert.deepEqual(await readFile(target), before, `${name}: the target changed`);
+      await assert.rejects(fsp.lstat(missing), { code: "ENOENT" }, `${name}: the dangling target was created`);
       await rm(link); // the link is refused before the lock, so remove it to probe the lock
       assert.equal(await withStoreWriteLock(link, async () => "free", { timeoutMs: 200 }), "free", `${name}: the lock is held`);
     }

@@ -85,8 +85,9 @@ class StoreLockTests(unittest.TestCase):
             "push_all": lambda store: store.push_all([envelope("b")]),
             "delete": lambda store: store.delete("t", "a"),
         }
-        for name, write in writes.items():
-            with self.subTest(name):
+        missing = self.dir / "volume" / "missing.cc"
+        for (name, write), link_to in [(item, to) for item in writes.items() for to in (target, missing)]:
+            with self.subTest(name, dangling=link_to == missing):
                 if os.path.lexists(self.path):
                     os.unlink(self.path)
                 holder = start_holder([sys.executable, "-c", PY_HOLDER, str(self.path), str(HOLD_SECONDS)])
@@ -104,14 +105,16 @@ class StoreLockTests(unittest.TestCase):
                 writer = threading.Thread(target=run)
                 writer.start()
                 time.sleep(0.3)
-                os.symlink(target, self.path)  # after the writer's pre-lock look, while it waits
+                os.symlink(link_to, self.path)  # after the writer's pre-lock look, while it waits
                 writer.join()
                 holder.wait()
                 self.assertEqual(1, len(outcome))
                 self.assertIsInstance(outcome[0], StoreLinkedError)
                 self.assertTrue(os.path.islink(self.path), "the link was replaced")
                 self.assertEqual(before, target.read_bytes())
-                with store_write_lock(target, timeout=0.2):  # the lock is free
+                self.assertFalse(missing.exists(), "the dangling target was created")
+                os.unlink(self.path)  # a link is refused before the lock, so remove it to probe the writer's own lock file
+                with store_write_lock(self.path, timeout=0.2):  # the lock is free
                     pass
 
     def test_the_lock_is_released_after_each_write(self) -> None:
