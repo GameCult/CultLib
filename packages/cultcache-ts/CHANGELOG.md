@@ -5,6 +5,10 @@ All notable changes to `@gamecult/cultcache-ts` are recorded here, following
 
 ## [Unreleased]
 
+### Changed
+
+- `CultCache.isWritable` does not look at store paths: a link at a store path is not predicted, and the write refuses it with `StoreLinkedError`. Pinned by a test through a cache attached to a linked store.
+
 ### Breaking
 
 - A write at a single-file store path that is a symbolic link, live or dangling, is refused with the new `StoreLinkedError` (exported from the package entry; `error.path` names the path) before the lock and the replace, and writes nothing: `push`, `pushAll`, `delete` and a soft flush alike. Before, a write at a live link replaced the link with a regular file, a dangling link failed with `ENOENT` (or, for `pushAll`, was replaced), and a soft flush at a link skipped. A caller catching `ENOENT` around a write at a dangling link now catches `StoreLinkedError`; configure the link's target as the store path. Reads through a live link work. An `lstat` failure other than `ENOENT` (`ENOTDIR`, `EACCES`, `ELOOP`) is rethrown as it is.

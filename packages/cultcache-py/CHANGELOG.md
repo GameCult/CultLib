@@ -8,6 +8,8 @@
 
 ### Changed
 
+- `CultCache.is_writable` does not look at store paths: a link at a store path is not predicted, and the write refuses it with `StoreLinkedError`. Pinned by a test through a cache attached to a linked store.
+- `JsonLinesBackingStore` writes LF line endings on Windows. It wrote CRLF there, through `write_text` newline translation, before the commit_store_file change (#154, adbbb780).
 - `msgpack` is a hard dependency, as `pyproject.toml` declared it. The optional-import fallbacks and the `cultcache-py[msgpack]` extra they named (which never existed) are gone: a missing msgpack is an `ImportError` at import.
 - `JsonLinesBackingStore` writes through the same `commit_store_file` as the single-file store: a unique staged file, fsynced before the replace and removed when the replace fails, so a refused replace no longer leaves `<path>.tmp` behind. It staged a fixed `<path>.tmp` without an fsync.
 - The single-file store's `push`, `push_all` and `delete` take the cross-process lock on `<path>.lock` (flock; LockFileEx over the whole file on Windows) across the read and the replace, waiting up to `lock_timeout` seconds (30 by default, `TimeoutError` after), and exclude the C#, Rust and TypeScript runtimes' writers. The staged file is `<path>.tmp-<pid>-<uuid>`, fsynced before the replace, with a directory fsync after it off Windows. A fixed `<path>.tmp` is no longer used.

@@ -636,7 +636,8 @@ class CultCache:
         a record held read-only (its payload carried slots past the declared ones, at any depth, and nothing consents to the loss, so
         writing it would drop data a newer writer stored), for a key a store carries foreign, and for a key held as another type's
         record this document does not own. Advisory (the write still decides): it answers at call time, and a key nothing holds is
-        writable."""
+        writable. It does not look at store paths: a link at a store path is not predicted, and the write refuses it with
+        `StoreLinkedError`."""
         self._assert_registered(document)
         try:
             self._refuse_at(document, key)

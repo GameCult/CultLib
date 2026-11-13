@@ -2473,6 +2473,30 @@ test("SingleFileMessagePackBackingStore refuses a dangling symlink at its path a
   assert.deepEqual(await readdir(volume), []);
 });
 
+// The advisory query answers for the held record and the cache's judges; a link at the store path is the write's to refuse.
+test("isWritable over a store at a live link answers true while the cache write is refused", { skip: process.platform === "win32" }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-writable-link-"));
+  const volume = join(dir, "volume");
+  await mkdir(volume);
+  const target = join(volume, "store.cc");
+  const link = join(dir, "link.cc");
+  const document = defineDocumentType({ type: "note", schema: z.object({ text: z.string() }) });
+  await CultCache.builder().withDocumentType(document).withGenericStore(new SingleFileMessagePackBackingStore(target)).build()
+    .put(document, "held", { text: "held" });
+  const before = await readFile(target);
+  await symlink(target, link);
+  const cache = CultCache.builder().withDocumentType(document).withGenericStore(new SingleFileMessagePackBackingStore(link)).build();
+  await cache.pullAllBackingStores();
+  const namesBefore = [(await readdir(dir)).sort(), (await readdir(volume)).sort()];
+
+  assert.equal(cache.isWritable(document, "held"), true);
+  assert.equal(cache.isWritable(document, "fresh"), true);
+  await assert.rejects(() => cache.put(document, "fresh", { text: "fresh" }), (error: unknown) => error instanceof StoreLinkedError && error.path === link);
+  assert.ok((await lstat(link)).isSymbolicLink());
+  assert.deepEqual(await readFile(target), before);
+  assert.deepEqual([(await readdir(dir)).sort(), (await readdir(volume)).sort()], namesBefore);
+});
+
 // The second look of the read, staged: nothing is at the path only when the read and the lstat both find nothing. A path
 // that changed between them (a link in a parent swapped for a file, a store that appeared) is never an empty store.
 test("readStoreBytes reports nothing at the path only when the lstat finds nothing too", async () => {

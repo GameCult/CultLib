@@ -615,7 +615,8 @@ export class CultCache {
    * another key, a record carrying unread slots nothing consents to). It answers the WRITE form. A removal asks the judge's
    * removal form and differs in two states: an owner's `delete` of a record held in another store than its own home succeeds
    * where this is false (a write would push to the wrong store), and `delete` of a global type at a key other than __global__ is
-   * the plain false of an unheld key where this is false. Live and advisory: the write or removal still decides.
+   * the plain false of an unheld key where this is false. It does not look at store paths: a link at a store path is not predicted, and
+   * the write refuses it with `StoreLinkedError`. Live and advisory: the write or removal still decides.
    */
   isWritable(definition: AnyCultCacheDocumentDefinition, key: string): boolean {
     const registered = this.#requireDefinition(definition);

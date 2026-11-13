@@ -2676,7 +2676,8 @@ namespace GameCult.Caching
         /// when that store holds it unowned (undeclared drift that drops persisted slots, or a payload carrying slots past this build's,
         /// see <see cref="CultStoredDocument.UnreadSlots"/>). For a key the cache does not hold, the removal check every store makes of it
         /// (false when a store lists it foreign). One write it does not predict: a Flatten of a variant whose base chain holds an unowned record is refused, though
-        /// the variant itself is writable. Live and advisory: the write still decides.
+        /// the variant itself is writable. It does not look at store paths: a link at a store path is not predicted, and the write refuses it
+        /// with <see cref="CultStoreLinkedException"/>. Live and advisory: the write still decides.
         /// </summary>
         public bool IsWritable(CultRecordKey key)
         {

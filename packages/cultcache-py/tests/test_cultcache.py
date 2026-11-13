@@ -1485,6 +1485,32 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["link.jsonl", "volume"])
             self.assertEqual(sorted(p.name for p in volume.iterdir()), ["store.jsonl"])
 
+    # The advisory query answers for the held record and the cache's judges; a link at the store path is the write's to refuse.
+    @unittest.skipIf(os.name != "posix", "symbolic links need POSIX here")
+    def test_is_writable_over_a_store_at_a_live_link_answers_true_while_the_cache_write_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            volume = Path(tmp) / "volume"
+            volume.mkdir()
+            target = volume / "store.cc"
+            document = item_doc()
+            seed = CultCache.builder().register_document_type(document).add_generic_store(SingleFileMessagePackBackingStore(target)).build()
+            seed.put(document, "held", Item(name="Held", category="c", value=1))
+            before = target.read_bytes()
+            link = Path(tmp) / "link.cc"
+            link.symlink_to(target)
+            cache = CultCache.builder().register_document_type(document).add_generic_store(SingleFileMessagePackBackingStore(link)).build()
+            cache.pull_all_backing_stores()
+            names_before = (sorted(p.name for p in Path(tmp).iterdir()), sorted(p.name for p in volume.iterdir()))
+
+            self.assertTrue(cache.is_writable(document, "held"))
+            self.assertTrue(cache.is_writable(document, "fresh"))
+            with self.assertRaises(StoreLinkedError) as caught:
+                cache.put(document, "fresh", Item(name="Fresh", category="d", value=2))
+            self.assertEqual(Path(caught.exception.path), link)
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(target.read_bytes(), before)
+            self.assertEqual((sorted(p.name for p in Path(tmp).iterdir()), sorted(p.name for p in volume.iterdir())), names_before)
+
     def test_store_linked_error_is_an_os_error_carrying_the_path(self) -> None:
         error = StoreLinkedError(Path("some/store.cc"))
         self.assertIsInstance(error, OSError)

@@ -3309,7 +3309,8 @@ impl CultCache {
     /// Whether a write or removal of `(type_id, key)` would be admitted: false when the held payload carries slots past
     /// its registered type's declared slots, at any depth, or cannot be read by this build at all (the record is
     /// read-only), when the cache holds no image of its stores (see [`CultCacheLoadRefused`]), when a store carries a foreign record at the key, or when another registered type holds it. True for a
-    /// key nothing holds. An unregistered type is an error. Advisory: the write entries ask the same checks themselves.
+    /// key nothing holds. An unregistered type is an error. It does not look at store paths: a link at a store path is not
+    /// predicted, and the write refuses it with [`StoreLinkedError`]. Advisory: the write entries ask the same checks themselves.
     pub fn is_writable(&self, type_id: &str, key: &str) -> Result<bool> {
         if self.require_loaded().is_err() {
             return Ok(false);
@@ -8222,6 +8223,34 @@ mod tests {
         assert_eq!(dir_names(&volume)?, volume_before, "no lock or staging file beside the target");
         assert_eq!(dir_names(temp.path())?, ["link.cc", "volume"], "no lock or staging file beside the link");
         assert_eq!(store.pull_all()?, vec![snapshot_envelope("a", b"1")]);
+        Ok(())
+    }
+
+    // The advisory query is the held record's and the cache's judges; a link at the store path is the write's to refuse.
+    #[cfg(unix)]
+    #[test]
+    fn is_writable_over_a_store_at_a_live_link_answers_true_while_the_cache_write_is_refused() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let target = temp.path().join("store.cc");
+        store_with(&target, |cache| cache.put("held", &settings_one()).map(drop))?;
+        let before = fs::read(&target)?;
+        let link = temp.path().join("link.cc");
+        std::os::unix::fs::symlink(&target, &link)?;
+
+        let mut cache = CultCache::new();
+        cache.register_registry(TestEntries)?;
+        cache.add_backing_store(SingleFileMessagePackBackingStore::new(&link), [Settings::TYPE])?;
+        cache.pull_all_backing_stores()?;
+        let names_before = dir_names(temp.path())?;
+
+        assert!(cache.is_writable(Settings::TYPE, "held")?, "the query does not look at the store path");
+        assert!(cache.is_writable(Settings::TYPE, "fresh")?, "the query does not look at the store path");
+        let error = cache.put("fresh", &settings_one()).unwrap_err();
+        let linked = error.downcast_ref::<StoreLinkedError>().unwrap_or_else(|| panic!("{error:#}"));
+        assert_eq!(linked.path, link);
+        assert!(fs::symlink_metadata(&link)?.file_type().is_symlink(), "the link is left as it was");
+        assert_eq!(fs::read(&target)?, before);
+        assert_eq!(dir_names(temp.path())?, names_before, "the refused write left no lock or staging file");
         Ok(())
     }
 

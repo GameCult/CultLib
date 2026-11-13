@@ -6,6 +6,10 @@ only in git history.
 
 ## Unreleased
 
+### Changed
+
+- `CultCache::is_writable` does not look at store paths: a link at a store path is not predicted, and the write refuses it with `StoreLinkedError`. Pinned by a test through a cache attached to a linked store.
+
 ### Breaking
 
 Semver: this is a breaking change in the 0.x line (0.3.x to 0.4.0).

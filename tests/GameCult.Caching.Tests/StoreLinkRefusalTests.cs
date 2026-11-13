@@ -170,6 +170,26 @@ namespace GameCult.Caching.Tests
             Assert.That(IsALink(link), "the link was replaced");
         }
 
+        [Test]
+        public void AnAdvisoryQueryOverACacheAtALiveLinkAnswersForTheRecordAndTheWriteIsStillRefused()
+        {
+            var path = PathOf("store.cc");
+            var link = PathOf("link.cc");
+            SeedSingle(path);
+            Link(link, path);
+            var before = File.ReadAllBytes(path);
+            using var cache = CultCacheMessagePack.Create(link, new CultCacheOpenOptions { Registry = Registry, FlushOnDispose = false, StoreFlushOnDispose = false });
+
+            Assert.That(cache.IsWritable(new CultRecordKey("seed")), Is.True, "the query does not look at the store path");
+            Assert.That(cache.IsWritable(new CultRecordKey("fresh")), Is.True, "the query does not look at the store path");
+            var refusal = Assert.Throws<CultStoreLinkedException>(() =>
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "t" }, new CultRecordKey("fresh"))))!;
+
+            Assert.That(refusal.Path, Is.EqualTo(link));
+            Assert.That(IsALink(link), "the link was replaced");
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(before));
+        }
+
         // A batch that upserts into one store and removes a key the cache does not hold has the other store judge that removal
         // under its own lock (JudgeChecks).
         private CultCache OpenTwoStores(string homePath, string otherPath)
