@@ -2106,7 +2106,7 @@ async function readTsInteropStore(file: string): Promise<InteropNote> {
 
 async function buildInteropPeers(): Promise<void> {
   if (!(await exists(rustInteropBinary))) {
-    await execAsync(`"${cargoCommand}" build --quiet --example cultcache_interop`, {
+    await execAsync(`"${cargoCommand}" build --locked --quiet --example cultcache_interop`, {
       cwd: cultcacheRsRoot,
     });
   }

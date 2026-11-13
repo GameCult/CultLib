@@ -122,7 +122,7 @@ const rust: Target = {
   name: "rust",
   payload: (text) => encode({ text }),
   async start() {
-    if (!prebuilt) await execFileAsync(cargo, ["build", "--example", "receipt_interop_server", "--message-format", "short"], { cwd: rustManifestDir });
+    if (!prebuilt) await execFileAsync(cargo, ["build", "--locked", "--example", "receipt_interop_server", "--message-format", "short"], { cwd: rustManifestDir });
     const metadata = spawnSync(cargo, ["metadata", "--format-version", "1", "--no-deps"], { cwd: rustManifestDir, encoding: "utf8" });
     if (metadata.status !== 0) throw new Error(`cargo metadata failed: ${metadata.stderr}`);
     const exe = join(JSON.parse(metadata.stdout).target_directory, "debug", "examples", `receipt_interop_server${process.platform === "win32" ? ".exe" : ""}`);

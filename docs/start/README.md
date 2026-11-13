@@ -124,7 +124,7 @@ The test imports from `../src/index` where the block reads `@gamecult/cultcache-
 Same shape with `derive(DatabaseEntry)`: slots are `#[cultcache(key = N)]`, so the `.cc` payload is the
 slot-indexed array the C# runtime writes. The source is
 [`packages/cultcache-rs/tests/first_call.rs`](../../packages/cultcache-rs/tests/first_call.rs), run by
-`cargo test --test first_call` in `packages/cultcache-rs`; a second test in that file fails if the block
+`cargo test --locked --test first_call` in `packages/cultcache-rs`; a second test in that file fails if the block
 below stops matching the file. The Rust runtime has no name lookup, so the read-back is by key. More:
 `packages/cultcache-rs/README.md`.
 
@@ -341,7 +341,7 @@ async function firstCall() {
 ### Rust CultNet first call
 
 Source: [`packages/cultnet-rs/tests/first_call.rs`](../../packages/cultnet-rs/tests/first_call.rs), run by
-`cargo test --test first_call` in `packages/cultnet-rs`. More: `packages/cultnet-rs/README.md`.
+`cargo test --locked --test first_call` in `packages/cultnet-rs`. More: `packages/cultnet-rs/README.md`.
 
 ```rust
 use std::net::{TcpListener, TcpStream};

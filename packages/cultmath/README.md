@@ -147,8 +147,8 @@ CultMath names with tests instead of copied project-local helper drift.
 ```powershell
 dotnet build packages/cultmath/src/CultMath/CultMath.csproj
 dotnet test packages/cultmath/tests/CultMath.Tests/CultMath.Tests.csproj
-cargo test --manifest-path packages/cultmath/native/cultmath-core/Cargo.toml
-cargo build --release --manifest-path packages/cultmath/native/cultmath-core/Cargo.toml
+cargo test --locked --manifest-path packages/cultmath/native/cultmath-core/Cargo.toml
+cargo build --locked --release --manifest-path packages/cultmath/native/cultmath-core/Cargo.toml
 .\packages\cultmath\scripts\build-unity-package.ps1
 ```
 

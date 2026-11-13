@@ -212,8 +212,8 @@ identity-owned C# session after provider route replacement.
 Rust package tests:
 
 ```powershell
-cargo test --manifest-path packages/cultcache-rs/Cargo.toml
-cargo test --manifest-path packages/cultnet-rs/Cargo.toml
+cargo test --locked --manifest-path packages/cultcache-rs/Cargo.toml
+cargo test --locked --manifest-path packages/cultnet-rs/Cargo.toml
 ```
 
 Kotlin package build:
