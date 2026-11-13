@@ -8176,11 +8176,21 @@ mod tests {
         with_write_fault(WriteStep::Unlock, || store.push(&pushed))?;
         assert!(with_write_fault(WriteStep::Unlock, || store.pull_all())?.contains(&pushed));
 
-        // The lock was released: another writer takes it at once.
-        assert!(matches!(
-            store.try_compare_exchange_snapshot(&store.pull_all()?, &replacement)?,
-            TryCompareExchangeSnapshotOutcome::Exchanged
-        ));
+        // The lock was released: another writer takes it. The shared lock of the faulted `pull_all` just above was left to the
+        // close of its descriptor (see `release_lock`), which frees it only once no other descriptor shares its open file
+        // description, and a test that spawns a child (a fork-exec duplicates every descriptor of the process until the exec)
+        // can hold such a duplicate on another test thread for a moment. A faulted exclusive lock cannot contend the try-lock:
+        // the blocking `pull_all` in its argument waits it out. So a contended try-lock is retried for up to two seconds; a
+        // lock that was never released stays contended and still fails.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let outcome = loop {
+            let outcome = store.try_compare_exchange_snapshot(&store.pull_all()?, &replacement)?;
+            if !matches!(outcome, TryCompareExchangeSnapshotOutcome::LockContended) || std::time::Instant::now() >= deadline {
+                break outcome;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert!(matches!(outcome, TryCompareExchangeSnapshotOutcome::Exchanged), "{outcome:?}");
 
         // The keyed store releases its lock the same way.
         let mut keyed = RedbMessagePackBackingStore::new(temp.path().join("keyed.redb"))?;
