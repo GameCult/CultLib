@@ -2,7 +2,7 @@
 //
 // The vectors below were produced by `cultnet-rs`, not written by hand:
 //
-//   cargo run --example runtime_presence_vector -p cultnet-rs
+//   cargo run --locked --example runtime_presence_vector -p cultnet-rs
 //
 // That matters. A fixture authored for both sides at once agrees with itself
 // and proves nothing; the contract is only real if one fork emits the bytes and

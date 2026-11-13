@@ -341,7 +341,7 @@ namespace GameCult.Networking.Tests
         {
             var path = Path.Combine(RepoRoot(), "contracts", "cultnet", "interop", "selection-vectors.rs-written.json");
             if (!File.Exists(path))
-                Assert.Inconclusive($"{path} is missing - run cargo test -p cultnet-rs --test selection with CULTNET_WRITE_VECTORS=1 first.");
+                Assert.Inconclusive($"{path} is missing - run cargo test --locked -p cultnet-rs --test selection with CULTNET_WRITE_VECTORS=1 first.");
 
             var (registry, rows, _) = BuildFixture();
             using var document = JsonDocument.Parse(File.ReadAllText(path));

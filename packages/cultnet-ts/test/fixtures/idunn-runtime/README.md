@@ -6,7 +6,7 @@ cultnet-rs only, and Idunn's `IdunnRuntimeActivationLaunch` is that same crate's
 It needs Linux and a machine-id equal to the `machine-id` file here, because the
 provider identity is bound to it. On Yggdrasil:
 
-    DOCKER_ARGS='--cap-add SYS_ADMIN --security-opt apparmor=unconfined'     bash ygg-verify.sh <CultLib> HEAD rust 'cd packages/cultnet-rs &&       cp <fixed-machine-id> /tmp/mid && mount --bind /tmp/mid /etc/machine-id &&       cargo run -q --example idunn_runtime_fixture /tmp/out'
+    DOCKER_ARGS='--cap-add SYS_ADMIN --security-opt apparmor=unconfined'     bash ygg-verify.sh <CultLib> HEAD rust 'cd packages/cultnet-rs &&       cp <fixed-machine-id> /tmp/mid && mount --bind /tmp/mid /etc/machine-id &&       cargo run --locked -q --example idunn_runtime_fixture /tmp/out'
 
 then copy `/tmp/out` over this directory. `--cap-add SYS_ADMIN` exists only so the bind mount can present the committed `machine-id`, which keeps Yggdrasil's real machine-id out of the repo. Every `presence-*.bin` was accepted by
 `authenticate_runtime_presence_claim` and correlated by
@@ -26,7 +26,7 @@ The generator takes its specification as input, so a consumer needs no patch to 
 specification is command-line flags; `@<file>` splices in a response file (one `--flag value`
 per line, `#` comments). CultLib's own sets are `fixture.args` here:
 
-    cargo run -q --example idunn_runtime_fixture /tmp/out @<path>/fixture.args
+    cargo run --locked -q --example idunn_runtime_fixture /tmp/out @<path>/fixture.args
 
 The consumer keeps its own `.args` file in its repository and runs the same command with the
 same machine-id bind mount as above. Global flags: `--source-repository`, `--detail`. Each
