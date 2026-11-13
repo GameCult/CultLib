@@ -69,8 +69,33 @@ class SoftPushAllTests(unittest.TestCase):
             JsonLinesBackingStore(self.path).push_all([envelope("a")], soft=True)
         self.assertEqual(junk, self.path.read_bytes())
 
-    def test_the_protocol_default_push_all_skips_what_its_pull_read_empty_included(self) -> None:
+    def test_the_protocol_default_push_all_decides_soft_by_what_pull_or_absent_says(self) -> None:
         class Memory(BackingStore):
+            def __init__(self) -> None:
+                self.items: list[CultCacheEnvelope] | None = None  # None: nothing at the path
+
+            def pull_all(self) -> list[CultCacheEnvelope]:
+                return list(self.items or [])
+
+            def pull_or_absent(self) -> list[CultCacheEnvelope] | None:
+                return None if self.items is None else list(self.items)
+
+            def _replace_all(self, envelopes: list[CultCacheEnvelope]) -> None:
+                self.items = list(envelopes)
+
+        store = Memory()
+        store.push_all([envelope("a")], soft=True)  # nothing at the path: writes
+        self.assertEqual(["a"], [item.key for item in store.items or []])
+        store.push_all([envelope("b")], soft=True)  # a store with records: skips
+        self.assertEqual(["a"], [item.key for item in store.items or []])
+        store.items = []
+        store.push_all([envelope("b")], soft=True)  # a store the reader read, empty: skips
+        self.assertEqual([], store.items)
+        store.push_all([envelope("b")])  # plain: lands
+        self.assertEqual(["b"], [item.key for item in store.items])
+
+    def test_a_store_that_only_pulls_all_is_read_so_a_soft_push_skips_it(self) -> None:
+        class PullOnly(BackingStore):
             def __init__(self) -> None:
                 self.items: list[CultCacheEnvelope] = []
 
@@ -80,20 +105,27 @@ class SoftPushAllTests(unittest.TestCase):
             def _replace_all(self, envelopes: list[CultCacheEnvelope]) -> None:
                 self.items = list(envelopes)
 
-        store = Memory()
-        store.push_all([envelope("a")], soft=True)  # the pull read an empty store: skips
+        store = PullOnly()
+        store.push_all([envelope("a")], soft=True)
         self.assertEqual([], store.items)
-        store.push_all([envelope("a")])  # plain: lands
-        store.push_all([envelope("b")], soft=True)  # a store with records: skips
-        self.assertEqual(["a"], [item.key for item in store.items])
-        store.push_all([envelope("b")])
-        self.assertEqual(["a", "b"], sorted(item.key for item in store.items))
+
+    def test_the_single_file_and_jsonl_stores_say_absent_and_read_through_pull_or_absent(self) -> None:
+        for make in (SingleFileMessagePackBackingStore, JsonLinesBackingStore):
+            with self.subTest(make.__name__):
+                path = self.dir / make.__name__
+                store = make(path)
+                self.assertIsNone(store.pull_or_absent())
+                store.push_all([envelope("a")])
+                self.assertEqual(["a"], [item.key for item in store.pull_or_absent() or []])
 
     def test_the_protocol_default_push_all_refuses_where_its_pull_refuses(self) -> None:
         class Unreadable(BackingStore):
             replaced = False
 
             def pull_all(self) -> list[CultCacheEnvelope]:
+                raise StoreUnreadableError(Path("x"), ValueError("junk"))
+
+            def pull_or_absent(self) -> list[CultCacheEnvelope] | None:
                 raise StoreUnreadableError(Path("x"), ValueError("junk"))
 
             def _replace_all(self, envelopes: list[CultCacheEnvelope]) -> None:

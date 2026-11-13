@@ -67,12 +67,19 @@ class BackingStore(Protocol):
     def delete(self, type: str, key: str) -> None:
         ...
 
+    def pull_or_absent(self) -> list[CultCacheEnvelope] | None:
+        """The envelopes the reader reads (empty included), None when nothing is at the path; raises when the path cannot be read.
+
+        The default is pull_all, which cannot say absent: a store that inherits it is always a store the reader read. A store kind
+        that can tell nothing-at-the-path overrides this, and the default push_all then writes where nothing is on a soft push."""
+        return self.pull_all()
+
     def push_all(self, envelopes: list[CultCacheEnvelope], soft: bool = False) -> None:
-        # A pull that returns is a store the reader read, empty included: the protocol cannot say "absent", so a soft push
-        # through this default always skips. A store that can tell nothing-at-the-path overrides push_all.
-        pulled = self.pull_all()
-        if soft:
+        # Soft: write only where pull_or_absent says nothing is; skip over a store it read, empty included; its raise refuses.
+        pulled = self.pull_or_absent()
+        if soft and pulled is not None:
             return
+        pulled = pulled or []
         existing = {(envelope.type, envelope.key): envelope for envelope in pulled}
         for envelope in envelopes:
             existing[(envelope.type, envelope.key)] = envelope

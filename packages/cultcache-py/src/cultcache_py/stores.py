@@ -78,6 +78,9 @@ class JsonLinesBackingStore:
     def pull_all(self) -> list[CultCacheEnvelope]:
         return self._pull() or []
 
+    def pull_or_absent(self) -> list[CultCacheEnvelope] | None:
+        return self._pull()
+
     def _pull(self) -> list[CultCacheEnvelope] | None:
         """The envelopes the reader reads, or None when nothing is at the path."""
         with self._lock:
@@ -151,6 +154,9 @@ class SingleFileMessagePackBackingStore:
 
     def pull_all(self) -> list[CultCacheEnvelope]:
         return self._pull() or []
+
+    def pull_or_absent(self) -> list[CultCacheEnvelope] | None:
+        return self._pull()
 
     def _pull(self) -> list[CultCacheEnvelope] | None:
         """The envelopes the reader reads, or None when nothing is at the path."""
