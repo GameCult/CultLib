@@ -424,7 +424,7 @@ test("a link put while a writer waits on the store lock is refused once it holds
     await new SingleFileMessagePackBackingStore(target).push(noteEnvelope("a"));
     const before = await readFile(target);
     const writes: Array<[string, (store: SingleFileMessagePackBackingStore) => Promise<void>]> = [
-      ["push", (store) => store.push(noteEnvelope("b"))],
+      ["push", async (store) => void (await store.push(noteEnvelope("b")))],
       ["pushAll", (store) => store.pushAll([noteEnvelope("b")])],
       ["delete", (store) => store.delete(noteEnvelope("a"))],
     ];

@@ -17,7 +17,7 @@ this page.
 | | CultCache | CultMath | Geometry | CultNet | CultMesh |
 | --- | --- | --- | --- | --- | --- |
 | **C#** | [first call, tested](#c-first-call); [update, tested](#c-update-with-retry) | [package](../../packages/cultmath/README.md); snippet not yet | [package](../../src/GameCult.Geometry/README.md); snippet not yet | [first call, tested](#c-cultnet-first-call); [package](../../src/GameCult.Networking) | [quickstart](../../src/GameCult.Mesh/docs/durable-node-quickstart.md); run by `scripts/verify-eve-getting-started.ps1` |
-| **TypeScript** | [first call, tested](#typescript-first-call) | not yet | not yet | [first call, tested](#typescript-cultnet-first-call); [package](../../packages/cultnet-ts/README.md) | [package](../../packages/cultmesh-ts/README.md); snippet not yet; [recipe: two-client .io game](io-game.md), tested with two live clients, browser page not yet run |
+| **TypeScript** | [first call, tested](#typescript-first-call); [update, tested](#typescript-update-with-retry) | not yet | not yet | [first call, tested](#typescript-cultnet-first-call); [package](../../packages/cultnet-ts/README.md) | [package](../../packages/cultmesh-ts/README.md); snippet not yet; [recipe: two-client .io game](io-game.md), tested with two live clients, browser page not yet run |
 | **Rust** | [first call, tested](#rust-first-call) | [native core](../../packages/cultmath/native/cultmath-core); snippet not yet | not yet | [first call, tested](#rust-cultnet-first-call); [package](../../packages/cultnet-rs/README.md), [examples](../../packages/cultnet-rs/examples) | [package](../../packages/cultmesh-rs); snippet not yet |
 | **Python** | [first call, tested](#python-first-call) | not yet | not yet | [first call, tested](#python-cultnet-first-call); [package](../../packages/cultnet-py/README.md) | [package](../../packages/cultmesh-py/README.md); snippet not yet |
 
@@ -149,6 +149,30 @@ async function firstCall(path: string) {
 
 The test imports from `../src/index` where the block reads `@gamecult/cultcache-ts`; a second test in that file fails if the block stops matching the rest. More:
 `packages/cultcache-ts/README.md`.
+
+## TypeScript update with retry
+
+`update` changes a record from what the store holds now and commits only if it is still that record. The source is the
+second region of
+[`packages/cultcache-ts/test/first-call.test.ts`](../../packages/cultcache-ts/test/first-call.test.ts), which uses the
+definitions of the first call above; a test in that file fails if the block stops matching the file.
+
+```ts
+async function restock(path: string) {
+  const cache = CultCache.builder()
+    .withRegistry(registry)
+    .withGenericStore(new SingleFileMessagePackBackingStore(path))
+    .build();
+  await cache.pullAllBackingStores();
+  return cache.update(itemDocument, "item:potion", (item) => {
+    const current = item ?? { name: "Potion", category: "Consumable", value: 0 };
+    return { ...current, value: current.value + 10 };
+  });
+}
+```
+
+The write is durable when the promise resolves. A lost race re-runs the function, so keep it free of side effects; when the
+attempts run out the result says `lostRace` instead of throwing. `put` is the blind opt-out: last writer wins.
 
 ## Rust first call
 

@@ -7,6 +7,7 @@ import { z } from "zod";
 import { codecs } from "../src";
 import type { Codec } from "../src/codec";
 import { defineDocumentType, documentPayloadFromBytes } from "../src/document";
+import { recordVersion } from "../src/single-file-messagepack-backing-store";
 import type { CacheBackingStore, CultCacheEnvelope } from "../src/types";
 
 // The union-surface fixture: the codecs, schema and value tests/vectors/union-parity was written from, shared by the
@@ -235,6 +236,16 @@ export function memoryStore(entries: CultCacheEnvelope[]): CacheBackingStore & {
     async pullAll() { return entries.map((entry) => ({ ...entry })); },
     async push(entry) { entries.push(entry); },
     async delete() {},
+    async read(key) {
+      const envelope = [...entries].reverse().find((entry) => entry.key === key);
+      return envelope === undefined ? undefined : { envelope, version: recordVersion(envelope) };
+    },
+    async commitIf(entry, expectedVersion) {
+      const current = [...entries].reverse().find((candidate) => candidate.key === entry.key);
+      if ((current === undefined ? null : recordVersion(current)) !== expectedVersion) return { outcome: "mismatch" };
+      entries.push(entry);
+      return { outcome: "committed", storedAt: entry.storedAt };
+    },
   };
 }
 

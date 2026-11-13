@@ -168,10 +168,8 @@ const settings = cache.getRequiredGlobal(settingsDocument);
 - `getByIndex(...)`
 - `getGlobal(...)`
 - `getRequiredGlobal(...)`
-- `put(...)`
-- `putGlobal(...)`
-- `update(...)`
-- `updateGlobal(...)`
+- `update(...)` and `updateGlobal(...)`, the conditional golden path: apply a function to a fresh copy of the record as the store holds it, commit only if it is unchanged, re-run on a lost race (`updated`, `declined` or `lostRace`)
+- `put(...)` and `putGlobal(...)`, the blind opt-out: last writer wins
 - `delete(...)`
 - `deleteGlobal(...)`
 - `snapshot()` (the logical image) and `storedSnapshot()` (the image as the stores hold it, for a whole flush)

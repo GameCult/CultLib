@@ -22,6 +22,8 @@ import type {
   CultCacheSchemaCatalogEntry,
   CultCacheStoreRegistration,
   CultCacheUnreadSlots,
+  CultCacheUpdateOptions,
+  CultCacheUpdateResult,
 } from "./types";
 
 type Accessor = (value: unknown) => string | undefined;
@@ -47,6 +49,10 @@ type EntryLookups = {
   readonly name?: string;
   readonly indexes: ReadonlyMap<string, string>;
 };
+
+// What a conditional write requires of the record at its key: the content version its store reported (null: no record), or for a
+// cache with no store the entry it held. Every write installs a new entry object, so the identity catches an A-B-A.
+type WriteCondition = { readonly version: string | null } | { readonly held: HydratedEntry | undefined };
 
 type HydratedEntry = CultCacheEnvelope & {
   catalogEntry: NonNullable<CultCacheEnvelope["catalogEntry"]>;
@@ -302,85 +308,88 @@ export class CultCache {
   // HydratedState, running every check and every user accessor, and replaces the cache's state
   // in one assignment only once the build finishes. A refused load admits nothing.
   pullAllBackingStores(): Promise<void> {
-    return this.#serial(async () => {
-      const next = emptyHydratedState();
-      const persistedGlobalKeys = new Map<string, string>();
+    return this.#serial(() => this.#pullNow());
+  }
 
-      for (const registration of this.#stores) {
-        const entries = await registration.store.pullAll();
+  // The pull itself, for a caller already inside a serial operation.
+  async #pullNow(): Promise<void> {
+    const next = emptyHydratedState();
+    const persistedGlobalKeys = new Map<string, string>();
 
-        for (const entry of entries) {
-          const registered = this.#resolveDefinitionForEnvelope(entry);
-          if (!registered) {
-            // A store may hold what this cache has no type for; it is carried, not served, and not a reason to refuse the load.
-            next.foreign.push({
-              key: entry.key,
-              schemaId: schemaIdForEnvelope(entry),
-              schemaName: entry.catalogEntry?.schemaName ?? entry.type,
-              storedAt: entry.storedAt,
-            });
-            continue;
-          }
+    for (const registration of this.#stores) {
+      const entries = await registration.store.pullAll();
 
-          const type = registered.definition.type;
-          const home = this.#resolveRegistration(type);
-          if (home?.store !== registration.store) {
+      for (const entry of entries) {
+        const registered = this.#resolveDefinitionForEnvelope(entry);
+        if (!registered) {
+          // A store may hold what this cache has no type for; it is carried, not served, and not a reason to refuse the load.
+          next.foreign.push({
+            key: entry.key,
+            schemaId: schemaIdForEnvelope(entry),
+            schemaName: entry.catalogEntry?.schemaName ?? entry.type,
+            storedAt: entry.storedAt,
+          });
+          continue;
+        }
+
+        const type = registered.definition.type;
+        const home = this.#resolveRegistration(type);
+        if (home?.store !== registration.store) {
+          throw new Error(
+            `CultCache "${type}" record "${entry.key}" was loaded from ${this.#describe(registration)}, ` +
+              `but its home is ${this.#describe(home)}.`,
+          );
+        }
+
+        const payload = this.#cloneBytes(entry.payload);
+        const { value, unreadSlots } = registered.formatter.decode(payload);
+        let admitted: CultCacheEnvelope = { ...entry, type, payload };
+        if (registered.global) {
+          const persistedKey = persistedGlobalKeys.get(type);
+          if (persistedKey !== undefined) {
             throw new Error(
-              `CultCache "${type}" record "${entry.key}" was loaded from ${this.#describe(registration)}, ` +
-                `but its home is ${this.#describe(home)}.`,
+              `CultCache global document type "${type}" has multiple persisted entries: "${persistedKey}" and "${entry.key}".`,
             );
           }
-
-          const payload = this.#cloneBytes(entry.payload);
-          const { value, unreadSlots } = registered.formatter.decode(payload);
-          let admitted: CultCacheEnvelope = { ...entry, type, payload };
-          if (registered.global) {
-            const persistedKey = persistedGlobalKeys.get(type);
-            if (persistedKey !== undefined) {
-              throw new Error(
-                `CultCache global document type "${type}" has multiple persisted entries: "${persistedKey}" and "${entry.key}".`,
-              );
-            }
-            persistedGlobalKeys.set(type, entry.key);
-            if (entry.key !== CultCache.GLOBAL_KEY) {
-              next.legacyGlobals.set(type, admitted);
-              admitted = { ...admitted, key: CultCache.GLOBAL_KEY };
-            }
+          persistedGlobalKeys.set(type, entry.key);
+          if (entry.key !== CultCache.GLOBAL_KEY) {
+            next.legacyGlobals.set(type, admitted);
+            admitted = { ...admitted, key: CultCache.GLOBAL_KEY };
           }
-          const hydrated = this.#admitEntry(next, registered, admitted, value, unreadSlots);
-          const other = this.#heldUnderOtherType(next, type, hydrated.key);
-          if (other !== undefined) {
-            throw new Error(`Record ${hydrated.key} is held by two stores, as type "${other.type}" and as type "${type}".`);
-          }
-          this.#installEntry(next, registered, hydrated);
         }
-      }
-
-      const foreignByKey = new Map<string, string>();
-      for (const record of next.foreign) {
-        const first = foreignByKey.get(record.key);
-        if (first !== undefined) {
-          throw new Error(`Record ${record.key} is held by two stores, as schema "${first}" and as schema "${record.schemaName}".`);
-        }
-        foreignByKey.set(record.key, record.schemaName);
-        const other = [...this.#definitions.keys()].map((type) => next.entries.get(this.#entryId(type, record.key))).find((held) => held !== undefined);
+        const hydrated = this.#admitEntry(next, registered, admitted, value, unreadSlots);
+        const other = this.#heldUnderOtherType(next, type, hydrated.key);
         if (other !== undefined) {
-          throw new Error(`Record ${record.key} is held by two stores, as type "${other.type}" and as schema "${record.schemaName}".`);
+          throw new Error(`Record ${hydrated.key} is held by two stores, as type "${other.type}" and as type "${type}".`);
+        }
+        this.#installEntry(next, registered, hydrated);
+      }
+    }
+
+    const foreignByKey = new Map<string, string>();
+    for (const record of next.foreign) {
+      const first = foreignByKey.get(record.key);
+      if (first !== undefined) {
+        throw new Error(`Record ${record.key} is held by two stores, as schema "${first}" and as schema "${record.schemaName}".`);
+      }
+      foreignByKey.set(record.key, record.schemaName);
+      const other = [...this.#definitions.keys()].map((type) => next.entries.get(this.#entryId(type, record.key))).find((held) => held !== undefined);
+      if (other !== undefined) {
+        throw new Error(`Record ${record.key} is held by two stores, as type "${other.type}" and as schema "${record.schemaName}".`);
+      }
+    }
+
+    // Judged whole, once: the refusal names the least violation of the state this load would leave, whatever the
+    // order of the stores and of the entries in them.
+    refuseLeastIndexSharing(function* () {
+      for (const entry of next.entries.values()) {
+        for (const [alias, value] of entry.lookups.indexes) {
+          yield { type: entry.type, schemaName: entry.catalogEntry.schemaName, alias, value, key: entry.key };
         }
       }
+    }());
 
-      // Judged whole, once: the refusal names the least violation of the state this load would leave, whatever the
-      // order of the stores and of the entries in them.
-      refuseLeastIndexSharing(function* () {
-        for (const entry of next.entries.values()) {
-          for (const [alias, value] of entry.lookups.indexes) {
-            yield { type: entry.type, schemaName: entry.catalogEntry.schemaName, alias, value, key: entry.key };
-          }
-        }
-      }());
-
-      this.#hydrated = next;
-    });
+    this.#hydrated = next;
   }
 
   get<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -513,12 +522,16 @@ export class CultCache {
     return key ? this.get(definition, key) : undefined;
   }
 
+  /**
+   * The blind write: the record at the key becomes `value`, whatever it held, and the last writer wins. `update` is the
+   * conditional path, which changes a record from what the store holds now and re-runs on a lost race.
+   */
   put<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
     key: string,
     value: CultCacheDocumentValue<TDefinition>,
   ): Promise<CultCacheDocumentValue<TDefinition>> {
-    return this.#serial(() => this.#putNow(definition, key, value));
+    return this.#serial(async () => (await this.#putNow(definition, key, value)).value);
   }
 
   putEnvelope<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -560,31 +573,68 @@ export class CultCache {
     definition: TDefinition,
     value: CultCacheDocumentValue<TDefinition>,
   ): Promise<CultCacheDocumentValue<TDefinition>> {
-    return this.#serial(() => {
+    return this.#serial(async () => {
       this.#requireGlobal(definition);
-      return this.#putNow(definition, CultCache.GLOBAL_KEY, value);
+      return (await this.#putNow(definition, CultCache.GLOBAL_KEY, value)).value;
     });
   }
 
-  update<TDefinition extends AnyCultCacheDocumentDefinition>(
+  /**
+   * Changes the record at the key from what the store holds now. `apply` may run up to `maxAttempts` times (default 5): each
+   * attempt gets a fresh copy of the record as the store holds it (undefined when absent), which it may change and return, and
+   * the result is written only if the record is still that version; a lost race runs `apply` again on the newer record. It must
+   * not write this cache or have side effects. Returning undefined writes nothing (`declined`). A lost race that outlasts
+   * `maxAttempts` returns `lostRace` and does not throw; a refusal, or a throw from `apply`, rejects and is not retried. The
+   * write is durable when the promise resolves. `document` is the cache's record after the outcome. `put` is the blind write.
+   */
+  async update<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
     key: string,
-    updater: (
+    apply: (
       current: CultCacheDocumentValue<TDefinition> | undefined,
-    ) => CultCacheDocumentValue<TDefinition>,
-  ): Promise<CultCacheDocumentValue<TDefinition>> {
-    return this.#serial(() => this.#putNow(definition, key, updater(this.get(definition, key))));
+    ) => CultCacheDocumentValue<TDefinition> | undefined | Promise<CultCacheDocumentValue<TDefinition> | undefined>,
+    options: CultCacheUpdateOptions = {},
+  ): Promise<CultCacheUpdateResult<CultCacheDocumentValue<TDefinition>>> {
+    if (typeof apply !== "function") {
+      throw new TypeError("CultCache update needs a function to apply.");
+    }
+    // undefined is the default; anything else must be an integer of at least 1, so null is refused.
+    const maxAttempts = options.maxAttempts === undefined ? 5 : options.maxAttempts;
+    if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+      throw new RangeError(`CultCache update maxAttempts must be an integer of at least 1, not ${String(maxAttempts)}.`);
+    }
+
+    for (let attempt = 1; ; attempt++) {
+      const { expected, copy } = await this.#serial(() => this.#readForUpdate(definition, key));
+      // Outside the serial queue and the store's lock: apply may await, and may write this cache through other keys.
+      const next = await apply(copy as CultCacheDocumentValue<TDefinition> | undefined);
+      if (next === undefined || next === null) {
+        return { outcome: "declined", document: this.get(definition, key) };
+      }
+      const written = await this.#serial(() => this.#putNow(definition, key, next, expected));
+      if (written.outcome === "committed") {
+        return { outcome: "updated", document: this.get(definition, key) as CultCacheDocumentValue<TDefinition> };
+      }
+      if (attempt === maxAttempts) {
+        // Display only. A cache with no store has nothing to pull, and a pull would replace what it holds with nothing.
+        if (this.#stores.length > 0) {
+          await this.#serial(() => this.#pullNow());
+        }
+        return { outcome: "lostRace", document: this.get(definition, key) };
+      }
+    }
   }
 
-  updateGlobal<TDefinition extends AnyCultCacheDocumentDefinition>(
+  /** `update` of the type's global record. */
+  async updateGlobal<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
-    updater: (
+    apply: (
       current: CultCacheDocumentValue<TDefinition> | undefined,
-    ) => CultCacheDocumentValue<TDefinition>,
-  ): Promise<CultCacheDocumentValue<TDefinition>> {
-    return this.#serial(() =>
-      this.#putNow(definition, CultCache.GLOBAL_KEY, updater(this.getGlobal(definition))),
-    );
+    ) => CultCacheDocumentValue<TDefinition> | undefined | Promise<CultCacheDocumentValue<TDefinition> | undefined>,
+    options: CultCacheUpdateOptions = {},
+  ): Promise<CultCacheUpdateResult<CultCacheDocumentValue<TDefinition>>> {
+    this.#requireGlobal(definition);
+    return this.update(definition, CultCache.GLOBAL_KEY, apply, options);
   }
 
   delete<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -724,11 +774,55 @@ export class CultCache {
     this.#stores.push(candidate);
   }
 
+  // One attempt's read for update: the record at the key as its home holds it now, the condition a commit must meet, and a copy of
+  // the record for apply to change. A store-backed cache asks its store, which reports the record and its version from one read;
+  // a cache with no store has only the held entry, whose identity is the condition and whose admitted payload is the copy.
+  async #readForUpdate(
+    definition: AnyCultCacheDocumentDefinition,
+    key: string,
+  ): Promise<{ expected: WriteCondition; copy: unknown }> {
+    const registered = this.#requireDefinition(definition);
+    this.#requireGlobalKey(registered, key);
+    const type = definition.type;
+    this.#refuseLegacyConditional(type);
+    const home = this.#homeStore(type);
+    if (home === undefined) {
+      const held = this.#hydrated.entries.get(this.#entryId(type, key));
+      if (held === undefined && this.#heldUnderOtherType(this.#hydrated, type, key) !== undefined) {
+        throw new Error(`Record ${key} is not a "${type}"; update cannot copy it.`);
+      }
+      return { expected: { held }, copy: held ? registered.formatter.decode(this.#cloneBytes(held.payload)).value : undefined };
+    }
+    if (home.read === undefined || home.commitIf === undefined) {
+      throw new Error(`CultCache backing store for type "${type}" cannot write conditionally; update needs a store with read and commitIf.`);
+    }
+    const found = await home.read(key);
+    if (found === undefined) {
+      return { expected: { version: null }, copy: undefined };
+    }
+    if (this.#resolveDefinitionForEnvelope(found.envelope) !== registered) {
+      throw new Error(`Record ${key} is not a "${type}"; update cannot copy it.`);
+    }
+    return { expected: { version: found.version }, copy: registered.formatter.decode(this.#cloneBytes(found.envelope.payload)).value };
+  }
+
+  #putNow<TDefinition extends AnyCultCacheDocumentDefinition>(
+    definition: TDefinition,
+    key: string,
+    value: CultCacheDocumentValue<TDefinition>,
+  ): Promise<{ outcome: "committed"; value: CultCacheDocumentValue<TDefinition> }>;
+  #putNow<TDefinition extends AnyCultCacheDocumentDefinition>(
+    definition: TDefinition,
+    key: string,
+    value: CultCacheDocumentValue<TDefinition>,
+    expected: WriteCondition,
+  ): Promise<{ outcome: "committed"; value: CultCacheDocumentValue<TDefinition> } | { outcome: "mismatch" }>;
   async #putNow<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
     key: string,
     value: CultCacheDocumentValue<TDefinition>,
-  ): Promise<CultCacheDocumentValue<TDefinition>> {
+    expected?: WriteCondition,
+  ): Promise<{ outcome: "committed"; value: CultCacheDocumentValue<TDefinition> } | { outcome: "mismatch" }> {
     const registered = this.#requireDefinition(definition);
     const payload = registered.formatter.encode(value);
     const { value: parsed, unreadSlots } = registered.formatter.decode(payload) as { value: CultCacheDocumentValue<TDefinition>; unreadSlots?: NotedSlots };
@@ -740,19 +834,55 @@ export class CultCache {
       schemaId: registered.catalogEntry.schemaId,
       catalogEntry: registered.catalogEntry,
     };
-    await this.#writeNow(registered, entry, parsed, unreadSlots);
-    return parsed;
+    const outcome = await this.#writeNow(registered, entry, parsed, unreadSlots, expected);
+    return outcome === "committed" ? { outcome, value: parsed } : { outcome };
   }
 
   // Validates the whole write (home, global singleton, name and index accessors) before the store
   // is touched; once the store accepts, applying to the cache has no fallible step.
-  async #writeNow(registered: RegisteredDefinition, entry: CultCacheEnvelope, value: unknown, unreadSlots?: NotedSlots): Promise<void> {
+  // With a condition, the write lands only if the record at the key is still the one the caller read: the store's version
+  // (commitIf), or for a cache with no store the held entry itself. Otherwise nothing is written or installed and the answer is
+  // "mismatch". Without one the write is blind, as put's.
+  async #writeNow(
+    registered: RegisteredDefinition,
+    entry: CultCacheEnvelope,
+    value: unknown,
+    unreadSlots?: NotedSlots,
+    expected?: WriteCondition,
+  ): Promise<"committed" | "mismatch"> {
     const home = this.#homeStore(entry.type);
     const retyped = this.#judge(registered, entry.key, entry);
     const hydrated = this.#admitEntry(this.#hydrated, registered, entry, value, unreadSlots);
     this.#refuseIndexSharing(this.#hydrated, entry.type, registered.catalogEntry.schemaName, entry.key, hydrated.lookups);
     const legacy = this.#hydrated.legacyGlobals.get(entry.type);
-    await home?.push(entry);
+    // A conditional write over a legacy global is refused here too (a pull while apply awaited can have loaded one): the condition
+    // was read from the global's own key, the record sits under its legacy key, and the retire below would delete it unseen.
+    if (expected !== undefined) {
+      this.#refuseLegacyConditional(entry.type);
+    }
+    if (expected !== undefined && "held" in expected) {
+      // The condition was fixed at read for a cache with no store. A store attached since has its own record at the key that
+      // this read never saw, so the held identity no longer judges the write: lose the race and read again.
+      if (home !== undefined || this.#hydrated.entries.get(this.#entryId(entry.type, entry.key)) !== expected.held) {
+        return "mismatch";
+      }
+    }
+    if (expected !== undefined && "version" in expected) {
+      if (home?.commitIf === undefined) {
+        throw new Error(`CultCache backing store for type "${entry.type}" cannot write conditionally; update needs a store with read and commitIf.`);
+      }
+      const committed = await home.commitIf(entry, expected.version);
+      if (committed.outcome === "mismatch") {
+        return "mismatch";
+      }
+      hydrated.storedAt = committed.storedAt;
+    } else {
+      // A store that re-stamps a write (storedAt later than the record it replaces) reports the stamp; the cache holds that one.
+      const pushed = await home?.push(entry);
+      if (typeof pushed === "object" && pushed !== null && typeof pushed.storedAt === "string" && !Number.isNaN(Date.parse(pushed.storedAt))) {
+        hydrated.storedAt = pushed.storedAt;
+      }
+    }
     if (home && legacy) {
       await this.#retireLegacyGlobal(home, legacy, entry);
     }
@@ -762,6 +892,17 @@ export class CultCache {
       this.#removeEntry(this.#hydrated, this.#definitions.get(retyped.type)!, retyped);
     }
     this.#installEntry(this.#hydrated, registered, hydrated);
+    return "committed";
+  }
+
+  // The one rule that a conditional write (update, whichever entry reaches it) never touches a global loaded from a legacy key:
+  // only putGlobal retires that key. Asked before apply runs and again at the write.
+  #refuseLegacyConditional(type: string): void {
+    if (this.#hydrated.legacyGlobals.has(type)) {
+      throw new Error(
+        `CultCache global "${type}" was loaded from a legacy key; write it once with putGlobal to retire its legacy key.`,
+      );
+    }
   }
 
   // An envelope of the definition's type at the key, carrying nothing: what the judge asks about a write or a removal by that type.

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -55,14 +56,42 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
     return disk.envelopes;
   }
 
-  async push(entry: CultCacheEnvelope): Promise<void> {
-    await this.#enqueue(async () => {
+  async push(entry: CultCacheEnvelope): Promise<{ storedAt: string }> {
+    return this.#enqueue(async () => {
       const disk = this.#readDisk();
       this.#format = disk.format;
       const existing = disk.envelopes;
       requireOneTypePerKey(this.filePath, [entry], existing);
-      const filtered = existing.filter((candidate) => candidate.key !== entry.key);
-      await this.#writeAll([entry], filtered);
+      const [written] = await this.#writeAll([entry], existing);
+      return { storedAt: written!.storedAt };
+    });
+  }
+
+  // The record at the key as the file holds it now, with its content version, from one read. Like pullAll it takes no lock: a
+  // reader sees a whole file (the commit renames one over the other), and the version it reports is the one commitIf judges.
+  async read(key: string): Promise<{ envelope: CultCacheEnvelope; version: string } | undefined> {
+    const envelope = readSingleFileStore(this.filePath).envelopes.find((candidate) => candidate.key === key);
+    return envelope === undefined ? undefined : { envelope, version: recordVersion(envelope) };
+  }
+
+  // Writes `entry` the way push does, but only if the record at its key (of any type) still has `expectedVersion`; null expects
+  // none. The comparison and the write are one hold of the write lock, so no other writer lands between them.
+  async commitIf(
+    entry: CultCacheEnvelope,
+    expectedVersion: string | null,
+  ): Promise<{ outcome: "committed"; storedAt: string } | { outcome: "mismatch" }> {
+    return this.#enqueue(async () => {
+      const disk = this.#readDisk();
+      this.#format = disk.format;
+      const existing = disk.envelopes;
+      const current = existing.find((candidate) => candidate.key === entry.key);
+      if ((current === undefined ? null : recordVersion(current)) !== expectedVersion) {
+        return { outcome: "mismatch" as const };
+      }
+
+      requireOneTypePerKey(this.filePath, [entry], existing);
+      const [written] = await this.#writeAll([entry], existing);
+      return { outcome: "committed" as const, storedAt: written!.storedAt };
     });
   }
 
@@ -126,11 +155,65 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
     return result;
   }
 
-  async #writeAll(supplied: CultCacheEnvelope[], arrived: CultCacheEnvelope[]): Promise<void> {
+  // Writes the supplied records onto the arrived ones and returns the supplied records as written. A supplied record whose
+  // schema id and payload bytes differ from the arrived one it replaces is never stamped earlier than the record it replaces, so a content version that includes storedAt
+  // cannot repeat across writes (variants:ruling:storedat-on-change): one not later than the arrived stamp is written one
+  // millisecond after it.
+  async #writeAll(supplied: CultCacheEnvelope[], arrived: CultCacheEnvelope[]): Promise<CultCacheEnvelope[]> {
+    const arrivedByKey = new Map(arrived.map((entry) => [entry.key, entry]));
+    const written = supplied.map((entry) => {
+      const prior = arrivedByKey.get(entry.key);
+      if (prior === undefined) {
+        return entry;
+      }
+      // A rewrite of the identical record (same schema id and payload bytes) keeps the stamp and so the version it has; the
+      // writer's type and catalog entry still go down with it.
+      if (sameContent(entry, prior)) {
+        return { ...entry, storedAt: prior.storedAt };
+      }
+      return { ...entry, storedAt: laterStoredAt(entry.storedAt, prior.storedAt) };
+    });
     await mkdir(dirname(this.filePath), { recursive: true });
 
-    await commitStoreFile(this.filePath, encode(encodeSnapshot(supplied, arrived, this.#format)));
+    await commitStoreFile(this.filePath, encode(encodeSnapshot(written, arrived, this.#format)));
+    return written;
   }
+}
+
+// The content version of a stored record: the lowercase hex SHA-256 of its persisted encoding, the MessagePack array
+// [key, schemaId, storedAt, payload] as the store writes it (the C# reference's StoredVersion). Private to this module so
+// node:crypto stays out of the browser-safe cache.
+export function recordVersion(entry: CultCacheEnvelope): string {
+  return createHash("sha256")
+    .update(encode([entry.key, schemaIdForEnvelope(entry), entry.storedAt, documentPayloadBytes(entry.payload)]))
+    .digest("hex");
+}
+
+function sameContent(a: CultCacheEnvelope, b: CultCacheEnvelope): boolean {
+  if (schemaIdForEnvelope(a) !== schemaIdForEnvelope(b)) {
+    return false;
+  }
+  const x = documentPayloadBytes(a.payload);
+  const y = documentPayloadBytes(b.payload);
+  return x.length === y.length && x.every((byte, i) => byte === y[i]);
+}
+
+// `storedAt` if it is later than `prior`, else `prior` plus one millisecond. A stamp that does not parse is not later; a prior
+// that does not parse leaves nothing to be later than.
+function laterStoredAt(storedAt: string, prior: string): string {
+  const priorMs = Date.parse(prior);
+  if (Number.isNaN(priorMs)) {
+    return storedAt;
+  }
+  const storedMs = Date.parse(storedAt);
+  if (!(Number.isNaN(storedMs) || storedMs <= priorMs)) {
+    return storedAt;
+  }
+  // The stamp is ISO-8601 with a four-digit year; one past 9999-12-31T23:59:59.999Z would print as an extended year.
+  if (priorMs + 1 > Date.UTC(9999, 11, 31, 23, 59, 59, 999)) {
+    throw new RangeError(`CultCache cannot stamp a write later than the record it replaces (${prior}): the stamp would leave the four-digit years.`);
+  }
+  return new Date(priorMs + 1).toISOString();
 }
 
 // A store holds a key once, and the reader refuses a file that holds it twice, so a write that would put a second type under a

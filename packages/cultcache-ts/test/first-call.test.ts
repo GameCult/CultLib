@@ -46,6 +46,21 @@ async function firstCall(path: string) {
 }
 // snippet:end
 
+// The update snippet, which docs/start/README.md shows after the first call and which uses its definitions.
+// snippet:update:begin
+async function restock(path: string) {
+  const cache = CultCache.builder()
+    .withRegistry(registry)
+    .withGenericStore(new SingleFileMessagePackBackingStore(path))
+    .build();
+  await cache.pullAllBackingStores();
+  return cache.update(itemDocument, "item:potion", (item) => {
+    const current = item ?? { name: "Potion", category: "Consumable", value: 0 };
+    return { ...current, value: current.value + 10 };
+  });
+}
+// snippet:update:end
+
 test("define, store and read back a typed document", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-first-call-"));
   try {
@@ -57,13 +72,35 @@ test("define, store and read back a typed document", async () => {
   }
 });
 
-test("docs show the tested snippet", async () => {
+test("update with retry: restock twice reads value 20 through a second cache", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-first-call-"));
+  try {
+    const path = join(dir, "restock.cc");
+    assert.equal((await restock(path)).outcome, "updated");
+    assert.equal((await restock(path)).outcome, "updated");
+    const reopened = CultCache.builder()
+      .withRegistry(registry)
+      .withGenericStore(new SingleFileMessagePackBackingStore(path))
+      .build();
+    await reopened.pullAllBackingStores();
+    assert.equal(reopened.get(itemDocument, "item:potion")?.value, 20);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// The docs show the region between `// snippet:<region>begin` and `end` markers verbatim, the package import aside.
+async function assertDocsShow(region: "" | "update:") {
   // Compiled to dist-test/test/first-call.test.js, so the package root is two levels up.
   const source = await readFile(join(__dirname, "..", "..", "test", "first-call.test.ts"), "utf8");
   const snippet = source
-    .split("// snippet:begin\n")[1]
-    .split("// snippet:end\n")[0]
+    .split(`// snippet:${region}begin\n`)[1]
+    .split(`// snippet:${region}end\n`)[0]
     .replace('"../src/index"', '"@gamecult/cultcache-ts"');
   const docs = (await readFile(join(__dirname, "..", "..", "..", "..", "docs", "start", "README.md"), "utf8")).replace(/\r\n/g, "\n");
-  assert.ok(docs.includes("```ts\n" + snippet + "```"), "docs/start/README.md no longer shows test/first-call.test.ts");
-});
+  assert.ok(docs.includes("```ts\n" + snippet + "```"), `docs/start/README.md no longer shows the ${region || "first-call "}region of test/first-call.test.ts`);
+}
+
+test("docs show the tested snippet", () => assertDocsShow(""));
+
+test("docs show the tested update snippet", () => assertDocsShow("update:"));

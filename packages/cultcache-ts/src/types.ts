@@ -125,9 +125,34 @@ export interface PushAllOptions {
 
 export interface CacheBackingStore {
   pullAll(): Promise<CultCacheEnvelope[]>;
-  push(entry: CultCacheEnvelope): Promise<void>;
+  /** A store that re-stamps the write returns the storedAt it wrote; the cache then holds that stamp, not its own. */
+  push(entry: CultCacheEnvelope): Promise<void | { storedAt: string }>;
   delete(entry: CultCacheEnvelope): Promise<void>;
   pushAll?(entries: CultCacheEnvelope[], options?: PushAllOptions): Promise<void>;
+  /**
+   * The record at the key as the store holds it now, with its content version, from one read; undefined when the store holds
+   * none. The version is the store's own: the cache carries it from `read` to `commitIf` and never computes it.
+   */
+  read?(key: string): Promise<{ envelope: CultCacheEnvelope; version: string } | undefined>;
+  /**
+   * Writes the entry only if the record at its key still has `expectedVersion` (null: no record), judged and written under the
+   * store's write lock. A mismatch writes nothing. A commit returns the storedAt actually written.
+   */
+  commitIf?(
+    entry: CultCacheEnvelope,
+    expectedVersion: string | null,
+  ): Promise<{ outcome: "committed"; storedAt: string } | { outcome: "mismatch" }>;
+}
+
+/** The outcome of `CultCache.update`: what `apply` wrote, declined to write, or lost to a rival writer. */
+export type CultCacheUpdateResult<TValue> =
+  | { outcome: "updated"; document: TValue }
+  | { outcome: "declined"; document: TValue | undefined }
+  | { outcome: "lostRace"; document: TValue | undefined };
+
+export interface CultCacheUpdateOptions {
+  /** How many times `apply` may run before a lost race is returned as `lostRace`. An integer of at least 1; default 5. */
+  maxAttempts?: number;
 }
 
 export interface CultCacheStoreRegistration {
