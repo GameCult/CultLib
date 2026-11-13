@@ -30,7 +30,7 @@ knock on the contract before touching the furniture.
 ## Receipts
 
 ```powershell
-cargo test
+cargo test --locked
 ```
 
 The initial tests prove:

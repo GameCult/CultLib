@@ -111,7 +111,8 @@ probe() {
       node ../../node_modules/typescript/bin/tsc -p tsconfig.test.json
       node --test dist-test/test/old-reader-v3.test.js ;;
     python) PYTHONPATH=packages/cultcache-py/src python3 packages/cultcache-py/tests/test_old_reader_v3.py -v ;;
-    rust) cd packages/cultcache-rs && cargo test --locked --test old_reader_v3 -- --nocapture ;;
+    # The staged tree is the frozen cultcache-rs-v0.3.1 revision, which has no committed Cargo.lock: --locked cannot work here.
+    rust) cd packages/cultcache-rs && cargo test --test old_reader_v3 -- --nocapture ;;
     *) usage ;;
   esac
 }

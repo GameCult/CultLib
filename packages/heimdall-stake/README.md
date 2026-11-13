@@ -11,8 +11,8 @@ adversary, storage, and any projection. Every parameter is a placeholder until t
 ## First call
 
 ```
-cargo run --example first_call      # prints the Meta example and a splitting table
-cargo test
+cargo run --locked --example first_call      # prints the Meta example and a splitting table
+cargo test --locked
 ```
 
 ```rust
