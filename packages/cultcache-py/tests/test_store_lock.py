@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import select
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,7 @@ from cultcache_py.backing_store import CultCacheEnvelope
 REPO = Path(__file__).resolve().parents[3]
 TS_STORE_FILE = REPO / "packages" / "cultcache-ts" / "dist" / "store-file.js"
 HOLD_SECONDS = 1.5
+HELD_WAIT_SECONDS = 3
 
 # A holder that takes the lock the way the Rust runtime does (an exclusive file lock), not through this package.
 PY_HOLDER = """
@@ -43,7 +45,14 @@ def envelope(key: str) -> CultCacheEnvelope:
 
 def start_holder(argv: list[str]) -> subprocess.Popen[str]:
     holder = subprocess.Popen(argv, stdout=subprocess.PIPE, text=True)
-    assert holder.stdout is not None and holder.stdout.readline().strip() == "HELD"
+    assert holder.stdout is not None
+    ready, _, _ = select.select([holder.stdout], [], [], HELD_WAIT_SECONDS)  # a holder blocked on a leaked lock never prints
+    if not ready:
+        holder.kill()
+        holder.wait()
+        holder.stdout.close()
+        raise AssertionError(f"the holder never took {argv[-2]}.lock within {HELD_WAIT_SECONDS} s: an earlier writer leaked the lock")
+    assert holder.stdout.readline().strip() == "HELD"
     holder.held_at = time.monotonic()  # type: ignore[attr-defined]
     return holder
 
