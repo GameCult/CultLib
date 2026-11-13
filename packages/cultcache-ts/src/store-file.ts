@@ -218,6 +218,8 @@ export async function withStoreWriteLock<T>(
   }
 
   try {
+    // A link may have been put at the path while the lock was awaited; the look above only saw the path before.
+    await refuseLinkedStore(storePath);
     return await operation();
   } finally {
     release();

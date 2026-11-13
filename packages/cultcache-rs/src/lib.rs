@@ -1752,7 +1752,8 @@ impl SingleFileMessagePackBackingStore {
         let lock = self.open_lock_file()?;
         fs2::FileExt::lock_exclusive(&lock)
             .with_context(|| format!("failed to lock {}", self.lock_path().display()))?;
-        release_lock(lock, action())
+        // A link may have been put at the path while the lock was awaited; the refusal above only saw the path before.
+        release_lock(lock, refuse_linked(&self.path).and_then(|()| action()))
     }
 
     /// Replaces the named entries only if each still matches its expectation.
@@ -1870,7 +1871,7 @@ impl SingleFileMessagePackBackingStore {
                     .with_context(|| format!("failed to lock {}", self.lock_path().display()));
             }
         }
-        release_lock(lock, action()).map(Some)
+        release_lock(lock, refuse_linked(&self.path).and_then(|()| action())).map(Some)
     }
 
     fn open_lock_file(&self) -> Result<File> {
@@ -8201,6 +8202,44 @@ mod tests {
 
     // A write at a store path that is a link is refused: a replace there would swap the link for a regular file and
     // detach the store from its target. Reads through a live link keep working.
+    // A link put at the store path while a writer waits on the lock is refused once the lock is taken, as C# does, and the
+    // lock is free afterwards.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_put_while_a_writer_waits_on_the_lock_is_refused_once_it_holds_it() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let volume = temp.path().join("volume");
+        fs::create_dir(&volume)?;
+        let target = volume.join("store.cc");
+        SingleFileMessagePackBackingStore::new(&target).push(&snapshot_envelope("a", b"1"))?;
+        let before = fs::read(&target)?;
+        let path = temp.path().join("late.cc");
+        let writers: [(&str, fn(&mut SingleFileMessagePackBackingStore) -> Result<()>); 4] = [
+            ("push", |s| s.push(&snapshot_envelope("b", b"2"))),
+            ("push_all", |s| s.push_all(&[snapshot_envelope("b", b"2")], PushAllOptions::default())),
+            ("delete", |s| s.delete(&snapshot_envelope("a", b"1"))),
+            ("compare_exchange_snapshot", |s| s.compare_exchange_snapshot(&[], &[snapshot_envelope("b", b"2")]).map(|_| ())),
+        ];
+        for (name, write) in writers {
+            let _ = fs::remove_file(&path);
+            let store = SingleFileMessagePackBackingStore::new(&path);
+            let holder = store.open_lock_file()?;
+            fs2::FileExt::lock_exclusive(&holder)?;
+            let mut waiting = SingleFileMessagePackBackingStore::new(&path);
+            let handle = std::thread::spawn(move || write(&mut waiting));
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            std::os::unix::fs::symlink(&target, &path)?;
+            fs2::FileExt::unlock(&holder)?;
+            let error = handle.join().expect("writer thread").expect_err("the late link must be refused");
+            assert!(error.downcast_ref::<StoreLinkedError>().is_some(), "{name}: {error:#}");
+            assert!(fs::symlink_metadata(&path)?.file_type().is_symlink(), "{name}: the link was replaced");
+            assert_eq!(fs::read(&target)?, before, "{name}: the target changed");
+            let probe = store.open_lock_file()?;
+            fs2::FileExt::try_lock_exclusive(&probe).map_err(|e| anyhow!("{name}: lock still held: {e}"))?;
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_write_at_a_live_link_is_refused_and_nothing_changes_while_a_read_through_it_works() -> Result<()> {

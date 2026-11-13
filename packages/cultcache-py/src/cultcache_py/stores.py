@@ -495,6 +495,8 @@ def store_write_lock(path: Path, timeout: float = LOCK_TIMEOUT_SECONDS) -> Itera
             raise TimeoutError(f"CultCache timed out after {timeout} s waiting for the store lock {lock_path}.")
         time.sleep(_LOCK_POLL_SECONDS)
     try:
+        # A link may have been put at the path while the lock was awaited; the look above only saw the path before.
+        _refuse_linked(path)
         yield
     finally:
         release()

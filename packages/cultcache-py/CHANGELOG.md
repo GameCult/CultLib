@@ -8,6 +8,7 @@
 
 ### Changed
 
+- `store_write_lock` looks for a link at the store path again once the lock is held, so a link put at the path while a writer waited on the lock is refused with `StoreLinkedError` and the lock released, instead of being replaced. `JsonLinesBackingStore` takes no cross-process lock (only its thread lock, under which it already refuses a link), so it has no lock wait to re-check across. Pinned by a test that puts the link while a foreign process holds the lock.
 - `CultCache.is_writable` does not look at store paths: a link at a store path is not predicted, and the write refuses it with `StoreLinkedError`. Pinned by a test through a cache attached to a linked store.
 - `JsonLinesBackingStore` writes LF line endings on Windows. It wrote CRLF there, through `write_text` newline translation, before the commit_store_file change (#154, adbbb780).
 - `msgpack` is a hard dependency, as `pyproject.toml` declared it. The optional-import fallbacks and the `cultcache-py[msgpack]` extra they named (which never existed) are gone: a missing msgpack is an `ImportError` at import.
