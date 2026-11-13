@@ -1861,6 +1861,8 @@ impl SingleFileMessagePackBackingStore {
 
     fn try_with_exclusive_lock<T>(&self, action: impl FnOnce() -> Result<T>) -> Result<Option<T>> {
         refuse_linked(&self.path)?;
+        #[cfg(test)]
+        run_after_pre_lock_look();
         let lock = self.open_lock_file()?;
         match fs2::FileExt::try_lock_exclusive(&lock) {
             Ok(()) => {}
@@ -4771,6 +4773,20 @@ fn injected_write_fault(step: WriteStep) -> std::io::Result<()> {
         return Err(std::io::Error::other("injected write fault"));
     }
     Ok(())
+}
+
+// The one gap a test cannot hold open from outside: a try-lock never waits, so what happens between its pre-lock look and
+// the lock is only reachable by running the test's closure there.
+#[cfg(test)]
+thread_local! {
+    static AFTER_PRE_LOCK_LOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_after_pre_lock_look() {
+    if let Some(hook) = AFTER_PRE_LOCK_LOOK.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
 }
 
 #[cfg(not(test))]
@@ -8241,6 +8257,38 @@ mod tests {
             assert!(!dangling.exists(), "{name}: the dangling target was created");
             let probe = store.open_lock_file()?;
             fs2::FileExt::try_lock_exclusive(&probe).map_err(|e| anyhow!("{name}: lock still held: {e}"))?;
+        }
+        Ok(())
+    }
+
+    // The try entry has no wait, so the late window is the gap between its look and its lock: a link put there is refused
+    // once the lock is held, nothing is written through or over it, and the lock is released.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_put_between_the_try_entrys_look_and_its_lock_is_refused_and_the_lock_is_released() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let target = temp.path().join("target.cc");
+        SingleFileMessagePackBackingStore::new(&target).push(&snapshot_envelope("a", b"1"))?;
+        let before = fs::read(&target)?;
+        let dangling = temp.path().join("missing.cc");
+        let path = temp.path().join("late.cc");
+        for link_to in [target.clone(), dangling.clone()] {
+            let store = SingleFileMessagePackBackingStore::new(&path);
+            let (link, at) = (link_to.clone(), path.clone());
+            AFTER_PRE_LOCK_LOOK.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || std::os::unix::fs::symlink(&link, &at).expect("put the link")));
+            });
+            let error = store
+                .try_compare_exchange_snapshot(&[], &[snapshot_envelope("b", b"2")])
+                .expect_err("the late link must be refused");
+            assert!(error.downcast_ref::<StoreLinkedError>().is_some(), "{error:#}");
+            assert!(fs::symlink_metadata(&path)?.file_type().is_symlink(), "the link was replaced");
+            assert_eq!(fs::read(&target)?, before, "the target changed");
+            assert!(!dangling.exists(), "the dangling target was created");
+            let probe = store.open_lock_file()?;
+            fs2::FileExt::try_lock_exclusive(&probe).map_err(|e| anyhow!("lock still held: {e}"))?;
+            drop(probe);
+            fs::remove_file(&path)?;
         }
         Ok(())
     }
