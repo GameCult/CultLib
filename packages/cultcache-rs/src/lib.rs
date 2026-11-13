@@ -8377,6 +8377,51 @@ mod tests {
         assert!(other.is_err());
     }
 
+    // The try entry must answer at once while another handle holds the lock. The attempt runs on a thread and its
+    // answer is awaited with a timeout, so an entry that waits fails this test by timeout instead of hanging the suite.
+    #[cfg(unix)]
+    #[test]
+    fn the_try_entry_returns_at_once_while_the_lock_is_held() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("held.cc");
+        let store = SingleFileMessagePackBackingStore::new(&path);
+        let holder = store.open_lock_file()?;
+        fs2::FileExt::lock_exclusive(&holder)?;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let attempt = SingleFileMessagePackBackingStore::new(&path);
+        std::thread::spawn(move || {
+            let _ = sender.send(attempt.try_compare_exchange_snapshot(&[], &[snapshot_envelope("b", b"2")]));
+        });
+        let outcome = receiver
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .map_err(|_| anyhow!("the try entry waited on a held lock instead of returning"))?;
+        assert!(matches!(outcome?, TryCompareExchangeSnapshotOutcome::LockContended));
+        assert!(!path.exists(), "the contended attempt wrote");
+        let again = store.open_lock_file()?;
+        assert!(fs2::FileExt::try_lock_exclusive(&again).is_err(), "the held lock was disturbed");
+        fs2::FileExt::unlock(&holder)?;
+        Ok(())
+    }
+
+    // Off Windows errno 32 is EPIPE, never a busy file: the predicate is false and the wait surfaces it on the first try.
+    #[cfg(not(windows))]
+    #[test]
+    fn error_32_is_not_busy_off_windows_and_surfaces_at_once() {
+        assert!(!is_sharing_violation(&busy_error()));
+        let (mut tries, mut sleeps) = (0, 0);
+        let error = retry_while_busy::<()>(
+            || {
+                tries += 1;
+                Err(busy_error())
+            },
+            is_sharing_violation,
+            || sleeps += 1,
+        )
+        .expect_err("error 32 must surface off Windows");
+        assert_eq!(error.raw_os_error(), Some(32));
+        assert_eq!((tries, sleeps), (1, 0));
+    }
+
     // The try entry has no wait, so the late window is the gap between its look and its lock: a link put there is refused
     // once the lock is held, nothing is written through or over it, and the lock is released.
     #[cfg(unix)]
