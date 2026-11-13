@@ -480,6 +480,39 @@ struct PersistedSchemaCatalogEntry(
     Vec<PersistedSchemaCatalogMember>,
 );
 
+/// One entry of a store file's schema catalog, read-only: the scalar fields every runtime publishes for a schema id. The members and
+/// the canonical schema JSON the file also carries are not exposed. `schema_version` is the version string the writer published
+/// (C# `CultSchemaCatalogEntry.SchemaVersion`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaCatalogEntry {
+    pub schema_id: String,
+    pub schema_name: String,
+    pub schema_version: String,
+    pub content_hash: String,
+    pub compatible_schema_ids: Vec<String>,
+}
+
+impl From<&PersistedSchemaCatalogEntry> for SchemaCatalogEntry {
+    fn from(entry: &PersistedSchemaCatalogEntry) -> Self {
+        Self {
+            schema_id: entry.0.clone(),
+            schema_name: entry.1.clone(),
+            schema_version: entry.2.clone(),
+            content_hash: entry.3.clone(),
+            compatible_schema_ids: entry.5.clone(),
+        }
+    }
+}
+
+/// The catalog entry a record's schema id names, as the decoder resolves it: the first entry that has the id as its own, else the
+/// first entry that lists it as compatible; `None` when the catalog publishes neither.
+pub fn resolve_schema_entry<'a>(catalog: &'a [SchemaCatalogEntry], schema_id: &str) -> Option<&'a SchemaCatalogEntry> {
+    catalog
+        .iter()
+        .find(|entry| entry.schema_id == schema_id)
+        .or_else(|| catalog.iter().find(|entry| entry.compatible_schema_ids.iter().any(|id| id == schema_id)))
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct PersistedSchemaCatalogMember(
     u32,
@@ -1695,6 +1728,16 @@ impl SingleFileMessagePackBackingStore {
     /// and locally owned stores must continue to use the locked APIs.
     pub fn pull_all_read_only_snapshot(&self) -> Result<Vec<CultCacheEnvelope>> {
         self.read_all_unlocked()
+    }
+
+    /// The schema catalog the store file publishes, read under the same shared lock [`CacheBackingStore::pull_all`] takes. An absent
+    /// file and a legacy envelope array have no catalog and give an empty one. Resolve a record's `schema_id` against it with
+    /// [`resolve_schema_entry`].
+    pub fn pull_schema_catalog(&self) -> Result<Vec<SchemaCatalogEntry>> {
+        if is_absent(&self.path)? && is_absent(&self.lock_path())? {
+            return Ok(Vec::new());
+        }
+        self.with_shared_lock(|| Ok(self.read_store_unlocked()?.catalog.iter().map(SchemaCatalogEntry::from).collect()))
     }
 
     fn write_all_unlocked(&self, entries: &[CultCacheEnvelope]) -> Result<()> {
