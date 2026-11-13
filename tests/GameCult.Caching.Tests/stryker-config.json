@@ -1,0 +1,11 @@
+{
+  "stryker-config": {
+    "project": "GameCult.Caching.csproj",
+    "mutate": [
+      "**/src/GameCult.Caching/**/*.cs"
+    ],
+    "mutation-level": "Standard",
+    "reporters": [ "progress", "html", "json" ],
+    "thresholds": { "high": 80, "low": 60, "break": 0 }
+  }
+}

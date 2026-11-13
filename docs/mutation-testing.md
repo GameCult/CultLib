@@ -3,7 +3,7 @@
 CultLib measures its C# test suites with Stryker.NET, pinned as a repo-local
 tool in `dotnet-tools.json`. Coverage is added project by project; a project
 with no `stryker-config.json` next to its test project has not been scoped
-yet (see "Follow-ups" below for what's outstanding).
+yet (see "Scope and follow-ups" below for what's outstanding).
 
 ## Running it
 
@@ -126,14 +126,17 @@ project as precedent for the `vstest` caveat itself - that caveat is
 `mtp`-runner-specific and documented above for `static readonly` field
 initializers, and GameCult.Geometry has never actually hit it.
 
-## Follow-ups
+## Scope and follow-ups
 
-CultMath.Tests and GameCult.Geometry.Tests are the only projects currently
-scoped. GameCult.Geometry's `stryker-config.json` has no `test-runner`
-entry: the project is NUnit 4 with `NUnit3TestAdapter` and
+CultMath.Tests, GameCult.Geometry.Tests and GameCult.Caching.Tests are the
+projects currently scoped. GameCult.Geometry's `stryker-config.json` has no
+`test-runner` entry: the project is NUnit 4 with `NUnit3TestAdapter` and
 `Microsoft.NET.Test.Sdk`, so Stryker's default `vstest` runner applies
 directly (no `mtp` workaround needed, unlike CultMath.Tests's xunit.v3
-suite).
+suite). GameCult.Caching.Tests is the same shape (NUnit, default `vstest`)
+and its `stryker-config.json` is driven the same way, by the repo-local
+`dotnet-stryker` tool: `dotnet tool restore` once, then `dotnet tool run
+dotnet-stryker` from `tests/GameCult.Caching.Tests`.
 
 GameCult.Geometry has only ever been run `--since:`-scoped to the cut that
 added surface nets; a full-project baseline (running mutation against all of
@@ -151,7 +154,81 @@ file, anything under `Fixtures/`) loses `--since` line-level scoping for that
 run; a future cut whose diff is C#-only, against a base commit that already
 has `stryker-config.json`, should scope correctly.
 
-`GameCult.Caching`, `GameCult.Mesh` (+ `.Quic`, `.Quic.Native`),
+### GameCult.Caching.Tests
+
+`tests/GameCult.Caching.Tests/stryker-config.json` mutates all of
+`src/GameCult.Caching` (the project is `GameCult.Caching.csproj`; Standard
+mutation level, `break` 0, the same thresholds as Geometry). Caching was
+scoped before Networking because its suite is deterministic and quick (1415
+tests, about 40 s) over about 7.8k lines of source, where GameCult.Networking
+is about 20k lines and its tests lean on socket timing, so a mutant timing out
+there says little about the test. A full Caching run is about 2,900 candidate
+mutants (3,602 created, minus 730 that fail to compile) at about 2 s each,
+about 1.5 hours; run it detached and read the JSON report,
+never as one attached session.
+
+The first measurement was a narrow pass over the three files that carry the
+store-replace and element-id machinery, from `tests/GameCult.Caching.Tests`:
+
+```bash
+dotnet tool run dotnet-stryker \
+  -m '**/src/GameCult.Caching/StoreReplace.cs' \
+  -m '**/src/GameCult.Caching/CultStoreLinks.cs' \
+  -m '**/src/GameCult.Caching/CultElementIds.cs'
+```
+
+A clean single run of that command tested 243 mutants and scored 86.79% in
+9 minutes 55 seconds. The first measurement of it overlapped two Stryker
+runs, so its numbers (and the 114 survivors it showed for `CultElementIds.cs`,
+where tests that kill a mutant by hand reported `Survived` or `Timeout`) are
+not measurements and are not quoted here. Never run two Stryker runs against
+one checkout at once, and check `ps` before starting one. A clean single run
+on `CultElementIds.cs` alone, after the tests below, tested 228 mutants: 208
+`Killed`, 8 `Timeout`, 12 `Survived`, a score of 94.74%. The 12th survivor
+was 321, which the throwing-enumerator case in `ListsOfValuesHoldNoIds` now
+kills; the other 11 are equivalent mutants. With that case a clean single run
+on `CultElementIds.cs` is 209 `Killed`, 8 `Timeout`, 11 `Survived`, 95.18%.
+
+Real gaps that run exposed, each now pinned by `ElementIdWalkTests` (and each
+failing when its mutant is applied by hand): the order of the id path (the
+codec refuses at the first type MessagePack cannot allow, so order is what an
+error names first; `Append` to `Prepend` at 163, 167 and 180); the
+union-cycle guard in `ConcreteTypes` (248; the mutant is a stack overflow, so
+the red is a crashed test host: a depth guard would need production code in
+`ConcreteTypes`, since the recursion is private and a stack overflow cannot be
+caught by the test, so the regression test is left to crash loudly); a list of values reporting that it holds an
+id (`Holds`, 322); `[Key]` read through an override (`KeyOf`, 583); and the
+`IsWrittenWhole` and `IsKeyed` predicates (629 to 631 and 636: formatter,
+`[MessagePackObject]` and `KeyAsPropertyName` inherited from a base, and the
+`[DataContract]` without `[MessagePackObject]` and `||` arms).
+
+Equivalent survivors in `CultElementIds.cs` (11), each hand-checked against the full
+suite; none can be told apart by any test:
+
+- 142, 251, 636 (second arm), 506 (`IsDefined(UnionAttribute, false)` to
+  `true`): `UnionAttribute` is `Inherited = false`, so its `inherit` argument
+  changes nothing. Likewise 630's `DataContractAttribute` `inherit` argument
+  (`DataContractAttribute` is `Inherited = false`).
+- 264, 542: `group.First()` to `FirstOrDefault()` over `GroupBy` groups, which
+  are never empty.
+- 491: `new StringBuilder(bytes.Length * 2)` to `/ 2` changes only the initial
+  capacity.
+- 578: removing the `Nullable.GetUnderlyingType` unwrap in `WalksAsOwner`;
+  `Classify` unwraps nullables itself, so the unwrap is dead. A cut
+  candidate, not a test gap.
+- 645, 657: `Append(type)` to `Prepend(type)` in `ElementTypeOf` and
+  `MapTypes`; `type` matches only when it is itself `IEnumerable<>`,
+  `IDictionary<,>` or `IReadOnlyDictionary<,>`, and none of those has a second
+  matching interface, so the position of `type` never decides the answer.
+
+The Windows-only P/Invoke group is exercised only on Windows: its mutants are
+`NoCoverage` on Linux and are a target for a Windows-leg mutation run, not a
+Linux gap or a finding. `StoreReplace.cs` line 45 is a different case: its
+negated `IsOSPlatform(Windows)` mutant is `Survived` on Linux, because the
+negated branch calls `ReplaceWindows`, whose `DllNotFound` fallback gives the
+same result.
+
+`GameCult.Mesh` (+ `.Quic`, `.Quic.Native`),
 `GameCult.Networking` (+ `.WebSockets`), and the non-.NET runtimes
 (`cultcache-rs/py/ts`, `cultmesh-*`, `cultnet-*`) each still need their own
 `stryker-config.json` (or ecosystem-equivalent tool: `cargo-mutants` for
