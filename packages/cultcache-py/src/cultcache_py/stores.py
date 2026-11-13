@@ -105,25 +105,28 @@ class JsonLinesBackingStore:
             return envelopes
 
     def push(self, envelope: CultCacheEnvelope) -> None:
-        with self._lock:
-            existing = {(item.type, item.key): item for item in self.pull_all()}
-            existing[(envelope.type, envelope.key)] = envelope
-            self._replace_all(list(existing.values()))
+        self.push_all([envelope])
 
     def push_all(self, envelopes: list[CultCacheEnvelope], soft: bool = False) -> None:
+        def merge(existing: dict[tuple[str, str], CultCacheEnvelope]) -> None:
+            for envelope in envelopes:
+                existing[(envelope.type, envelope.key)] = envelope
+        self._rewrite(merge, soft)
+
+    def delete(self, type: str, key: str) -> None:
+        self._rewrite(lambda existing: existing.pop((type, key), None))
+
+    def _rewrite(self, change: Callable[[dict[tuple[str, str], CultCacheEnvelope]], object], soft: bool = False) -> None:
+        """The one entry of every write: refuses a link at the path, then reads the file (a soft write stops here when the
+        reader read it), applies the change and replaces it."""
         with self._lock:
+            _refuse_linked(self.path)
             arrived = self._pull()
             if soft and arrived is not None:
                 return
             existing = {(item.type, item.key): item for item in arrived or []}
-            for envelope in envelopes:
-                existing[(envelope.type, envelope.key)] = envelope
+            change(existing)
             self._replace_all(list(existing.values()))
-
-    def delete(self, type: str, key: str) -> None:
-        with self._lock:
-            existing = [item for item in self.pull_all() if not (item.type == type and item.key == key)]
-            self._replace_all(existing)
 
     def _replace_all(self, envelopes: list[CultCacheEnvelope]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -137,7 +140,7 @@ class JsonLinesBackingStore:
                 "stored_at": envelope.stored_at,
             }, ensure_ascii=False, sort_keys=True))
         temp.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-        temp.replace(self.path)
+        _replace_store(temp, self.path)
 
 
 class SingleFileMessagePackBackingStore:
@@ -339,7 +342,7 @@ def commit_store_file(path: Path, data: bytes) -> None:
             os.fsync(fd)
         finally:
             os.close(fd)
-        os.replace(staged, path)
+        _replace_store(staged, path)
     except BaseException:
         try:
             os.unlink(staged)
@@ -354,11 +357,136 @@ def commit_store_file(path: Path, data: bytes) -> None:
             os.close(directory)
 
 
+REPLACE_ATTEMPTS = 25
+REPLACE_RETRY_SECONDS = 0.02
+_ERROR_ACCESS_DENIED = 5
+_ERROR_SHARING_VIOLATION = 32
+_ERROR_LOCK_VIOLATION = 33
+_POSIX_UNSUPPORTED = (1, 50, 87)  # incorrect function, not supported, invalid parameter: FAT, exFAT, before Windows 10 1607
+MOVEFILE_REPLACE_WRITE_THROUGH = 0x9  # MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+
+
+class ReplaceKernel:
+    """The kernel32 calls a Windows store replace needs, each answering 0 or a Win32 error code."""
+
+    def rename_posix(self, staged: str, destination: str) -> int:
+        """CreateFileW(staged, DELETE|SYNCHRONIZE), then FileRenameInfoEx with REPLACE_IF_EXISTS|POSIX_SEMANTICS, then CloseHandle."""
+        raise NotImplementedError
+
+    def move_file_ex(self, staged: str, destination: str, flags: int) -> int:
+        raise NotImplementedError
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+
+
+def _replace_store(staged: str | os.PathLike[str], destination: str | os.PathLike[str]) -> None:
+    """Replaces `destination` with `staged`: POSIX-semantics rename first on Windows (so a reader holding the store open
+    keeps it and rarely sees it absent; a stalled rename can still leave it absent for 5-47 ms on NTFS,
+    variants:ruling:posix-rename-absent-window-document), os.replace elsewhere."""
+    if sys.platform == "win32":
+        replace_store_windows(os.fspath(staged), os.fspath(destination), WindowsReplaceKernel())
+    else:
+        os.replace(staged, destination)
+
+
+def replace_store_windows(staged: str, destination: str, kernel: ReplaceKernel) -> None:
+    """POSIX-semantics rename, falling back for the rest of the call to write-through MoveFileExW where POSIX semantics are
+    unsupported; errors 5, 32 and 33 retry up to 25 times 20 ms apart, any other code raises at once. The TypeScript and C#
+    runtimes take the same decision table."""
+    posix = True
+    last = 0
+    for _ in range(REPLACE_ATTEMPTS):
+        code = kernel.rename_posix(staged, destination) if posix else kernel.move_file_ex(staged, destination, MOVEFILE_REPLACE_WRITE_THROUGH)
+        if posix and code in _POSIX_UNSUPPORTED:
+            posix = False
+            code = kernel.move_file_ex(staged, destination, MOVEFILE_REPLACE_WRITE_THROUGH)
+        if code == 0:
+            return
+        if code not in (_ERROR_ACCESS_DENIED, _ERROR_SHARING_VIOLATION, _ERROR_LOCK_VIOLATION):
+            raise _replace_error(f"CultCache could not replace the store: Win32 error {code}.", code)
+        last = code
+        kernel.sleep(REPLACE_RETRY_SECONDS)
+    raise _replace_error(f"CultCache could not replace the store after {REPLACE_ATTEMPTS} attempts: last Win32 error {last}.", last)
+
+
+def _replace_error(message: str, code: int) -> OSError:
+    error = OSError(message)
+    error.winerror = code  # type: ignore[attr-defined]
+    return error
+
+
+class WindowsReplaceKernel(ReplaceKernel):
+    """kernel32 bound by ctypes, as _try_lock_windows binds it. Windows only."""
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        self._ctypes = ctypes
+        k = self._k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.CreateFileW.restype = wintypes.HANDLE
+        k.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        k.SetFileInformationByHandle.restype = wintypes.BOOL
+        k.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        k.CloseHandle.restype = wintypes.BOOL
+        k.CloseHandle.argtypes = [wintypes.HANDLE]
+        k.MoveFileExW.restype = wintypes.BOOL
+        k.MoveFileExW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+
+    def rename_posix(self, staged: str, destination: str) -> int:
+        ctypes, k = self._ctypes, self._k
+        delete_synchronize, share_all, open_existing, normal = 0x00110000, 0x7, 3, 0x80
+        handle = k.CreateFileW(staged, delete_synchronize, share_all, None, open_existing, normal, None)
+        if handle is None or ctypes.c_void_p(handle).value in (None, ctypes.c_void_p(-1).value):
+            return ctypes.get_last_error()
+        try:
+            # FILE_RENAME_INFO: Flags (DWORD), RootDirectory (pointer-aligned HANDLE), FileNameLength (DWORD), FileName (WCHAR[]).
+            name = os.path.abspath(destination).encode("utf-16-le")
+            pointer = ctypes.sizeof(ctypes.c_void_p)
+            length_at = pointer + pointer
+            info = ctypes.create_string_buffer(length_at + 4 + len(name) + 2)
+            info[0:4] = (0x3).to_bytes(4, "little")  # FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS
+            info[length_at:length_at + 4] = len(name).to_bytes(4, "little")
+            info[length_at + 4:length_at + 4 + len(name)] = name
+            file_rename_info_ex = 22
+            if k.SetFileInformationByHandle(handle, file_rename_info_ex, info, len(info)):
+                return 0
+            return ctypes.get_last_error()
+        finally:
+            k.CloseHandle(handle)
+
+    def move_file_ex(self, staged: str, destination: str, flags: int) -> int:
+        return 0 if self._k.MoveFileExW(staged, destination, flags) else self._ctypes.get_last_error()
+
+
+class StoreLinkedError(OSError):
+    """A write was asked of a store path that is a link: a replace there would swap the link for a regular file."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"CultCache store {path} is a link, and a write at it would replace the link; configure the link's target as the store path.")
+        self.path = path
+
+
+def _refuse_linked(path: Path) -> None:
+    """Refuses a link at the store path: a file or directory link, and on Windows a junction or any reparse point (islink misses
+    junctions before Python 3.12). Absent is not a link."""
+    linked = os.path.islink(path)
+    if not linked and sys.platform == "win32":
+        try:
+            linked = bool(os.lstat(path).st_file_attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+        except FileNotFoundError:
+            pass
+    if linked:
+        raise StoreLinkedError(path)
+
+
 @contextmanager
 def store_write_lock(path: Path, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
     """Holds the exclusive store lock on `<path>.lock`, the lock the C#, Rust and TypeScript runtimes take: flock on Unix,
     LockFileEx over the whole file on Windows, polled every 10 ms with no handle held between polls. The lock file is
     created if absent and never written or deleted."""
+    _refuse_linked(path)
     lock_path = path.with_name(path.name + ".lock")
     deadline = time.monotonic() + timeout
     while True:
