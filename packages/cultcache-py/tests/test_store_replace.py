@@ -107,6 +107,19 @@ class StoreWritesRouteThroughTheReplace(unittest.TestCase):
             self.assertEqual([destination for _, destination in seen], [binary, lines])
             self.assertTrue(binary.read_bytes() and lines.read_text())
 
+    def test_a_failed_jsonl_replace_leaves_no_staged_file_and_the_old_store(self):
+        envelope = CultCacheEnvelope(key="k", type="t", payload=b"\x01", stored_at="2026-11-06T00:00:00Z")
+        with tempfile.TemporaryDirectory() as directory:
+            lines = Path(directory) / "s.jsonl"
+            store = stores.JsonLinesBackingStore(lines)
+            store.push_all([envelope])
+            before = lines.read_bytes()
+            with mock.patch.object(stores, "_replace_store", side_effect=OSError("replace refused")):
+                with self.assertRaises(OSError):
+                    store.push_all([CultCacheEnvelope(key="k2", type="t", payload=b"\x02", stored_at="2026-11-06T00:00:00Z")])
+            self.assertEqual(lines.read_bytes(), before)
+            self.assertEqual([p.name for p in Path(directory).iterdir() if ".tmp" in p.name], [])
+
     @unittest.skipUnless(sys.platform == "win32", "needs a real Windows")
     def test_real_kernel_replaces_through_both_primitives(self):
         kernel = stores.WindowsReplaceKernel()

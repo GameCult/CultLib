@@ -9,6 +9,7 @@
 ### Changed
 
 - `msgpack` is a hard dependency, as `pyproject.toml` declared it. The optional-import fallbacks and the `cultcache-py[msgpack]` extra they named (which never existed) are gone: a missing msgpack is an `ImportError` at import.
+- `JsonLinesBackingStore` writes through the same `commit_store_file` as the single-file store: a unique staged file, fsynced before the replace and removed when the replace fails, so a refused replace no longer leaves `<path>.tmp` behind. It staged a fixed `<path>.tmp` without an fsync.
 - The single-file store's `push`, `push_all` and `delete` take the cross-process lock on `<path>.lock` (flock; LockFileEx over the whole file on Windows) across the read and the replace, waiting up to `lock_timeout` seconds (30 by default, `TimeoutError` after), and exclude the C#, Rust and TypeScript runtimes' writers. The staged file is `<path>.tmp-<pid>-<uuid>`, fsynced before the replace, with a directory fsync after it off Windows. A fixed `<path>.tmp` is no longer used.
 
 ### Breaking

@@ -130,7 +130,6 @@ class JsonLinesBackingStore:
 
     def _replace_all(self, envelopes: list[CultCacheEnvelope]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temp = self.path.with_suffix(self.path.suffix + ".tmp")
         lines = []
         for envelope in sorted(envelopes, key=lambda item: (item.type, item.key)):
             lines.append(json.dumps({
@@ -139,8 +138,7 @@ class JsonLinesBackingStore:
                 "payload": base64.b64encode(envelope.payload).decode("ascii"),
                 "stored_at": envelope.stored_at,
             }, ensure_ascii=False, sort_keys=True))
-        temp.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-        _replace_store(temp, self.path)
+        commit_store_file(self.path, ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8"))
 
 
 class SingleFileMessagePackBackingStore:
