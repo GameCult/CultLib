@@ -4396,61 +4396,277 @@ fn replace_file_atomically(staged: &Path, destination: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn replace_file_atomically(staged: &Path, destination: &Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
     injected_write_fault(WriteStep::Rename).context("failed to atomically replace the store")?;
+    replace_with(&WindowsKernel, staged, destination)
+}
 
-    let staged_wide = staged
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination_wide = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    // A concurrent reader of the destination (another process opening the
-    // store, an indexer, an antivirus scan) makes the replace fail with a
-    // sharing or access error for as long as it holds the handle. That is
-    // transient by construction; a daemon that treats it as fatal dies on
-    // the first overlap (Muninn serve did, 2026-09-11). Retry briefly.
-    const ERROR_ACCESS_DENIED: i32 = 5;
-    const ERROR_SHARING_VIOLATION: i32 = 32;
-    const ERROR_LOCK_VIOLATION: i32 = 33;
+/// The two Windows replace primitives, each answering 0 or a Win32 error code, and the wait
+/// between attempts. `replace_with` owns every decision about them.
+#[cfg_attr(not(windows), allow(dead_code))]
+trait ReplaceKernel {
+    /// CreateFileW(staged, DELETE|SYNCHRONIZE), then FileRenameInfoEx with
+    /// REPLACE_IF_EXISTS|POSIX_SEMANTICS, then CloseHandle.
+    fn rename_posix(&self, staged: &Path, destination: &Path) -> u32;
+    /// MoveFileExW(staged, destination, flags).
+    fn move_file_ex(&self, staged: &Path, destination: &Path, flags: u32) -> u32;
+    fn sleep(&self, milliseconds: u64);
+}
+
+/// MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH.
+#[cfg_attr(not(windows), allow(dead_code))]
+const MOVEFILE_REPLACE_WRITE_THROUGH: u32 = 0x9;
+
+/// Replaces `destination` with `staged` on Windows: a POSIX-semantics rename first, so a reader
+/// that opened the old store keeps it and the destination is rarely seen absent (a stalled rename
+/// can still leave it absent for 5-47 ms on NTFS: `variants:ruling:posix-rename-absent-window-document`);
+/// MoveFileExW with
+/// write-through where POSIX semantics are unsupported (FAT, exFAT, before Windows 10 1607),
+/// for the rest of the call; and a bounded retry on access, sharing and lock violations.
+/// A concurrent reader (another process, an indexer, an antivirus scan) makes the replace fail
+/// transiently, and a daemon that treats that as fatal dies on the first overlap (Muninn serve
+/// did, 2026-09-11). Ruling `variants:ruling:windows-replace-posix-first`: cultcache-ts carries the
+/// same table on main; cultcache-cs carries it only once its pending PR lands.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn replace_with(kernel: &dyn ReplaceKernel, staged: &Path, destination: &Path) -> Result<()> {
+    const ERROR_INVALID_FUNCTION: u32 = 1;
+    const ERROR_ACCESS_DENIED: u32 = 5;
+    const ERROR_SHARING_VIOLATION: u32 = 32;
+    const ERROR_LOCK_VIOLATION: u32 = 33;
+    const ERROR_NOT_SUPPORTED: u32 = 50;
+    const ERROR_INVALID_PARAMETER: u32 = 87;
     const ATTEMPTS: u32 = 25;
-    const BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
-    let mut attempt = 0;
-    loop {
-        let success = unsafe {
-            MoveFileExW(
-                staged_wide.as_ptr(),
-                destination_wide.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
+    const BACKOFF_MS: u64 = 20;
+    let mut posix = true;
+    let mut last_code = 0;
+    for attempt in 1..=ATTEMPTS {
+        let mut code = if posix {
+            kernel.rename_posix(staged, destination)
+        } else {
+            kernel.move_file_ex(staged, destination, MOVEFILE_REPLACE_WRITE_THROUGH)
         };
-        if success != 0 {
+        if posix && matches!(code, ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED | ERROR_INVALID_PARAMETER) {
+            posix = false;
+            code = kernel.move_file_ex(staged, destination, MOVEFILE_REPLACE_WRITE_THROUGH);
+        }
+        if code == 0 {
             return Ok(());
         }
-        let error = std::io::Error::last_os_error();
-        attempt += 1;
-        let transient = matches!(
-            error.raw_os_error(),
-            Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
-        );
-        if !transient || attempt >= ATTEMPTS {
-            return Err(error).with_context(|| {
-                format!(
-                    "failed to atomically replace {} with {} after {attempt} attempt(s)",
-                    destination.display(),
-                    staged.display()
-                )
-            });
+        if !matches!(code, ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION) {
+            return Err(anyhow::anyhow!(
+                "failed to atomically replace {} with {}: Win32 error {code} after {attempt} attempt(s)",
+                destination.display(),
+                staged.display()
+            ));
         }
-        std::thread::sleep(BACKOFF);
+        last_code = code;
+        kernel.sleep(BACKOFF_MS);
+    }
+    Err(anyhow::anyhow!(
+        "failed to atomically replace {} with {} after {ATTEMPTS} attempt(s): last Win32 error {last_code}",
+        destination.display(),
+        staged.display()
+    ))
+}
+
+#[cfg(windows)]
+struct WindowsKernel;
+
+#[cfg(windows)]
+fn wide(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+impl ReplaceKernel for WindowsKernel {
+    fn rename_posix(&self, staged: &Path, destination: &Path) -> u32 {
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FileRenameInfoEx, SetFileInformationByHandle, DELETE, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, SYNCHRONIZE,
+        };
+        use windows_sys::Win32::System::WindowsProgramming::{
+            FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
+        };
+
+        let staged_wide = wide(staged);
+        let destination_wide = wide(destination);
+        // FILE_RENAME_INFO ends in a variable-length name: allocate it as u64s for alignment.
+        let name_bytes = (destination_wide.len() - 1) * 2;
+        let header = std::mem::size_of::<FILE_RENAME_INFO>();
+        let total = header + name_bytes + 2;
+        let mut buffer = vec![0u64; total.div_ceil(8)];
+        unsafe {
+            let info = buffer.as_mut_ptr() as *mut FILE_RENAME_INFO;
+            (*info).Anonymous.Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+            (*info).RootDirectory = std::ptr::null_mut();
+            (*info).FileNameLength = name_bytes as u32;
+            let name = std::ptr::addr_of_mut!((*info).FileName) as *mut u16;
+            std::ptr::copy_nonoverlapping(destination_wide.as_ptr(), name, destination_wide.len());
+
+            let handle = CreateFileW(
+                staged_wide.as_ptr(),
+                DELETE | SYNCHRONIZE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            );
+            if handle == INVALID_HANDLE_VALUE {
+                return GetLastError();
+            }
+            let ok = SetFileInformationByHandle(handle, FileRenameInfoEx, info as *const _, total as u32);
+            let code = if ok == 0 { GetLastError() } else { 0 };
+            CloseHandle(handle);
+            code
+        }
+    }
+
+    fn move_file_ex(&self, staged: &Path, destination: &Path, flags: u32) -> u32 {
+        use windows_sys::Win32::Foundation::GetLastError;
+        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+        let ok = unsafe { MoveFileExW(wide(staged).as_ptr(), wide(destination).as_ptr(), flags) };
+        if ok != 0 {
+            0
+        } else {
+            unsafe { GetLastError() }
+        }
+    }
+
+    fn sleep(&self, milliseconds: u64) {
+        std::thread::sleep(std::time::Duration::from_millis(milliseconds));
+    }
+}
+
+#[cfg(test)]
+mod replace_with_tests {
+    use super::{replace_with, ReplaceKernel};
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::path::Path;
+
+    #[derive(Debug, PartialEq)]
+    enum Call {
+        Posix,
+        MoveFile(u32),
+        Sleep(u64),
+    }
+
+    /// Answers each primitive from a script; an empty script answers 0.
+    #[derive(Default)]
+    struct FakeKernel {
+        posix: RefCell<VecDeque<u32>>,
+        move_file: RefCell<VecDeque<u32>>,
+        calls: RefCell<Vec<Call>>,
+    }
+
+    impl FakeKernel {
+        fn scripted(posix: &[u32], move_file: &[u32]) -> Self {
+            Self {
+                posix: RefCell::new(posix.iter().copied().collect()),
+                move_file: RefCell::new(move_file.iter().copied().collect()),
+                ..Self::default()
+            }
+        }
+        fn calls(&self) -> Vec<Call> {
+            self.calls.replace(Vec::new())
+        }
+    }
+
+    impl ReplaceKernel for FakeKernel {
+        fn rename_posix(&self, _: &Path, _: &Path) -> u32 {
+            self.calls.borrow_mut().push(Call::Posix);
+            self.posix.borrow_mut().pop_front().unwrap_or(0)
+        }
+        fn move_file_ex(&self, _: &Path, _: &Path, flags: u32) -> u32 {
+            self.calls.borrow_mut().push(Call::MoveFile(flags));
+            self.move_file.borrow_mut().pop_front().unwrap_or(0)
+        }
+        fn sleep(&self, milliseconds: u64) {
+            self.calls.borrow_mut().push(Call::Sleep(milliseconds));
+        }
+    }
+
+    fn run(kernel: &FakeKernel) -> anyhow::Result<()> {
+        replace_with(kernel, Path::new("staged"), Path::new("store.cc"))
+    }
+
+    #[test]
+    fn a_posix_rename_that_lands_is_the_whole_replace() {
+        let kernel = FakeKernel::scripted(&[0], &[]);
+        run(&kernel).unwrap();
+        assert_eq!(kernel.calls(), vec![Call::Posix]);
+    }
+
+    #[test]
+    fn unsupported_posix_semantics_fall_back_to_write_through_and_stay_there() {
+        for code in [1, 50, 87] {
+            // The fallback itself is held once, so the retry must use MoveFileExW, not POSIX again.
+            let kernel = FakeKernel::scripted(&[code], &[32, 0]);
+            run(&kernel).unwrap_or_else(|e| panic!("code {code}: {e}"));
+            assert_eq!(
+                kernel.calls(),
+                vec![Call::Posix, Call::MoveFile(0x9), Call::Sleep(20), Call::MoveFile(0x9)],
+                "code {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_held_destination_is_retried_with_posix_until_it_lets_go() {
+        for code in [5, 32, 33] {
+            let kernel = FakeKernel::scripted(&[code, code, 0], &[]);
+            run(&kernel).unwrap();
+            assert_eq!(
+                kernel.calls(),
+                vec![Call::Posix, Call::Sleep(20), Call::Posix, Call::Sleep(20), Call::Posix],
+                "code {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_destination_held_forever_fails_after_twenty_five_attempts_naming_the_code() {
+        for code in [5, 32, 33] {
+            let kernel = FakeKernel::scripted(&[code; 40], &[]);
+            let error = run(&kernel).unwrap_err().to_string();
+            let calls = kernel.calls();
+            assert_eq!(calls.iter().filter(|c| **c == Call::Posix).count(), 25);
+            assert_eq!(calls.iter().filter(|c| **c == Call::Sleep(20)).count(), 25);
+            assert!(error.contains("25 attempt(s)") && error.contains(&format!("error {code}")), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_held_destination_after_fallback_exhausts_through_move_file_ex() {
+        let kernel = FakeKernel::scripted(&[87], &[32; 40]);
+        assert!(run(&kernel).is_err());
+        let calls = kernel.calls();
+        assert_eq!(calls.iter().filter(|c| **c == Call::Posix).count(), 1);
+        assert_eq!(calls.iter().filter(|c| matches!(c, Call::MoveFile(0x9))).count(), 25);
+    }
+
+    #[test]
+    fn any_other_code_fails_at_once_without_a_retry() {
+        for (posix, move_file) in [(&[2u32][..], &[][..]), (&[87][..], &[3][..])] {
+            let kernel = FakeKernel::scripted(posix, move_file);
+            let error = run(&kernel).unwrap_err().to_string();
+            assert!(!kernel.calls().contains(&Call::Sleep(20)), "{error}");
+            assert!(error.contains("1 attempt(s)"), "{error}");
+        }
+    }
+
+    #[test]
+    fn move_file_ex_answering_unsupported_is_an_error_not_a_cue_to_fall_back_again() {
+        let kernel = FakeKernel::scripted(&[87], &[32, 87]);
+        let error = run(&kernel).unwrap_err().to_string();
+        assert_eq!(
+            kernel.calls(),
+            vec![Call::Posix, Call::MoveFile(0x9), Call::Sleep(20), Call::MoveFile(0x9)],
+            "{error}"
+        );
+        assert!(error.contains("error 87") && error.contains("2 attempt(s)"), "{error}");
     }
 }
 
@@ -4458,6 +4674,35 @@ fn replace_file_atomically(staged: &Path, destination: &Path) -> Result<()> {
 mod windows_replace_tests {
     use super::replace_file_atomically;
     use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4; // READ | WRITE | DELETE
+
+    /// A reader that shares delete holds the old store open. A POSIX-semantics rename
+    /// replaces the name while the reader keeps the old content; MoveFileExW alone fails
+    /// there with error 5 (Soul's Starfire probe, build 26200), so this test passes only
+    /// if the POSIX path is live. Compile-checked only: it has never run on Windows.
+    #[test]
+    fn a_replace_succeeds_over_a_delete_sharing_reader_which_keeps_the_old_content() {
+        use std::io::Read;
+        let dir = std::env::temp_dir().join(format!("cultcache-posix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let destination = dir.join("store.cc");
+        let staged = dir.join("store.cc.tmp");
+        std::fs::write(&destination, b"old").unwrap();
+        std::fs::write(&staged, b"new").unwrap();
+        let mut reader = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_ALL)
+            .open(&destination)
+            .unwrap();
+        replace_file_atomically(&staged, &destination).expect("POSIX rename over a sharing reader");
+        let mut seen = Vec::new();
+        reader.read_to_end(&mut seen).unwrap();
+        assert_eq!(seen, b"old", "the reader keeps the old content");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new");
+        drop(reader);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A reader holding the destination open with no sharing makes the
     /// replace fail for as long as it holds on; it must succeed once the
@@ -4529,7 +4774,8 @@ fn injected_write_fault(_step: WriteStep) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn sync_parent_directory(_path: &Path) -> Result<()> {
-    // MoveFileExW with MOVEFILE_WRITE_THROUGH owns publication durability.
+    // Publication durability is the replace's: the MoveFileExW fallback writes through; the POSIX-semantics
+    // rename has no write-through flag and its durability is unmeasured (follow-up windows-replace-run-and-durability).
     Ok(())
 }
 
