@@ -163,8 +163,8 @@ scoped before Networking because its suite is deterministic and quick (1415
 tests, about 40 s) over about 7.8k lines of source, where GameCult.Networking
 is about 20k lines and its tests lean on socket timing, so a mutant timing out
 there says little about the test. A full Caching run is about 2,900 candidate
-mutants (3,602 created, minus 730 that fail to compile) at about 2 s each,
-about 1.5 hours; run it detached and read the JSON report,
+mutants (3,602 created, minus 730 that fail to compile) at 1.25 to 1.6 s
+each, so about 1 to 1.3 hours; run it detached and read the JSON report,
 never as one attached session.
 
 The first measurement was a narrow pass over the three files that carry the
@@ -177,8 +177,10 @@ dotnet tool run dotnet-stryker \
   -m '**/src/GameCult.Caching/CultElementIds.cs'
 ```
 
-A clean single run of that command tested 243 mutants and scored 86.79% in
-9 minutes 55 seconds. The first measurement of it overlapped two Stryker
+A clean single run of that command tests 243 to 265 mutants (the count moves with the revision) and scored 85.28% on
+568a60fa, before any test of this scope was added; 86.79% on d38b5728, with
+the first batch of tests; and 87.17% on 76d9e7d1, with the throwing-enumerator
+case, in about 10 minutes. The first measurement of it overlapped two Stryker
 runs, so its numbers (and the 114 survivors it showed for `CultElementIds.cs`,
 where tests that kill a mutant by hand reported `Survived` or `Timeout`) are
 not measurements and are not quoted here. Never run two Stryker runs against
