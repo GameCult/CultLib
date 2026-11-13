@@ -434,32 +434,74 @@ public sealed class CultMeshSingleFileStoreTests
         TempFiles().Should().BeEmpty();
     }
 
-    // The store's replace decides what a write leaves where a live link was, and a Mesh write leaves what a cache commit leaves:
-    // one replace, whatever the platform does with a link.
-    [Test]
-    public void AMeshWriteOverALiveLinkLeavesWhatACacheCommitLeaves()
+    // A write at a store path that is a link is refused before the lock, the staging file and the replace: the link and its
+    // target stay as they were, and nothing is left beside them.
+    private void AssertRefusedAndUntouched(string link, string target, byte[] targetBefore, Action write)
     {
-        string Outcome(string name, Action<string> write)
+        var refusal = Assert.Throws<CultStoreLinkedException>(() => write())!;
+        refusal.Message.Should().Contain(link);
+        IsALink(link).Should().BeTrue("the link was replaced");
+        File.ReadAllBytes(target).Should().Equal(targetBefore);
+        File.Exists(link + ".lock").Should().BeFalse("the refused write took the lock");
+        TempFiles().Should().BeEmpty();
+    }
+
+    [Test]
+    public void AMeshWriteAtALiveLinkIsRefusedAndNothingChanges()
+    {
+        var target = Path.Combine(_root, "target.cc");
+        var link = Path.Combine(_root, "link.cc");
+        CultMesh.WriteSingleFileDocument(target, Key, Publication("first"));
+        CreateLiveLinkOrIgnore(link, target);
+        var before = File.ReadAllBytes(target);
+
+        AssertRefusedAndUntouched(link, target, before, () => CultMesh.WriteSingleFileDocument(link, Key, Publication("second")));
+        AssertRefusedAndUntouched(link, target, before, () => CultMesh.WriteSingleFileDocumentPayload(link, Key, Raw, null, EmptyArray));
+    }
+
+    [Test]
+    public void AReadThroughALiveLinkStillWorks()
+    {
+        var target = Path.Combine(_root, "target.cc");
+        var link = Path.Combine(_root, "link.cc");
+        CultMesh.WriteSingleFileDocument(target, Key, Publication("first"));
+        CreateLiveLinkOrIgnore(link, target);
+
+        CultMesh.ReadSingleFileDocument<CultMeshBodyPublicationDocument>(link, Key).ProducerId.Should().Be("first");
+        RecordsSeenByACache(link).Should().Be(1);
+    }
+
+    // A link to a directory that is there is a directory, not an unreachable store; a write at it is a link refusal.
+    [Test]
+    public void ALiveDirectoryLinkIsADirectoryErrorOnReadAndALinkRefusalOnWrite()
+    {
+        var directory = Path.Combine(_root, "real-directory");
+        var link = Path.Combine(_root, "directory-link.cc");
+        Directory.CreateDirectory(directory);
+        CreateDirectoryLink(link, directory);
+
+        Assert.Catch<IOException>(() => CultMesh.ReadSingleFileDocumentPayload(link, Key, "raw:schema"))!.Message.Should().Contain("directory");
+        Assert.Catch<IOException>(() => RecordsSeenByACache(link))!.Message.Should().Contain("directory");
+        Assert.Throws<CultStoreLinkedException>(() => CultMesh.WriteSingleFileDocument(link, Key, Publication()));
+        Directory.GetFileSystemEntries(directory).Should().BeEmpty();
+        IsALink(link).Should().BeTrue();
+    }
+
+    private static void CreateDirectoryLink(string path, string target)
+    {
+        if (!OperatingSystem.IsWindows())
         {
-            var target = Path.Combine(_root, name + "-target.cc");
-            var link = Path.Combine(_root, name + "-link.cc");
-            CultMesh.WriteSingleFileDocument(target, Key, Publication("first"));
-            CreateLiveLinkOrIgnore(link, target);
-            var before = File.ReadAllBytes(target);
-
-            write(link);
-
-            CultMesh.ReadSingleFileDocument<CultMeshBodyPublicationDocument>(link, Key).ProducerId.Should().Be("second", name);
-            return $"linkKept={IsALink(link)} targetChanged={!File.ReadAllBytes(target).SequenceEqual(before)}";
+            Directory.CreateSymbolicLink(path, target);
+            return;
         }
 
-        var viaMesh = Outcome("mesh", link => CultMesh.WriteSingleFileDocument(link, Key, Publication("second")));
-        var viaCache = Outcome("cache", link =>
+        var mklink = Process.Start(new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{path}\" \"{target}\"")
         {
-            using var cache = CultCacheMessagePack.Create(link, ReadOnlyOpen);
-            cache.Commit(batch => batch.Upsert(typeof(CultMeshBodyPublicationDocument), Publication("second"), Key));
-        });
-
-        viaMesh.Should().Be(viaCache);
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        })!;
+        mklink.WaitForExit();
+        Assert.That(mklink.ExitCode, Is.Zero, "mklink /J failed");
     }
 }

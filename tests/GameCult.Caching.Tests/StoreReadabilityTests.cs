@@ -266,7 +266,7 @@ namespace GameCult.Caching.Tests
             using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
             CreateDanglingDirectoryLink(path, Path.Combine(_directory, "unmounted"));
 
-            Assert.That(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"))), Throws.TypeOf<IOException>());
+            Assert.That(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"))), Throws.TypeOf<CultStoreLinkedException>());
             Assert.That(IsALink(path), "the link was replaced");
             Assert.That(Directory.Exists(Path.Combine(_directory, "unmounted")), Is.False, "a write went through the link");
         }
@@ -292,9 +292,64 @@ namespace GameCult.Caching.Tests
             using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
             File.Delete(target);
 
-            Assert.That(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"))), Throws.TypeOf<IOException>());
+            Assert.That(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"))), Throws.TypeOf<CultStoreLinkedException>());
             Assert.That(new FileInfo(path).LinkTarget, Is.Not.Null, "the link was replaced");
             Assert.That(File.Exists(target), Is.False, "a write went through the link");
+        }
+
+        // A write at a store path that is a link is refused with a typed error before the lock or the replace: the link, its target
+        // and the directory beside them are as they were.
+        [Test]
+        public void ACacheCommitAtALiveLinkIsRefusedAndNothingChanges()
+        {
+            var target = Path.Combine(_directory, "target.cc");
+            var link = Path.Combine(_directory, "link.cc");
+            using (var seed = CultCacheMessagePack.Create(target, new CultCacheOpenOptions { Registry = Registry }))
+                seed.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "a" }, new CultRecordKey("a")));
+            CreateFileLinkOrIgnore(link, target);
+            var before = File.ReadAllBytes(target);
+            using var cache = CultCacheMessagePack.Create(link, new CultCacheOpenOptions { Registry = Registry, FlushOnDispose = false, StoreFlushOnDispose = false });
+
+            var refusal = Assert.Throws<CultStoreLinkedException>(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "b" }, new CultRecordKey("b"))))!;
+
+            Assert.That(refusal.Message, Does.Contain(link));
+            Assert.That(IsALink(link), "the link was replaced");
+            Assert.That(File.ReadAllBytes(target), Is.EqualTo(before));
+            Assert.That(File.Exists(link + ".lock"), Is.False, "the refused write took the lock");
+            Assert.That(Directory.GetFileSystemEntries(_directory).Where(entry => entry.EndsWith(".tmp")), Is.Empty);
+        }
+
+        [Test]
+        public void AFlushAtALiveLinkIsRefusedAndNothingChanges()
+        {
+            var target = Path.Combine(_directory, "target.cc");
+            var link = Path.Combine(_directory, "link.cc");
+            using (var seed = CultCacheMessagePack.Create(target, new CultCacheOpenOptions { Registry = Registry }))
+                seed.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "a" }, new CultRecordKey("a")));
+            CreateFileLinkOrIgnore(link, target);
+            var before = File.ReadAllBytes(target);
+            using var cache = CultCacheMessagePack.Create(link, new CultCacheOpenOptions { Registry = Registry, FlushOnDispose = false, StoreFlushOnDispose = false });
+            cache.UpsertAsync(typeof(IdDeck), new IdDeck { Name = "b" }, new CultRecordKey("b")).GetAwaiter().GetResult();
+
+            Assert.Throws<CultStoreLinkedException>(() => cache.FlushAllBackingStores());
+
+            Assert.That(IsALink(link), "the link was replaced");
+            Assert.That(File.ReadAllBytes(target), Is.EqualTo(before));
+            Assert.That(File.Exists(link + ".lock"), Is.False);
+        }
+
+        [Test]
+        public void AnOpenAtALiveLinkReadsTheTargetsRecords()
+        {
+            var target = Path.Combine(_directory, "target.cc");
+            var link = Path.Combine(_directory, "link.cc");
+            using (var seed = CultCacheMessagePack.Create(target, new CultCacheOpenOptions { Registry = Registry }))
+                seed.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "a" }, new CultRecordKey("a")));
+            CreateFileLinkOrIgnore(link, target);
+
+            using var cache = CultCacheMessagePack.Create(link, new CultCacheOpenOptions { Registry = Registry, FlushOnDispose = false, StoreFlushOnDispose = false });
+
+            Assert.That(cache.Get<IdDeck>(new CultRecordKey("a"))?.Name, Is.EqualTo("a"));
         }
 
         // A directory at the path is something at the path: it is an I/O error on open and on commit, never an empty store, and
