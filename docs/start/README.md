@@ -72,8 +72,8 @@ public static class FirstCall
 
 ## C# update with retry
 
-Change a record you may not be the only one changing. `Update` reads the record, hands your function a private
-copy, and commits the result only if the record is still the one it read. If another writer got there first, it
+Change a record you may not be the only one changing. `Update` reads the record as its store holds it, hands your function a fresh
+copy of it, and commits the result only if the record is still the one it read. If another writer got there first, it
 reads again and runs your function again, up to five times. The source is
 [`tests/GameCult.Caching.Tests/UpdateCallTests.cs`](../../tests/GameCult.Caching.Tests/UpdateCallTests.cs); the
 snippet reuses `Item` from the first call.

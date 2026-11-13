@@ -64,48 +64,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         var reports = new List<CultSchemaMigrationReport>();
         var loaded = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
         var foreign = new List<CultForeignRecord>();
-        for (var attempt = 1; ; attempt++)
-        {
-            loaded.Clear();
-            reports.Clear();
-            foreign.Clear();
-            // Only pages named by the manifest read under the lease are loaded; orphaned pages are never loaded. With no
-            // lock to lease (none created yet, or a store copied without it) a writer may commit mid-load, so an unleased
-            // load stands only if its manifest is still current; if the manifest moved it reloads, under the lease the
-            // writer created. A page that fails under an unmoved manifest is corruption, not a race.
-            using var lease = AcquireCommitLease(wait: true, create: false);
-            var manifestBytes = ReadManifestBytes();
-            var (manifest, _) = ParseManifest(manifestBytes);
-            Trace($"manifest records={manifest.Records.Length}");
-            try
-            {
-                if (lease == null)
-                    UnleasedManifestRead?.Invoke();
-                LoadRecordPages(
-                    manifest.Records.OrderBy(record => record.Key, StringComparer.Ordinal).ToArray(),
-                    manifest.SchemaCatalog,
-                    loaded,
-                    reports,
-                    foreign);
-                if (lease != null || !ManifestMoved(manifestBytes))
-                {
-                    Trace($"indexed-pages loaded={loaded.Count}");
-                    break;
-                }
-            }
-            catch (Exception exception) when (lease == null && IsTornGeneration(exception))
-            {
-                // The re-read stays out of the filter: an exception thrown inside a filter is swallowed as false.
-                if (!ManifestMoved(manifestBytes))
-                    throw;
-                if (attempt == UnleasedLoadAttempts)
-                    throw Unsettled(exception);
-                continue;
-            }
-
-            if (attempt == UnleasedLoadAttempts)
-                throw Unsettled(null);
-        }
+        LoadManifestPages(null, loaded, reports, foreign, Trace);
 
         bool Staged(string key) => _dirtyKeys.ContainsKey(key) || _deletedKeys.ContainsKey(key);
         var arrived = loaded
@@ -135,6 +94,70 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         IsDirty = !_dirtyKeys.IsEmpty || !_deletedKeys.IsEmpty;
         Trace("publish");
     }
+
+    // The one load of manifest pages, for the whole store (key null) or one record: under the lease, with the moved-manifest retry.
+    // It reads only; adopting what it loaded is the caller's.
+    private void LoadManifestPages(
+        string? key,
+        Dictionary<string, CultStoredDocument> loaded,
+        List<CultSchemaMigrationReport> reports,
+        List<CultForeignRecord> foreign,
+        Action<string> trace)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            loaded.Clear();
+            reports.Clear();
+            foreign.Clear();
+            // Only pages named by the manifest read under the lease are loaded; orphaned pages are never loaded. With no
+            // lock to lease (none created yet, or a store copied without it) a writer may commit mid-load, so an unleased
+            // load stands only if its manifest is still current; if the manifest moved it reloads, under the lease the
+            // writer created. A page that fails under an unmoved manifest is corruption, not a race.
+            using var lease = AcquireCommitLease(wait: true, create: false);
+            var manifestBytes = ReadManifestBytes();
+            var (manifest, _) = ParseManifest(manifestBytes);
+            trace($"manifest records={manifest.Records.Length}");
+            try
+            {
+                if (lease == null)
+                    UnleasedManifestRead?.Invoke();
+                LoadRecordPages(
+                    manifest.Records.Where(record => key == null || string.Equals(record.Key, key, StringComparison.Ordinal))
+                        .OrderBy(record => record.Key, StringComparer.Ordinal).ToArray(),
+                    manifest.SchemaCatalog,
+                    loaded,
+                    reports,
+                    foreign);
+                if (lease != null || !ManifestMoved(manifestBytes))
+                {
+                    trace($"indexed-pages loaded={loaded.Count}");
+                    break;
+                }
+            }
+            catch (Exception exception) when (lease == null && IsTornGeneration(exception))
+            {
+                // The re-read stays out of the filter: an exception thrown inside a filter is swallowed as false.
+                if (!ManifestMoved(manifestBytes))
+                    throw;
+                if (attempt == UnleasedLoadAttempts)
+                    throw Unsettled(exception);
+                continue;
+            }
+
+            if (attempt == UnleasedLoadAttempts)
+                throw Unsettled(null);
+        }
+    }
+
+    // The record at a key as its page holds it now, decoded fresh and stamped with VersionOf its manifest payload, the version
+    // CommitBatch compares. Null when none is there or it is foreign. Touches no entry, hydration, report or foreign list of the
+    // store, and raises nothing.
+    internal override CultStoredDocument? ReadDurable(string key) => Held(() =>
+    {
+        var loaded = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
+        LoadManifestPages(key, loaded, new List<CultSchemaMigrationReport>(), new List<CultForeignRecord>(), _ => { });
+        return loaded.TryGetValue(key, out var stored) ? stored : null;
+    });
 
     // Variants wait for the directory store's own cut; until then it refuses one rather than persist a resolved view as a plain page.
     private static void RefuseVariant(CultStoredDocument entry)

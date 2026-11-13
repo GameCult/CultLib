@@ -364,5 +364,18 @@ namespace GameCult.Caching.OutsideStoreTests
             Assert.That(() => cache.Commit(batch => batch.Remove(K)), Throws.InstanceOf<CultSchemaConflictException>(), "removal");
             Assert.That(disk.Records["k"], Is.EqualTo(before));
         }
+
+        // Only the library can stamp a version on a decoded record, so a store kind outside it cannot read one honestly: Update refuses before apply.
+        [Test]
+        public void UpdateOverAnOutsideStoreIsNotSupported()
+        {
+            var disk = new Disk();
+            PutOnDisk(disk, AB, "k", new OutA { Name = "k", Value = 1 });
+            using var cache = Open(disk, AB);
+            var calls = 0;
+
+            Assert.That(() => cache.Update<OutA>(K, a => { calls++; return a; }), Throws.TypeOf<NotSupportedException>());
+            Assert.That(calls, Is.EqualTo(0), "apply ran for a store that cannot serve Update");
+        }
     }
 }

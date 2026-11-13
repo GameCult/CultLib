@@ -19,7 +19,7 @@ namespace GameCult.Caching.Tests
     {
         private static readonly CultRecordKey Key = new("counter");
         private static readonly CultDocumentRegistry Registry =
-            CultDocumentRegistry.ForTypes(new[] { typeof(UpdateCounter), typeof(UpdateTally), typeof(UpdateGear) });
+            CultDocumentRegistry.ForTypes(new[] { typeof(UpdateCounter), typeof(UpdateTally), typeof(UpdateGear), typeof(UpdateBase), typeof(UpdateDerived) });
 
         private string _directory = string.Empty;
 
@@ -78,16 +78,22 @@ namespace GameCult.Caching.Tests
             using var a = Open(path, directory);
             using var b = Open(path, directory);
             var applied = 0;
+            // Each round starts both writers together: an attempt reads fresh from the store, so only overlapping read-commit windows lose.
+            var round = new Barrier(2);
 
             var racers = new[] { a, b }.Select(cache => Task.Run(() =>
             {
                 var results = new List<CultUpdateOutcome>();
                 for (var i = 0; i < n; i++)
+                {
+                    round.SignalAndWait();
                     results.Add(cache.Update<UpdateCounter>(Key, counter =>
                     {
                         Interlocked.Increment(ref applied);
                         return Plus(counter, 1);
                     }, maxAttempts: 200).Outcome);
+                }
+
                 return results;
             })).ToArray();
             Assert.That(Task.WaitAll(racers, TimeSpan.FromMinutes(2)), Is.True, "the racers did not finish");
@@ -172,6 +178,193 @@ namespace GameCult.Caching.Tests
             Assert.That(StoredValue(path, false), Is.EqualTo(1005));
         }
 
+        // No publication in the middle of an Update: a rival's write that cost this cache an attempt is never published on its own,
+        // only the value this Update commits (a pull after every lost attempt would publish both).
+        [TestCase(false)]
+        [TestCase(true)]
+        public void LostAttemptPublishesNothingMidUpdate(bool directory)
+        {
+            var path = PathOf("midupdate.cc");
+            Seed(path, directory, 1);
+            using var cache = Open(path, directory);
+            using var rival = Open(path, directory);
+            var published = new List<int>();
+            using var subscription = cache.Watch<UpdateCounter>().Subscribe(change => published.Add(change.Document!.Value));
+            var calls = 0;
+
+            var result = cache.Update<UpdateCounter>(Key, counter =>
+            {
+                if (++calls == 1)
+                    Rival(rival, 5);
+                return Plus(counter, 1);
+            });
+
+            Assert.That(result.Outcome, Is.EqualTo(CultUpdateOutcome.Updated));
+            Assert.That(calls, Is.EqualTo(2));
+            Assert.That(published, Is.EqualTo(new[] { 6 }), "the rival's 5 was published in the middle of the Update");
+        }
+
+        // The directory store reads only the key's own page, so a damaged page of another record does not stop an Update.
+        [Test]
+        public void DirectoryUpdateReadsOnlyItsOwnPage()
+        {
+            var path = PathOf("pages.cc");
+            var other = new CultRecordKey("other");
+            using (var seed = Open(path, true))
+                Assert.That(seed.Commit(batch => batch.Upsert(new UpdateCounter { Name = "other", Value = 9 }, new CultRecordHandle<UpdateCounter>(other))), Is.True);
+            var otherPages = Directory.GetFiles(path + ".records", "*.msgpack");
+            Assert.That(otherPages, Has.Length.EqualTo(1));
+            Seed(path, true, 1);
+            using var cache = Open(path, true);
+            File.WriteAllBytes(otherPages[0], new byte[] { 1, 2, 3, 4, 5 });
+
+            var result = cache.Update<UpdateCounter>(Key, counter => Plus(counter, 1));
+
+            Assert.That(result.Outcome, Is.EqualTo(CultUpdateOutcome.Updated));
+            Assert.That(result.Document!.Value, Is.EqualTo(2));
+        }
+
+        // The durable read is not a load: it leaves the store's foreign list, its migration reports and what the cache publishes alone.
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ReadDurableLeavesTheStoreViewAlone(bool directory)
+        {
+            var path = PathOf("view.cc");
+            Seed(path, directory, 1);
+            using (var writer = Open(path, directory))
+                Assert.That(writer.Commit(batch => batch.Upsert(new UpdateGear { Name = "gear", Power = 3 }, new CultRecordHandle<UpdateGear>(new CultRecordKey("gear")))), Is.True);
+            var narrow = CultDocumentRegistry.ForTypes(new[] { typeof(UpdateCounter) });
+            using var cache = new CultCache(narrow);
+            cache.AddBackingStore(directory ? new DirectoryMessagePackBackingStore(path) : new SingleFileMessagePackBackingStore(path));
+            using var rival = Open(path, directory);
+            var store = cache.BackingStores.Single();
+            var foreign = store.ForeignRecords;
+            var reports = store.LastSchemaMigrationReports;
+            Assert.That(foreign.Select(record => record.Key), Is.EqualTo(new[] { "gear" }), "the fixture holds a foreign record");
+            Assert.That(reports, Is.Not.Empty, "the fixture holds a migration report");
+            var foreignKeys = foreign.Select(record => (record.Key, record.SchemaId, record.StoredAt)).ToArray();
+            var reportKinds = reports.Select(report => (report.PersistedSchemaName, report.Kind)).ToArray();
+            var changes = 0;
+            using var subscription = cache.Watch<UpdateCounter>().Subscribe(_ => changes++);
+            var calls = 0;
+
+            var result = cache.Update<UpdateCounter>(Key, counter =>
+            {
+                if (++calls == 1)
+                    Rival(rival, 5);
+                return Plus(counter, 1);
+            });
+
+            Assert.That(result.Outcome, Is.EqualTo(CultUpdateOutcome.Updated));
+            Assert.That(calls, Is.EqualTo(2), "the Update reread the key");
+            Assert.That(store.ForeignRecords, Is.SameAs(foreign));
+            Assert.That(store.LastSchemaMigrationReports, Is.SameAs(reports));
+            Assert.That(store.ForeignRecords.Select(record => (record.Key, record.SchemaId, record.StoredAt)), Is.EqualTo(foreignKeys));
+            Assert.That(store.LastSchemaMigrationReports.Select(report => (report.PersistedSchemaName, report.Kind)), Is.EqualTo(reportKinds));
+            Assert.That(changes, Is.EqualTo(1), "only the committed write was published");
+        }
+
+        // Routing: store A is home to UpdateBase, store B to UpdateDerived : UpdateBase. Land judges a derived record at B.
+        private CultCache OpenRouted()
+        {
+            var cache = new CultCache(Registry);
+            cache.AddBackingStore(new SingleFileMessagePackBackingStore(PathOf("a.cc")), typeof(UpdateBase));
+            cache.AddBackingStore(new SingleFileMessagePackBackingStore(PathOf("b.cc")), typeof(UpdateDerived));
+            return cache;
+        }
+
+        private CultCache OpenOneRouted(string file, Type home)
+        {
+            var cache = new CultCache(Registry);
+            cache.AddBackingStore(new SingleFileMessagePackBackingStore(PathOf(file)), home);
+            return cache;
+        }
+
+        private byte[]? BytesOf(string file) => File.Exists(PathOf(file)) ? File.ReadAllBytes(PathOf(file)) : null;
+
+        private static readonly CultRecordHandle<UpdateBase> BaseHandle = new(Key);
+
+        private static void RivalDerived(CultCache cache, int value) =>
+            Assert.That(cache.Commit(batch => batch.Upsert<UpdateBase>(new UpdateDerived { Name = "counter", Value = value }, BaseHandle)), Is.True);
+
+        [Test]
+        public void RoutedSubtypeStaleCacheConverges()
+        {
+            using var cache = OpenRouted();
+            using var rival = OpenRouted();
+            RivalDerived(rival, 1);
+            var seen = new List<int?>();
+
+            var result = cache.Update<UpdateBase>(Key, document =>
+            {
+                seen.Add((document as UpdateDerived)?.Value);
+                var derived = (UpdateDerived)document!;
+                derived.Value += 1;
+                return derived;
+            });
+
+            Assert.That(seen, Is.EqualTo(new int?[] { 1 }), "apply did not see the rival's record in its home store, once");
+            Assert.That(result.Outcome, Is.EqualTo(CultUpdateOutcome.Updated));
+            using var reader = OpenRouted();
+            Assert.That(((UpdateDerived)reader.Get<UpdateBase>(Key)!).Value, Is.EqualTo(2));
+        }
+
+        [Test]
+        public void RoutedSubtypeCreateLandsInItsHome()
+        {
+            using (var cache = OpenRouted())
+            {
+                var calls = 0;
+                var result = cache.Update<UpdateBase>(Key, document =>
+                {
+                    calls++;
+                    Assert.That(document, Is.Null);
+                    return new UpdateDerived { Name = "counter", Value = 1 };
+                });
+                Assert.That(calls, Is.EqualTo(1));
+                Assert.That(result.Outcome, Is.EqualTo(CultUpdateOutcome.Updated));
+            }
+
+            using (var inB = OpenOneRouted("b.cc", typeof(UpdateDerived)))
+                Assert.That(inB.Get<UpdateBase>(Key), Is.InstanceOf<UpdateDerived>());
+            using (var inA = OpenOneRouted("a.cc", typeof(UpdateBase)))
+                Assert.That(inA.Get<UpdateBase>(Key), Is.Null, "the record landed in the wrong store");
+        }
+
+        [Test]
+        public void MovingTheRecordToAnotherHomeRefuses()
+        {
+            using (var rival = OpenRouted())
+                RivalDerived(rival, 1);
+            var before = (A: BytesOf("a.cc"), B: BytesOf("b.cc"));
+            using var cache = OpenRouted();
+            var calls = 0;
+
+            var refusal = Assert.Throws<InvalidOperationException>(() =>
+                cache.Update<UpdateBase>(Key, _ => { calls++; return new UpdateBase { Name = "counter" }; }))!;
+
+            Assert.That(calls, Is.EqualTo(1), "a refusal was retried");
+            Assert.That(refusal.Message, Does.Contain("a.cc").And.Contain("b.cc").And.Contain("move"));
+            Assert.That(BytesOf("a.cc"), Is.EqualTo(before.A));
+            Assert.That(BytesOf("b.cc"), Is.EqualTo(before.B));
+        }
+
+        [Test]
+        public void ARecordHeldByTwoStoresRefusesBeforeApply()
+        {
+            using var cache = OpenRouted();
+            using (var inA = OpenOneRouted("a.cc", typeof(UpdateBase)))
+                Assert.That(inA.Commit(batch => batch.Upsert(new UpdateBase { Name = "counter" }, BaseHandle)), Is.True);
+            using (var inB = OpenOneRouted("b.cc", typeof(UpdateDerived)))
+                Assert.That(inB.Commit(batch => batch.Upsert<UpdateBase>(new UpdateDerived { Name = "counter", Value = 1 }, BaseHandle)), Is.True);
+            var calls = 0;
+
+            var refusal = Assert.Throws<InvalidOperationException>(() => cache.Update<UpdateBase>(Key, document => { calls++; return document; }))!;
+
+            Assert.That(calls, Is.EqualTo(0));
+            Assert.That(refusal.Message, Does.Contain("held by two stores"));
+        }
+
         [Test]
         public void NullFromApplyDeclines()
         {
@@ -219,8 +412,19 @@ namespace GameCult.Caching.Tests
             var calls = 0;
             Func<UpdateCounter?, UpdateCounter?> apply = counter => { calls++; return Plus(counter, 1); };
 
-            using (var codecLess = Open(path, false, codec: false))
-                Assert.That(() => codecLess.Update(Key, apply), Throws.InvalidOperationException);
+            // A cache with no store copies its held instance, so it needs a codec.
+            using (var storeLess = new CultCache(Registry))
+            {
+                storeLess.Commit(batch => batch.Upsert(new UpdateCounter { Name = "counter", Value = 1 }, new CultRecordHandle<UpdateCounter>(Key)));
+                Assert.That(() => storeLess.Update(Key, apply), Throws.InvalidOperationException.With.Message.Contains("no codec"));
+            }
+
+            // Stores are attached, but none is home to the type: refused before apply.
+            using (var noHome = new CultCache(Registry, CultCacheMessagePack.CreateCodec(Registry)))
+            {
+                noHome.AddBackingStore(new SingleFileMessagePackBackingStore(PathOf("nohome.cc")), typeof(UpdateTally));
+                Assert.That(() => noHome.Update(Key, apply), Throws.InvalidOperationException.With.Message.Contains("names its home store"));
+            }
             using (var cache = Open(path, false))
             {
                 Assert.That(() => cache.Update(Key, apply, maxAttempts: 0), Throws.TypeOf<ArgumentOutOfRangeException>());
@@ -241,7 +445,7 @@ namespace GameCult.Caching.Tests
             before = File.ReadAllBytes(path);
             var gearCalls = 0;
             using (var cache = Open(path, false))
-                Assert.That(() => cache.Update<UpdateGear>(new CultRecordKey("gear-big"), gear => { gearCalls++; return gear; }), Throws.InvalidOperationException);
+                Assert.That(() => cache.Update<UpdateGear>(new CultRecordKey("gear-big"), gear => { gearCalls++; return gear; }), Throws.InvalidOperationException.With.Message.Contains("Update cannot copy it"));
             Assert.That(gearCalls, Is.EqualTo(0), "apply ran for a variant");
             Assert.That(calls, Is.EqualTo(0), "apply ran for a refused call");
             Assert.That(File.ReadAllBytes(path), Is.EqualTo(before));
@@ -479,6 +683,73 @@ namespace GameCult.Caching.Tests
             Assert.That(cache.Get<UpdateCounter>(Key)!.Value, Is.EqualTo(200));
         }
 
+        [TestCase(false)]
+        [TestCase(true)]
+        public void StaleCacheFirstAttemptSeesTheStore(bool directory)
+        {
+            var path = PathOf("stale.cc");
+            Seed(path, directory, 1);
+            using var a = Open(path, directory);
+            using var b = Open(path, directory);
+            Assert.That(b.Get<UpdateCounter>(Key)!.Value, Is.EqualTo(1));
+            Rival(a, 7);
+            var seen = new List<int>();
+
+            var result = b.Update<UpdateCounter>(Key, counter => { seen.Add(counter!.Value); return Plus(counter, 1); });
+
+            Assert.That(result.Outcome, Is.EqualTo(CultUpdateOutcome.Updated));
+            Assert.That(seen, Is.EqualTo(new[] { 7 }), "the first attempt read the cache's stale copy");
+            Assert.That(StoredValue(path, directory), Is.EqualTo(8));
+        }
+
+        // The durable read is not a load: it leaves the store's view of what the cache holds alone, so a later pull still delivers the rival's write.
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ADeclinedUpdateDoesNotHideTheRivalsWriteFromALaterPull(bool directory)
+        {
+            var path = PathOf("hidden.cc");
+            Seed(path, directory, 1);
+            using var a = Open(path, directory);
+            using var b = Open(path, directory);
+            Assert.That(b.Get<UpdateCounter>(Key)!.Value, Is.EqualTo(1));
+            Rival(a, 7);
+
+            Assert.That(b.Update<UpdateCounter>(Key, _ => null).Outcome, Is.EqualTo(CultUpdateOutcome.Declined));
+            Assert.That(b.Get<UpdateCounter>(Key)!.Value, Is.EqualTo(1), "a declined Update changed what the cache holds");
+            b.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+
+            Assert.That(b.Get<UpdateCounter>(Key)!.Value, Is.EqualTo(7));
+        }
+
+        [Test]
+        public void CodecLessStoreBackedCacheUpdates()
+        {
+            var path = PathOf("codecless.cc");
+            Seed(path, false, 1);
+            var calls = 0;
+            using (var cache = Open(path, false, codec: false))
+                Assert.That(cache.Update<UpdateCounter>(Key, counter => { calls++; return Plus(counter, 1); }).Outcome, Is.EqualTo(CultUpdateOutcome.Updated));
+
+            Assert.That(calls, Is.EqualTo(1));
+            Assert.That(StoredValue(path, false), Is.EqualTo(2));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void AStoreHoldingNothingAtTheKeyIsAbsentEvenIfTheCacheHoldsIt(bool directory)
+        {
+            var path = PathOf("gone.cc");
+            Seed(path, directory, 5);
+            using var a = Open(path, directory);
+            using var b = Open(path, directory);
+            Assert.That(b.Get<UpdateCounter>(Key), Is.Not.Null);
+            Assert.That(a.Commit(batch => batch.Remove(Key)), Is.True);
+            var seen = new List<UpdateCounter?>();
+
+            Assert.That(b.Update<UpdateCounter>(Key, counter => { seen.Add(counter); return null; }).Outcome, Is.EqualTo(CultUpdateOutcome.Declined));
+            Assert.That(seen, Is.EqualTo(new UpdateCounter?[] { null }));
+        }
+
         [CultDocument("tests.update_counter", "tests.update_counter.v1")]
         [MessagePackObject(AllowPrivate = true)]
         internal sealed class UpdateCounter
@@ -510,6 +781,23 @@ namespace GameCult.Caching.Tests
 
             [Key(1)]
             public int Power;
+        }
+
+        [CultDocument("tests.update_base", "tests.update_base.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal class UpdateBase
+        {
+            [Key(0)]
+            [CultName]
+            public string Name = string.Empty;
+        }
+
+        [CultDocument("tests.update_derived", "tests.update_derived.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class UpdateDerived : UpdateBase
+        {
+            [Key(1)]
+            public int Value;
         }
     }
 }

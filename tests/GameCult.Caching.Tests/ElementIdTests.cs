@@ -224,6 +224,28 @@ namespace GameCult.Caching.Tests
             Assert.That(AllIds(reread), Is.EqualTo(first), "the ids minted at load are the ids written, and stay through repeated writes");
         }
 
+        // Update reads the store's bytes, which hold no ids; it mints the ids the load minted, so the write keeps the ids the cache showed.
+        [Test]
+        public void UpdateOfAPreIdRecordPersistsTheIdsTheLoadMinted()
+        {
+            var path = PathOf("old.cc");
+            WritePreIdStore(path, null, ("a", "a", 2));
+            var key = new CultRecordKey("a");
+
+            string[] shown;
+            using (var cache = Open(path))
+            {
+                shown = AllIds(cache.Get<IdDeck>(key)!);
+                Assert.That(shown, Has.All.Not.Empty);
+                var result = cache.Update<IdDeck>(key, deck => { deck!.Name = "a2"; return deck; });
+                Assert.That(result.Outcome, Is.EqualTo(CultUpdateOutcome.Updated));
+            }
+
+            var written = MessagePackSerializer.Deserialize<IdDeck>(DiskRecord(path, "a").Payload);
+            Assert.That(written.Name, Is.EqualTo("a2"));
+            Assert.That(AllIds(written), Is.EqualTo(shown), "the write replaced the ids the cache showed with random ones");
+        }
+
         [Test]
         public void MintElementIdsRewritesEveryPreIdRecordAndNothingElse()
         {

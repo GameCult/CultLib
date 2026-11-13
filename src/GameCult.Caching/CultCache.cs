@@ -2682,34 +2682,66 @@ namespace GameCult.Caching
         }
 
         /// <summary>
-        /// Reads the record at <paramref name="key"/>, applies <paramref name="apply"/> to a private copy of it, and commits the result only
-        /// if the record is still the one that was read; when another writer got there first it re-reads and runs <paramref name="apply"/>
-        /// again, up to <paramref name="maxAttempts"/> times. The write is durable when Update returns.
+        /// Reads the record at <paramref name="key"/> as its home store holds it, applies <paramref name="apply"/> to a fresh copy of it, and
+        /// commits the result only if the record is still the one that was read; when another writer got there first it re-reads and runs
+        /// <paramref name="apply"/> again, up to <paramref name="maxAttempts"/> times. The write is durable when Update returns.
         /// </summary>
         /// <remarks>
-        /// <paramref name="apply"/> may run up to <paramref name="maxAttempts"/> times. It gets a private copy (null when the key holds
-        /// nothing), which it may change and return. It must not write to the cache or have other side effects. Return null to write
-        /// nothing. A store with staged blind writes refuses Update until it is flushed, as it refuses any conditional commit. The cache
-        /// needs a codec to copy with. Running out of attempts returns <see cref="CultUpdateOutcome.LostRace"/>; every other failure throws.
+        /// <paramref name="apply"/> may run up to <paramref name="maxAttempts"/> times. It gets the record as the store that holds it has it now, read from every home
+        /// of T and its routed subtypes and decoded afresh for this attempt (null when the key holds nothing), which it may change and return. A record held by two stores, or an apply that changes the record's home store, throws. A change made in place to an
+        /// instance the cache holds is neither seen nor written. It must not write to the cache or have other side effects. Return null to write
+        /// nothing. A store with staged blind writes refuses Update until it is flushed, as it refuses any conditional commit. A cache with no
+        /// store attached copies its held instance and needs a codec; a store kind outside the library cannot serve Update (<see cref="NotSupportedException"/>). Running out of attempts returns <see cref="CultUpdateOutcome.LostRace"/>; every other failure throws.
         /// </remarks>
         public CultUpdateResult<T> Update<T>(CultRecordKey key, Func<T?, T?> apply, int maxAttempts = 5) where T : class
         {
             if (apply == null) throw new ArgumentNullException(nameof(apply));
             if (maxAttempts < 1) throw new ArgumentOutOfRangeException(nameof(maxAttempts), maxAttempts, "At least one attempt is required.");
-            var codec = _codec ?? throw new InvalidOperationException("This cache has no codec; create it with CultCacheMessagePack.Create.");
             for (var attempt = 1; ; attempt++)
             {
-                var (version, copy) = Held(() =>
+                var (version, copy, source) = Held(() =>
                 {
-                    if (!_entries.TryGetValue(key.Value, out var held))
-                        return ((string?)null, (T?)null);
-                    if (held.Variant != null || held.Document is not T)
+                    if (_stores.Count == 0)
+                    {
+                        // No store: the held entry is the record.
+                        _entries.TryGetValue(key.Value, out var held);
+                        var codec = _codec ?? throw new InvalidOperationException("This cache has no codec; create it with CultCacheMessagePack.Create.");
+                        if (held == null)
+                            return ((string?)null, (T?)null, (CacheBackingStore?)null);
+                        if (held.Variant != null || held.Document is not T)
+                            throw new InvalidOperationException($"Record {key.Value} is a variant or not a {typeof(T).Name}; Update cannot copy it.");
+                        return (held.StoredVersion, (T?)codec.Clone(held.Document, held.Descriptor.DocumentType), null);
+                    }
+
+                    // The store with the key is among the homes of T and its routed subtypes; the cache's own view of the key may be stale, so it is not asked.
+                    var homes = CandidateHomes(typeof(T));
+                    if (homes.Length == 0)
+                        throw new InvalidOperationException("A conditional batch names its home store through a record it upserts or removes.");
+                    CacheBackingStore? holder = null;
+                    CultStoredDocument? durable = null;
+                    foreach (var candidate in homes)
+                    {
+                        if (candidate.ReadDurable(key.Value) is not { } found)
+                            continue;
+                        if (holder != null)
+                            throw new InvalidOperationException($"Record {key.Value} is held by two stores, {holder} and {candidate}; Update cannot choose.");
+                        holder = candidate;
+                        durable = found;
+                    }
+
+                    if (durable == null)
+                        return ((string?)null, (T?)null, (CacheBackingStore?)null);
+                    if (durable.Variant != null || durable.Document is not T typed)
                         throw new InvalidOperationException($"Record {key.Value} is a variant or not a {typeof(T).Name}; Update cannot copy it.");
-                    return (held.StoredVersion, (T?)codec.Clone(held.Document, held.Descriptor.DocumentType));
+                    CultElementIds.Plan(durable.Descriptor.DocumentType, durable.Document, key.Value, deterministic: true).Apply();
+                    return (durable.StoredVersion, typed, holder);
                 });
                 var next = apply(copy);
                 if (next == null)
                     return new CultUpdateResult<T>(CultUpdateOutcome.Declined, Get<T>(key));
+                if (source != null && Held(() => Home(next.GetType())) is var landing && landing != source)
+                    throw new InvalidOperationException(
+                        $"Update of {key.Value} would move the record from {source} to {landing?.ToString() ?? "memory"}; remove it and write it at its new home.");
                 CultCommitOutcome outcome;
                 try
                 {
@@ -2728,9 +2760,11 @@ namespace GameCult.Caching
                     return new CultUpdateResult<T>(CultUpdateOutcome.Updated, next);
                 if (outcome != CultCommitOutcome.Mismatch)
                     throw new InvalidOperationException($"Update of {key.Value} was refused: {outcome}.");
-                Held(() => { Home(next.GetType())?.PullAll(); return true; });
                 if (attempt >= maxAttempts)
+                {
+                    Held(() => { Home(next.GetType())?.PullAll(); return true; });
                     return new CultUpdateResult<T>(CultUpdateOutcome.LostRace, Get<T>(key));
+                }
             }
         }
 
@@ -3751,6 +3785,18 @@ namespace GameCult.Caching
             return changes;
         }
 
+        // Every store a record of this type, or of a registered subtype of it, can live in.
+        private CacheBackingStore[] CandidateHomes(Type type)
+        {
+            var homes = new HashSet<CacheBackingStore>();
+            if (Home(type) is { } own)
+                homes.Add(own);
+            foreach (var descriptor in _registry.AllDescriptors)
+                if (type.IsAssignableFrom(descriptor.DocumentType) && Home(descriptor.DocumentType) is { } routed)
+                    homes.Add(routed);
+            return _stores.Select(entry => entry.Store).Where(homes.Contains).ToArray();
+        }
+
         // The most derived routed home type assignable from the document type, else the untyped store.
         private CacheBackingStore? Home(Type documentType)
         {
@@ -4027,6 +4073,15 @@ namespace GameCult.Caching
         internal void UseRegistry(CultDocumentRegistry? registry) => _registry = registry;
 
         public abstract void PullAll();
+
+        /// <summary>
+        /// The record at <paramref name="key"/> as this store holds it now, decoded as a load decodes it by this call (a new instance nobody
+        /// else holds) and stamped with the version this store's commit compares. Null when the store holds nothing there or holds it foreign.
+        /// It changes none of the store's entries, staged writes or reports and raises nothing. Internal because only this library can stamp a version.
+        /// </summary>
+        internal virtual CultStoredDocument? ReadDurable(string key) =>
+            throw new NotSupportedException($"{this} cannot read one record, which Update needs.");
+
         public abstract void Push(CultStoredDocument entry);
         public abstract void Delete(CultStoredDocument entry);
         public void PushAll() => PushAll(soft: false);
@@ -5172,6 +5227,9 @@ namespace GameCult.Caching
                 return null;
             return ToStoredDocument(record, durable.Version(key), durable.Snapshot.SchemaCatalog, DeserializeMarked, out _);
         }
+
+        // Update's read: the durable record at the key, decoded afresh, stamped with the version CommitBatch compares.
+        internal override CultStoredDocument? ReadDurable(string key) => Held(() => DurableAt(ReadSnapshot(), key));
 
         // The file now holds every record written, under the id and at the storedAt the write gave it, and the version of those bytes:
         // the store's entries and the cache's say so. A copied record is on disk as the file had it, so nothing learns anything new about it: in particular the
