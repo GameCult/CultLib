@@ -2052,6 +2052,29 @@ namespace GameCult.Caching
         Contended
     }
 
+    public enum CultUpdateOutcome
+    {
+        Updated,
+        Declined,
+        LostRace
+    }
+
+    /// <summary>
+    /// What <see cref="CultCache.Update{T}"/> did. A lost race is a value, not an exception. <see cref="Document"/> is the instance the
+    /// cache holds at the key when Update returns: the written one for Updated, null when the key is absent.
+    /// </summary>
+    public readonly struct CultUpdateResult<T> where T : class
+    {
+        public CultUpdateResult(CultUpdateOutcome outcome, T? document)
+        {
+            Outcome = outcome;
+            Document = document;
+        }
+
+        public CultUpdateOutcome Outcome { get; }
+        public T? Document { get; }
+    }
+
     public sealed class CultCommitRequest
     {
         internal CultCommitRequest(
@@ -2563,6 +2586,7 @@ namespace GameCult.Caching
             return UpsertAsync(document, handle);
         }
 
+        // A blind write, last-writer-wins per key; Update is the conditional golden path.
         // Refused with CultSchemaConflictException when the key holds a record stored under an id no registered type declares.
         public Task<CultRecordHandle<T>> UpsertAsync<T>(T document, CultRecordHandle<T>? handle = null)
         {
@@ -2639,6 +2663,7 @@ namespace GameCult.Caching
 
         /// <summary>
         /// Commits the staged batch. Returns false when a condition failed: nothing was written, changed in memory, or published.
+        /// Without <c>Expect</c> a commit is blind; <see cref="Update{T}"/> retries a conditional one.
         /// </summary>
         /// <remarks>
         /// A commit that succeeds and then fails in a journal or observer still stands and is published, and the writer
@@ -2654,6 +2679,59 @@ namespace GameCult.Caching
         public CultCommitOutcome TryCommit(Action<CultCacheBatch> stage)
         {
             return Land(stage, wait: false);
+        }
+
+        /// <summary>
+        /// Reads the record at <paramref name="key"/>, applies <paramref name="apply"/> to a private copy of it, and commits the result only
+        /// if the record is still the one that was read; when another writer got there first it re-reads and runs <paramref name="apply"/>
+        /// again, up to <paramref name="maxAttempts"/> times. The write is durable when Update returns.
+        /// </summary>
+        /// <remarks>
+        /// <paramref name="apply"/> may run up to <paramref name="maxAttempts"/> times. It gets a private copy (null when the key holds
+        /// nothing), which it may change and return. It must not write to the cache or have other side effects. Return null to write
+        /// nothing. A store with staged blind writes refuses Update until it is flushed, as it refuses any conditional commit. The cache
+        /// needs a codec to copy with. Running out of attempts returns <see cref="CultUpdateOutcome.LostRace"/>; every other failure throws.
+        /// </remarks>
+        public CultUpdateResult<T> Update<T>(CultRecordKey key, Func<T?, T?> apply, int maxAttempts = 5) where T : class
+        {
+            if (apply == null) throw new ArgumentNullException(nameof(apply));
+            if (maxAttempts < 1) throw new ArgumentOutOfRangeException(nameof(maxAttempts), maxAttempts, "At least one attempt is required.");
+            var codec = _codec ?? throw new InvalidOperationException("This cache has no codec; create it with CultCacheMessagePack.Create.");
+            for (var attempt = 1; ; attempt++)
+            {
+                var (version, copy) = Held(() =>
+                {
+                    if (!_entries.TryGetValue(key.Value, out var held))
+                        return ((string?)null, (T?)null);
+                    if (held.Variant != null || held.Document is not T)
+                        throw new InvalidOperationException($"Record {key.Value} is a variant or not a {typeof(T).Name}; Update cannot copy it.");
+                    return (held.StoredVersion, (T?)codec.Clone(held.Document, held.Descriptor.DocumentType));
+                });
+                var next = apply(copy);
+                if (next == null)
+                    return new CultUpdateResult<T>(CultUpdateOutcome.Declined, Get<T>(key));
+                CultCommitOutcome outcome;
+                try
+                {
+                    outcome = Land(batch =>
+                    {
+                        batch.Expected.Add((key, version));
+                        batch.Upsert(next, new CultRecordHandle<T>(key));
+                    }, wait: true);
+                }
+                catch (CultWriteConflictException conflict) when (conflict.InnerException == null)
+                {
+                    outcome = CultCommitOutcome.Mismatch;
+                }
+
+                if (outcome == CultCommitOutcome.Committed)
+                    return new CultUpdateResult<T>(CultUpdateOutcome.Updated, next);
+                if (outcome != CultCommitOutcome.Mismatch)
+                    throw new InvalidOperationException($"Update of {key.Value} was refused: {outcome}.");
+                Held(() => { Home(next.GetType())?.PullAll(); return true; });
+                if (attempt >= maxAttempts)
+                    return new CultUpdateResult<T>(CultUpdateOutcome.LostRace, Get<T>(key));
+            }
         }
 
         public CultRecordHandle<T>? TryGetHandle<T>(T document)

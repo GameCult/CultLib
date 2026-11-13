@@ -62,17 +62,28 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void DocsShowTheTestedSnippet()
+        public void DocsShowTheTestedSnippet() => StartDocs.AssertShowsSnippet(SourcePath());
+
+        static string SourcePath([System.Runtime.CompilerServices.CallerFilePath] string path = "") => path;
+    }
+
+    // docs/start/README.md shows each tested snippet verbatim: the region between snippet:begin and snippet:end of its source file.
+    internal static class StartDocs
+    {
+        public static void AssertShowsSnippet(string sourcePath) =>
+            AssertShowsSnippet(sourcePath, Path.Combine("..", "..", "docs", "start", "README.md"));
+
+        // The same check against another document, its path relative to the directory of sourcePath. The snippet there is the
+        // statements of a block, so it need not open the fence (the block's usings come first).
+        public static void AssertShowsSnippet(string sourcePath, string docsRelativePath, bool wholeBlock = true)
         {
-            var source = File.ReadAllText(SourcePath());
+            var source = File.ReadAllText(sourcePath).Replace("\r\n", "\n");
             const string begin = "// snippet:begin\n";
             var start = source.IndexOf(begin, StringComparison.Ordinal) + begin.Length;
             var snippet = source[start..source.IndexOf("// snippet:end\n", StringComparison.Ordinal)];
-            var docs = File.ReadAllText(Path.Combine(Path.GetDirectoryName(SourcePath())!, "..", "..", "docs", "start", "README.md"));
-            Assert.That(docs.Replace("\r\n", "\n"), Does.Contain("```csharp\n" + snippet + "```"),
-                "docs/start/README.md no longer shows tests/GameCult.Caching.Tests/FirstCallTests.cs verbatim");
+            var docs = File.ReadAllText(Path.Combine(Path.GetDirectoryName(sourcePath)!, docsRelativePath));
+            Assert.That(docs.Replace("\r\n", "\n"), Does.Contain(wholeBlock ? "```csharp\n" + snippet + "```" : snippet),
+                $"{docsRelativePath} no longer shows {Path.GetFileName(sourcePath)} verbatim");
         }
-
-        static string SourcePath([System.Runtime.CompilerServices.CallerFilePath] string path = "") => path;
     }
 }

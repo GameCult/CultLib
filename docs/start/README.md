@@ -16,7 +16,7 @@ this page.
 
 | | CultCache | CultMath | Geometry | CultNet | CultMesh |
 | --- | --- | --- | --- | --- | --- |
-| **C#** | [first call, tested](#c-first-call) | [package](../../packages/cultmath/README.md); snippet not yet | [package](../../src/GameCult.Geometry/README.md); snippet not yet | [first call, tested](#c-cultnet-first-call); [package](../../src/GameCult.Networking) | [quickstart](../../src/GameCult.Mesh/docs/durable-node-quickstart.md); run by `scripts/verify-eve-getting-started.ps1` |
+| **C#** | [first call, tested](#c-first-call); [update, tested](#c-update-with-retry) | [package](../../packages/cultmath/README.md); snippet not yet | [package](../../src/GameCult.Geometry/README.md); snippet not yet | [first call, tested](#c-cultnet-first-call); [package](../../src/GameCult.Networking) | [quickstart](../../src/GameCult.Mesh/docs/durable-node-quickstart.md); run by `scripts/verify-eve-getting-started.ps1` |
 | **TypeScript** | [first call, tested](#typescript-first-call) | not yet | not yet | [first call, tested](#typescript-cultnet-first-call); [package](../../packages/cultnet-ts/README.md) | [package](../../packages/cultmesh-ts/README.md); snippet not yet; [recipe: two-client .io game](io-game.md), tested with two live clients, browser page not yet run |
 | **Rust** | [first call, tested](#rust-first-call) | [native core](../../packages/cultmath/native/cultmath-core); snippet not yet | not yet | [first call, tested](#rust-cultnet-first-call); [package](../../packages/cultnet-rs/README.md), [examples](../../packages/cultnet-rs/examples) | [package](../../packages/cultmesh-rs); snippet not yet |
 | **Python** | [first call, tested](#python-first-call) | not yet | not yet | [first call, tested](#python-cultnet-first-call); [package](../../packages/cultnet-py/README.md) | [package](../../packages/cultmesh-py/README.md); snippet not yet |
@@ -69,6 +69,37 @@ public static class FirstCall
 ```
 
 `FirstCall.Run` is the call; a second test in that file fails if the block above stops matching it. More: `src/GameCult.Caching/README.md`.
+
+## C# update with retry
+
+Change a record you may not be the only one changing. `Update` reads the record, hands your function a private
+copy, and commits the result only if the record is still the one it read. If another writer got there first, it
+reads again and runs your function again, up to five times. The source is
+[`tests/GameCult.Caching.Tests/UpdateCallTests.cs`](../../tests/GameCult.Caching.Tests/UpdateCallTests.cs); the
+snippet reuses `Item` from the first call.
+
+```csharp
+using GameCult.Caching;
+using GameCult.Caching.MessagePack;
+
+public static class UpdateCall
+{
+    public static CultUpdateResult<Item> Restock(string path, CultRecordKey key)
+    {
+        var cache = CultCacheMessagePack.Create(path);
+        return cache.Update<Item>(key, item =>
+        {
+            item ??= new Item { Name = "Potion", Category = "Consumable" };
+            item.Value += 10;
+            return item;
+        });
+    }
+}
+```
+
+The write is durable when `Update` returns, with no `PushAll`. A lost race re-runs the function, so keep it free of
+side effects; when the attempts run out the result says `LostRace` instead of throwing. `UpsertAsync` plus
+`PushAll` is the blind opt-out: last writer wins.
 
 ## TypeScript first call
 

@@ -352,7 +352,7 @@ namespace GameCult.Caching
             }
         }
 
-        public object Clone(object document, Type type) => _deserialize(type, _serialize(document, type, type));
+        public object Clone(object document, Type type) => _codec.Clone(document, type);
 
         public CultInspectorEdit BeginEdit(CultStoredDocument record)
         {

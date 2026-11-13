@@ -13,6 +13,7 @@ Cacheable models are plain classes annotated with cache intent.
 using GameCult.Caching;
 using MessagePack;
 
+[MessagePackObject]
 [CultDocument("gamecult.item_data", "gamecult.item_data.v1")]
 public sealed class ItemData
 {
@@ -131,17 +132,32 @@ using GameCult.Caching;
 using GameCult.Caching.MessagePack;
 
 var cache = await CultCacheMessagePack.OpenAsync("Data.msgpack");
+var key = new CultRecordKey("potion");
 
+// The golden path: read, change a private copy, commit only if the record is unchanged, re-run on a lost race.
+// Durable when it returns; no flush.
+var result = cache.Update<ItemData>(key, item =>
+{
+    item ??= new ItemData { Name = "Potion", Sku = "POT-1", Category = "Consumable" };
+    item.Value += 10;
+    return item;
+});
+
+// The blind opt-out: last writer wins per key. Name the key, or a new key claims the same unique Sku and is refused.
 var handle = await cache.UpsertAsync(new ItemData
 {
     Name = "Potion",
     Sku = "POT-1",
     Category = "Consumable",
     Value = 50
-});
+}, new CultRecordHandle<ItemData>(key));
 
 await cache.FlushAsync();
 ```
+
+`Update` may run your function more than once, so it must have no side effects. Returning null writes nothing, and a
+lost race that outlasts `maxAttempts` comes back as `CultUpdateOutcome.LostRace`. `UpsertAsync` plus `FlushAsync` never
+checks what it overwrites.
 
 If you want the explicit assembly rite, the lower-level `CultCache` +
 `SingleFileMessagePackBackingStore` path is still there. The helper is just the
@@ -294,13 +310,10 @@ Useful surfaces:
 - `cache.IsDirty`
 - `store.IsDirty`
 - `cache.Document<T>(key)`
-- `cache.Soa<T>()`
-- `cache.UpsertAsync(document)`
+- `cache.Update<T>(key, apply)`
+- `cache.UpsertAsync(document)` (blind write)
 - `cache.FlushAllBackingStores()`
 - `cache.FlushAsync()`
-- `cache.FlushBackingStore(store)`
-- `cache.PrepareForReloadOrShutdown()`
-- `cache.PrepareForReloadOrShutdownAsync()`
 - `cache.FlushAttachedStoresOnDispose`
 - `store.FlushOnDispose`
 

@@ -29,6 +29,11 @@ namespace GameCult.Caching
         // (document payload, slot and encoded value pairs)
         public Func<byte[], IReadOnlyList<KeyValuePair<int, byte[]>>, byte[]> Overlay { get; }
 
+        // The one copy of a document: its encoding, decoded again. Update's private argument and CultInspectorModel.Clone share it.
+        internal object Clone(object document, Type type) =>
+            Deserialize(type, type, Serialize(document, type, type))
+            ?? throw new InvalidOperationException($"The codec returned null for {type.FullName}.");
+
         /// <summary>
         /// Decodes a document payload read from a store file, as a cache load decodes it: the ids a load mints are minted from the key
         /// and their path, so every reader of one store mints the same ids, and a payload a cache write would refuse is refused here too.
