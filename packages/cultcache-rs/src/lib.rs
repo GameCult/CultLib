@@ -1176,6 +1176,35 @@ impl std::fmt::Display for CultCacheStoreUnreadable {
 
 impl std::error::Error for CultCacheStoreUnreadable {}
 
+/// A write was asked of a store path that is a link (a file or directory symbolic link, or a Windows
+/// junction): a replace there would swap the link for a regular file and detach the store from its
+/// target. Nothing was locked or written. Configure the link's target as the store path. Reads through
+/// a live link are unaffected. Find it with `error.downcast_ref::<StoreLinkedError>()`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreLinkedError {
+    pub path: PathBuf,
+}
+
+impl std::fmt::Display for StoreLinkedError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "CultCache store {} is a link, and a write at it would replace the link; configure the link's target as the store path",
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for StoreLinkedError {}
+
+/// Refuses a write at a link. A path that cannot be inspected is left to the open that follows.
+fn refuse_linked(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(StoreLinkedError { path: path.to_path_buf() }.into()),
+        _ => Ok(()),
+    }
+}
+
 /// A write to a single-file store that failed, and what it left on disk. It sits in the
 /// error chain of every such failure, above the cause, so a consumer tells the outcomes
 /// apart with `error.downcast_ref::<CultCacheStoreWriteFailed>()`.
@@ -1719,6 +1748,7 @@ impl SingleFileMessagePackBackingStore {
     }
 
     fn with_exclusive_lock<T>(&self, action: impl FnOnce() -> Result<T>) -> Result<T> {
+        refuse_linked(&self.path)?;
         let lock = self.open_lock_file()?;
         fs2::FileExt::lock_exclusive(&lock)
             .with_context(|| format!("failed to lock {}", self.lock_path().display()))?;
@@ -1830,6 +1860,7 @@ impl SingleFileMessagePackBackingStore {
     }
 
     fn try_with_exclusive_lock<T>(&self, action: impl FnOnce() -> Result<T>) -> Result<Option<T>> {
+        refuse_linked(&self.path)?;
         let lock = self.open_lock_file()?;
         match fs2::FileExt::try_lock_exclusive(&lock) {
             Ok(()) => {}
@@ -5374,12 +5405,6 @@ mod tests {
         Ok(())
     }
 
-    fn io_not_found(error: &anyhow::Error) -> bool {
-        error
-            .chain()
-            .any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound))
-    }
-
     fn test_envelope(r#type: &str, key: &str, payload: &[u8]) -> CultCacheEnvelope {
         CultCacheEnvelope {
             key: key.to_string(),
@@ -7314,7 +7339,14 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("store.cc");
         std::os::unix::fs::symlink(&path, &path)?;
-        assert_io_failure_on_every_read(&SingleFileMessagePackBackingStore::new(&path));
+        let [pull, snapshot, exchange] = every_read(&SingleFileMessagePackBackingStore::new(&path));
+        for error in [pull.unwrap_err(), snapshot.unwrap_err()] {
+            let io = io_error_in(&error).expect("the failure to reach the store is an io::Error");
+            assert_ne!(io.kind(), std::io::ErrorKind::NotFound, "{error:#}");
+            assert_eq!(unreadable_kind(&error), None, "{error:#}");
+        }
+        // The exchange is a write: a link at the path is refused before it reads.
+        assert!(exchange.unwrap_err().downcast_ref::<StoreLinkedError>().is_some());
         assert!(fs::symlink_metadata(&path)?.file_type().is_symlink());
         Ok(())
     }
@@ -7753,12 +7785,13 @@ mod tests {
         let path = temp.path().join("store.cc");
         std::os::unix::fs::symlink(&target, &path)?;
         let store = SingleFileMessagePackBackingStore::new(&path);
-        for result in every_read(&store) {
-            let error = result.expect_err("a dangling link must not read as an empty store");
+        let [pull, snapshot, exchange] = every_read(&store);
+        for error in [pull.unwrap_err(), snapshot.unwrap_err()] {
             assert!(io_error_in(&error).is_some(), "{error:#}");
             assert_eq!(unreadable_kind(&error), None, "{error:#}");
         }
-        // Every merging writer refuses on its own read, so none can replace the link.
+        assert!(exchange.unwrap_err().downcast_ref::<StoreLinkedError>().is_some());
+        // Every writer refuses the link before its lock, so none can replace it.
         let mut writer = SingleFileMessagePackBackingStore::new(&path);
         let delta = snapshot_envelope("delta", b"4");
         let writes = [
@@ -7770,7 +7803,7 @@ mod tests {
         ];
         for (index, result) in writes.into_iter().enumerate() {
             let error = result.expect_err("a merging write through a dangling link must refuse");
-            assert!(io_error_in(&error).is_some(), "write {index}: {error:#}");
+            assert!(error.downcast_ref::<StoreLinkedError>().is_some(), "write {index}: {error:#}");
             assert_eq!(write_failure_kind(&error), None, "write {index}: {error:#}");
         }
         assert!(fs::symlink_metadata(&path)?.file_type().is_symlink());
@@ -7909,25 +7942,63 @@ mod tests {
         Ok(())
     }
 
-    // What a write does through a symbolic link today. R3 decides whether a write
-    // resolves the link or refuses it; until then these pin the current behaviour so the
-    // change is deliberate. Reads refuse a dangling link (see the test above).
+    // A write at a store path that is a link is refused: a replace there would swap the link for a regular file and
+    // detach the store from its target. Reads through a live link keep working.
     #[cfg(unix)]
     #[test]
-    fn r3_decides_resolve_or_refuse_a_push_through_a_live_link_replaces_the_link() -> Result<()> {
+    fn a_write_at_a_live_link_is_refused_and_nothing_changes_while_a_read_through_it_works() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let volume = temp.path().join("volume");
         fs::create_dir(&volume)?;
         let target = volume.join("store.cc");
         SingleFileMessagePackBackingStore::new(&target).push(&snapshot_envelope("a", b"1"))?;
         let before = fs::read(&target)?;
-        let link = temp.path().join("store.cc");
+        let volume_before = dir_names(&volume)?;
+        let link = temp.path().join("link.cc");
         std::os::unix::fs::symlink(&target, &link)?;
 
-        SingleFileMessagePackBackingStore::new(&link).push(&snapshot_envelope("b", b"2"))?;
-        assert!(fs::symlink_metadata(&link)?.file_type().is_file(), "the link was replaced by a regular file");
-        assert_eq!(fs::read(&target)?, before, "the store the link pointed to is unchanged");
+        let mut store = SingleFileMessagePackBackingStore::new(&link);
+        let errors = [
+            store.push(&snapshot_envelope("b", b"2")).unwrap_err(),
+            store.push_all(&[snapshot_envelope("b", b"2")], PushAllOptions::default()).unwrap_err(),
+            store.push_all(&[snapshot_envelope("b", b"2")], PushAllOptions { soft: true }).unwrap_err(),
+            store.delete(&snapshot_envelope("a", b"1")).unwrap_err(),
+            store.compare_exchange_snapshot(&[], &[snapshot_envelope("b", b"2")]).unwrap_err(),
+            store.try_compare_exchange_snapshot(&[], &[snapshot_envelope("b", b"2")]).err().expect("refused"),
+        ];
+        for error in &errors {
+            let linked = error.downcast_ref::<StoreLinkedError>().unwrap_or_else(|| panic!("{error:#}"));
+            assert_eq!(linked.path, link);
+            assert!(error.to_string().contains(&link.display().to_string()), "{error:#}");
+        }
+        assert!(fs::symlink_metadata(&link)?.file_type().is_symlink(), "the link is left as it was");
+        assert_eq!(fs::read(&target)?, before);
+        assert_eq!(dir_names(&volume)?, volume_before, "no lock or staging file beside the target");
+        assert_eq!(dir_names(temp.path())?, ["link.cc", "volume"], "no lock or staging file beside the link");
+        assert_eq!(store.pull_all()?, vec![snapshot_envelope("a", b"1")]);
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_at_a_live_directory_link_is_refused_as_a_link() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let real = temp.path().join("real");
+        fs::create_dir(&real)?;
+        let link = temp.path().join("dirlink");
+        std::os::unix::fs::symlink(&real, &link)?;
+        let error = SingleFileMessagePackBackingStore::new(&link).push(&snapshot_envelope("a", b"1")).unwrap_err();
+        assert!(error.downcast_ref::<StoreLinkedError>().is_some(), "{error:#}");
+        assert!(fs::symlink_metadata(&link)?.file_type().is_symlink());
+        assert_eq!(fs::read_dir(&real)?.count(), 0);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn dir_names(dir: &Path) -> Result<Vec<String>> {
+        let mut names = fs::read_dir(dir)?.map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>>>()?;
+        names.sort();
+        Ok(names)
     }
 
     // The two cases the vectors cannot hold: nothing at the path is written, and a dangling link is refused and left as it is.
@@ -7951,7 +8022,7 @@ mod tests {
             let error = SingleFileMessagePackBackingStore::new(&link)
                 .push_all(&[snapshot_envelope("a", b"1")], PushAllOptions { soft: true })
                 .unwrap_err();
-            assert!(io_not_found(&error), "{error:#}");
+            assert!(error.downcast_ref::<StoreLinkedError>().is_some(), "{error:#}");
             assert!(fs::symlink_metadata(&link)?.file_type().is_symlink(), "the link was replaced");
             assert_eq!(fs::read_dir(&volume)?.count(), 0, "nothing reached the link's volume");
         }

@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 
 import { decode, encode } from "@msgpack/msgpack";
 
+import { StoreLinkedError as PackageStoreLinkedError } from "../src/index";
 import { documentPayloadBytes, documentPayloadFromBytes } from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
 import { SchemaConflictError, StoreUnreadableError } from "../src/store-format";
@@ -23,6 +24,7 @@ import {
   replaceStoreFile,
   replaceStoreFileWindows,
   windowsKernel,
+  refuseLinkedStore,
   withStoreWriteLock,
 } from "../src/store-file";
 import type { ReplaceKernel, StoreFileOps } from "../src/store-file";
@@ -814,6 +816,38 @@ test("opening writes nothing: a missing store leaves no lock file, a legacy stor
     assert.deepEqual((await new SingleFileMessagePackBackingStore(path).pullAll()).map((entry) => entry.key), ["k"]);
     assert.deepEqual([...(await readFile(path))], [...legacyBytes], "a legacy store whose payloads are already bytes is not rewritten");
     assert.deepEqual((await readdir(directory)).sort(), ["legacy-bytes.cc"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("StoreLinkedError is importable from the package entry and is what a write at a link throws", { skip: process.platform === "win32" }, async () => {
+  const directory = await scratch();
+  try {
+    const target = join(directory, "target.cc");
+    await writeFile(target, "x");
+    const link = join(directory, "link.cc");
+    await fsp.symlink(target, link);
+    await assert.rejects(
+      () => refuseLinkedStore(link),
+      (error: unknown) => error instanceof PackageStoreLinkedError && error.path === link && error.name === "StoreLinkedError",
+    );
+    await assert.rejects(() => new SingleFileMessagePackBackingStore(link).pushAll([]), (error: unknown) => error instanceof PackageStoreLinkedError);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("refuseLinkedStore lets a path that is absent pass and rethrows any other lstat failure", { skip: process.platform === "win32" }, async () => {
+  const directory = await scratch();
+  try {
+    await refuseLinkedStore(join(directory, "absent.cc"));
+    const file = join(directory, "file");
+    await writeFile(file, "x");
+    await assert.rejects(
+      () => refuseLinkedStore(join(file, "child.cc")),
+      (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOTDIR",
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

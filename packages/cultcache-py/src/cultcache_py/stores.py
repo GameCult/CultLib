@@ -101,22 +101,24 @@ class JsonLinesBackingStore:
             return envelopes
 
     def push(self, envelope: CultCacheEnvelope) -> None:
-        with self._lock:
-            existing = {(item.type, item.key): item for item in self.pull_all()}
-            existing[(envelope.type, envelope.key)] = envelope
-            self._replace_all(list(existing.values()))
+        self.push_all([envelope])
 
     def push_all(self, envelopes: list[CultCacheEnvelope]) -> None:
-        with self._lock:
-            existing = {(item.type, item.key): item for item in self.pull_all()}
+        def merge(existing: dict[tuple[str, str], CultCacheEnvelope]) -> None:
             for envelope in envelopes:
                 existing[(envelope.type, envelope.key)] = envelope
-            self._replace_all(list(existing.values()))
+        self._rewrite(merge)
 
     def delete(self, type: str, key: str) -> None:
+        self._rewrite(lambda existing: existing.pop((type, key), None))
+
+    def _rewrite(self, change: Callable[[dict[tuple[str, str], CultCacheEnvelope]], object]) -> None:
+        """The one entry of every write: refuses a link at the path, then reads the file, applies the change and replaces it."""
         with self._lock:
-            existing = [item for item in self.pull_all() if not (item.type == type and item.key == key)]
-            self._replace_all(existing)
+            _refuse_linked(self.path)
+            existing = {(item.type, item.key): item for item in self.pull_all()}
+            change(existing)
+            self._replace_all(list(existing.values()))
 
     def _replace_all(self, envelopes: list[CultCacheEnvelope]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -363,7 +365,8 @@ class ReplaceKernel:
 
 def _replace_store(staged: str | os.PathLike[str], destination: str | os.PathLike[str]) -> None:
     """Replaces `destination` with `staged`: POSIX-semantics rename first on Windows (so a reader holding the store open
-    never sees it absent), os.replace elsewhere."""
+    keeps it and rarely sees it absent; a stalled rename can still leave it absent for 5-47 ms on NTFS,
+    variants:ruling:posix-rename-absent-window-document), os.replace elsewhere."""
     if sys.platform == "win32":
         replace_store_windows(os.fspath(staged), os.fspath(destination), WindowsReplaceKernel())
     else:
@@ -440,11 +443,33 @@ class WindowsReplaceKernel(ReplaceKernel):
         return 0 if self._k.MoveFileExW(staged, destination, flags) else self._ctypes.get_last_error()
 
 
+class StoreLinkedError(OSError):
+    """A write was asked of a store path that is a link: a replace there would swap the link for a regular file."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"CultCache store {path} is a link, and a write at it would replace the link; configure the link's target as the store path.")
+        self.path = path
+
+
+def _refuse_linked(path: Path) -> None:
+    """Refuses a link at the store path: a file or directory link, and on Windows a junction or any reparse point (islink misses
+    junctions before Python 3.12). Absent is not a link."""
+    linked = os.path.islink(path)
+    if not linked and sys.platform == "win32":
+        try:
+            linked = bool(os.lstat(path).st_file_attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+        except FileNotFoundError:
+            pass
+    if linked:
+        raise StoreLinkedError(path)
+
+
 @contextmanager
 def store_write_lock(path: Path, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
     """Holds the exclusive store lock on `<path>.lock`, the lock the C#, Rust and TypeScript runtimes take: flock on Unix,
     LockFileEx over the whole file on Windows, polled every 10 ms with no handle held between polls. The lock file is
     created if absent and never written or deleted."""
+    _refuse_linked(path)
     lock_path = path.with_name(path.name + ".lock")
     deadline = time.monotonic() + timeout
     while True:
