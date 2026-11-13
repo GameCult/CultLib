@@ -111,7 +111,7 @@ probe() {
       node ../../node_modules/typescript/bin/tsc -p tsconfig.test.json
       node --test dist-test/test/old-reader-v3.test.js ;;
     python) PYTHONPATH=packages/cultcache-py/src python3 packages/cultcache-py/tests/test_old_reader_v3.py -v ;;
-    rust) cd packages/cultcache-rs && cargo test --test old_reader_v3 -- --nocapture ;;
+    rust) cd packages/cultcache-rs && cargo test --locked --test old_reader_v3 -- --nocapture ;;
     *) usage ;;
   esac
 }

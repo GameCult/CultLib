@@ -2795,7 +2795,7 @@ async function buildInteropPeers(): Promise<void> {
 }
 
 async function buildRustInteropPeer(): Promise<void> {
-  rustInteropPeerBuild ??= execFileAsync(cargoCommand, ["build", "--quiet", "--example", "cultnet_interop_peer"], {
+  rustInteropPeerBuild ??= execFileAsync(cargoCommand, ["build", "--locked", "--quiet", "--example", "cultnet_interop_peer"], {
     cwd: cultnetRsRoot,
   }).then(() => undefined);
   await rustInteropPeerBuild;
