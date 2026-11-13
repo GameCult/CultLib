@@ -136,7 +136,7 @@ namespace GameCult.Caching.OutsideStoreTests
                 IsDirty = true;
             });
 
-            public override void PushAll() => Held(() => Apply(Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>(), Array.Empty<string>()));
+            public override void PushAll(bool soft) => Held(() => Apply(Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>(), Array.Empty<string>()));
 
             public override CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait) => Held(() =>
             {

@@ -208,6 +208,72 @@ namespace GameCult.Caching.Tests
             Assert.That(reader.AllEntries, Is.Empty);
         }
 
+        [Test]
+        public async Task SoftFlushOverAbsentManifestWrites()
+        {
+            using var cache = Open(out var store);
+            var key = await cache.UpsertAsync(typeof(Page), new Page { Name = "a", Text = "one" });
+
+            cache.FlushAllBackingStores(soft: true);
+
+            Assert.That(File.Exists(_manifest), Is.True);
+            Assert.That(store.IsDirty, Is.False);
+            using var reader = Open(out _);
+            Assert.That(reader.Get<Page>(key)?.Text, Is.EqualTo("one"));
+        }
+
+        [Test]
+        public async Task SoftFlushOverReadableManifestLeavesItAndKeepsStagedWritesDirty()
+        {
+            using var cache = Open(out var store);
+            await cache.UpsertAsync(typeof(Page), new Page { Name = "a", Text = "one" });
+            cache.FlushAllBackingStores();
+            var before = File.ReadAllBytes(_manifest);
+            var pages = Directory.GetFiles(_records, "*.msgpack").OrderBy(path => path).ToArray();
+            var second = await cache.UpsertAsync(typeof(Page), new Page { Name = "b", Text = "two" });
+
+            cache.FlushAllBackingStores(soft: true);
+
+            Assert.That(File.ReadAllBytes(_manifest), Is.EqualTo(before), "a soft flush rewrote a manifest it reads");
+            Assert.That(Directory.GetFiles(_records, "*.msgpack").OrderBy(path => path).ToArray(), Is.EqualTo(pages));
+            Assert.That(store.IsDirty, Is.True, "a skipped soft flush discarded a staged write");
+
+            cache.FlushAllBackingStores();
+            using var reader = Open(out _);
+            Assert.That(reader.Get<Page>(second)?.Text, Is.EqualTo("two"));
+        }
+
+        [Test]
+        public async Task SoftFlushOverReadableEmptyManifestLeavesIt()
+        {
+            using var cache = Open(out var store);
+            var key = await cache.UpsertAsync(typeof(Page), new Page { Name = "a", Text = "one" });
+            cache.FlushAllBackingStores();
+            cache.Remove(key);
+            cache.FlushAllBackingStores();
+            var before = File.ReadAllBytes(_manifest);
+            using (var reader = Open(out _)) Assert.That(reader.AllEntries, Is.Empty, "the store is not readable-empty");
+            await cache.UpsertAsync(typeof(Page), new Page { Name = "b", Text = "two" });
+
+            cache.FlushAllBackingStores(soft: true);
+
+            Assert.That(File.ReadAllBytes(_manifest), Is.EqualTo(before), "a soft flush wrote over a readable store that holds no records");
+            Assert.That(store.IsDirty, Is.True);
+        }
+
+        [Test]
+        public async Task SoftFlushOverUnreadableManifestRefusesAndLeavesIt()
+        {
+            using var cache = Open(out var store);
+            await cache.UpsertAsync(typeof(Page), new Page { Name = "a", Text = "one" });
+            var junk = new byte[] { 0xC1, 0x01, 0x02, 0x03 };
+            File.WriteAllBytes(_manifest, junk);
+
+            Assert.That(() => store.PushAll(soft: true), Throws.Exception);
+            Assert.That(File.ReadAllBytes(_manifest), Is.EqualTo(junk));
+            Assert.That(store.IsDirty, Is.True);
+        }
+
         private CultCache Open(out DirectoryMessagePackBackingStore store)
         {
             var cache = new CultCache(Registry);

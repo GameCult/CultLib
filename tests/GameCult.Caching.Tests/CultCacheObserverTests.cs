@@ -180,7 +180,7 @@ namespace GameCult.Caching.Tests
 
             public override void Push(CultStoredDocument entry) { }
             public override void Delete(CultStoredDocument entry) { }
-            public override void PushAll() { }
+            public override void PushAll(bool soft) { }
             public override CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait) => CultCommitOutcome.Committed;
         }
 

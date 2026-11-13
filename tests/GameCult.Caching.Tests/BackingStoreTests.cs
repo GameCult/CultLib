@@ -57,6 +57,137 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task SoftFlush_Over_Readable_Store_Leaves_It_Byte_For_Byte_And_Keeps_Staged_Writes_Dirty()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.msgpack");
+            try
+            {
+                var store = new SingleFileMessagePackBackingStore(filePath);
+                var cache = new CultCache();
+                cache.AddBackingStore(store);
+                await cache.AddAsync(new NamedTestEntry { Name = "first", Value = "one" });
+                await cache.FlushAsync();
+                var before = File.ReadAllBytes(filePath);
+
+                var staged = await cache.AddAsync(new NamedTestEntry { Name = "second", Value = "two" });
+                await cache.FlushAsync(soft: true);
+
+                Assert.That(File.ReadAllBytes(filePath), Is.EqualTo(before), "a soft flush rewrote a store it reads");
+                Assert.That(store.IsDirty, Is.True, "a skipped soft flush discarded a staged write");
+
+                await cache.FlushAsync();
+                var reader = new CultCache();
+                reader.AddBackingStore(new SingleFileMessagePackBackingStore(filePath));
+                await reader.PullAllBackingStoresAsync();
+                Assert.That(reader.Get<NamedTestEntry>(staged.Key)!.Value, Is.EqualTo("two"));
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+            }
+        }
+
+        [Test]
+        public async Task SoftFlush_Over_Readable_Store_Holding_No_Records_Leaves_It()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.msgpack");
+            try
+            {
+                var store = new SingleFileMessagePackBackingStore(filePath);
+                var cache = new CultCache();
+                cache.AddBackingStore(store);
+                var first = await cache.AddAsync(new NamedTestEntry { Name = "first", Value = "one" });
+                await cache.FlushAsync();
+                cache.Remove(first.Key);
+                await cache.FlushAsync();
+                var before = File.ReadAllBytes(filePath);
+                var empty = new CultCache();
+                empty.AddBackingStore(new SingleFileMessagePackBackingStore(filePath));
+                Assert.That(empty.AllEntries, Is.Empty, "the store is not readable-empty");
+
+                await cache.AddAsync(new NamedTestEntry { Name = "second", Value = "two" });
+                await cache.FlushAsync(soft: true);
+
+                Assert.That(File.ReadAllBytes(filePath), Is.EqualTo(before), "a soft flush wrote over a readable store that holds no records");
+                Assert.That(store.IsDirty, Is.True);
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+            }
+        }
+
+        [Test]
+        public async Task PlainPushAll_Over_Readable_Store_Writes_The_Staged_Records()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.msgpack");
+            try
+            {
+                var store = new SingleFileMessagePackBackingStore(filePath);
+                var cache = new CultCache();
+                cache.AddBackingStore(store);
+                await cache.AddAsync(new NamedTestEntry { Name = "first", Value = "one" });
+                store.PushAll();
+                var before = File.ReadAllBytes(filePath);
+
+                await cache.AddAsync(new NamedTestEntry { Name = "second", Value = "two" });
+                store.PushAll();
+
+                Assert.That(File.ReadAllBytes(filePath), Is.Not.EqualTo(before), "a plain PushAll skipped a store it reads");
+                Assert.That(store.IsDirty, Is.False);
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+            }
+        }
+
+        [Test]
+        public async Task SoftFlush_Over_Absent_Path_Writes()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.msgpack");
+            try
+            {
+                var store = new SingleFileMessagePackBackingStore(filePath);
+                var cache = new CultCache();
+                cache.AddBackingStore(store);
+                await cache.AddAsync(new NamedTestEntry { Name = "first", Value = "one" });
+
+                await cache.FlushAsync(soft: true);
+
+                Assert.That(File.Exists(filePath), Is.True);
+                Assert.That(store.IsDirty, Is.False);
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+            }
+        }
+
+        [Test]
+        public async Task SoftFlush_Over_Unreadable_File_Refuses_And_Leaves_It()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.msgpack");
+            try
+            {
+                var junk = new byte[] { 0xC1, 0x01, 0x02, 0x03 };
+                var store = new SingleFileMessagePackBackingStore(filePath);
+                var cache = new CultCache();
+                cache.AddBackingStore(store);
+                await cache.AddAsync(new NamedTestEntry { Name = "first", Value = "one" });
+                File.WriteAllBytes(filePath, junk);
+
+                Assert.That(() => store.PushAll(soft: true), Throws.InstanceOf<CultStoreUnreadableException>());
+                Assert.That(File.ReadAllBytes(filePath), Is.EqualTo(junk));
+                Assert.That(store.IsDirty, Is.True);
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+            }
+        }
+
+        [Test]
         public async Task SingleFileMessagePackBackingStore_PullAll_SeesFileCreatedAfterReaderOpened()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.msgpack");
