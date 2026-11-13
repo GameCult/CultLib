@@ -7,6 +7,7 @@ All notable changes to `@gamecult/cultcache-ts` are recorded here, following
 
 ### Changed
 
+- `withStoreWriteLock` looks for a link at the store path again once the lock is held, so a link put at the path while a writer waited on the lock is refused with `StoreLinkedError` and the lock released, instead of being replaced. Pinned by a test that puts the link while another holder owns the lock.
 - `CultCache.isWritable` does not look at store paths: a link at a store path is not predicted, and the write refuses it with `StoreLinkedError`. Pinned by a test through a cache attached to a linked store.
 
 ### Breaking

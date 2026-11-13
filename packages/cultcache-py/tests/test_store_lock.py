@@ -5,12 +5,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from cultcache_py import SingleFileMessagePackBackingStore, stores
+from cultcache_py.stores import StoreLinkedError, store_write_lock
 from cultcache_py.backing_store import CultCacheEnvelope
 
 REPO = Path(__file__).resolve().parents[3]
@@ -72,6 +74,48 @@ class StoreLockTests(unittest.TestCase):
     def test_write_waits_while_the_typescript_runtime_holds_the_lock(self) -> None:
         holder = start_holder(["node", "-e", TS_HOLDER, str(TS_STORE_FILE), str(self.path), str(HOLD_SECONDS)])
         self.assert_write_waits_for(holder)
+
+    def test_a_link_put_while_a_writer_waits_on_the_lock_is_refused_once_it_holds_it(self) -> None:
+        target = self.dir / "volume" / "store.cc"
+        target.parent.mkdir()
+        SingleFileMessagePackBackingStore(target).push(envelope("a"))
+        before = target.read_bytes()
+        writes = {
+            "push": lambda store: store.push(envelope("b")),
+            "push_all": lambda store: store.push_all([envelope("b")]),
+            "delete": lambda store: store.delete("t", "a"),
+        }
+        missing = self.dir / "volume" / "missing.cc"
+        for (name, write), link_to in [(item, to) for item in writes.items() for to in (target, missing)]:
+            with self.subTest(name, dangling=link_to == missing):
+                if os.path.lexists(self.path):
+                    os.unlink(self.path)
+                holder = start_holder([sys.executable, "-c", PY_HOLDER, str(self.path), str(HOLD_SECONDS)])
+                self.addCleanup(holder.wait)
+                self.addCleanup(holder.stdout.close)  # type: ignore[union-attr]
+                outcome: list[BaseException | None] = []
+
+                def run() -> None:
+                    try:
+                        write(SingleFileMessagePackBackingStore(self.path, lock_timeout=10))
+                        outcome.append(None)
+                    except BaseException as exc:  # noqa: BLE001 - the thread hands the outcome to the test
+                        outcome.append(exc)
+
+                writer = threading.Thread(target=run)
+                writer.start()
+                time.sleep(0.3)
+                os.symlink(link_to, self.path)  # after the writer's pre-lock look, while it waits
+                writer.join()
+                holder.wait()
+                self.assertEqual(1, len(outcome))
+                self.assertIsInstance(outcome[0], StoreLinkedError)
+                self.assertTrue(os.path.islink(self.path), "the link was replaced")
+                self.assertEqual(before, target.read_bytes())
+                self.assertFalse(missing.exists(), "the dangling target was created")
+                os.unlink(self.path)  # a link is refused before the lock, so remove it to probe the writer's own lock file
+                with store_write_lock(self.path, timeout=0.2):  # the lock is free
+                    pass
 
     def test_the_lock_is_released_after_each_write(self) -> None:
         store = SingleFileMessagePackBackingStore(self.path, lock_timeout=0.2)

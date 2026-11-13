@@ -417,6 +417,43 @@ test("a second writer in this process waits for the store lock and runs after re
   }
 });
 
+test("a link put while a writer waits on the store lock is refused once it holds the lock", { skip: process.platform === "win32" }, async () => {
+  const directory = await scratch();
+  try {
+    const target = join(directory, "target.cc");
+    await new SingleFileMessagePackBackingStore(target).push(noteEnvelope("a"));
+    const before = await readFile(target);
+    const writes: Array<[string, (store: SingleFileMessagePackBackingStore) => Promise<void>]> = [
+      ["push", (store) => store.push(noteEnvelope("b"))],
+      ["pushAll", (store) => store.pushAll([noteEnvelope("b")])],
+      ["delete", (store) => store.delete(noteEnvelope("a"))],
+    ];
+    const missing = join(directory, "missing.cc");
+    for (const [name, write, linkTo] of writes.flatMap(([n, w]) => [[n, w, target], [`${n} (dangling)`, w, missing]] as const)) {
+      const link = join(directory, `${name.replace(/\W+/g, "-")}.cc`);
+      let writer: Promise<void> | undefined;
+      await withStoreWriteLock(link, async () => {
+        writer = write(new SingleFileMessagePackBackingStore(link));
+        writer.catch(() => undefined);
+        await sleepFor(150);
+        await fsp.symlink(linkTo, link); // after the writer's pre-lock look, while it waits
+      });
+      await assert.rejects(writer!, (error: unknown) => error instanceof PackageStoreLinkedError, name);
+      assert.ok((await fsp.lstat(link)).isSymbolicLink(), `${name}: the link was replaced`);
+      assert.deepEqual(await readFile(target), before, `${name}: the target changed`);
+      await assert.rejects(fsp.lstat(missing), { code: "ENOENT" }, `${name}: the dangling target was created`);
+      await rm(link); // the link is refused before the lock, so remove it to probe the lock
+      assert.equal(await withStoreWriteLock(link, async () => "free", { timeoutMs: 200 }), "free", `${name}: the lock is held`);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+function noteEnvelope(key: string): CultCacheEnvelope {
+  return { key, type: "note", payload: documentPayloadFromBytes(Uint8Array.of(0x91, 1)), storedAt: "2026-10-20T00:00:00Z" };
+}
+
 test("the store lock gives up after its wait bound and names the lock path", async () => {
   const directory = await scratch();
   try {

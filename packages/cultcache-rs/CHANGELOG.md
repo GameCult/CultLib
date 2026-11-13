@@ -8,6 +8,7 @@ only in git history.
 
 ### Changed
 
+- The single-file store re-checks for a link once the store lock is held (every write and the try-exchange), so a link put at the path while a writer waited on the lock is refused with `StoreLinkedError` and the lock released, as C# does, instead of being replaced. Pinned by a test that puts the link while a second holder owns the lock.
 - `CultCache::is_writable` does not look at store paths: a link at a store path is not predicted, and the write refuses it with `StoreLinkedError`. Pinned by a test through a cache attached to a linked store.
 
 ### Breaking

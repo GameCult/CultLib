@@ -1752,7 +1752,7 @@ impl SingleFileMessagePackBackingStore {
         let lock = self.open_lock_file()?;
         fs2::FileExt::lock_exclusive(&lock)
             .with_context(|| format!("failed to lock {}", self.lock_path().display()))?;
-        release_lock(lock, action())
+        self.run_locked(lock, action)
     }
 
     /// Replaces the named entries only if each still matches its expectation.
@@ -1870,7 +1870,13 @@ impl SingleFileMessagePackBackingStore {
                     .with_context(|| format!("failed to lock {}", self.lock_path().display()));
             }
         }
-        release_lock(lock, action()).map(Some)
+        self.run_locked(lock, action).map(Some)
+    }
+
+    /// The one tail of both exclusive entries: with the lock held, look for a link again (one may have been put at the
+    /// path while the lock was awaited; the look before the lock saw the path earlier), run the action, release.
+    fn run_locked<T>(&self, lock: File, action: impl FnOnce() -> Result<T>) -> Result<T> {
+        release_lock(lock, refuse_linked(&self.path).and_then(|()| action()))
     }
 
     fn open_lock_file(&self) -> Result<File> {
@@ -8196,6 +8202,46 @@ mod tests {
         let mut keyed = RedbMessagePackBackingStore::new(temp.path().join("keyed.redb"))?;
         with_write_fault(WriteStep::Unlock, || keyed.push(&pushed))?;
         assert_eq!(keyed.pull_all()?, vec![pushed]);
+        Ok(())
+    }
+
+    // A link put at the store path while a writer waits on the lock is refused once the lock is taken, as C# does, and the
+    // lock is free afterwards.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_put_while_a_writer_waits_on_the_lock_is_refused_once_it_holds_it() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let volume = temp.path().join("volume");
+        fs::create_dir(&volume)?;
+        let target = volume.join("store.cc");
+        SingleFileMessagePackBackingStore::new(&target).push(&snapshot_envelope("a", b"1"))?;
+        let before = fs::read(&target)?;
+        let dangling = volume.join("missing.cc");
+        let path = temp.path().join("late.cc");
+        let writers: [(&str, fn(&mut SingleFileMessagePackBackingStore) -> Result<()>); 4] = [
+            ("push", |s| s.push(&snapshot_envelope("b", b"2"))),
+            ("push_all", |s| s.push_all(&[snapshot_envelope("b", b"2")], PushAllOptions::default())),
+            ("delete", |s| s.delete(&snapshot_envelope("a", b"1"))),
+            ("compare_exchange_snapshot", |s| s.compare_exchange_snapshot(&[], &[snapshot_envelope("b", b"2")]).map(|_| ())),
+        ];
+        for (name, write, link_to) in writers.into_iter().flat_map(|(n, w)| [(n, w, &target), (n, w, &dangling)]) {
+            let _ = fs::remove_file(&path);
+            let store = SingleFileMessagePackBackingStore::new(&path);
+            let holder = store.open_lock_file()?;
+            fs2::FileExt::lock_exclusive(&holder)?;
+            let mut waiting = SingleFileMessagePackBackingStore::new(&path);
+            let handle = std::thread::spawn(move || write(&mut waiting));
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            std::os::unix::fs::symlink(link_to, &path)?;
+            fs2::FileExt::unlock(&holder)?;
+            let error = handle.join().expect("writer thread").expect_err("the late link must be refused");
+            assert!(error.downcast_ref::<StoreLinkedError>().is_some(), "{name}: {error:#}");
+            assert!(fs::symlink_metadata(&path)?.file_type().is_symlink(), "{name}: the link was replaced");
+            assert_eq!(fs::read(&target)?, before, "{name}: the target changed");
+            assert!(!dangling.exists(), "{name}: the dangling target was created");
+            let probe = store.open_lock_file()?;
+            fs2::FileExt::try_lock_exclusive(&probe).map_err(|e| anyhow!("{name}: lock still held: {e}"))?;
+        }
         Ok(())
     }
 
