@@ -1863,7 +1863,9 @@ impl SingleFileMessagePackBackingStore {
         refuse_linked(&self.path)?;
         #[cfg(test)]
         run_after_pre_lock_look();
-        let lock = self.open_lock_file()?;
+        let Some(lock) = self.try_open_lock_file()? else {
+            return Ok(None);
+        };
         match fs2::FileExt::try_lock_exclusive(&lock) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
@@ -1881,19 +1883,31 @@ impl SingleFileMessagePackBackingStore {
         release_lock(lock, refuse_linked(&self.path).and_then(|()| action()))
     }
 
+    /// Opens the lock file, waiting through a Windows sharing violation the way the lock itself waits.
     fn open_lock_file(&self) -> Result<File> {
+        let lock_path = self.prepare_lock_dir()?;
+        retry_while_busy(
+            || open_lock_once(&lock_path),
+            is_sharing_violation,
+            || std::thread::sleep(std::time::Duration::from_millis(5)),
+        )
+        .with_context(|| format!("failed to open {}", lock_path.display()))
+    }
+
+    /// The single-attempt open for the try entry: a sharing violation is `None`, the same answer as a held lock.
+    fn try_open_lock_file(&self) -> Result<Option<File>> {
+        let lock_path = self.prepare_lock_dir()?;
+        open_unless_busy(|| open_lock_once(&lock_path), is_sharing_violation)
+            .with_context(|| format!("failed to open {}", lock_path.display()))
+    }
+
+    fn prepare_lock_dir(&self) -> Result<PathBuf> {
         let lock_path = self.lock_path();
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        OpenOptions::new()
-            .create(true)
-            .read(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)
-            .with_context(|| format!("failed to open {}", lock_path.display()))
+        Ok(lock_path)
     }
 
     fn lock_path(&self) -> PathBuf {
@@ -4545,6 +4559,53 @@ impl ReplaceKernel for WindowsKernel {
 
     fn sleep(&self, milliseconds: u64) {
         std::thread::sleep(std::time::Duration::from_millis(milliseconds));
+    }
+}
+
+fn open_lock_once(lock_path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .truncate(false)
+        .write(true)
+        .open(lock_path)
+}
+
+/// Windows ERROR_SHARING_VIOLATION (raw os error 32): another handle holds the lock file open without sharing. On Unix
+/// errno 32 is EPIPE and is never a busy file.
+#[cfg(windows)]
+fn is_sharing_violation(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(32)
+}
+
+#[cfg(not(windows))]
+fn is_sharing_violation(_error: &std::io::Error) -> bool {
+    false
+}
+
+/// Repeats `open` while it fails busy, sleeping between tries and without a bound, as the lock waits; any other error surfaces.
+fn retry_while_busy<T>(
+    mut open: impl FnMut() -> std::io::Result<T>,
+    busy: impl Fn(&std::io::Error) -> bool,
+    mut sleep: impl FnMut(),
+) -> std::io::Result<T> {
+    loop {
+        match open() {
+            Err(error) if busy(&error) => sleep(),
+            other => return other,
+        }
+    }
+}
+
+/// One attempt: `None` when the open fails busy, any other error surfaces.
+fn open_unless_busy<T>(
+    open: impl FnOnce() -> std::io::Result<T>,
+    busy: impl Fn(&std::io::Error) -> bool,
+) -> std::io::Result<Option<T>> {
+    match open() {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if busy(&error) => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -8259,6 +8320,61 @@ mod tests {
             fs2::FileExt::try_lock_exclusive(&probe).map_err(|e| anyhow!("{name}: lock still held: {e}"))?;
         }
         Ok(())
+    }
+
+    fn busy_error() -> std::io::Error {
+        std::io::Error::from_raw_os_error(32)
+    }
+
+    fn is_busy(error: &std::io::Error) -> bool {
+        error.raw_os_error() == Some(32)
+    }
+
+    #[test]
+    fn the_lock_open_waits_through_busy_failures_then_opens() {
+        let (mut tries, mut sleeps) = (0, 0);
+        let opened = retry_while_busy(
+            || {
+                tries += 1;
+                if tries <= 4 { Err(busy_error()) } else { Ok(tries) }
+            },
+            is_busy,
+            || sleeps += 1,
+        );
+        assert_eq!(opened.unwrap(), 5);
+        assert_eq!(sleeps, 4);
+    }
+
+    #[test]
+    fn the_lock_open_surfaces_a_non_busy_error_at_once() {
+        let (mut tries, mut sleeps) = (0, 0);
+        let error = retry_while_busy::<()>(
+            || {
+                tries += 1;
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            },
+            is_busy,
+            || sleeps += 1,
+        )
+        .expect_err("a non-busy error must surface");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!((tries, sleeps), (1, 0));
+    }
+
+    #[test]
+    fn the_try_open_maps_a_sharing_violation_to_none_without_retrying() {
+        let mut tries = 0;
+        let opened = open_unless_busy::<()>(
+            || {
+                tries += 1;
+                Err(busy_error())
+            },
+            is_busy,
+        );
+        assert!(opened.unwrap().is_none());
+        assert_eq!(tries, 1);
+        let other = open_unless_busy::<()>(|| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)), is_busy);
+        assert!(other.is_err());
     }
 
     // The try entry has no wait, so the late window is the gap between its look and its lock: a link put there is refused
