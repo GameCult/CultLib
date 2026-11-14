@@ -10,7 +10,7 @@ from typing import Any, Callable, Generic, Iterable, TypeVar
 
 from .backing_store import BackingStore, CultCacheEnvelope
 from .documents import DocumentDefinition, UnreadSlots, extract_value
-from .stores import SchemaConflictError, _parse_stored_at, retyped, stored_at_over, written_owns
+from .stores import SchemaConflictError, parse_stored_at, retyped, stored_at_over, written_owns
 
 T = TypeVar("T")
 F = TypeVar("F", bound=Callable[..., Any])
@@ -650,7 +650,7 @@ class CultCache:
             self._drop(other, key)
         for envelope, value, keys in admitted:
             stamp = stamps.get(envelope.key)
-            if isinstance(stamp, str) and _parse_stored_at(stamp) is not None:
+            if isinstance(stamp, str) and parse_stored_at(stamp) is not None:
                 envelope = replace(envelope, stored_at=stamp)
             self._remove_lookups(type, envelope.key)
             values[envelope.key] = value

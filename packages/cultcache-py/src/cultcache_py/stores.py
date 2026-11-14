@@ -780,7 +780,7 @@ _STORED_AT_SHAPE = re.compile(
 )
 
 
-def _parse_stored_at(text: Any) -> datetime | None:
+def parse_stored_at(text: Any) -> datetime | None:
     """The UTC instant a stored_at text names, or None. Only the shape the runtimes write is a stamp: an RFC 3339 date-time with T,
     an optional fraction of 1 to 9 digits (cut to the microsecond) and Z or a numeric offset of hours 00-23 and minutes 00-59. Checked here, not left to
     fromisoformat, whose accepted set differs by interpreter (3.10 and 3.13) and from Rust and TypeScript. An instant outside
@@ -808,7 +808,7 @@ def mint_stored_at(previous: str | None, now: datetime) -> str:
     A previous that does not parse leaves `now`. Raises ValueError, nothing minted, when `previous` is the last instant a stamp
     can name, so a write over it is refused and writes nothing."""
     now = now.astimezone(timezone.utc)
-    last = _parse_stored_at(previous)
+    last = parse_stored_at(previous)
     if last is not None and now <= last:
         try:
             now = last + timedelta(microseconds=1)
@@ -820,7 +820,7 @@ def mint_stored_at(previous: str | None, now: datetime) -> str:
 def stored_at_over(staged: str, replaced: str) -> str:
     """The stored_at a record replacing `replaced` is written with (C# StoredAtOver): `staged` when both parse and it is strictly
     later, else one minted over `replaced`. No content is compared: every replacing write is stamped later."""
-    later, earlier = _parse_stored_at(staged), _parse_stored_at(replaced)
+    later, earlier = parse_stored_at(staged), parse_stored_at(replaced)
     if later is not None and earlier is not None and later > earlier:
         return staged
     return mint_stored_at(replaced, datetime.now(timezone.utc))

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- `parse_stored_at` (was `_parse_stored_at`) is public: cultmesh-py judges a peer's `storedAt` by it. A peer's `document_put_raw` whose `storedAt` is missing, empty or not a stamp is refused `message_invalid` (field `document`) and nothing is minted or stored (variants:ruling:raw-put-without-stamp-refused). A subscribed server's stampless put now raises `ValueError` from `CultMeshClient.read_next_change` instead of being stored under a minted stamp.
+
 ### Added
 
 - `CultCache.update` and `update_global` return `UpdateResult(outcome, document)`; `UpdateOutcome` is `UPDATED`, `DECLINED` or `LOST_RACE`. The single-file store gains `read(key)` (the record and its content version, the SHA-256 C# computes) and `commit_if(envelope, expected)`, the version is the SHA-256 of the record re-encoded as `[key, schemaId, storedAt, payload]` with minimal MessagePack encodings, which is the SHA-256 of the record's stored bytes exactly when the writer encoded it minimally (every writer in this library does; a record another writer encoded with a wider-than-needed length or integer has the version of its minimal form, not of its bytes). Both looked up by the cache and not `BackingStore` protocol members (variants:cut_spec:cut-update-with-retry-py).

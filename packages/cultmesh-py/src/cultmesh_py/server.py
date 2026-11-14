@@ -10,6 +10,7 @@ from typing import Any
 
 import msgpack
 
+from cultcache_py.stores import parse_stored_at
 from cultnet_py import (
     error_message,
     message_invalid_error,
@@ -969,7 +970,7 @@ class CultMeshLocalServer:
         as a snapshot would serve it under the shortest message id, must fit max_snapshot_bytes;
         a put arriving over RUDP must also fit, as fragments of rudp_max_fragment_bytes, in one
         message and the peer's reliable queue. A put whose document has no string recordKey or
-        binary payload could never be stored or served, and is refused as malformed."""
+        binary payload, or a storedAt that is no stamp, could never be stored or served, and is refused as malformed."""
         document_record = message.get("document")
         if not (
             isinstance(document_record, dict)
@@ -977,6 +978,8 @@ class CultMeshLocalServer:
             and isinstance(document_record.get("payload"), (bytes, bytearray))
         ):
             return self._message_invalid(message, "document", "Raw put documents must carry a string recordKey and a binary payload.")
+        if parse_stored_at(document_record.get("storedAt")) is None:
+            return self._message_invalid(message, "document", "Raw put documents must carry a storedAt stamp.")
         if self.max_snapshot_bytes is None and not over_rudp:
             return None
         alone = self.node.database.raw_put_served_alone(message, message_id=_SHORTEST_SERVED_MESSAGE_ID)

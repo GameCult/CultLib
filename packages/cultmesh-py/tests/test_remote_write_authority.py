@@ -94,6 +94,44 @@ class NotificationStampTests(unittest.TestCase):
                     self.assertEqual(node.database._shard_logs[SHARD_ID][-1]["put"]["document"]["storedAt"], held)
 
 
+class StamplessPutTests(unittest.TestCase):
+    """A peer's put with no storedAt, or one that is no stamp, is refused message_invalid; nothing is minted or stored."""
+
+    def test_a_put_without_a_stamp_is_refused_and_the_store_stays_writable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            node = create_node(Path(directory) / "node.cc", runtime_id="stampless-server")
+            node.database.register_document(NOTE)
+            server = CultMeshLocalServer(node=node, port=0, write_authority=CultMeshGrantAllWrites())
+            sized = CultMeshLocalServer(node=node, port=0, write_authority=CultMeshGrantAllWrites(), max_snapshot_bytes=10**6)
+            rudp = CultMeshLocalServer(node=node, port=0, write_authority=CultMeshGrantAllWrites())
+            for label, stamp in (("missing", None), ("empty", ""), ("garbage", "yesterday"), ("no zone", "2026-11-07T00:00:00")):
+                with self.subTest(label):
+                    message = put_of(KEY_A, "peer")
+                    del message["document"]["storedAt"]
+                    if stamp is not None:
+                        message["document"]["storedAt"] = stamp
+                    # The size-limited and RUDP paths measure the document as a snapshot would serve it, so they must refuse first.
+                    for limited in (server, sized, rudp):
+                        [refusal] = limited._handle_connection_message(message, {}, over_rudp=limited is rudp, peer=PEER)
+                        self.assertEqual(refusal["code"], "message_invalid")
+                        self.assertEqual(refusal["details"]["field"], "document")
+                    with self.assertRaises(ValueError):
+                        node.database.apply_raw_put_message(message)
+                    self.assertIsNone(node.cache.get(NOTE, KEY_A))
+                    self.assertNotIn(SHARD_ID, node.database._shard_logs)
+            # An aliased put with a bad stamp still asks the authority about the canonical id, and is refused before the stamp is judged.
+            authority = Recording(lambda request: CultMeshRemoteWriteDecision.refuse("no"))
+            guarded = CultMeshLocalServer(node=node, port=0, write_authority=authority)
+            aliased = put_of(KEY_A, "peer", schema_id=ALIAS, stored_at="yesterday")
+            [refusal] = guarded._handle_connection_message(aliased, {}, peer=PEER)
+            self.assertEqual(refusal["code"], "write_not_authorized")
+            self.assertEqual(authority.requests[0].schema_id, SCHEMA_ID)
+            # The refused puts left the file readable: the next put of any key is stored.
+            replies = server._handle_connection_message(put_of(KEY_B, "stamped"), {}, peer=PEER)
+            self.assertEqual(replies, [])
+            self.assertEqual(node.cache.get(NOTE, KEY_B)["text"], "stamped")
+
+
 class RemoteWriteAuthorityTests(unittest.TestCase):
     def build(self, authority: Any = None) -> CultMeshLocalServer:
         node = create_node(runtime_id="authority-server")

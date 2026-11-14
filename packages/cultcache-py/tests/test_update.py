@@ -26,7 +26,7 @@ from cultcache_py import (
     leaves as t,
 )
 from cultcache_py.cache import GLOBAL_KEY, CultCacheError
-from cultcache_py.stores import _parse_stored_at, mint_stored_at, record_version, stored_at_over
+from cultcache_py.stores import parse_stored_at, mint_stored_at, record_version, stored_at_over
 
 
 @dataclass
@@ -578,7 +578,7 @@ class StoreRestampTests(Fixture):
         return next(envelope.stored_at for envelope in store.pull_all() if envelope.key == key)
 
     def later_than_alpha(self, text: str) -> bool:
-        return _parse_stored_at(text) > _parse_stored_at(ALPHA)
+        return parse_stored_at(text) > parse_stored_at(ALPHA)
 
     def test_commit_if_and_the_restamp_at_the_store(self) -> None:
         store = SingleFileMessagePackBackingStore(self.path)
@@ -655,7 +655,7 @@ class StoreRestampTests(Fixture):
         }
         for text, instant in accepted.items():
             with self.subTest(text=text):
-                self.assertEqual(_parse_stored_at(text), instant)
+                self.assertEqual(parse_stored_at(text), instant)
         for text in (
             "2026-01-01", "20260101T000000Z", "2026-W01-1T00:00:00Z", "2026-01-01 00:00:00Z", "2026-01-01T00:00:00,5Z",
             "2026-01-01T00Z", "2026-01-01T00:00:00", "2026-01-01T00:00:00.Z", "2026-01-01T00:00:00.1234567890Z",
@@ -665,12 +665,12 @@ class StoreRestampTests(Fixture):
             "", "garbage",
         ):
             with self.subTest(text=text):
-                self.assertIsNone(_parse_stored_at(text))
+                self.assertIsNone(parse_stored_at(text))
 
     def test_a_stamp_outside_the_range_is_unparseable_and_one_at_the_edge_refuses_a_later_stamp(self) -> None:
         for text in ("9999-12-31T23:30:00-05:00", "0001-01-01T00:00:00+05:00"):
             with self.subTest(text=text):
-                self.assertIsNone(_parse_stored_at(text))
+                self.assertIsNone(parse_stored_at(text))
         now = datetime(2030, 1, 1, tzinfo=timezone.utc)
         self.assertEqual(mint_stored_at("9999-12-31T23:30:00-05:00", now), "2030-01-01T00:00:00.000000+00:00")
         edge = "9999-12-31T23:59:59.9999999Z"
@@ -699,10 +699,10 @@ class StoreRestampTests(Fixture):
     def test_stamp_parsing_and_install(self) -> None:
         for text in ("2026-01-01T00:00:00.1234567+00:00", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00.123456+00:00"):
             with self.subTest(text=text):
-                self.assertIsNotNone(_parse_stored_at(text))
-                self.assertEqual(_parse_stored_at(text).tzinfo, timezone.utc)
-        self.assertIsNone(_parse_stored_at("garbage"))
-        self.assertIsNone(_parse_stored_at(None))
+                self.assertIsNotNone(parse_stored_at(text))
+                self.assertEqual(parse_stored_at(text).tzinfo, timezone.utc)
+        self.assertIsNone(parse_stored_at("garbage"))
+        self.assertIsNone(parse_stored_at(None))
         now = datetime(2030, 1, 1, tzinfo=timezone.utc)
         self.assertEqual(mint_stored_at("garbage", now), "2030-01-01T00:00:00.000000+00:00")
         self.assertEqual(stored_at_over("2000-01-01T00:00:00Z", "2000-01-01T00:00:00Z")[:4], str(datetime.now(timezone.utc).year))  # no later: minted at now

@@ -12,6 +12,7 @@ from typing import Any, Callable
 from cultcache_py import CultCache, CultCacheEnvelope, SingleFileMessagePackBackingStore
 from cultcache_py.cache import CultCacheError, index_text
 from cultcache_py.documents import DocumentDefinition, extract_value
+from cultcache_py.stores import parse_stored_at
 from cultnet_py import (
     CultNetAppliedRecord,
     CultNetFileShardMutationLogStore,
@@ -664,10 +665,10 @@ class CultMeshDatabase:
         ):
             return None
         try:
-            prepared = self._raw_put_envelope(message)
+            document = self._raw_put_document(message)
         except Exception:  # noqa: BLE001 - any other malformed shape
             return None
-        return None if prepared is None else (prepared[0].catalog_entry().schema_id, prepared[1].key)
+        return None if document is None else (document.catalog_entry().schema_id, document_record["recordKey"])
 
     def raw_delete_target(self, message: dict[str, Any]) -> tuple[str, str] | None:
         """The canonical schema id and record key a raw delete names, or None when its schema is not registered."""
@@ -706,25 +707,34 @@ class CultMeshDatabase:
             documents=(self._served_record(prepared[1]),),
         ).to_wire()
 
-    def _raw_put_envelope(
-        self, message: dict[str, Any]
-    ) -> tuple[DocumentDefinition[Any], CultCacheEnvelope] | None:
+    def _raw_put_document(self, message: dict[str, Any]) -> DocumentDefinition[Any] | None:
+        """The registered document a raw put names, or None when its record is not a map or its schema is not registered."""
         document_record = message.get("document")
         if not isinstance(document_record, dict):
             return None
         schema_id = str(document_record.get("schemaId") or "")
-        documents_by_schema_id = schema_document_map(self.documents)
         try:
-            document = resolve_document_for_raw_record(documents_by_schema_id, schema_id, document_record)
+            return resolve_document_for_raw_record(schema_document_map(self.documents), schema_id, document_record)
         except KeyError:
             return None
+
+    def _raw_put_envelope(
+        self, message: dict[str, Any]
+    ) -> tuple[DocumentDefinition[Any], CultCacheEnvelope] | None:
+        document = self._raw_put_document(message)
+        if document is None:
+            return None
+        document_record = message["document"]
+        # A peer's put is stored under the stamp it carries, so one that is no stamp is refused: nothing is minted for it.
+        if parse_stored_at(document_record.get("storedAt")) is None:
+            raise ValueError("A raw put must carry a storedAt stamp.")
         # One id: the local schema id, under which the cache stores the record.
         return document, CultCacheEnvelope(
             key=str(document_record["recordKey"]),
             type=document.type,
             schema_id=document.catalog_entry().schema_id,
             payload=bytes(document_record["payload"]),
-            stored_at=str(document_record.get("storedAt") or ""),
+            stored_at=document_record["storedAt"],
             catalog_entry=document.catalog_entry(),
         )
 
