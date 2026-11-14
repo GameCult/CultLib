@@ -7,6 +7,7 @@ All notable changes to `@gamecult/cultnet-ts` are recorded here, following
 
 ### Breaking
 
+- `CultNetDocumentRegistry.applyRawDocumentPutMessage` and `createRawSnapshotResponseForPut` throw `A raw put must carry a storedAt stamp.` when the put's `storedAt` is missing, empty or not a stamp (`isStoredAtStamp` of cultcache-ts), and nothing is stored. The parser no longer refuses a `cultnet.document_put_raw.v0` for its `storedAt`: the server and the node judge it, so a refusal can name `document` (snapshot records and database changes are still read strictly as non-empty).
 - `decodeManifest` refuses a manifest with bytes after its first MessagePack value (`CDN artifact manifest has N bytes after its first MessagePack value.`), as the C# reference does; before, the tail was ignored. `contracts/cultmesh/content-acceptance-vectors.json` now holds `trailing_nil`, `trailing_reserved_code` and `trailing_truncated_array` as refused.
 
 ### Added

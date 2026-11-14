@@ -5,8 +5,11 @@ All notable changes to `@gamecult/cultcache-ts` are recorded here, following
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-14
+
 ### Added
 
+- `isStoredAtStamp(text)` (package and browser entries): whether a `storedAt` is a stamp, the one shape pinned in `tests/vectors/stored-at-stamp/` (an RFC 3339 date-time with `T`, an optional 1 to 9 digit fraction, `Z` or `+hh:mm`/`-hh:mm`, a real calendar date, seconds 00-59, years 0001-9999). cultnet-ts and cultmesh-ts judge a peer's put by it (variants:ruling:raw-put-without-stamp-refused).
 - `CacheBackingStore` gains the optional `read(key)` (the record at the key with its content version, from one read) and `commitIf(entry, expectedVersion)` (write only if the version still holds, under the store's write lock; returns the storedAt written). The single-file store implements both. The content version is the lowercase hex SHA-256 of the record's persisted encoding `[key, schemaId, storedAt, payload]`, equal to the C# reference's on `tests/vectors/content-version`. A store without them still works for everything except `update`.
 - `CultCacheUpdateResult` and `CultCacheUpdateOptions` (`maxAttempts`, default 5), exported from the package entry and the browser entry.
 

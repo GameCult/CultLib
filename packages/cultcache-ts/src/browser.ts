@@ -16,6 +16,7 @@ export {
 } from "./document";
 export { CultCachePayloadDepthError, MAX_PAYLOAD_DEPTH } from "./payload-depth";
 export type { DocumentPayload } from "./document";
+export { isStoredAtStamp } from "./stored-at";
 export { SchemaConflictError, StoreUnreadableError } from "./store-format";
 export type {
   AnyCultCacheDocumentDefinition,

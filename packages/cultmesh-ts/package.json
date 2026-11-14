@@ -49,7 +49,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@gamecult/cultcache-ts": "^0.15.0",
+    "@gamecult/cultcache-ts": "^0.16.0",
     "@gamecult/cultnet-ts": "^0.4.0",
     "koffi": "3.3.0"
   },

@@ -1055,6 +1055,13 @@ namespace GameCult.Networking
             var key = new CultRecordKey(message.Document.RecordKey);
             var descriptor = _documents.ResolveDescriptorForRawDocument(message.Document);
             authorize?.Invoke(descriptor.SchemaId, key);
+            // A peer's put is judged for its stamp after its authority and before any shard is asked (so it is never forwarded):
+            // the cache would mint a stamp for one that is no stamp, and a refused put stores and mints nothing.
+            if (authorize != null && !CultNetStoredAtStamp.IsStamp(message.Document.StoredAt))
+            {
+                throw new CultNetStoredAtStampException();
+            }
+
             var shard = ResolveShardInternal(descriptor, key);
             EnsurePrimary(shard, descriptor.SchemaId, key, message.ShardEpoch);
             var document = _documents.DeserializeRawDocument(message.Document);

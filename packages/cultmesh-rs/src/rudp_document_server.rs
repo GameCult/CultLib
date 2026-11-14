@@ -69,7 +69,8 @@ pub struct CultMeshRudpSnapshotQuery {
 pub trait CultMeshRudpRawDocumentSink {
     /// Whether this put may be written, decided without writing it. A receipt-capable session asks it only
     /// the first time it sees a message id; a resend is answered from what the session remembers
-    /// (write-receipt.md, rule 5). The default admits everything and leaves the decision to
+    /// (write-receipt.md, rule 5). A legacy session asks it only for a put whose `storedAt` is no stamp, so the
+    /// authority's refusal comes before the stamp's. The default admits everything and leaves the decision to
     /// `accept_raw_document`.
     fn authorize_raw_document(&mut self, _receipt: &CultMeshRudpRawDocumentReceipt) -> Result<()> {
         Ok(())
@@ -293,6 +294,9 @@ pub enum CultMeshRudpRejectionReason {
     DocumentMissing,
     /// A receipt-capable session's put or delete has a null or missing `schemaId`.
     SchemaIdMissing,
+    /// A put's `storedAt` is not a stamp (`cultcache_rs::is_stored_at_stamp`). It is judged after the sink's
+    /// authorization and before the document is measured or the sink commits it: nothing is minted or stored.
+    StoredAtNotStamp,
 }
 
 impl std::fmt::Display for CultMeshRudpRejectionReason {
@@ -307,6 +311,7 @@ impl std::fmt::Display for CultMeshRudpRejectionReason {
             Self::ChannelNotReliable => f.write_str("a receipt session's write arrived on an unreliable channel"),
             Self::DocumentMissing => f.write_str("the write has no document"),
             Self::SchemaIdMissing => f.write_str("the write has no schemaId"),
+            Self::StoredAtNotStamp => f.write_str("the document's storedAt is not a stamp"),
             Self::DocumentUnservable {
                 response_bytes,
                 max_snapshot_response_bytes,
@@ -347,7 +352,7 @@ impl std::fmt::Display for CultMeshRudpRejectionReason {
 /// The texts a refused peer is sent, one per rejection variant. They are fixed:
 /// a sink's or source's error text can quote what a peer sent, so it stays with
 /// the caller that receives the rejection and never reaches the wire.
-pub(crate) const REFUSAL_TEXTS: [&str; 17] = [
+pub(crate) const REFUSAL_TEXTS: [&str; 18] = [
     "the catalog refused the document",
     "the document can never be served",
     "the snapshot source failed",
@@ -365,6 +370,7 @@ pub(crate) const REFUSAL_TEXTS: [&str; 17] = [
     "receipt sessions require the reliable channel",
     "document is required",
     "schemaId is required",
+    "document must carry a storedAt stamp",
 ];
 
 impl CultMeshRudpRejectionReason {
@@ -393,7 +399,8 @@ impl CultMeshRudpRejectionReason {
             13 => Self::MessageIdTooLong,
             14 => Self::ChannelNotReliable,
             15 => Self::DocumentMissing,
-            _ => Self::SchemaIdMissing,
+            16 => Self::SchemaIdMissing,
+            _ => Self::StoredAtNotStamp,
         }
     }
 
@@ -416,6 +423,7 @@ impl CultMeshRudpRejectionReason {
             Self::ChannelNotReliable => 14,
             Self::DocumentMissing => 15,
             Self::SchemaIdMissing => 16,
+            Self::StoredAtNotStamp => 17,
         }
     }
 }
@@ -498,6 +506,7 @@ impl CultMeshRudpApplicationRejection {
             (CultMeshRudpRejectionReason::MessageIdTooLong, _) => message_invalid_message("messageId", text),
             (CultMeshRudpRejectionReason::DocumentMissing, _) => message_invalid_message("document", text),
             (CultMeshRudpRejectionReason::SchemaIdMissing, _) => message_invalid_message("schemaId", text),
+            (CultMeshRudpRejectionReason::StoredAtNotStamp, _) => message_invalid_message("document", text),
             (CultMeshRudpRejectionReason::ChannelNotReliable, _) => message_invalid_message("channel", text),
             (CultMeshRudpRejectionReason::WriteLimitReached, _) => CultNetMessage::Error {
                 error: format!("limit_reached: {text}"),
@@ -1601,10 +1610,18 @@ where
         receipt: CultMeshRudpRawDocumentReceipt,
         authorize: bool,
     ) -> std::result::Result<(), CultMeshRudpRejectionReason> {
-        if authorize {
+        let stamped = cultcache_rs::is_stored_at_stamp(&receipt.document.stored_at);
+        // The authority speaks first. A legacy session's sink decides at `accept_raw_document`, so it is asked here
+        // only when the stamp is bad: an ungranted peer is refused `write_not_authorized`, not told its stamp is wrong.
+        if authorize || !stamped {
             if let Err(error) = self.sink.authorize_raw_document(&receipt) {
                 return Err(CultMeshRudpRejectionReason::SinkRefused(format!("{error:#}")));
             }
+        }
+        // A peer's put is stored under the stamp it carries, so one that is no stamp is refused before anything is
+        // measured, minted or handed to the sink.
+        if !stamped {
+            return Err(CultMeshRudpRejectionReason::StoredAtNotStamp);
         }
         let document = &receipt.document;
         // Admit only what some snapshot request can return: the smallest

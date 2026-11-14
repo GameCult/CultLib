@@ -1301,6 +1301,30 @@ mod tests {
         Ok(())
     }
 
+    /// The node's store is the second owner of the stamp rule: a snapshot document whose `storedAt` is no stamp refuses
+    /// the whole pull, nothing is minted or stored, and the node stays writable.
+    #[test]
+    fn a_snapshot_document_whose_stored_at_is_no_stamp_refuses_the_pull_and_stores_nothing() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("m.cc");
+        let mut node = CultMesh::create_node(&path, TestDocuments, Default::default())?;
+        let plain = |body: &str| rmp_serde::to_vec(&(body,));
+        for bad in ["", "yesterday", "2026-01-01T00:00:00", "2026-01-01t00:00:00z", "2026-01-01T00:00:60Z"] {
+            let mut stampless = raw_note("bad", plain("bad")?);
+            stampless.stored_at = bad.to_string();
+            let error = node
+                .apply_raw_snapshot_documents(vec![raw_note("good", plain("good")?), stampless])
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("stored_at"), "{bad:?}: {error:#}");
+            assert!(node.get::<Note>("good")?.is_none() && node.get::<Note>("bad")?.is_none(), "{bad:?}");
+        }
+        assert_eq!(node.apply_raw_snapshot_documents(vec![raw_note("after", plain("after")?)])?, 1);
+        let reopened = CultMesh::create_node(&path, TestDocuments, Default::default())?;
+        assert_eq!(reopened.get_required::<Note>("after")?.body, "after");
+        assert!(reopened.get::<Note>("good")?.is_none());
+        Ok(())
+    }
+
     #[test]
     fn a_snapshot_applied_to_a_stale_node_keeps_the_records_another_writer_added() -> Result<()> {
         let temp = tempfile::tempdir()?;

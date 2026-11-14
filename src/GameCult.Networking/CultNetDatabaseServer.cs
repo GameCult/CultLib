@@ -475,6 +475,11 @@ namespace GameCult.Networking
                 _server.Logger.LogWarning($"CultNet raw put refused: {ex.Message}");
                 Refuse(peer, write, CultNetErrorMessage.ForRemoteWriteRefused(ex.Request, ex.Reason));
             }
+            catch (CultNetStoredAtStampException ex)
+            {
+                _server.Logger.LogWarning($"CultNet raw put refused: {ex.Message}");
+                Refuse(peer, write, CultNetErrorMessage.ForMessageInvalid("document", "document.storedAt is not a stamp"));
+            }
             catch (CultNetShardAuthorityException ex)
             {
                 bool forwarded;

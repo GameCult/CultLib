@@ -3761,12 +3761,7 @@ impl CultCache {
                     entry.r#type
                 ));
             }
-            if entry.stored_at.trim().is_empty() {
-                return Err(anyhow!(
-                    "CultCache envelope stored_at for type {:?} must be non-empty",
-                    entry.r#type
-                ));
-            }
+            require_stored_at_stamp(entry)?;
             require_record_payload(entry)?;
             self.refuse_unread_slots(&entry.r#type, &entry.key)?;
             self.refuse_claimed_id(entry)?;
@@ -3843,12 +3838,7 @@ impl CultCache {
                 entry.r#type
             ));
         }
-        if entry.stored_at.trim().is_empty() {
-            return Err(anyhow!(
-                "CultCache envelope stored_at for type {:?} must be non-empty",
-                entry.r#type
-            ));
-        }
+        require_stored_at_stamp(&entry)?;
         require_record_payload(&entry)?;
         self.refuse_unread_slots(&entry.r#type, &entry.key)?;
         self.refuse_claimed_id(&entry)?;
@@ -4326,6 +4316,73 @@ fn restamped_over(entry: &CultCacheEnvelope, held: &[CultCacheEnvelope]) -> Resu
         entry.stored_at = stored_at_over(&entry.stored_at, &replaced.stored_at)?;
     }
     Ok(entry)
+}
+
+/// Whether `text` is a `stored_at` stamp: the one shape pinned in `tests/vectors/stored-at-stamp/`. An RFC 3339 date-time,
+/// `YYYY-MM-DDThh:mm:ss`, an optional fraction of 1 to 9 digits, then `Z` or `+hh:mm` / `-hh:mm` (hours 00-23, minutes 00-59);
+/// uppercase `T` and `Z`, ASCII digits, no surrounding whitespace, a real calendar date, seconds 00-59, a local year of 0001-9999, and an instant (the
+/// offset applied) within years 0001-9999. Checked by hand, not by `chrono`'s RFC 3339 reader, which takes other shapes
+/// (lowercase `t`, a space, a leap second). A peer's `storedAt` is stored as it arrives, so one that is not a stamp is refused.
+pub fn is_stored_at_stamp(text: &str) -> bool {
+    let b = text.as_bytes();
+    let digits = |from: usize, count: usize| -> Option<u32> {
+        let part = b.get(from..from + count)?;
+        part.iter().all(u8::is_ascii_digit).then(|| part.iter().fold(0, |n, d| n * 10 + u32::from(d - b'0')))
+    };
+    let at = |index: usize, byte: u8| b.get(index) == Some(&byte);
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) =
+        (digits(0, 4), digits(5, 2), digits(8, 2), digits(11, 2), digits(14, 2), digits(17, 2))
+    else {
+        return false;
+    };
+    if !(at(4, b'-') && at(7, b'-') && at(10, b'T') && at(13, b':') && at(16, b':')) {
+        return false;
+    }
+    let mut next = 19;
+    if at(next, b'.') {
+        let fraction = b[next + 1..].iter().take_while(|byte| byte.is_ascii_digit()).count();
+        if !(1..=9).contains(&fraction) {
+            return false;
+        }
+        next += 1 + fraction;
+    }
+    let offset_seconds = if b.len() == next + 1 && at(next, b'Z') {
+        0
+    } else if b.len() == next + 6 && (at(next, b'+') || at(next, b'-')) && at(next + 3, b':') {
+        let (Some(hours), Some(minutes)) = (digits(next + 1, 2), digits(next + 4, 2)) else {
+            return false;
+        };
+        if hours > 23 || minutes > 59 {
+            return false;
+        }
+        let magnitude = i64::from(hours * 3600 + minutes * 60);
+        if at(next, b'-') { -magnitude } else { magnitude }
+    } else {
+        return false;
+    };
+    if second > 59 || year < 1 {
+        return false;
+    }
+    let Some(local) = chrono::NaiveDate::from_ymd_opt(year as i32, month, day)
+        .and_then(|date| date.and_hms_opt(hour, minute, second))
+    else {
+        return false;
+    };
+    use chrono::Datelike;
+    local
+        .checked_sub_signed(chrono::TimeDelta::seconds(offset_seconds))
+        .is_some_and(|utc| (1..=9999).contains(&utc.year()))
+}
+
+/// A raw envelope is stored under the stamp it carries, so one that is no stamp is refused and nothing is minted for it.
+fn require_stored_at_stamp(entry: &CultCacheEnvelope) -> Result<()> {
+    if is_stored_at_stamp(&entry.stored_at) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "CultCache envelope stored_at for type {:?} must be an RFC 3339 stamp",
+        entry.r#type
+    ))
 }
 
 fn now_utc_second() -> String {
@@ -6895,7 +6952,7 @@ mod tests {
         let (mut empty_stored_at, _) = cache.prepare_entry("n", &Note { title: "t".to_string(), body: "b".to_string() })?;
         empty_stored_at.stored_at = " ".to_string();
         let error = cache.put_prepared_batch(vec![empty_stored_at]).unwrap_err();
-        assert!(error.to_string().contains("stored_at for type \"note\" must be non-empty"), "{error}");
+        assert!(error.to_string().contains("stored_at for type \"note\" must be an RFC 3339 stamp"), "{error}");
 
         assert_eq!(cache.snapshot(), before);
         assert_eq!(fs::read(&store_path)?, store_bytes);

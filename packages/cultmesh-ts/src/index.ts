@@ -5,6 +5,7 @@ import {
   CultCache,
   SchemaConflictError,
   SingleFileMessagePackBackingStore,
+  isStoredAtStamp,
   schemaIdentityOf,
   type AnyCultCacheDocumentDefinition,
   type CacheBackingStore,
@@ -5813,6 +5814,12 @@ export class CultMesh {
               ));
               return;
             }
+            // A peer's put is stored under the stamp it carries: one that is no stamp is refused, after the authority
+            // has spoken and before the put is sized, so the size-limited path never measures it. Nothing is minted.
+            if (!isStoredAtStamp(message.document.storedAt)) {
+              sendSchemaMessage(record, cultNetMessageInvalidError("document", "Raw put documents must carry a storedAt stamp."));
+              return;
+            }
           }
           if (options.onDocumentPutRaw) {
             const unservable = unservablePut(message);
@@ -6635,7 +6642,7 @@ function normalizeRudpDocumentPut(
   return {
     schemaId: document.schemaId,
     recordKey: document.recordKey,
-    storedAt: document.storedAt ?? new Date().toISOString(),
+    storedAt: document.storedAt,
     sourceRuntimeId: document.sourceRuntimeId ?? null,
     sourceAgentId: document.sourceAgentId ?? null,
     sourceRole: document.sourceRole ?? null,

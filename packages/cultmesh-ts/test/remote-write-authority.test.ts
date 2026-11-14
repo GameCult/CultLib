@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { z } from "zod";
 import { documentPayloadFromBytes, defineDocumentType } from "@gamecult/cultcache-ts";
+import { decode } from "@msgpack/msgpack";
 import { decodeRudpPacket } from "@gamecult/cultnet-ts";
 import { encodeWireValue } from "@gamecult/cultnet-ts/wire";
 import {
@@ -307,6 +308,64 @@ test("the refusal on the wire is the pinned error-vectors bytes", async () => {
     r.peer.send(put("some:key"));
     await r.settle();
     assert.deepEqual(Buffer.from(encodeWireValue(r.replies[0])), expected);
+  });
+});
+
+// A peer's put is stored under the stamp it carries: every row of the shared vector goes through the real handler. A row that
+// is no stamp is refused message_invalid naming `document`, on the plain, the size-limited and (RUDP is this server's only
+// transport) the capped path; the handler never runs, so nothing is stored or minted, and a stamped put after it still lands.
+const STAMP_VECTOR = join(__dirname, "..", "..", "..", "..", "tests", "vectors", "stored-at-stamp", "stamps.msgpack");
+
+test("a put whose storedAt is no stamp is refused message_invalid (document), for every row of the stamp vector", async () => {
+  const rows = decode(readFileSync(STAMP_VECTOR)) as [string, boolean][];
+  const cases: [string, unknown, boolean][] = [...rows.map(([text, parses]): [string, unknown, boolean] => [JSON.stringify(text), text, parses]),
+    ["missing", undefined, false], ["number", 1_700_000_000_000, false]];
+  for (const extra of [{}, { maxPayloadBytes: 4096 }]) {
+    await using(await rig(new CultMeshGrantAllWrites(), extra), async (r) => {
+      let accepted = 0;
+      for (const [label, storedAt, parses] of cases) {
+        const message = put(KEY_A) as unknown as { document: Record<string, unknown> };
+        if (storedAt === undefined) delete message.document.storedAt; else message.document.storedAt = storedAt;
+        const seen = r.replies.length;
+        const handled = r.puts.length;
+        r.peer.send(message as unknown as CultNetMessage);
+        await sleep(40);
+        if (parses) {
+          accepted += 1;
+          assert.equal(r.puts.length, handled + 1, `${label}: a stamp reaches the handler`);
+          assert.equal(r.replies.length, seen, label);
+        } else {
+          assert.equal(r.puts.length, handled, `${label}: nothing handled, so nothing minted or stored`);
+          const reply = r.replies[seen] as { schemaVersion?: string; code?: string; details?: { field?: string } } | undefined;
+          assert.equal(reply?.schemaVersion, "cultnet.error.v0", label);
+          assert.equal(reply?.code, "message_invalid", label);
+          assert.equal(reply?.details?.field, "document", label);
+        }
+      }
+      assert.ok(accepted > 0);
+      assert.deepEqual(r.errors, []);
+      // The large put under a garbage stamp is refused for its stamp, before it is measured.
+      const large = put(KEY_A, {}, SCHEMA_ID, new Uint8Array(20_000)) as unknown as { document: Record<string, unknown> };
+      large.document.storedAt = "yesterday";
+      r.peer.send(large as unknown as CultNetMessage);
+      await sleep(60);
+      const last = r.replies[r.replies.length - 1] as { code?: string; details?: { field?: string } };
+      assert.equal(last.code, "message_invalid");
+      assert.equal(last.details?.field, "document");
+    });
+  }
+  // The stamp is judged after the authority: an ungranted peer hears write_not_authorized, aliased or not.
+  const refusing = new Recording(() => ({ granted: false, reason: "no" }));
+  await using(await rig(refusing), async (r) => {
+    const aliased = put(KEY_A, {}, ALIAS) as unknown as { document: Record<string, unknown> };
+    aliased.document.storedAt = "yesterday";
+    r.peer.send(aliased as unknown as CultNetMessage);
+    r.peer.send(put(KEY_B));
+    await r.settle();
+    assertRefused(r.replies[0], KEY_A);
+    assertRefused(r.replies[1], KEY_B);
+    assert.equal(refusing.requests[0]?.schemaId, SCHEMA_ID, "an aliased put asks under the canonical id");
+    assert.equal(r.puts.length, 0);
   });
 });
 

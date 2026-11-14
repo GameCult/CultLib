@@ -1289,7 +1289,9 @@ function validateDocumentPutRawMessage(input: unknown): asserts input is CultNet
     throw new Error("Validation failed for cultnet.document_put_raw.v0: /document: is required");
   }
 
-  validateRawDocumentRecord(candidate.document, "/document");
+  // A peer's put is judged for its stamp by the server and the node (isStoredAtStamp), which answer message_invalid naming
+  // `document` after the write authority has spoken; the parser must let such a put through to them.
+  validateRawDocumentRecord(candidate.document, "/document", { judgesStoredAt: false });
 }
 
 function validateSnapshotResponseRawMessage(
@@ -1450,6 +1452,7 @@ function validateBinaryMessageRoot(
 function validateRawDocumentRecord(
   input: unknown,
   instancePath: string,
+  { judgesStoredAt = true }: { judgesStoredAt?: boolean } = {},
 ): asserts input is CultNetRawDocumentRecord {
   if (!input || typeof input !== "object") {
     throw new Error(`Validation failed for raw CultNet document record: ${instancePath}: must be an object`);
@@ -1461,7 +1464,9 @@ function validateRawDocumentRecord(
   requireOptionalNonEmptyString(candidate.schemaVersion, `${instancePath}/schemaVersion`);
   requireOptionalNonEmptyString(candidate.schemaContentHash, `${instancePath}/schemaContentHash`);
   requireNonEmptyString(candidate.recordKey, `${instancePath}/recordKey`);
-  requireNonEmptyString(candidate.storedAt, `${instancePath}/storedAt`);
+  if (judgesStoredAt) {
+    requireNonEmptyString(candidate.storedAt, `${instancePath}/storedAt`);
+  }
   if (candidate.payloadEncoding !== "messagepack") {
     throw new Error(
       `Validation failed for raw CultNet document record: ${instancePath}/payloadEncoding: must equal messagepack`,

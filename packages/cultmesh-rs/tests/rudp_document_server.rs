@@ -3546,6 +3546,10 @@ fn blank_means_exactly_the_unicode_white_space_code_points_in_every_field() -> R
     for (index, (hex, blank)) in space.iter().map(|h| (h, true)).chain(not_space.iter().map(|h| (h, false))).enumerate() {
         let hex = hex.as_str().unwrap();
         for (field_index, field) in fields.iter().enumerate() {
+            // A storedAt must be a stamp: a non-blank one that is no stamp is not a name (write-receipt.md, Required fields).
+            if !blank && *field == "storedAt" {
+                continue;
+            }
             // A session that is sent refusals is allowed to end, so each code point and field gets its own.
             let sink = Sink::default();
             let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
@@ -3624,5 +3628,179 @@ fn an_unreadable_frame_on_a_receipt_connection_is_sent_exactly_the_fixed_text() 
         error_text_and_field(&answers[0]),
         (unreadable_vector_text(&vectors), Some("message".into()))
     );
+    Ok(())
+}
+
+// ---- A peer's `storedAt` must be a stamp (variants:ruling:raw-put-without-stamp-refused) ----
+//
+// `tests/vectors/stored-at-stamp/stamps.msgpack`: `[text, parses]` rows. Every row that is no stamp is refused and
+// nothing reaches the sink. A blank text names nothing, so it is refused as a frame that does not read (field
+// "message", write-receipt.md, Required fields); any other text that is no stamp is refused field "document".
+
+fn stamp_rows() -> Vec<(String, bool)> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/vectors/stored-at-stamp/stamps.msgpack");
+    rmp_serde::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+fn is_blank(text: &str) -> bool {
+    text.chars().all(char::is_whitespace)
+}
+
+/// A put of `key` whose `storedAt` is `stamp` as it would arrive: a blank one is swapped into the bytes, since the
+/// encoder refuses it.
+fn put_stamped_bytes(id: &str, key: &str, payload: Vec<u8>, stamp: &str) -> Result<Vec<u8>> {
+    let mut record = document(key, payload);
+    record.stored_at = if is_blank(stamp) { "zz-stamp-zz".into() } else { stamp.into() };
+    let bytes = encode_cultnet_message_to_vec(
+        &CultNetMessage::DocumentPutRaw { message_id: id.into(), document: record },
+        CultNetWireContract::CultNetSchemaV0,
+    )?;
+    Ok(if is_blank(stamp) { swap_fixstr(&bytes, "zz-stamp-zz", stamp) } else { bytes })
+}
+
+#[test]
+fn a_receipt_session_put_that_is_no_stamp_is_refused_for_every_vector_row_and_the_store_stays_writable() -> Result<()> {
+    let rows = stamp_rows();
+    assert!(rows.len() > 30);
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 700)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    assert_eq!(frames_after(&mut server, &mut peer, 1)?, vec![server_hello()]);
+    let mut expected = Vec::new();
+    let mut answers = Vec::new();
+    for (index, (text, parses)) in rows.iter().enumerate() {
+        let id = format!("r{index}");
+        peer.send_reliable("schema", put_stamped_bytes(&id, &format!("note:{index}"), vec![1, 2, 3], text)?)?;
+        expected.push((id, text.clone(), *parses));
+        // One write in flight at a time: the answer arrives before the next row is sent.
+        answers.extend(frames_after(&mut server, &mut peer, 1)?);
+    }
+    peer.send_reliable("schema", valid_put("after"))?;
+    answers.extend(frames_after(&mut server, &mut peer, 1)?);
+    for (answer, (id, text, parses)) in answers.iter().zip(&expected) {
+        if *parses {
+            assert_eq!(*answer, admitted(id, &id.replace('r', "note:")), "{text:?}");
+            continue;
+        }
+        assert_eq!(refusal_of(answer), (Some(CultNetErrorCode::MessageInvalid), Some(id.clone())), "{text:?}");
+        let field = if is_blank(text) { "message" } else { "document" };
+        assert_eq!(error_text_and_field(answer).1, Some(field.into()), "{text:?}");
+    }
+    // Every stamp row was stored exactly as sent; no refused row was stored; the put after them all was.
+    let state = sink.0.lock().unwrap();
+    let stored: Vec<&str> = state.receipts.iter().map(|receipt| receipt.document.stored_at.as_str()).collect();
+    let stamps: Vec<&str> = rows.iter().filter(|(_, parses)| *parses).map(|(text, _)| text.as_str()).collect();
+    assert_eq!(&stored[..stamps.len()], &stamps[..]);
+    assert_eq!(stored.len(), stamps.len() + 1, "only the stamped puts and the final put were stored");
+    assert_eq!(answers.last(), Some(&admitted("put-after", "after")));
+    Ok(())
+}
+
+#[test]
+fn a_put_with_no_storedat_key_is_refused_and_a_resend_replays_the_refusal() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 701)?;
+    connect(&mut server, &mut [&mut peer])?;
+    send_reliable(&mut peer, &receipt_hello())?;
+    let missing = swap_fixstr(&valid_put("a"), "storedAt", "storedAx");
+    peer.send_reliable("schema", missing)?;
+    // The same garbage stamp twice under one id: the refusal is remembered (by index) and replays as it was.
+    peer.send_reliable("schema", put_stamped_bytes("g1", "note:g", vec![1], "yesterday")?)?;
+    peer.send_reliable("schema", put_stamped_bytes("g1", "note:g", vec![1], "yesterday")?)?;
+    let answers = answers_after(&mut server, &mut peer, 3)?;
+    assert_eq!(error_text_and_field(&answers[0]).1, Some("message".into()));
+    assert_eq!(refusal_of(&answers[1]), (Some(CultNetErrorCode::MessageInvalid), Some("g1".into())));
+    assert_eq!(error_text_and_field(&answers[1]).1, Some("document".into()));
+    assert_eq!(answers[2], answers[1]);
+    assert!(sink.0.lock().unwrap().receipts.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_legacy_session_put_that_is_no_stamp_is_refused_for_every_vector_row_and_nothing_is_stored() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut connection_id = 800;
+    for (text, parses) in stamp_rows() {
+        if parses {
+            continue;
+        }
+        connection_id += 1;
+        let mut peer = client(server.local_addr()?, connection_id)?;
+        connect(&mut server, &mut [&mut peer])?;
+        let receipt = peer.send_reliable("schema", put_stamped_bytes("bad", "note:bad", vec![1, 2, 3], &text)?)?;
+        let reason = poll_until_rejected_or_stored(&mut server, &mut peer, &sink, 1)?;
+        if is_blank(&text) {
+            assert!(matches!(reason, Some(CultMeshRudpRejectionReason::MessageUnreadable(_))), "{text:?}: {reason:?}");
+        } else {
+            assert_eq!(reason, Some(CultMeshRudpRejectionReason::StoredAtNotStamp), "{text:?}");
+            let (error, code, details) = typed_refusal_seen_by(&mut peer, &receipt, Some(&mut server))?;
+            assert_eq!(code, Some(CultNetErrorCode::MessageInvalid), "{text:?}: {error}");
+            assert_eq!(details.and_then(|d| d.field), Some("document".into()), "{text:?}");
+        }
+        assert!(sink.0.lock().unwrap().receipts.is_empty(), "{text:?} reached the sink");
+    }
+    // The server and its sink are still writable.
+    connection_id += 1;
+    let mut peer = client(server.local_addr()?, connection_id)?;
+    connect(&mut server, &mut [&mut peer])?;
+    stored_after_poll(&mut server, &mut peer, &sink, 1)?;
+    Ok(())
+}
+
+/// The size gate measures the document as a snapshot would serve it: a put over the bound that is also no stamp is
+/// refused for its stamp first, and nothing is measured for one that is.
+#[test]
+fn the_stamp_is_judged_before_the_size_limit() -> Result<()> {
+    let over = document("big", vec![7; 101]);
+    let options = CultMeshRudpDocumentServerOptions {
+        max_snapshot_response_bytes: served_alone_bytes(&over)? - 1,
+        ..Default::default()
+    };
+    let sink = Sink::default();
+    let mut server = server(options, Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut peer = client(server.local_addr()?, 900)?;
+    connect(&mut server, &mut [&mut peer])?;
+    peer.send_reliable("schema", put_stamped_bytes("o1", "big", vec![7; 101], "yesterday")?)?;
+    assert_eq!(
+        poll_until_rejected_or_stored(&mut server, &mut peer, &sink, 1)?,
+        Some(CultMeshRudpRejectionReason::StoredAtNotStamp)
+    );
+    let mut stamped = client(server.local_addr()?, 901)?;
+    connect(&mut server, &mut [&mut stamped])?;
+    stamped.send_reliable("schema", put_stamped_bytes("o2", "big", vec![7; 101], "2026-06-25T00:00:00Z")?)?;
+    assert!(matches!(
+        poll_until_rejected_or_stored(&mut server, &mut stamped, &sink, 1)?,
+        Some(CultMeshRudpRejectionReason::DocumentUnservable { .. })
+    ));
+    assert!(sink.0.lock().unwrap().receipts.is_empty());
+    Ok(())
+}
+
+/// An ungranted peer is refused `write_not_authorized` before its stamp is judged, on a receipt session and on a
+/// legacy one, and the authority is asked about the write.
+#[test]
+fn an_ungranted_peer_is_refused_for_authority_before_its_stamp_is_judged() -> Result<()> {
+    let sink = Sink::denying(&["secret"]);
+    let mut server = server(Default::default(), Clock::new(70_000), sink.clone(), Source::default())?;
+    let mut receipt_peer = client(server.local_addr()?, 950)?;
+    connect(&mut server, &mut [&mut receipt_peer])?;
+    send_reliable(&mut receipt_peer, &receipt_hello())?;
+    receipt_peer.send_reliable("schema", put_stamped_bytes("a1", "secret", vec![1], "yesterday")?)?;
+    let answers = answers_after(&mut server, &mut receipt_peer, 1)?;
+    assert_eq!(refusal_of(&answers[0]), (Some(CultNetErrorCode::WriteNotAuthorized), Some("a1".into())));
+    assert_eq!(sink.0.lock().unwrap().authorized, vec!["a1".to_string()]);
+
+    let mut legacy_peer = client(server.local_addr()?, 951)?;
+    connect(&mut server, &mut [&mut legacy_peer])?;
+    legacy_peer.send_reliable("schema", put_stamped_bytes("a2", "secret", vec![1], "yesterday")?)?;
+    assert!(matches!(
+        poll_until_rejected_or_stored(&mut server, &mut legacy_peer, &sink, 1)?,
+        Some(CultMeshRudpRejectionReason::SinkRefused(_))
+    ));
+    assert!(sink.0.lock().unwrap().receipts.is_empty());
     Ok(())
 }

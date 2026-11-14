@@ -115,7 +115,7 @@
     "validPutPayloadHex": "81A16101",
     "whiteSpaceCodePoints": ["0009","000A","000B","000C","000D","0020","0085","00A0","1680","2000","2001","2002","2003","2004","2005","2006","2007","2008","2009","200A","2028","2029","202F","205F","3000"],
     "notWhiteSpaceCodePoints": ["200B","200C","200D","2060","FEFF","180E","001C","001D","001E","001F"],
-    "codePointCases": "For every code point in whiteSpaceCodePoints, each of schemaId, recordKey, storedAt, sourceRuntimeId, sourceAgentId, sourceRole and one tags entry, set alone to a string of just that code point (and to that code point repeated three times), is refused; for every code point in notWhiteSpaceCodePoints the same string is not blank and the put is admitted.",
+    "codePointCases": "For every code point in whiteSpaceCodePoints, each of schemaId, recordKey, storedAt, sourceRuntimeId, sourceAgentId, sourceRole and one tags entry, set alone to a string of just that code point (and to that code point repeated three times), is refused; for every code point in notWhiteSpaceCodePoints the same string in each of those fields except storedAt is not blank and the put is admitted (a storedAt must be a stamp: a non-blank storedAt that is no stamp is refused message_invalid, field document, after the write authority, and is covered by tests/vectors/stored-at-stamp).",
     "cases": [
       { "name": "valid_document_is_admitted", "set": {}, "outcome": "admitted" },
       { "name": "empty_schema_id", "set": { "schemaId": "" }, "outcome": "refused" },
@@ -140,7 +140,7 @@
       { "name": "zero_width_space_schema_id_is_a_name", "set": { "schemaId": "\u200b" }, "outcome": "admitted" },
       { "name": "zero_width_space_record_key_is_a_name", "set": { "recordKey": "\u200b" }, "outcome": "admitted" },
       { "name": "zero_width_space_tag_is_a_name", "set": { "tags": ["\u200b"] }, "outcome": "admitted" },
-      { "name": "bom_stored_at_is_a_name", "set": { "storedAt": "\ufeff" }, "outcome": "admitted" },
+      { "name": "bom_record_key_is_a_name", "set": { "recordKey": "\ufeff" }, "outcome": "admitted" },
       { "name": "mongolian_vowel_separator_source_role_is_a_name", "set": { "sourceRole": "\u180e" }, "outcome": "admitted" },
       { "name": "padded_name_is_a_name", "set": { "schemaId": "\u00a0a\u2003", "tags": [" a"] }, "outcome": "admitted" },
       { "name": "file_separator_schema_id_is_a_name", "set": { "schemaId": "\u001c" }, "outcome": "admitted" },

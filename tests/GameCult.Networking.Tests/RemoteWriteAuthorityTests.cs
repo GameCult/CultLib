@@ -405,6 +405,114 @@ namespace GameCult.Networking.Tests
             Assert.That(rig.Logger.Errors, Is.Empty, "a null decision is a refusal, not a fault");
         }
 
+        // ---- a peer's storedAt must be a stamp (tests/vectors/stored-at-stamp, variants:ruling:raw-put-without-stamp-refused) ----
+
+        private static (string Text, bool Parses)[] StampVectors()
+        {
+            var dir = new System.IO.DirectoryInfo(TestContext.CurrentContext.TestDirectory);
+            while (dir != null && !System.IO.Directory.Exists(System.IO.Path.Combine(dir.FullName, "tests", "vectors"))) dir = dir.Parent;
+            var bytes = System.IO.File.ReadAllBytes(System.IO.Path.Combine(dir!.FullName, "tests", "vectors", "stored-at-stamp", "stamps.msgpack"));
+            return MessagePack.MessagePackSerializer.Deserialize<object[]>(bytes)
+                .Select(row => (Row: (object[])row, 0)).Select(r => ((string)r.Row[0], (bool)r.Row[1])).ToArray();
+        }
+
+        // A blank stamp is a frame that does not read (write-receipt.md, vector blankFields: field "message"); any other text
+        // that is no stamp is message_invalid on field "document". Both are refused before the store is asked.
+        private static bool IsBlankText(string text) => text.All(c => char.IsWhiteSpace(c));
+
+        [Test]
+        public async Task EveryStampVectorRowIsJudgedThroughTheRealServerHandler()
+        {
+            using var wire = new WirePair();
+            var rig = Build(new RecordingAuthority(_ => CultNetRemoteWriteDecision.Grant()), peer: wire.Peer);
+            var rows = StampVectors();
+            Assert.That(rows, Has.Length.GreaterThan(30));
+            var n = 0;
+            foreach (var (text, parses) in rows)
+            {
+                var key = new CultRecordKey($"tests:stamp:{n++}");
+                var put = rig.PutOf(key, "peer");
+                put.Document.StoredAt = text;
+                var publishedBefore = rig.Published.Count;
+                var logBefore = rig.LogLength;
+
+                await rig.Put(put);
+
+                if (parses)
+                {
+                    Assert.That(rig.TextOf(key), Is.EqualTo("peer"), $"stamp '{text}' is admitted");
+                    Assert.That(wire.Errors, Is.Empty, $"stamp '{text}' is not answered with an error");
+                    continue;
+                }
+
+                var reply = await wire.NextErrorAsync();
+                Assert.That(reply.Code, Is.EqualTo("message_invalid"), $"'{text}'");
+                Assert.That(reply.Details!.Field, Is.EqualTo(IsBlankText(text) ? "message" : "document"), $"'{text}'");
+                Assert.That(rig.TextOf(key), Is.Null, $"'{text}' stored nothing");
+                Assert.That(rig.Cache.Get<NetworkSchemaNote>(key), Is.Null, $"'{text}' minted nothing");
+                Assert.That(rig.Published, Has.Count.EqualTo(publishedBefore), $"'{text}' published nothing");
+                Assert.That(rig.LogLength, Is.EqualTo(logBefore), $"'{text}' logged nothing");
+                Assert.That(wire.Errors, Is.Empty, "one reply per refused write");
+            }
+
+            var fresh = new CultRecordKey("tests:stamp:after");
+            await rig.Put(rig.PutOf(fresh, "after"));
+            Assert.That(rig.TextOf(fresh), Is.EqualTo("after"), "the store stays writable after the refusals");
+            Assert.That(wire.Errors, Is.Empty);
+        }
+
+        // The host's own door (the public ApplyPutAsync overload, no authorize) is exempt from the stamp judgment: the cache mints
+        // a stamp for it. Applying the check to every call would refuse this put.
+        [Test]
+        public async Task TheHostsOwnDoorIsExemptFromTheStampJudgment()
+        {
+            var rig = Build(new RecordingAuthority(_ => CultNetRemoteWriteDecision.Refuse("no")));
+            var put = rig.PutOf(KeyA, "host");
+            put.Document.StoredAt = "yesterday";
+
+            await rig.Database.ApplyPutAsync(put);
+
+            Assert.That(rig.TextOf(KeyA), Is.EqualTo("host"), "the host's put with no stamp is applied, not refused");
+        }
+
+        [Test]
+        public async Task AnUngrantedPeerIsToldItIsNotAuthorizedBeforeItsStampIsJudgedAndAnAliasAsksTheCanonicalId()
+        {
+            using var wire = new WirePair();
+            var authority = new RecordingAuthority(_ => CultNetRemoteWriteDecision.Refuse("no"));
+            var rig = Build(authority, peer: wire.Peer);
+            var put = rig.PutOf(KeyA, "peer");
+            put.Document.StoredAt = "yesterday";
+            put.Document.SchemaId = "runtime.generated.network-note.ui.42";
+
+            await rig.Put(put);
+            var reply = await wire.NextErrorAsync();
+
+            Assert.That(reply.Code, Is.EqualTo("write_not_authorized"), "authority first, the stamp is not judged");
+            Assert.That(authority.Requests.Single().SchemaId, Is.EqualTo(rig.SchemaId));
+            Assert.That(rig.TextOf(KeyA), Is.Null);
+        }
+
+        [Test]
+        public async Task AGarbageStampIsNeverForwardedToThePrimary()
+        {
+            using var wire = new WirePair();
+            var forwarder = new CountingForwarder();
+            var rig = Build(new RecordingAuthority(_ => CultNetRemoteWriteDecision.Grant()), primary: false, forwarder, wire.Peer);
+            var put = rig.PutOf(KeyA, "peer");
+            put.Document.StoredAt = "2026-06-25T00:00:00";
+
+            await rig.Put(put);
+            var reply = await wire.NextErrorAsync();
+
+            Assert.That(reply.Code, Is.EqualTo("message_invalid"));
+            Assert.That(reply.Details!.Field, Is.EqualTo("document"));
+            Assert.That(forwarder.Puts, Is.EqualTo(0));
+
+            await rig.Put(rig.PutOf(KeyA, "peer"));
+            Assert.That(forwarder.Puts, Is.EqualTo(1), "a stamped put still forwards");
+        }
+
         private sealed class RecordingAuthority : ICultNetRemoteWriteAuthority
         {
             private readonly Func<CultNetRemoteWriteRequest, CultNetRemoteWriteDecision> _decide;

@@ -5,6 +5,7 @@ from typing import Any, Iterable
 
 from cultcache_py import CultCache, CultCacheEnvelope
 from cultcache_py.documents import DocumentDefinition
+from cultcache_py.stores import parse_stored_at
 
 from .shard_log import CultNetShardLogResponse
 from .snapshot import CultNetRawDocumentRecord, CultNetRawSnapshotResponse
@@ -50,17 +51,29 @@ def apply_raw_document_record(
     )
 
 
+def require_stored_at_stamp(record: dict[str, Any]) -> str:
+    """The storedAt a replicated raw record carries; ValueError when it is missing or no stamp. The one place the rule is judged."""
+    stored_at = record.get("storedAt")
+    if parse_stored_at(stored_at) is None:
+        raise ValueError("A replicated raw record must carry a storedAt stamp.")
+    return stored_at
+
+
 def raw_record_to_envelope(
     document: DocumentDefinition[Any],
     schema_id: str,
     record: dict[str, Any],
 ) -> CultCacheEnvelope:
+    """The envelope a replicated raw record is stored as; the one place a record becomes an envelope (a direct apply, a snapshot and a
+    shard log all come through here). A peer's record is stored under the stamp it carries, so one whose storedAt is missing, empty or
+    no stamp is refused with ValueError and nothing is minted or stored (variants:ruling:raw-put-without-stamp-refused)."""
+    stored_at = require_stored_at_stamp(record)
     return CultCacheEnvelope(
         key=str(record["recordKey"]),
         type=document.type,
         schema_id=schema_id,
         payload=bytes(record["payload"]),
-        stored_at=str(record.get("storedAt") or ""),
+        stored_at=stored_at,
         catalog_entry=document.catalog_entry(),
     )
 
@@ -117,6 +130,12 @@ def apply_shard_log_response(
         reason = response.get("reason") or "unspecified"
         raise ValueError(f"Shard log response requires resync: {reason}")
     documents_by_schema_id = schema_document_map(documents)
+    # The whole log is refused before anything is stored: every put that would be applied is judged for its stamp first.
+    for entry in response.get("entries", []):
+        if isinstance(entry, dict) and entry.get("changeKind") in ("added", "updated") and isinstance(entry.get("put"), dict):
+            record = entry["put"]["document"]
+            if can_resolve_document_for_raw_record(documents_by_schema_id, str(record["schemaId"]), record):
+                require_stored_at_stamp(record)
     applied: list[CultNetAppliedRecord] = []
     for entry in response.get("entries", []):
         if not isinstance(entry, dict):

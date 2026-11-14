@@ -3423,11 +3423,12 @@ const servedBoundRegistry = () =>
 
 /**
  * A put's own storedAt, kept by the served record and replaced in the receipt by the server's
- * 24-character clock. `SERVED_STORED_AT` is long, so an echoed receipt is smaller than the served
- * reply; `RECEIPT_STORED_AT` is short, so an echoed receipt is the larger reply, which shows that
+ * 24-character clock. `SERVED_STORED_AT` is as long as a stamp can be (a stamp is judged before a put is
+ * sized, so padding one is refused), so an echoed receipt is smaller than the served reply;
+ * `RECEIPT_STORED_AT` is short, so an echoed receipt is the larger reply, which shows that
  * admission sizes only the served reply.
  */
-const SERVED_STORED_AT = `2026-09-30T00:00:00.000Z${"~".repeat(200)}`;
+const SERVED_STORED_AT = "2026-09-30T00:00:00.123456789+00:00"; // the longest a stamp can be, 35 characters
 const RECEIPT_STORED_AT = "2026-09-30T00:00:00.000Z";
 const SERVED_BOUND_SERVER = "cultmesh-ts-served-bound-server";
 

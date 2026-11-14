@@ -1119,6 +1119,8 @@ namespace GameCult.Networking.Tests
             foreach (var field in BlankRuleFields)
             foreach (var times in new[] { 1, 3 })
             {
+                // A storedAt must be a stamp: a non-blank one that is no stamp is not "a name" (write-receipt.md, Required fields).
+                if (!blank && field == "storedAt") continue;
                 var text = string.Concat(Enumerable.Repeat(char.ConvertFromUtf32(Convert.ToInt32(hex, 16)), times));
                 var rig = Build();
                 var wire = new Wire();

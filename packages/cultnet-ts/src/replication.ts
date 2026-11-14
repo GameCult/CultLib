@@ -6,6 +6,7 @@ import type {
 } from "@gamecult/cultcache-ts";
 import {
   SchemaConflictError,
+  isStoredAtStamp,
   decodeDocumentPayload,
   documentPayloadBytes,
   documentPayloadFromBytes,
@@ -323,6 +324,10 @@ export class CultNetDocumentRegistry {
     envelope: CultCacheEnvelope;
   } {
     const binding = this.#requireSchemaBinding(message.document.schemaId);
+    // A put is stored under the stamp it carries; one that is no stamp is refused, and nothing is minted for it.
+    if (!isStoredAtStamp(message.document.storedAt)) {
+      throw new Error("A raw put must carry a storedAt stamp.");
+    }
     return {
       binding,
       envelope: {

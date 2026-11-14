@@ -12,7 +12,7 @@ from typing import Any, Callable
 from cultcache_py import CultCache, CultCacheEnvelope, SingleFileMessagePackBackingStore
 from cultcache_py.cache import CultCacheError, index_text
 from cultcache_py.documents import DocumentDefinition, extract_value
-from cultcache_py.stores import parse_stored_at
+from cultnet_py.replication import raw_record_to_envelope
 from cultnet_py import (
     CultNetAppliedRecord,
     CultNetFileShardMutationLogStore,
@@ -724,19 +724,8 @@ class CultMeshDatabase:
         document = self._raw_put_document(message)
         if document is None:
             return None
-        document_record = message["document"]
-        # A peer's put is stored under the stamp it carries, so one that is no stamp is refused: nothing is minted for it.
-        if parse_stored_at(document_record.get("storedAt")) is None:
-            raise ValueError("A raw put must carry a storedAt stamp.")
-        # One id: the local schema id, under which the cache stores the record.
-        return document, CultCacheEnvelope(
-            key=str(document_record["recordKey"]),
-            type=document.type,
-            schema_id=document.catalog_entry().schema_id,
-            payload=bytes(document_record["payload"]),
-            stored_at=document_record["storedAt"],
-            catalog_entry=document.catalog_entry(),
-        )
+        # One id: the local schema id, under which the cache stores the record. The stamp is judged where a record becomes an envelope.
+        return document, raw_record_to_envelope(document, document.catalog_entry().schema_id, message["document"])
 
     @staticmethod
     def _served_record(envelope: CultCacheEnvelope) -> CultNetRawDocumentRecord:
