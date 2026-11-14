@@ -148,7 +148,6 @@ class UniqueIndexTests(unittest.TestCase):
                 "put": lambda cache, d, k, i: cache.put(d, k, i),
                 "put_envelope": lambda cache, d, k, i: cache.put_envelope(d, envelope(d, k, i)),
                 "put_envelopes": lambda cache, d, k, i: cache.put_envelopes(d, [envelope(d, k, i)]),
-                "update": lambda cache, d, k, i: cache.update(d, k, lambda _held: i),
             }
             for name, write in paths.items():
                 with self.subTest(alias=alias, path=name):

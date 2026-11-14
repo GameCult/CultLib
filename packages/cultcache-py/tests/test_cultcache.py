@@ -86,7 +86,7 @@ class CultCacheTests(unittest.TestCase):
             )
             cache.pull_all_backing_stores()
             cache.put(document, "item:potion", Item(name="Potion", category="Consumable", value=50))
-            cache.update(document, "item:potion", lambda item: Item(item.name, item.category, item.value + 5))
+            cache.put(document, "item:potion", Item(name="Potion", category="Consumable", value=55))
             self.assertEqual(cache.get_required(document, "item:potion").value, 55)
             cache.delete(document, "item:potion")
             self.assertIsNone(cache.get(document, "item:potion"))

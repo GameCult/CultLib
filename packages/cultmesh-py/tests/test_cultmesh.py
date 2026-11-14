@@ -19,6 +19,7 @@ from typing import Any, Callable
 import msgpack
 from cultcache_py import (
     CultCache,
+    CultCacheEnvelope,
     SingleFileMessagePackBackingStore,
     define_database_entry_type,
     define_document_type,
@@ -795,6 +796,51 @@ class CultMeshTests(unittest.TestCase):
         self.assertEqual(node.get_required(document, "note:first").body, "first catalog publication")
         self.assertEqual(node.get_required(document, "note:second").body, "second catalog publication")
         self.assertIsInstance(node.get_required(alias, "note:second"), UiNote)
+
+    def test_raw_put_publishes_and_logs_the_stamp_the_store_wrote(self) -> None:
+        document = define_database_entry_type("mesh.stamp_item", [("name", 0), ("category", 1), ("value", 2, 0)], cls=Item)
+        node = create_node(runtime_id="python-node")
+        node.register_document(document)
+        cache = node.database.cache
+        entry = document.catalog_entry()
+        future = "2099-01-01T00:00:00.000000+00:00"
+        cache.put_envelope(
+            document,
+            CultCacheEnvelope(
+                key="item:stamp",
+                type=document.type,
+                payload=document.encode_payload(Item("old", "gear", 1)),
+                stored_at=future,
+                schema_id=entry.schema_id,
+                catalog_entry=entry,
+            ),
+        )
+        # A replacing write is stored later than the record it replaces, so the stamp is not the one the write was created with.
+        wire = node.put_raw_message(document, "item:stamp", Item("new", "gear", 2), shard_id="mesh", shard_epoch=1).to_wire()
+        held = cache.get_required_envelope(document, "item:stamp").stored_at
+        self.assertGreater(held, future)
+        self.assertEqual(wire["document"]["storedAt"], held)
+        self.assertEqual(node.database._shard_logs["mesh"][-1]["put"]["document"]["storedAt"], held)
+
+    def test_applied_raw_put_logs_the_stamp_the_cache_holds(self) -> None:
+        document = define_database_entry_type("mesh.applied_stamp", [("name", 0), ("category", 1), ("value", 2, 0)], cls=Item)
+        node = create_node(runtime_id="python-node")
+        node.register_document(document)
+        cache = node.database.cache
+        entry = document.catalog_entry()
+
+        def envelope(value: int, stored_at: str) -> CultCacheEnvelope:
+            return CultCacheEnvelope("item:applied", document.type, document.encode_payload(Item("n", "gear", value)), stored_at, entry.schema_id, entry)
+
+        cache.put_envelope(document, envelope(1, "2099-01-01T00:00:00.000000+00:00"))
+        peer = node.put_raw_message(document, "item:peer", Item("peer", "gear", 2)).to_wire()  # a well-formed put to replay
+        peer["document"] = {**peer["document"], "recordKey": "item:applied", "storedAt": "2000-01-01T00:00:00Z",
+                            "payload": envelope(2, "x").payload}
+        peer["shardId"], peer["shardEpoch"] = "mesh", 1
+        node.database.apply_raw_put_message(peer)
+        held = cache.get_required_envelope(document, "item:applied").stored_at
+        self.assertGreater(held, "2099-01-01T00:00:00.000000+00:00")
+        self.assertEqual(node.database._shard_logs["mesh"][-1]["put"]["document"]["storedAt"], held)
 
     def test_cultmesh_node_emits_raw_put_and_delete_messages_for_local_writes(self) -> None:
         document = define_database_entry_type(

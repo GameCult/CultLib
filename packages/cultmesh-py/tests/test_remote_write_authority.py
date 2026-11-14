@@ -8,6 +8,7 @@ the peer the connection loop would pass, and one test drives the same path over 
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,7 @@ from cultmesh_py import (
     CultMeshServerPeer,
     create_node,
 )
-from cultmesh_py.server import CultMeshLocalServer
+from cultmesh_py.server import CultMeshLocalServer, _DatabaseSubscription
 from cultnet_py import CultNetPeerError, create_rudp_schema_transport, document_delete, document_put_raw, error_message
 
 SCHEMA_ID = "sha256:authority-note"
@@ -55,12 +56,12 @@ class Recording:
         return self._decide(request)
 
 
-def put_of(key: str, text: str, *, schema_id: str = SCHEMA_ID) -> dict[str, Any]:
+def put_of(key: str, text: str, *, schema_id: str = SCHEMA_ID, stored_at: str = "2026-11-07T00:00:00Z") -> dict[str, Any]:
     return document_put_raw(
         message_id="wire",
         key=key,
         schema_id=schema_id,
-        stored_at="2026-11-07T00:00:00Z",
+        stored_at=stored_at,
         payload=NOTE.encode_payload({"schema_version": "tests.authority_note.v1", "text": text}),
         shard_id=SHARD_ID,
         shard_epoch=1,
@@ -71,6 +72,26 @@ def delete_of(key: str, *, schema_id: str = SCHEMA_ID) -> dict[str, Any]:
     return document_delete(
         message_id="wire-delete", schema_id=schema_id, record_key=key, shard_id=SHARD_ID, shard_epoch=1
     ).to_wire()
+
+
+class NotificationStampTests(unittest.TestCase):
+    """A subscriber is sent the stamp the store holds after a peer's put, as the shard log is, not the peer's stamp."""
+
+    def test_the_notification_carries_the_stamp_the_cache_holds(self) -> None:
+        local, peer_stamp = "2099-01-01T00:00:00.000000+00:00", "2000-01-01T00:00:00Z"
+        with tempfile.TemporaryDirectory() as directory:
+            for backing in (None, Path(directory) / "node.cc"):  # store-less, then store-backed
+                with self.subTest(store=backing is not None):
+                    node = create_node(backing, runtime_id="stamp-server")
+                    node.database.register_document(NOTE)
+                    server = CultMeshLocalServer(node=node, port=0, write_authority=CultMeshGrantAllWrites())
+                    node.database.apply_raw_put_message(put_of(KEY_A, "server", stored_at=local))
+                    subscriptions = {"s": _DatabaseSubscription("s", set(), set())}
+                    replies = server._handle_connection_message(put_of(KEY_A, "peer", stored_at=peer_stamp), subscriptions, peer=PEER)
+                    held = node.cache.get_required_envelope(NOTE, KEY_A).stored_at
+                    self.assertGreater(held, local)
+                    self.assertEqual([reply["document"]["storedAt"] for reply in replies], [held])
+                    self.assertEqual(node.database._shard_logs[SHARD_ID][-1]["put"]["document"]["storedAt"], held)
 
 
 class RemoteWriteAuthorityTests(unittest.TestCase):

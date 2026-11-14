@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import enum
 import functools
 import math
 import threading
@@ -9,11 +10,37 @@ from typing import Any, Callable, Generic, Iterable, TypeVar
 
 from .backing_store import BackingStore, CultCacheEnvelope
 from .documents import DocumentDefinition, UnreadSlots, extract_value
-from .stores import SchemaConflictError, retyped, written_owns
+from .stores import SchemaConflictError, _parse_stored_at, retyped, stored_at_over, written_owns
 
 T = TypeVar("T")
 F = TypeVar("F", bound=Callable[..., Any])
 GLOBAL_KEY = "__global__"
+
+
+class UpdateOutcome(enum.Enum):
+    UPDATED = "updated"
+    DECLINED = "declined"
+    LOST_RACE = "lost_race"
+
+
+@dataclass(frozen=True)
+class UpdateResult(Generic[T]):
+    """What `CultCache.update` did and the cache's record at the key after it (None when it holds nothing). The document decides
+    nothing: it is a read after the outcome."""
+
+    outcome: UpdateOutcome
+    document: T | None
+
+
+@dataclass(frozen=True)
+class _Expected:
+    """What an update's commit requires to still hold. A cache with no store requires the held envelope object at the key (None:
+    nothing held); a store-backed one requires the type's home to be `store` and the record there to have content version
+    `version` (None: no record)."""
+
+    held: CultCacheEnvelope | None = None
+    store: BackingStore | None = None
+    version: str | None = None
 
 
 def _locked(method: F) -> F:
@@ -482,7 +509,7 @@ class CultCache:
     def put(self, document: DocumentDefinition[T], key: str, value: T) -> None:
         self._put(document, key, value)
 
-    def _put(self, document: DocumentDefinition[T], key: str, value: T) -> None:
+    def _put(self, document: DocumentDefinition[T], key: str, value: T, expected: _Expected | None = None) -> str:
         self._assert_registered(document)
         if document.global_document and key != GLOBAL_KEY:
             raise CultCacheError(f"Global document {document.type} must use key {GLOBAL_KEY}")
@@ -494,7 +521,7 @@ class CultCache:
             schema_id=catalog_entry.schema_id,
             catalog_entry=catalog_entry,
         )
-        self._write(document, [(envelope, value)], batch=False)
+        return self._write(document, [(envelope, value)], batch=False, expected=expected)
 
     @_mutating
     def put_envelope(self, document: DocumentDefinition[T], envelope: CultCacheEnvelope) -> T:
@@ -562,9 +589,12 @@ class CultCache:
         *,
         batch: bool,
         unread: dict[str, UnreadSlots | None] | None = None,
-    ) -> None:
+        expected: _Expected | None = None,
+    ) -> str:
         """Validates every record (home and name and index extractors included) before the store is
-        touched; once the store accepts, applying to the cache has no fallible step."""
+        touched; once the store accepts, applying to the cache has no fallible step. With `expected` (an update's commit) the write
+        also requires the record to be unchanged since it was read and returns 'mismatch', having written and installed nothing,
+        when it is not; otherwise 'committed'. A record is held under the stored_at its store reports writing."""
         type = document.type
         # A batch naming a key twice lands the last record for it, as C# CultCacheBatch stages one operation per key. The
         # judge, the store and the apply all read this one list.
@@ -584,13 +614,34 @@ class CultCache:
         )
         store = self._store_for_type(type)
         legacy_key = self._state.legacy_global_keys.get(type)
-        if store is not None:
-            if batch:
-                store.push_all([envelope for envelope, _ in records])
+        stamps: dict[str, Any] = {}
+        if expected is not None:
+            if legacy_key is not None:
+                raise self._legacy_global_refusal(document, legacy_key)
+            if expected.store is None:
+                held = self._state.envelopes.get(type, {}).get(records[0][0].key)
+                if store is not None or held is not expected.held:
+                    return "mismatch"
+            elif store is not expected.store:
+                return "mismatch"
             else:
-                store.push(records[0][0])
+                stamp = store.commit_if(records[0][0], expected.version)  # type: ignore[attr-defined]
+                if stamp is None:
+                    return "mismatch"
+                stamps[records[0][0].key] = stamp
+        elif store is not None:
+            if batch:
+                reported = store.push_all([envelope for envelope, _ in records])
+                stamps = reported if isinstance(reported, dict) else {}
+            else:
+                stamps[records[0][0].key] = store.push(records[0][0])
             if legacy_key is not None:
                 self._retire_legacy_global(store, type, legacy_key)
+        else:
+            for envelope, _ in records:
+                held_at = next((held for held in (by_type.get(envelope.key) for by_type in self._state.envelopes.values()) if held is not None), None)
+                if held_at is not None:
+                    stamps[envelope.key] = stored_at_over(envelope.stored_at, held_at.stored_at)
         self._state.legacy_global_keys.pop(type, None)
         values = self._state.values.setdefault(type, {})
         envelopes = self._state.envelopes.setdefault(type, {})
@@ -598,6 +649,9 @@ class CultCache:
         for other, key in displaced:
             self._drop(other, key)
         for envelope, value, keys in admitted:
+            stamp = stamps.get(envelope.key)
+            if isinstance(stamp, str) and _parse_stored_at(stamp) is not None:
+                envelope = replace(envelope, stored_at=stamp)
             self._remove_lookups(type, envelope.key)
             values[envelope.key] = value
             envelopes[envelope.key] = envelope
@@ -609,6 +663,7 @@ class CultCache:
                 self._state.names[(type, keys.name)] = envelope.key
             for index, index_value in keys.indexes.items():
                 self._state.indexes[(type, index, index_value)] = envelope.key
+        return "committed"
 
     def _refuse_retype(self, document: DocumentDefinition[Any], written: list[CultCacheEnvelope]) -> list[tuple[str, str]]:
         """The one key-identity judge (variants:ruling:cache-refuses-retype): a key holds one record whatever its type, so a write
@@ -663,18 +718,34 @@ class CultCache:
             if held is None:
                 continue
             type, slots = held
-            raise SchemaConflictError(
-                self._state.envelopes[type][key].schema_id or type,
-                [self._state.documents[type].catalog_entry().schema_name],
-                key,
-                message=(
-                    f"{self._state.documents[type].catalog_entry().schema_name} record {key} is read-only: {slots.type_name} was read with "
-                    f"{slots.slot_count} slots where this build declares {slots.declared_count} ({slots.occurrences} object(s) in the "
-                    "record). Writing it would drop data a newer writer stored; read it with types that declare those slots, or "
-                    "write it from that build."
-                ),
-                unread_slots=slots,
-            )
+            raise self._read_only_refusal(self._state.documents[type], key, self._state.envelopes[type][key].schema_id, slots)
+
+    @staticmethod
+    def _read_only_refusal(
+        document: DocumentDefinition[Any], key: str, schema_id: str | None, slots: UnreadSlots
+    ) -> SchemaConflictError:
+        """The one refusal of a write to a record that carries slots this build would drop: a record the cache holds read-only,
+        or one an update reads from the store."""
+        name = document.catalog_entry().schema_name
+        return SchemaConflictError(
+            schema_id or document.type,
+            [name],
+            key,
+            message=(
+                f"{name} record {key} is read-only: {slots.type_name} was read with "
+                f"{slots.slot_count} slots where this build declares {slots.declared_count} ({slots.occurrences} object(s) in the "
+                "record). Writing it would drop data a newer writer stored; read it with types that declare those slots, or "
+                "write it from that build."
+            ),
+            unread_slots=slots,
+        )
+
+    @staticmethod
+    def _legacy_global_refusal(document: DocumentDefinition[Any], legacy_key: str) -> CultCacheError:
+        return CultCacheError(
+            f"Global {document.type} is held under the legacy key {legacy_key!r}; update cannot copy it. "
+            "put_global writes the global and retires the legacy key."
+        )
 
     @staticmethod
     def _foreign_refusal(record: ForeignRecord) -> SchemaConflictError:
@@ -707,20 +778,81 @@ class CultCache:
         self._assert_global(document)
         self._put(document, GLOBAL_KEY, value)
 
-    @_mutating
-    def update(self, document: DocumentDefinition[T], key: str, updater: Any) -> T:
-        return self._update(document, key, updater)
+    def update(
+        self, document: DocumentDefinition[T], key: str, apply: Callable[[T | None], T | None], *, max_attempts: int = 5
+    ) -> UpdateResult[T]:
+        """Reads the record at the key as its home store holds it, applies `apply` to a fresh copy of it, and commits the result
+        only if the record is still the one that was read; when another writer got there first it reads again and runs `apply`
+        again, up to `max_attempts` times.
 
-    def _update(self, document: DocumentDefinition[T], key: str, updater: Any) -> T:
-        current = self.get_required(document, key)
-        updated = updater(current)
-        self._put(document, key, updated)
-        return updated
+        `apply` may run up to `max_attempts` times, on a fresh copy of the record as the store holds it now (None when the key
+        holds nothing), which it may change and return. It must not write the same key through this cache or have side effects.
+        Returning None writes nothing (DECLINED). A lost race that outlasts `max_attempts` returns LOST_RACE and does not raise;
+        a refusal, or a raise from `apply`, propagates and is not retried. The write is durable when update returns. The
+        result's document is the cache's record after the outcome. `put` is the blind write. A cache with no store copies its
+        held instance; a store without `read` and `commit_if` (the JSON lines store among them) refuses before `apply` runs."""
+        if not callable(apply):
+            raise TypeError("CultCache update needs a function to apply.")
+        if not isinstance(max_attempts, int) or isinstance(max_attempts, bool):
+            raise TypeError(f"CultCache update max_attempts must be an int, not {type(max_attempts).__name__}.")
+        if max_attempts < 1:
+            raise ValueError(f"CultCache update max_attempts must be at least 1, not {max_attempts}.")
+        for attempt in range(1, max_attempts + 1):
+            copy, expected = self._read_for_update(document, key)
+            # Outside the cache's lock and the store's: apply may take its time and may write other keys through this cache.
+            next_value = apply(copy)
+            if next_value is None:
+                return UpdateResult(UpdateOutcome.DECLINED, self.get(document, key))
+            if self._commit_update(document, key, next_value, expected) == "committed":
+                return UpdateResult(UpdateOutcome.UPDATED, self.get(document, key))
+        # Display only: the cache shows what the winner left.
+        if self._state.stores_by_type or self._state.generic_store is not None:
+            self.pull_all_backing_stores()
+        return UpdateResult(UpdateOutcome.LOST_RACE, self.get(document, key))
 
     @_mutating
-    def update_global(self, document: DocumentDefinition[T], updater: Any) -> T:
+    def _read_for_update(self, document: DocumentDefinition[T], key: str) -> tuple[T | None, _Expected]:
+        """One attempt's read: the copy to hand `apply` and the condition its commit holds. Every refusal that does not depend on
+        what `apply` returns is raised here, so `apply` never runs for a write that cannot land. Installs nothing."""
+        self._assert_registered(document)
+        self._refuse_at(document, key)
+        legacy_key = self._state.legacy_global_keys.get(document.type)
+        if legacy_key is not None:
+            raise self._legacy_global_refusal(document, legacy_key)
+        store = self._store_for_type(document.type)
+        if store is None:
+            held = self._state.envelopes.get(document.type, {}).get(key)
+            return (None if held is None else document.decode_payload(held.payload)), _Expected(held=held)
+        read, commit_if = getattr(store, "read", None), getattr(store, "commit_if", None)
+        if read is None or commit_if is None:
+            raise CultCacheError(
+                f"Backing store {type(store).__name__} for {document.type} cannot write conditionally; "
+                "update needs a store with read and commit_if."
+            )
+        if document.global_document:
+            for envelope in store.pull_all():
+                if envelope.key != GLOBAL_KEY and self._resolve_document_for_envelope(envelope) is document:
+                    raise self._legacy_global_refusal(document, envelope.key)
+        found = read(key)
+        if found is None:
+            return None, _Expected(store=store)
+        envelope, version = found
+        if self._resolve_document_for_envelope(envelope) is not document:
+            raise CultCacheError(f"Record {key} is not a {document.type}; update cannot copy it.")
+        value, unread = self._decode_marked(document, envelope)
+        if unread is not None:
+            raise self._read_only_refusal(document, key, envelope.schema_id, unread)
+        return value, _Expected(store=store, version=version)
+
+    @_mutating
+    def _commit_update(self, document: DocumentDefinition[T], key: str, value: T, expected: _Expected) -> str:
+        return self._put(document, key, value, expected)
+
+    def update_global(
+        self, document: DocumentDefinition[T], apply: Callable[[T | None], T | None], *, max_attempts: int = 5
+    ) -> UpdateResult[T]:
         self._assert_global(document)
-        return self._update(document, GLOBAL_KEY, updater)
+        return self.update(document, GLOBAL_KEY, apply, max_attempts=max_attempts)
 
     @_mutating
     def delete(self, document: DocumentDefinition[Any], key: str) -> None:

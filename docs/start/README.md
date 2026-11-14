@@ -19,7 +19,7 @@ this page.
 | **C#** | [first call, tested](#c-first-call); [update, tested](#c-update-with-retry) | [package](../../packages/cultmath/README.md); snippet not yet | [package](../../src/GameCult.Geometry/README.md); snippet not yet | [first call, tested](#c-cultnet-first-call); [package](../../src/GameCult.Networking) | [quickstart](../../src/GameCult.Mesh/docs/durable-node-quickstart.md); run by `scripts/verify-eve-getting-started.ps1` |
 | **TypeScript** | [first call, tested](#typescript-first-call); [update, tested](#typescript-update-with-retry) | not yet | not yet | [first call, tested](#typescript-cultnet-first-call); [package](../../packages/cultnet-ts/README.md) | [package](../../packages/cultmesh-ts/README.md); snippet not yet; [recipe: two-client .io game](io-game.md), tested with two live clients, browser page not yet run |
 | **Rust** | [first call, tested](#rust-first-call); [update, tested](#rust-update-with-retry) | [native core](../../packages/cultmath/native/cultmath-core); snippet not yet | not yet | [first call, tested](#rust-cultnet-first-call); [package](../../packages/cultnet-rs/README.md), [examples](../../packages/cultnet-rs/examples) | [package](../../packages/cultmesh-rs); snippet not yet |
-| **Python** | [first call, tested](#python-first-call) | not yet | not yet | [first call, tested](#python-cultnet-first-call); [package](../../packages/cultnet-py/README.md) | [package](../../packages/cultmesh-py/README.md); snippet not yet |
+| **Python** | [first call, tested](#python-first-call); [update, tested](#python-update-with-retry) | not yet | not yet | [first call, tested](#python-cultnet-first-call); [package](../../packages/cultnet-py/README.md) | [package](../../packages/cultmesh-py/README.md); snippet not yet |
 
 For the whole
 picture of what each piece is for, see the
@@ -304,6 +304,29 @@ def first_call() -> Item:
     assert reopened.get_by_name(item_doc, "Potion") == reopened.get_required(item_doc, "item:potion")
     return reopened.get_required(item_doc, "item:potion")
 ```
+
+## Python update with retry
+
+`update` changes a record from what the store holds now and commits only if it is still that record. The source is the
+`update` region of
+[`packages/cultcache-py/tests/test_first_call.py`](../../packages/cultcache-py/tests/test_first_call.py), which uses the
+definitions of the first call above; a test in that file fails if the block stops matching the file.
+
+```python
+def restock(path: Path):
+    cache = (
+        CultCache.builder()
+        .register_document_type(item_doc)
+        .add_generic_store(SingleFileMessagePackBackingStore(path))
+        .build()
+    )
+    cache.pull_all_backing_stores()
+    return cache.update(item_doc, "item:potion", lambda item: Item("Potion", "Consumable", (item.value if item else 0) + 10))
+```
+
+The write is durable when `update` returns. A lost race re-runs the function, so keep it free of side effects; when the
+attempts run out the result's `outcome` is `UpdateOutcome.LOST_RACE` instead of a raise. `put` is the blind opt-out: last
+writer wins.
 
 ## CultNet first calls
 

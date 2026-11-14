@@ -1,13 +1,17 @@
 ﻿from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
 import uuid
 from contextlib import contextmanager
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, TypeVar
 
@@ -107,14 +111,23 @@ class JsonLinesBackingStore:
                     raise ValueError(f"Malformed CultCache JSONL envelope at {self.path}:{line_number}: missing {exc}") from exc
             return envelopes
 
-    def push(self, envelope: CultCacheEnvelope) -> None:
-        self.push_all([envelope])
+    def push(self, envelope: CultCacheEnvelope) -> str | None:
+        return self.push_all([envelope])[envelope.key]
 
-    def push_all(self, envelopes: list[CultCacheEnvelope], soft: bool = False) -> None:
+    def push_all(self, envelopes: list[CultCacheEnvelope], soft: bool = False) -> dict[str, str]:
+        """Merges the envelopes, each stored later than any record it replaces, and returns the stamps written by key
+        ({} when a soft push skipped)."""
+        stamps: dict[str, str] = {}
+
         def merge(existing: dict[tuple[str, str], CultCacheEnvelope]) -> None:
             for envelope in envelopes:
+                replaced = existing.get((envelope.type, envelope.key))
+                if replaced is not None:
+                    envelope = replace(envelope, stored_at=stored_at_over(envelope.stored_at, replaced.stored_at))
                 existing[(envelope.type, envelope.key)] = envelope
+                stamps[envelope.key] = envelope.stored_at
         self._rewrite(merge, soft)
+        return stamps
 
     def delete(self, type: str, key: str) -> None:
         self._rewrite(lambda existing: existing.pop((type, key), None))
@@ -177,22 +190,39 @@ class SingleFileMessagePackBackingStore:
             except Exception as exc:
                 raise StoreUnreadableError(self.path, exc) from exc
 
-    def push(self, envelope: CultCacheEnvelope) -> None:
+    def push(self, envelope: CultCacheEnvelope) -> str | None:
         with self._write_transaction():
-            self._replace_all([envelope], self.pull_all())
+            return self._replace_all([envelope], self.pull_all())[envelope.key]
 
-    def push_all(self, envelopes: list[CultCacheEnvelope], soft: bool = False) -> None:
+    def push_all(self, envelopes: list[CultCacheEnvelope], soft: bool = False) -> dict[str, str]:
         """A soft push writes only where nothing is at the path: a store the reader reads is left byte for byte, and a file it
-        cannot read is refused by the same read, as in TS and Rust."""
+        cannot read is refused by the same read, as in TS and Rust. Returns the stamps written by key ({} when skipped)."""
         with self._write_transaction():
             arrived = self._pull()
             if soft and arrived is not None:
-                return
-            self._replace_all(list(envelopes), arrived or [])
+                return {}
+            return self._replace_all(list(envelopes), arrived or [])
 
     def delete(self, type: str, key: str) -> None:
         with self._write_transaction():
             self._replace_all([], [item for item in self.pull_all() if not (item.type == type and item.key == key)])
+
+    def read(self, key: str) -> tuple[CultCacheEnvelope, str] | None:
+        """The record at the key, of any type, and its content version, from one read; None when the key holds nothing."""
+        for envelope in self._pull() or []:
+            if envelope.key == key:
+                return envelope, record_version(envelope)
+        return None
+
+    def commit_if(self, envelope: CultCacheEnvelope, expected: str | None) -> str | None:
+        """Writes the envelope only if the record at its key (any type) is still the one whose version is `expected`
+        (None: no record), judged under the write lock; returns the stored_at written, or None with nothing written."""
+        with self._write_transaction():
+            arrived = self._pull() or []
+            current = next((item for item in arrived if item.key == envelope.key), None)
+            if (None if current is None else record_version(current)) != expected:
+                return None
+            return self._replace_all([envelope], arrived)[envelope.key]
 
     @contextmanager
     def _write_transaction(self) -> Iterator[None]:
@@ -203,8 +233,10 @@ class SingleFileMessagePackBackingStore:
             with store_write_lock(self.path, self.lock_timeout):
                 yield
 
-    def _replace_all(self, supplied: list[CultCacheEnvelope], arrived: list[CultCacheEnvelope]) -> None:
-        commit_store_file(self.path, msgpack.packb(_encode_snapshot(supplied, arrived, self._format), use_bin_type=True))
+    def _replace_all(self, supplied: list[CultCacheEnvelope], arrived: list[CultCacheEnvelope]) -> dict[str, str]:
+        snapshot, stamps = _encode_snapshot(supplied, arrived, self._format)
+        commit_store_file(self.path, msgpack.packb(snapshot, use_bin_type=True))
+        return stamps
 
 
 
@@ -305,7 +337,7 @@ def written_owns(held: CultCacheEnvelope, written: CultCacheEnvelope) -> bool:
 
 def _encode_snapshot(
     supplied: list[CultCacheEnvelope], arrived: list[CultCacheEnvelope], format_version: str
-) -> list[Any]:
+) -> tuple[list[Any], dict[str, str]]:
     # A key names one record whatever its type, so a supplied record replaces the arrived one by key alone, and only of the
     # type that owns it: retyping a key is a removal and an add, so a record another type owns under the key refuses the write.
     held_by_key = {envelope.key: envelope for envelope in arrived}
@@ -314,8 +346,12 @@ def _encode_snapshot(
         for held in (landing.get(envelope.key), held_by_key.get(envelope.key)):
             if held is not None and not written_owns(held, envelope):
                 raise retyped(held, envelope)
+        held = held_by_key.get(envelope.key)
+        if held is not None:
+            envelope = replace(envelope, stored_at=stored_at_over(envelope.stored_at, held.stored_at))
         landing[envelope.key] = envelope
     supplied = list(landing.values())
+    stamps = {envelope.key: envelope.stored_at for envelope in supplied}
     replaced = set(landing)
     kept = [envelope for envelope in arrived if envelope.key not in replaced]
     envelopes = [*kept, *supplied]
@@ -330,7 +366,7 @@ def _encode_snapshot(
         [envelope.key, _schema_id_for(envelope), envelope.stored_at, envelope.payload]
         for envelope in sorted(envelopes, key=lambda item: item.key)
     ]
-    return [format_version, catalog, records]
+    return [format_version, catalog, records], stamps
 
 def commit_store_file(path: Path, data: bytes) -> None:
     """Writes `data` to a unique staged file beside the store, fsyncs it, replaces the store with it and, off Windows,
@@ -737,6 +773,65 @@ def _decode_catalog_member(value: Any) -> CultCacheSchemaCatalogMember:
 
 def _schema_id_for(envelope: CultCacheEnvelope) -> str:
     return envelope.schema_id or envelope.type
+
+
+_STORED_AT_SHAPE = re.compile(
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?(?:(Z)|([+-])([01][0-9]|2[0-3]):([0-5][0-9]))"
+)
+
+
+def _parse_stored_at(text: Any) -> datetime | None:
+    """The UTC instant a stored_at text names, or None. Only the shape the runtimes write is a stamp: an RFC 3339 date-time with T,
+    an optional fraction of 1 to 9 digits (cut to the microsecond) and Z or a numeric offset of hours 00-23 and minutes 00-59. Checked here, not left to
+    fromisoformat, whose accepted set differs by interpreter (3.10 and 3.13) and from Rust and TypeScript. An instant outside
+    datetime's range is not a stamp."""
+    if not isinstance(text, str):
+        return None
+    shape = _STORED_AT_SHAPE.fullmatch(text)
+    if shape is None:
+        return None
+    year, month, day, hour, minute, second, fraction, zulu, sign, offset_hours, offset_minutes = shape.groups()
+    try:
+        offset = timezone.utc if zulu else timezone(
+            (-1 if sign == "-" else 1) * timedelta(hours=int(offset_hours), minutes=int(offset_minutes))
+        )
+        local = datetime(
+            int(year), int(month), int(day), int(hour), int(minute), int(second), int(((fraction or "") + "000000")[:6]), offset
+        )
+        return local.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
+        return None
+
+
+def mint_stored_at(previous: str | None, now: datetime) -> str:
+    """A stored_at later than `previous` (C# MintStoredAt): `now`, or the microsecond after `previous` when `now` is not later.
+    A previous that does not parse leaves `now`. Raises ValueError, nothing minted, when `previous` is the last instant a stamp
+    can name, so a write over it is refused and writes nothing."""
+    now = now.astimezone(timezone.utc)
+    last = _parse_stored_at(previous)
+    if last is not None and now <= last:
+        try:
+            now = last + timedelta(microseconds=1)
+        except OverflowError:
+            raise ValueError(f"stored_at {previous!r} is the last instant a stamp can name; a write over it cannot be stored later") from None
+    return now.isoformat(timespec="microseconds")
+
+
+def stored_at_over(staged: str, replaced: str) -> str:
+    """The stored_at a record replacing `replaced` is written with (C# StoredAtOver): `staged` when both parse and it is strictly
+    later, else one minted over `replaced`. No content is compared: every replacing write is stamped later."""
+    later, earlier = _parse_stored_at(staged), _parse_stored_at(replaced)
+    if later is not None and earlier is not None and later > earlier:
+        return staged
+    return mint_stored_at(replaced, datetime.now(timezone.utc))
+
+
+def record_version(envelope: CultCacheEnvelope) -> str:
+    """The content version of a stored record: the lowercase hex SHA-256 of its persisted encoding, the array
+    [key, schema id, stored_at, payload] exactly as the single-file store writes it
+    (variants:ruling:write-set-content-version-declared-ownership)."""
+    record = [envelope.key, _schema_id_for(envelope), envelope.stored_at, envelope.payload]
+    return hashlib.sha256(msgpack.packb(record, use_bin_type=True)).hexdigest()
 
 
 def _default_catalog_entry(envelope: CultCacheEnvelope) -> CultCacheSchemaCatalogEntry:

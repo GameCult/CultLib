@@ -1,7 +1,7 @@
 ﻿from .backing_store import BackingStore, CultCacheEnvelope
 from .backing_store import CultCacheSchemaCatalogEntry, CultCacheSchemaCatalogMember
 from . import leaves
-from .cache import CultCache, CultCacheBuilder, ForeignRecord
+from .cache import CultCache, CultCacheBuilder, ForeignRecord, UpdateOutcome, UpdateResult
 from .documents import (
     MAX_PAYLOAD_DEPTH,
     MAX_SLOT_KEY,
@@ -42,6 +42,8 @@ __all__ = [
     "StoreUnreadableError",
     "UnionArm",
     "UnreadSlots",
+    "UpdateOutcome",
+    "UpdateResult",
     "read_payload_tree",
     "leaves",
     "database_entry_field",

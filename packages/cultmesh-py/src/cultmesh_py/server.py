@@ -686,9 +686,11 @@ class CultMeshLocalServer:
                 message_id=str(message.get("messageId") or ""),
                 code="unregistered_document_put",
             )]
+        # Subscribers are sent the stamp the store holds, which a replacing put mints later than the record it replaces, not the peer's.
+        stored = self.node.database.cache.get_required_envelope(change.document, change.record_key).stored_at
         return self._database_change_notifications(
             message,
-            document_record,
+            {**document_record, "storedAt": stored},
             change.change_kind,
             subscriptions,
             resolved_schema_id=change.schema_id,

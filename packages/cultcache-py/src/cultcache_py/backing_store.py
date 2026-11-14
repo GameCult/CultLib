@@ -58,10 +58,17 @@ class CultCacheEnvelope:
 
 
 class BackingStore(Protocol):
+    """The members every store has. A store may also offer `read(key) -> tuple[CultCacheEnvelope, str] | None` (the record at the
+    key, of any type, and its content version, from one read) and `commit_if(envelope, expected: str | None) -> str | None` (write
+    only if the record at the key is still the version `expected`, None meaning no record; returns the stored_at written, or None
+    with nothing written). They are looked up with getattr, not Protocol members, and `CultCache.update` needs both. `push` and
+    `push_all` may report the stored_at they wrote (`str` and `dict[str, str]` by key); None keeps the cache's own stamp. A store
+    stamps a record that replaces another strictly later than the one it replaces."""
+
     def pull_all(self) -> list[CultCacheEnvelope]:
         ...
 
-    def push(self, envelope: CultCacheEnvelope) -> None:
+    def push(self, envelope: CultCacheEnvelope) -> str | None:
         ...
 
     def delete(self, type: str, key: str) -> None:
@@ -74,7 +81,7 @@ class BackingStore(Protocol):
         that can tell nothing-at-the-path overrides this, and the default push_all then writes where nothing is on a soft push."""
         return self.pull_all()
 
-    def push_all(self, envelopes: list[CultCacheEnvelope], soft: bool = False) -> None:
+    def push_all(self, envelopes: list[CultCacheEnvelope], soft: bool = False) -> dict[str, str] | None:
         # Soft: write only where pull_or_absent says nothing is; skip over a store it read, empty included; its raise refuses.
         pulled = self.pull_or_absent()
         if soft and pulled is not None:

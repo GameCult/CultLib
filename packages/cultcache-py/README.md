@@ -94,8 +94,7 @@ store.
 - `put(...)`
 - `put_envelopes(...)`
 - `put_global(...)`
-- `update(...)`
-- `update_global(...)`
+- `update(document, key, apply, *, max_attempts=5)` and `update_global(document, apply, *, max_attempts=5)`: the conditional golden path; reads the record as its home store holds it now, runs `apply` on a fresh copy, writes only if the record is unchanged and runs `apply` again on a lost race; returns `UpdateResult(outcome, document)` with `UpdateOutcome.UPDATED`, `DECLINED` (`apply` returned `None`) or `LOST_RACE` (see below)
 - `delete(...)`
 - `delete_global(...)`
 - `is_writable(document, key)` (advisory: would a write or removal of the key be refused; see below)
@@ -142,6 +141,8 @@ used by the TypeScript, Rust, and C# runtimes:
 - catalog entries: `[schemaId, schemaName, schemaVersion, contentHash,
   canonicalSchemaJson, compatibleSchemaIds, members]`
 - records: `[key, schemaId, storedAt, payload]`
+
+`update` needs a home store with the optional `read(key)` (the record at the key, of any type, and its content version, from one read) and `commit_if(envelope, expected)` (write only if the record at the key is still that version, under the store's write lock). The content version is the lowercase hex SHA-256 of the record re-encoded as the store writes it, `[key, schemaId, storedAt, payload]` with minimal MessagePack encodings, the same value C# computes (`tests/vectors/content-version`). It equals the SHA-256 of the record's bytes in the file exactly when the writer encoded the record minimally, as every writer in this library does; a record encoded with a wider-than-needed length or integer has the version of its minimal form. The single-file store has both; `JsonLinesBackingStore` and a store without them refuse `update` before `apply` runs. A cache with no store copies its held instance. Every write that replaces a record is stored at a later `stored_at` than the one it replaces, in each store kind and in a store-less cache; `push` and `push_all` return the stamp written, and the cache holds that stamp.
 
 Large corpora should use a sharded store or a real database. A single snapshot file is a scalpel, not a forklift.
 

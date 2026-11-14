@@ -4,6 +4,8 @@
 import unittest
 from pathlib import Path
 
+from cultcache_py import UpdateOutcome
+
 # snippet:begin
 import tempfile
 from dataclasses import asdict, dataclass
@@ -51,15 +53,44 @@ def first_call() -> Item:
 # snippet:end
 
 
+# snippet:update:begin
+def restock(path: Path):
+    cache = (
+        CultCache.builder()
+        .register_document_type(item_doc)
+        .add_generic_store(SingleFileMessagePackBackingStore(path))
+        .build()
+    )
+    cache.pull_all_backing_stores()
+    return cache.update(item_doc, "item:potion", lambda item: Item("Potion", "Consumable", (item.value if item else 0) + 10))
+# snippet:update:end
+
+
 class FirstCallTests(unittest.TestCase):
     def test_first_call_round_trips_through_a_second_cache(self) -> None:
         self.assertEqual(first_call(), Item("Potion", "Consumable", 50))
 
-    def test_docs_show_the_tested_snippet(self) -> None:
+    def test_update_with_retry_through_a_second_cache(self) -> None:
+        path = Path(tempfile.mkdtemp()) / "restock.cc"
+        restock(path)
+        result = restock(path)
+        self.assertIs(result.outcome, UpdateOutcome.UPDATED)
+        reopened = (
+            CultCache.builder()
+            .register_document_type(item_doc)
+            .add_generic_store(SingleFileMessagePackBackingStore(path))
+            .build()
+        )
+        reopened.pull_all_backing_stores()
+        self.assertEqual(reopened.get_required(item_doc, "item:potion"), Item("Potion", "Consumable", 20))
+
+    def test_docs_show_the_tested_snippets(self) -> None:
         source = Path(__file__).read_text(encoding="utf-8")
-        snippet = source.split("# snippet:begin\n", 1)[1].split("# snippet:end\n", 1)[0]
         docs = (Path(__file__).parents[3] / "docs" / "start" / "README.md").read_text(encoding="utf-8")
-        self.assertIn("```python\n" + snippet + "```", docs)
+        for region in ("snippet", "snippet:update"):
+            with self.subTest(region=region):
+                snippet = source.split(f"# {region}:begin\n", 1)[1].split(f"# {region}:end\n", 1)[0]
+                self.assertIn("```python\n" + snippet + "```", docs)
 
 
 if __name__ == "__main__":

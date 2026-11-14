@@ -570,12 +570,14 @@ class CultMeshDatabase:
             catalog_entry=catalog_entry,
         )
         value = self.cache.put_envelope(registered, envelope)
+        # The stamp the write was stored at, which a replacing write mints later than the record it replaces: the cache holds it.
+        stored_at = self.cache.get_required_envelope(registered, key).stored_at
         self._publish_local_change(registered, key, "added" if previous is None else "updated", value, previous)
         message = document_put_raw(
             message_id=message_id,
             key=key,
             schema_id=envelope.schema_id or catalog_entry.schema_id,
-            stored_at=envelope.stored_at,
+            stored_at=stored_at,
             payload=envelope.payload,
             source_runtime_id=self.runtime_id,
             shard_id=shard_id,
@@ -683,10 +685,11 @@ class CultMeshDatabase:
         value = self.cache.put_envelope(document, envelope)
         change_kind = "added" if previous is None else "updated"
         change = self._publish_local_change(document, record_key, change_kind, value, previous)
-        self._append_shard_log_put(CultNetMessage(
-            "cultnet.document_put_raw.v0",
-            {key: value for key, value in message.items() if key != "schemaVersion"},
-        ), change_kind)
+        # The log carries the stamp the cache holds, which a replacing put mints later than the record it replaces, not the peer's.
+        stored_at = self.cache.get_required_envelope(document, record_key).stored_at
+        logged = {key: value for key, value in message.items() if key != "schemaVersion"}
+        logged["document"] = {**message["document"], "storedAt": stored_at}
+        self._append_shard_log_put(CultNetMessage("cultnet.document_put_raw.v0", logged), change_kind)
         return change
 
     def raw_put_served_alone(self, message: dict[str, Any], *, message_id: str) -> dict[str, Any] | None:
