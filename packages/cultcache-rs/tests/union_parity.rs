@@ -674,7 +674,7 @@ fn a_refused_load_refuses_every_write() {
             ("put_prepared_batch", cache.put_prepared_batch(vec![staged.clone()]).unwrap_err()),
             ("put_envelope", cache.put_envelope::<UnionSurface>(staged.clone()).unwrap_err()),
             ("put_raw_envelope", cache.put_raw_envelope(staged.clone()).unwrap_err()),
-            ("update", cache.update::<UnionSurface, _>("good", |current| current.unwrap_or_else(constructed)).unwrap_err()),
+            ("update", cache.update::<UnionSurface, _>("good", |current| Some(current.unwrap_or_else(constructed))).unwrap_err()),
             ("delete", cache.delete::<UnionSurface>("good").unwrap_err()),
             ("delete a key the image lacks", cache.delete::<UnionSurface>("absent").unwrap_err()),
         ];

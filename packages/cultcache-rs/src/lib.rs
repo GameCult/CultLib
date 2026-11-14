@@ -1290,6 +1290,39 @@ pub struct PushAllOptions {
     pub soft: bool,
 }
 
+/// A record read from a store with its content version, both from one read. The version is the lowercase hex SHA-256 of the
+/// record as the store file encodes it (key, schema id, `stored_at`, payload), so a rewrite of the same bytes under a later
+/// stamp is a different version.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CultStoredRecord {
+    pub envelope: CultCacheEnvelope,
+    pub version: String,
+}
+
+/// The verdict of [`CacheBackingStore::commit_if`]: the write landed and carries this stamp, or the record at the key was not at
+/// the expected version and nothing was written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CultCommitIf {
+    Committed { stored_at: String },
+    Mismatch,
+}
+
+/// How [`CultCache::update`] ended. `Declined` wrote nothing because `apply` returned `None`; `LostRace` wrote nothing because
+/// every attempt found the record changed under it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CultUpdateOutcome {
+    Updated,
+    Declined,
+    LostRace,
+}
+
+/// The outcome of an update and the cache's document at the key after it (a read that decides nothing).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CultUpdateResult<T> {
+    pub outcome: CultUpdateOutcome,
+    pub document: Option<T>,
+}
+
 /// One per-entry expectation for [`SingleFileMessagePackBackingStore::compare_exchange`].
 /// `current` is the envelope the caller believes is stored, or `None` when it
 /// believes the identity is absent.
@@ -1312,7 +1345,9 @@ pub enum TryCompareExchangeSnapshotOutcome {
 
 pub trait CacheBackingStore: Send {
     fn pull_all(&self) -> Result<Vec<CultCacheEnvelope>>;
-    fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()>;
+    /// Writes `entry` and returns the `stored_at` the store wrote: a store that restamps a replacing write reports the stamp it
+    /// minted, and the cache holds that one.
+    fn push(&mut self, entry: &CultCacheEnvelope) -> Result<String>;
     fn delete(&mut self, entry: &CultCacheEnvelope) -> Result<()>;
 
     /// Writes `entries` onto the store as it is when the write lands, in one
@@ -1322,7 +1357,9 @@ pub trait CacheBackingStore: Send {
     /// it held before. A cache batch (`put_prepared_batch`) is all-or-nothing
     /// only through this. There is no default, because a write assembled from
     /// `push` calls leaves the store partial when one of them fails; a store
-    /// without an atomic write does not compile:
+    /// without an atomic write does not compile. It returns one stamp per entry given, in order, the `stored_at` written for it
+    /// (an entry deduplicated away gets the stamp of the one that landed for its schema id and key); a soft write that wrote
+    /// nothing returns none:
     ///
     /// ```compile_fail,E0046
     /// use cultcache_rs::{CacheBackingStore, CultCacheEnvelope};
@@ -1333,15 +1370,33 @@ pub trait CacheBackingStore: Send {
     ///     fn pull_all(&self) -> anyhow::Result<Vec<CultCacheEnvelope>> {
     ///         Ok(Vec::new())
     ///     }
-    ///     fn push(&mut self, _entry: &CultCacheEnvelope) -> anyhow::Result<()> {
-    ///         Ok(())
+    ///     fn push(&mut self, _entry: &CultCacheEnvelope) -> anyhow::Result<String> {
+    ///         Ok(String::new())
     ///     }
     ///     fn delete(&mut self, _entry: &CultCacheEnvelope) -> anyhow::Result<()> {
     ///         Ok(())
     ///     }
     /// }
     /// ```
-    fn push_all(&mut self, entries: &[CultCacheEnvelope], options: PushAllOptions) -> Result<()>;
+    fn push_all(&mut self, entries: &[CultCacheEnvelope], options: PushAllOptions) -> Result<Vec<String>>;
+
+    /// The record at `key`, of any type, with its content version, from one read; `None` when the store holds nothing there.
+    /// [`CultCache::update`] needs this and [`CacheBackingStore::commit_if`]; a store without them refuses it.
+    fn read(&self, _key: &str) -> Result<Option<CultStoredRecord>> {
+        Err(anyhow!(
+            "{} has no read and commit_if: CultCache::update needs read and commit_if",
+            std::any::type_name::<Self>()
+        ))
+    }
+
+    /// Writes `entry` over the record at its key only if that record's version is `expected` (`None`: nothing is there), in
+    /// one step under the store's own exclusion. A mismatch writes nothing.
+    fn commit_if(&mut self, _entry: &CultCacheEnvelope, _expected: Option<&str>) -> Result<CultCommitIf> {
+        Err(anyhow!(
+            "{} has no read and commit_if: CultCache::update needs read and commit_if",
+            std::any::type_name::<Self>()
+        ))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2026,14 +2081,46 @@ impl CacheBackingStore for SingleFileMessagePackBackingStore {
         self.with_shared_lock(|| self.read_all_unlocked())
     }
 
-    fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
+    fn push(&mut self, entry: &CultCacheEnvelope) -> Result<String> {
         self.with_exclusive_lock(|| {
             let mut entries = self.read_all_unlocked()?;
+            let entry = restamped_over(entry, &entries)?;
             // A write replaces the record of its own type under its key; a second type under the key reaches the commit guard.
-            entries.retain(|candidate| entry_id(candidate) != entry_id(entry));
+            entries.retain(|candidate| entry_id(candidate) != entry_id(&entry));
             entries.push(entry.clone());
             entries.sort_by_key(entry_id);
-            self.write_all_unlocked(&entries)
+            self.write_all_unlocked(&entries)?;
+            Ok(entry.stored_at)
+        })
+    }
+
+    fn read(&self, key: &str) -> Result<Option<CultStoredRecord>> {
+        if is_absent(&self.path)? && is_absent(&self.lock_path())? {
+            return Ok(None);
+        }
+        self.with_shared_lock(|| {
+            Ok(self
+                .read_all_unlocked()?
+                .into_iter()
+                .find(|entry| entry.key == key)
+                .map(|envelope| CultStoredRecord { version: record_version(&envelope), envelope }))
+        })
+    }
+
+    fn commit_if(&mut self, entry: &CultCacheEnvelope, expected: Option<&str>) -> Result<CultCommitIf> {
+        self.with_exclusive_lock(|| {
+            let mut entries = self.read_all_unlocked()?;
+            let actual = entries.iter().find(|held| held.key == entry.key).map(record_version);
+            if actual.as_deref() != expected {
+                return Ok(CultCommitIf::Mismatch);
+            }
+            let entry = restamped_over(entry, &entries)?;
+            // Only the record of the entry's own identity is replaced; a second type under the key reaches the commit guard, as push does.
+            entries.retain(|held| entry_id(held) != entry_id(&entry));
+            entries.push(entry.clone());
+            entries.sort_by_key(entry_id);
+            self.write_all_unlocked(&entries)?;
+            Ok(CultCommitIf::Committed { stored_at: entry.stored_at })
         })
     }
 
@@ -2045,27 +2132,32 @@ impl CacheBackingStore for SingleFileMessagePackBackingStore {
         })
     }
 
-    fn push_all(&mut self, entries: &[CultCacheEnvelope], options: PushAllOptions) -> Result<()> {
+    fn push_all(&mut self, entries: &[CultCacheEnvelope], options: PushAllOptions) -> Result<Vec<String>> {
         self.with_exclusive_lock(|| {
             // A soft flush asks the one reader: nothing at the path is written, a store it reads is left alone, and anything
             // the reader refuses (an unreadable file, a dangling link) is refused here as it is for open.
             if options.soft && !self.read_store_unlocked()?.absent {
-                return Ok(());
+                return Ok(Vec::new());
             }
 
             // Of entries sharing a key and a schema id the last one given is the record, whatever their type names (a type
             // renamed under a stable id); it replaces the held record under that key and schema id. A second schema id
             // under a key reaches the commit guard, which judges the merged store.
-            let mut by_id = BTreeMap::<(String, String), &CultCacheEnvelope>::new();
-            for entry in entries {
-                by_id.insert((schema_identity(entry).to_string(), entry.key.clone()), entry);
-            }
             let mut merged = self.read_all_unlocked()?;
-            let replaced: BTreeSet<_> = by_id.values().map(|entry| entry_id(entry)).collect();
+            let mut by_id = BTreeMap::<(String, String), CultCacheEnvelope>::new();
+            for entry in entries {
+                by_id.insert((schema_identity(entry).to_string(), entry.key.clone()), restamped_over(entry, &merged)?);
+            }
+            let replaced: BTreeSet<_> = by_id.values().map(entry_id).collect();
             merged.retain(|held| !replaced.contains(&entry_id(held)));
-            merged.extend(by_id.into_values().cloned());
+            let stamps = entries
+                .iter()
+                .map(|entry| by_id[&(schema_identity(entry).to_string(), entry.key.clone())].stored_at.clone())
+                .collect();
+            merged.extend(by_id.into_values());
             merged.sort_by_key(entry_id);
-            self.write_all_unlocked(&merged)
+            self.write_all_unlocked(&merged)?;
+            Ok(stamps)
         })
     }
 }
@@ -2827,14 +2919,14 @@ impl CacheBackingStore for OwnedRedbMessagePackBackingStore {
         read_all_redb(&table)
     }
 
-    fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
+    fn push(&mut self, entry: &CultCacheEnvelope) -> Result<String> {
         let write = self.inner.database.begin_write()?;
         {
             let mut table = write.open_table(REDB_ENVELOPES)?;
             insert_redb_entry(&mut table, entry)?;
         }
         write.commit()?;
-        Ok(())
+        Ok(entry.stored_at.clone())
     }
 
     fn delete(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
@@ -2848,7 +2940,7 @@ impl CacheBackingStore for OwnedRedbMessagePackBackingStore {
         Ok(())
     }
 
-    fn push_all(&mut self, entries: &[CultCacheEnvelope], _options: PushAllOptions) -> Result<()> {
+    fn push_all(&mut self, entries: &[CultCacheEnvelope], _options: PushAllOptions) -> Result<Vec<String>> {
         unique_batch_ids(entries, "push all")?;
         let write = self.inner.database.begin_write()?;
         {
@@ -2858,7 +2950,7 @@ impl CacheBackingStore for OwnedRedbMessagePackBackingStore {
             }
         }
         write.commit()?;
-        Ok(())
+        Ok(entries.iter().map(|entry| entry.stored_at.clone()).collect())
     }
 }
 
@@ -2957,7 +3049,7 @@ impl CacheBackingStore for RedbMessagePackBackingStore {
         })
     }
 
-    fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
+    fn push(&mut self, entry: &CultCacheEnvelope) -> Result<String> {
         self.with_database(|database| {
             let write = database.begin_write()?;
             {
@@ -2965,7 +3057,7 @@ impl CacheBackingStore for RedbMessagePackBackingStore {
                 insert_redb_entry(&mut table, entry)?;
             }
             write.commit()?;
-            Ok(())
+            Ok(entry.stored_at.clone())
         })
     }
 
@@ -2982,7 +3074,7 @@ impl CacheBackingStore for RedbMessagePackBackingStore {
         })
     }
 
-    fn push_all(&mut self, entries: &[CultCacheEnvelope], _options: PushAllOptions) -> Result<()> {
+    fn push_all(&mut self, entries: &[CultCacheEnvelope], _options: PushAllOptions) -> Result<Vec<String>> {
         unique_batch_ids(entries, "push all")?;
         self.with_database(|database| {
             let write = database.begin_write()?;
@@ -2993,7 +3085,7 @@ impl CacheBackingStore for RedbMessagePackBackingStore {
                 }
             }
             write.commit()?;
-            Ok(())
+            Ok(entries.iter().map(|entry| entry.stored_at.clone()).collect())
         })
     }
 }
@@ -3414,18 +3506,39 @@ impl CultCache {
     fn refuse_unread_slots(&self, type_id: &str, key: &str) -> Result<()> {
         match self.held_finding(type_id, key)? {
             HeldFinding::Free => Ok(()),
+            finding => {
+                let held = &self.entries[&entry_id_parts(type_id, key)];
+                self.refuse_finding(type_id, key, schema_identity(held), finding)
+            }
+        }
+    }
+
+    /// The same refusal for a record read from a store: [`CultCache::update`] copies it, so it must not carry slots this build
+    /// would drop or bytes it cannot read.
+    fn refuse_record_slots(&self, type_id: &str, key: &str, schema_id: &str, payload: &[u8]) -> Result<()> {
+        let Some(definition) = self.definitions.get(type_id) else {
+            bail!("No entry type registered for CultCache envelope type {type_id:?}");
+        };
+        let finding = match (definition.unread_slots)(payload) {
+            Ok(None) => return Ok(()),
+            Ok(Some(unread)) => HeldFinding::Marked(unread),
+            Err(error) => HeldFinding::Unreadable(error),
+        };
+        self.refuse_finding(type_id, key, schema_id, finding)
+    }
+
+    fn refuse_finding(&self, type_id: &str, key: &str, schema_id: &str, finding: HeldFinding) -> Result<()> {
+        match finding {
+            HeldFinding::Free => Ok(()),
             HeldFinding::Unreadable(error) => Err(error.context(format!(
                 "CultCache entry {type_id:?} at key {key:?} is held read-only: this build cannot read its payload. A newer writer's record is read with that build; a corrupt one is restored from a backup or removed at the store itself, not through the cache"
             ))),
-            HeldFinding::Marked(unread) => {
-                let held = &self.entries[&entry_id_parts(type_id, key)];
-                Err(anyhow::Error::new(SchemaConflictError {
-                    schema_id: schema_identity(held).to_string(),
-                    schema_names: vec![self.definitions[type_id].schema_name.to_string()],
-                    record_key: key.to_string(),
-                    unread_slots: Some(unread),
-                }))
-            }
+            HeldFinding::Marked(unread) => Err(anyhow::Error::new(SchemaConflictError {
+                schema_id: schema_id.to_string(),
+                schema_names: vec![self.definitions[type_id].schema_name.to_string()],
+                record_key: key.to_string(),
+                unread_slots: Some(unread),
+            })),
         }
     }
 
@@ -3561,14 +3674,7 @@ impl CultCache {
         self.require_loaded()?;
         let (entry, parsed) = self.prepare_entry(key, value)?;
         self.refuse_unread_slots(&entry.r#type, &entry.key)?;
-        self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
-        self.refuse_retype(&self.entries, &self.foreign, &entry)?;
-        let change = self.judge_unique(&[&entry])?;
-        if let Some(home) = self.home_index(T::TYPE)? {
-            self.stores[home].store.push(&entry)?;
-        }
-        self.entries.insert(entry_id(&entry), entry);
-        change.apply(&mut self.index_holders);
+        self.write_entry(entry, None)?;
         Ok(parsed)
     }
 
@@ -3687,10 +3793,22 @@ impl CultCache {
         if let Some(store_index) = store_index {
             // The home store is handed the staged records alone and applies them onto what it holds now.
             // A key staged twice lands as its last record, whatever the store.
-            let landing: BTreeMap<_, _> = staged.iter().map(|entry| (entry_id(entry), entry.clone())).collect();
-            self.stores[store_index]
-                .store
-                .push_all(&landing.into_values().collect::<Vec<_>>(), PushAllOptions::default())?;
+            let landing: Vec<CultCacheEnvelope> = staged
+                .iter()
+                .map(|entry| (entry_id(entry), entry.clone()))
+                .collect::<BTreeMap<_, _>>()
+                .into_values()
+                .collect();
+            let stamps = self.stores[store_index].store.push_all(&landing, PushAllOptions::default())?;
+            if stamps.len() == landing.len() {
+                for (entry, stamp) in landing.iter().zip(stamps) {
+                    if chrono::DateTime::parse_from_rfc3339(&stamp).is_ok()
+                        && let Some(held) = next.get_mut(&entry_id(entry))
+                    {
+                        held.stored_at = stamp;
+                    }
+                }
+            }
         }
         self.entries = next;
         change.apply(&mut self.index_holders);
@@ -3702,14 +3820,7 @@ impl CultCache {
         let parsed = self.validate_envelope::<T>(&entry)?;
         self.refuse_unread_slots(&entry.r#type, &entry.key)?;
         self.refuse_claimed_id(&entry)?;
-        self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
-        self.refuse_retype(&self.entries, &self.foreign, &entry)?;
-        let change = self.judge_unique(&[&entry])?;
-        if let Some(home) = self.home_index(T::TYPE)? {
-            self.stores[home].store.push(&entry)?;
-        }
-        self.entries.insert(entry_id(&entry), entry);
-        change.apply(&mut self.index_holders);
+        self.write_entry(entry, None)?;
         Ok(parsed)
     }
 
@@ -3741,15 +3852,33 @@ impl CultCache {
         require_record_payload(&entry)?;
         self.refuse_unread_slots(&entry.r#type, &entry.key)?;
         self.refuse_claimed_id(&entry)?;
+        self.write_entry(entry, None)?;
+        Ok(())
+    }
+
+    /// The one landing of a single record, for `put`, `put_envelope`, `put_raw_envelope` and `update`: the global, retype and
+    /// unique judges, then the home store's write, then the install of the stamp the store reports (kept only when it parses
+    /// as RFC 3339, else the entry's own). `expected` is `None` for a blind write; `Some(version)` writes only over the record at
+    /// that version (`Some(None)`: over nothing) and returns `false`, installing nothing, when the store found another.
+    fn write_entry(&mut self, mut entry: CultCacheEnvelope, expected: Option<Option<String>>) -> Result<bool> {
         self.refuse_second_global(&self.entries, &entry.r#type, &entry.key)?;
         self.refuse_retype(&self.entries, &self.foreign, &entry)?;
         let change = self.judge_unique(&[&entry])?;
         if let Some(home) = self.home_index(&entry.r#type)? {
-            self.stores[home].store.push(&entry)?;
+            let stored_at = match expected {
+                None => self.stores[home].store.push(&entry)?,
+                Some(version) => match self.stores[home].store.commit_if(&entry, version.as_deref())? {
+                    CultCommitIf::Committed { stored_at } => stored_at,
+                    CultCommitIf::Mismatch => return Ok(false),
+                },
+            };
+            if chrono::DateTime::parse_from_rfc3339(&stored_at).is_ok() {
+                entry.stored_at = stored_at;
+            }
         }
         self.entries.insert(entry_id(&entry), entry);
         change.apply(&mut self.index_holders);
-        Ok(())
+        Ok(true)
     }
 
     fn validate_envelope<T: DatabaseEntry>(&self, entry: &CultCacheEnvelope) -> Result<T> {
@@ -3784,13 +3913,82 @@ impl CultCache {
         })
     }
 
-    pub fn update<T, F>(&mut self, key: &str, updater: F) -> Result<T>
+    /// Read the record at `key` as its home store holds it now, apply `apply` to a copy, and write the result only if the store
+    /// still holds the record that was read; on a lost race run `apply` again on a fresh read, up to 5 attempts
+    /// ([`CultCache::update_with_attempts`] takes the bound). `apply` may run several times and must have no side effects.
+    /// `None` from `apply` writes nothing ([`CultUpdateOutcome::Declined`]); losing every attempt is a value
+    /// ([`CultUpdateOutcome::LostRace`]), not an error. On `Updated` the write is durable. [`CultCache::put`] is the blind write.
+    pub fn update<T, F>(&mut self, key: &str, apply: F) -> Result<CultUpdateResult<T>>
     where
         T: DatabaseEntry,
-        F: FnOnce(Option<T>) -> T,
+        F: FnMut(Option<T>) -> Option<T>,
     {
-        let current = self.get::<T>(key)?;
-        self.put::<T>(key.to_string(), &updater(current))
+        self.update_with_attempts(key, 5, apply)
+    }
+
+    /// [`CultCache::update`] with its attempt bound: `max_attempts` of 0 is refused before `apply` runs. A refusal, a store
+    /// error or a failed judge is returned at once and never retried; after the last lost attempt the cache pulls its stores
+    /// (display only) and reports `LostRace`.
+    pub fn update_with_attempts<T, F>(&mut self, key: &str, max_attempts: usize, mut apply: F) -> Result<CultUpdateResult<T>>
+    where
+        T: DatabaseEntry,
+        F: FnMut(Option<T>) -> Option<T>,
+    {
+        if max_attempts == 0 {
+            bail!("update max_attempts must be at least 1");
+        }
+        for attempt in 1..=max_attempts {
+            let (copy, expected) = self.read_for_update::<T>(key)?;
+            let Some(next) = apply(copy) else {
+                return Ok(CultUpdateResult { outcome: CultUpdateOutcome::Declined, document: self.get::<T>(key)? });
+            };
+            let (entry, _) = self.prepare_entry(key, &next)?;
+            if self.write_entry(entry, expected)? {
+                return Ok(CultUpdateResult { outcome: CultUpdateOutcome::Updated, document: self.get::<T>(key)? });
+            }
+            if attempt == max_attempts {
+                self.pull_all_backing_stores()?;
+                return Ok(CultUpdateResult { outcome: CultUpdateOutcome::LostRace, document: self.get::<T>(key)? });
+            }
+        }
+        unreachable!("the last attempt returns")
+    }
+
+    /// One attempt's read: the refusals that precede `apply`, then the record at `key` as the home store holds it with the version
+    /// to commit against (`Some(None)` for nothing there; `None` for a cache with no store, which has no version). Installs
+    /// nothing in the cache.
+    #[allow(clippy::type_complexity)]
+    fn read_for_update<T: DatabaseEntry>(&self, key: &str) -> Result<(Option<T>, Option<Option<String>>)> {
+        self.require_loaded()?;
+        self.require_entry_type::<T>()?;
+        self.refuse_unread_slots(T::TYPE, key)?;
+        let probe = CultCacheEnvelope {
+            key: key.to_string(),
+            r#type: T::TYPE.to_string(),
+            payload: Vec::new(),
+            stored_at: String::new(),
+            schema_id: None,
+        };
+        self.refuse_retype(&self.entries, &self.foreign, &probe)?;
+        let Some(home) = self.home_index(T::TYPE)? else {
+            return Ok((self.get::<T>(key)?, None));
+        };
+        let Some(found) = self.stores[home].store.read(key)? else {
+            return Ok((None, Some(None)));
+        };
+        let known_types: BTreeSet<String> = self.definitions.keys().cloned().collect();
+        let resolved = resolve_registered_type(
+            &known_types,
+            &self.schema_name_definitions,
+            found.envelope.schema_id.as_deref(),
+            &found.envelope.r#type,
+        );
+        if resolved.as_deref() != Some(T::TYPE) {
+            bail!("Record {key} is not a {}; update cannot copy it.", T::TYPE);
+        }
+        self.refuse_record_slots(T::TYPE, key, schema_identity(&found.envelope), &found.envelope.payload)?;
+        let copy = decode_payload::<T>(&found.envelope.payload)?;
+        Ok((Some(copy), Some(Some(found.version))))
     }
 
     pub fn delete<T: DatabaseEntry>(&mut self, key: &str) -> Result<bool> {
@@ -4074,6 +4272,60 @@ fn entry_id(entry: &CultCacheEnvelope) -> (String, String) {
 
 fn entry_id_parts(r#type: &str, key: &str) -> (String, String) {
     (r#type.to_string(), key.to_string())
+}
+
+/// The content version of a stored record: lowercase hex SHA-256 of the record exactly as the store file encodes it, so it
+/// covers the key, schema id, `stored_at` and payload. The only hash in this crate.
+fn record_version(entry: &CultCacheEnvelope) -> String {
+    use sha2::{Digest, Sha256};
+    let record = PersistedRecord(
+        entry.key.clone(),
+        schema_identity(entry).to_string(),
+        entry.stored_at.clone(),
+        entry.payload.clone(),
+    );
+    let bytes = rmp_serde::to_vec(&record).expect("a record of strings and bytes encodes");
+    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// A stamp strictly later than `previous` (to the microsecond): `now` truncated to the microsecond when that is later,
+/// otherwise `previous` truncated plus one microsecond. An absent or unparseable `previous` gives `now`. A successor past
+/// year 9999 does not exist as a stamp any runtime reads, so it is refused (C# `MintStoredAt` throws there).
+fn mint_stored_at(previous: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> Result<String> {
+    use chrono::SubsecRound;
+    let now = now.trunc_subsecs(6);
+    let minted = match previous.and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok()) {
+        Some(previous) => {
+            let previous = previous.with_timezone(&chrono::Utc).trunc_subsecs(6);
+            if now <= previous {
+                previous
+                    .checked_add_signed(chrono::Duration::microseconds(1))
+                    .filter(|successor| chrono::Datelike::year(successor) <= 9999)
+                    .ok_or_else(|| anyhow!("stored_at {previous} has no later stamp: the successor is past year 9999"))?
+            } else {
+                now
+            }
+        }
+        None => now,
+    };
+    Ok(minted.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
+}
+
+/// The stamp a replacing write carries: `staged` stands only when both stamps parse and it is strictly later than `replaced`.
+fn stored_at_over(staged: &str, replaced: &str) -> Result<String> {
+    match (chrono::DateTime::parse_from_rfc3339(staged), chrono::DateTime::parse_from_rfc3339(replaced)) {
+        (Ok(staged_at), Ok(replaced_at)) if staged_at > replaced_at => Ok(staged.to_string()),
+        _ => mint_stored_at(Some(replaced), chrono::Utc::now()),
+    }
+}
+
+/// `entry` stamped later than the record the store holds at its key, of any type; unchanged where nothing is held.
+fn restamped_over(entry: &CultCacheEnvelope, held: &[CultCacheEnvelope]) -> Result<CultCacheEnvelope> {
+    let mut entry = entry.clone();
+    if let Some(replaced) = held.iter().find(|candidate| candidate.key == entry.key) {
+        entry.stored_at = stored_at_over(&entry.stored_at, &replaced.stored_at)?;
+    }
+    Ok(entry)
 }
 
 fn now_utc_second() -> String {
@@ -4924,7 +5176,7 @@ mod tests {
         fn pull_all(&self) -> Result<Vec<CultCacheEnvelope>> {
             self.inner.pull_all()
         }
-        fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
+        fn push(&mut self, entry: &CultCacheEnvelope) -> Result<String> {
             self.inner.push(entry)
         }
         fn delete(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
@@ -4934,7 +5186,7 @@ mod tests {
             &mut self,
             entries: &[CultCacheEnvelope],
             options: PushAllOptions,
-        ) -> Result<()> {
+        ) -> Result<Vec<String>> {
             if self.refuse_batch.load(Ordering::SeqCst) {
                 return Err(anyhow!("injected batch refusal"));
             }
@@ -5554,8 +5806,8 @@ mod tests {
         let absent_note = CultCacheExpectedEnvelope { key: "k".to_string(), r#type: Note::TYPE.to_string(), current: None };
         type Writer = fn(&mut SingleFileMessagePackBackingStore, &[CultCacheEnvelope; 3], &CultCacheExpectedEnvelope) -> Result<bool>;
         let writers: Vec<(&str, Writer)> = vec![
-            ("push", |s, e, _| s.push(&e[2]).map(|()| true)),
-            ("push_all", |s, e, _| s.push_all(&[e[0].clone(), e[2].clone()], PushAllOptions::default()).map(|()| true)),
+            ("push", |s, e, _| s.push(&e[2]).map(|_| true)),
+            ("push_all", |s, e, _| s.push_all(&[e[0].clone(), e[2].clone()], PushAllOptions::default()).map(|_| true)),
             ("insert_entry_if_absent", |s, e, _| s.insert_entry_if_absent(e[2].clone())),
             ("compare_and_swap_entry", |s, e, _| s.compare_and_swap_entry(&e[0], e[2].clone())),
             ("compare_exchange", |s, e, x| s.compare_exchange(std::slice::from_ref(x), &[e[2].clone()])),
@@ -5713,6 +5965,52 @@ mod tests {
         assert_eq!(fs::read(&foreign)?, b"foreign store staging");
         assert_eq!(store.pull_all()?, vec![expected]);
         Ok(())
+    }
+
+    fn is_minted_text(text: &str) -> bool {
+        let bytes = text.as_bytes();
+        bytes.len() == 27
+            && bytes.ends_with(b"Z")
+            && bytes[19] == b'.'
+            && bytes[20..26].iter().all(u8::is_ascii_digit)
+            && chrono::DateTime::parse_from_rfc3339(text).is_ok()
+    }
+
+    fn at(text: &str) -> chrono::DateTime<chrono::FixedOffset> {
+        chrono::DateTime::parse_from_rfc3339(text).unwrap()
+    }
+
+    #[test]
+    fn stamps_stand_only_when_strictly_later_and_otherwise_mint_over_the_replaced() {
+        // A strictly later staged stamp stands as written.
+        assert_eq!(stored_at_over("2099-01-01T00:00:00Z", "2026-01-01T00:00:00Z").unwrap(), "2099-01-01T00:00:00Z");
+        // An equal or earlier one is replaced by a minted stamp later than the replaced, over C#'s seven digits too.
+        for replaced in ["2026-01-01T00:00:00.1234567+00:00", "2026-01-01T00:00:00Z", "2099-01-01T00:00:00Z"] {
+            for staged in [replaced, "2020-01-01T00:00:00Z"] {
+                let minted = stored_at_over(staged, replaced).unwrap();
+                assert!(is_minted_text(&minted), "{minted}");
+                assert!(at(&minted) > at(replaced), "{minted} over {replaced}");
+            }
+        }
+        assert_eq!(stored_at_over("2020-01-01T00:00:00Z", "2099-01-01T00:00:00Z").unwrap(), "2099-01-01T00:00:00.000001Z");
+        // An unparseable stamp on either side is never kept: the minted stamp is the replaced's successor or now.
+        let minted = stored_at_over("not a stamp", "2099-01-01T00:00:00Z").unwrap();
+        assert_eq!(minted, "2099-01-01T00:00:00.000001Z");
+        let minted = stored_at_over("2099-01-01T00:00:00Z", "not a stamp").unwrap();
+        assert!(is_minted_text(&minted));
+        assert!((chrono::Utc::now() - at(&minted).with_timezone(&chrono::Utc)).num_seconds().abs() < 60, "{minted}");
+        assert!(is_minted_text(&mint_stored_at(None, chrono::Utc::now()).unwrap()));
+    }
+
+    #[test]
+    fn a_stamp_with_no_successor_in_year_9999_is_refused() {
+        for replaced in ["9999-12-31T23:59:59.9999999+00:00", "9999-12-31T23:59:59.999999Z"] {
+            for staged in [replaced, "2020-01-01T00:00:00Z"] {
+                assert!(stored_at_over(staged, replaced).is_err(), "{staged} over {replaced}");
+            }
+        }
+        // One microsecond earlier still has a successor.
+        assert_eq!(stored_at_over("2020-01-01T00:00:00Z", "9999-12-31T23:59:59.999998Z").unwrap(), "9999-12-31T23:59:59.999999Z");
     }
 
     #[test]
@@ -6633,9 +6931,10 @@ mod tests {
                 retries: 0,
             });
             current.retries += 1;
-            current
+            Some(current)
         })?;
-        assert_eq!(updated.retries, 1);
+        assert_eq!(updated.outcome, CultUpdateOutcome::Updated);
+        assert_eq!(updated.document.map(|settings| settings.retries), Some(1));
         assert!(cache.delete::<Settings>("app")?);
         assert!(cache.get::<Settings>("app")?.is_none());
         Ok(())
@@ -7351,10 +7650,10 @@ mod tests {
                 let mut store = SingleFileMessagePackBackingStore::new(&path);
                 let outcome = match operation {
                     "open" => store.pull_all().map(|_| ()),
-                    "soft_push_all" => store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions { soft: true }),
-                    "push_all" => store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default()),
+                    "soft_push_all" => store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions { soft: true }).map(|_| ()),
+                    "push_all" => store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default()).map(|_| ()),
                     "delete" => store.delete(&snapshot_envelope("x", b"one")),
-                    _ => store.push(&snapshot_envelope("x", b"one")),
+                    _ => store.push(&snapshot_envelope("x", b"one")).map(|_| ()),
                 };
                 let what = format!("{vector} {operation}");
                 assert_eq!(outcome.is_ok(), reads, "{what}: {outcome:?}");
@@ -8016,7 +8315,7 @@ mod tests {
                 let mut store = SingleFileMessagePackBackingStore::new(&path);
                 let outcome = match operation {
                     "open" => store.pull_all().map(|_| ()),
-                    _ => store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default()),
+                    _ => store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default()).map(|_| ()),
                 };
                 let error = outcome.expect_err(&format!("{vector} {operation}"));
                 assert!(unreadable_kind(&error).is_some(), "{vector} {operation}: {error:#}");
@@ -8168,7 +8467,7 @@ mod tests {
         let mut writer = SingleFileMessagePackBackingStore::new(&path);
         let delta = snapshot_envelope("delta", b"4");
         let writes = [
-            writer.push(&delta),
+            writer.push(&delta).map(|_| ()),
             writer.delete(&delta),
             writer.insert_entry_if_absent(delta.clone()).map(|_| ()),
             writer.compare_and_swap_batch(&[], vec![delta.clone()]).map(|_| ()),
@@ -8339,8 +8638,8 @@ mod tests {
         let dangling = volume.join("missing.cc");
         let path = temp.path().join("late.cc");
         let writers: [(&str, fn(&mut SingleFileMessagePackBackingStore) -> Result<()>); 4] = [
-            ("push", |s| s.push(&snapshot_envelope("b", b"2"))),
-            ("push_all", |s| s.push_all(&[snapshot_envelope("b", b"2")], PushAllOptions::default())),
+            ("push", |s| s.push(&snapshot_envelope("b", b"2")).map(|_| ())),
+            ("push_all", |s| s.push_all(&[snapshot_envelope("b", b"2")], PushAllOptions::default()).map(|_| ())),
             ("delete", |s| s.delete(&snapshot_envelope("a", b"1"))),
             ("compare_exchange_snapshot", |s| s.compare_exchange_snapshot(&[], &[snapshot_envelope("b", b"2")]).map(|_| ())),
         ];

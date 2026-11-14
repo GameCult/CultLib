@@ -270,7 +270,7 @@ fn every_write_entry_refuses_a_marked_key_before_any_store_is_touched() {
     assert_refused_with(&cache.put_prepared_batch(vec![replacing]).unwrap_err(), "marked", &expected);
     assert_refused_with(&cache.delete::<UnionSurface>("marked").unwrap_err(), "marked", &expected);
     assert_refused_with(
-        &cache.update::<UnionSurface, _>("marked", |current| current.unwrap()).unwrap_err(),
+        &cache.update::<UnionSurface, _>("marked", |current| current).unwrap_err(),
         "marked",
         &expected,
     );

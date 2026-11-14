@@ -195,6 +195,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "serde_stacker",
+ "sha2",
  "stacker",
  "uuid",
  "windows-sys 0.59.0",

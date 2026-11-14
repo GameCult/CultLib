@@ -51,6 +51,7 @@ fn write_record(path: &Path, key: &str, ty: &str, schema: &str, payload: Vec<u8>
         stored_at: "2026-10-29T00:00:00Z".into(),
         schema_id: Some(schema.into()),
     })
+    .map(|_| ())
 }
 
 // ------------------------------------------------------------------ fake host

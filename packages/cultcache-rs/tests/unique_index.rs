@@ -221,7 +221,7 @@ fn a_record_rewriting_its_own_key_keeps_its_value_and_a_change_releases_the_old_
     assert_eq!(cache.get_by_index::<Unique>("Sku", "S").unwrap().unwrap().sku, "S");
     assert_eq!(cache.get_by_index::<Unique>("Sku", "T").unwrap().unwrap().sku, "T");
     // Updating through `update` is the same rule.
-    assert!(cache.update::<Unique, _>("k", |_| unique("S")).is_err());
+    assert!(cache.update::<Unique, _>("k", |_| Some(unique("S"))).is_err());
     assert_eq!(cache.get::<Unique>("k").unwrap().unwrap().sku, "T");
 }
 
@@ -326,7 +326,7 @@ fn every_write_path_refuses_and_changes_nothing() {
             assert_eq!(text, refusal(first, second, "Multi", alias));
         };
         pick(&error_text(cache.put("m:new", clash)));
-        pick(&error_text(cache.update::<Multi, _>("m:new", |_| clash.clone())));
+        pick(&error_text(cache.update::<Multi, _>("m:new", |_| Some(clash.clone()))));
         let envelope = staged(&cache, &[("m:new", clash.clone())]).remove(0);
         pick(&error_text(cache.put_envelope::<Multi>(envelope.clone())));
         pick(&error_text(cache.put_raw_envelope(envelope.clone())));

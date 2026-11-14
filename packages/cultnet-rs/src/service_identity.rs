@@ -347,7 +347,9 @@ pub fn export_service_identity_trust_anchor<P: ServiceIdentityProfile>(
     };
     let mut backing = SingleFileMessagePackBackingStore::new(path);
     match backing.pull_all()?.as_slice() {
-        [] => backing.push(&envelope)?,
+        [] => {
+            backing.push(&envelope)?;
+        }
         [current] if current == &envelope => {}
         _ => bail!("service identity trust anchor output already contains different state"),
     }

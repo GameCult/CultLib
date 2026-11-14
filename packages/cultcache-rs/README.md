@@ -186,7 +186,7 @@ without pretending Rust has runtime reflection hiding under the floorboards.
 - `soa::<T>`
 - `put::<T>`
 - `put_envelope::<T>`
-- `update::<T>`
+- `update::<T>` and `update_with_attempts::<T>`: the conditional golden-path write (read the stored record, apply, commit only over what was read, rerun on a lost race)
 - `delete::<T>`
 - `snapshot`
 - `snapshot_soa`
@@ -303,6 +303,14 @@ The contract, shared with every runtime, is one home store per document type
 - a write whose type has no home store is an error
 
 ## Persistence Semantics
+
+`update` is the golden path for changing a record another writer may also change: each attempt reads the record and its content
+version from the home store, hands `apply` a copy, and commits only if the store still holds that version. `put` is the blind
+write. The single-file store stamps a replacing write (`push`, `push_all` and `update`'s commit) strictly later than the record
+it replaces, and the cache holds the stamp the store reports; the redb stores and the exact-envelope family
+(`compare_and_swap_entry` and the other store-level conditional writes) write the caller's envelope byte for byte. A store
+needs `read` and `commit_if` to serve `update`; the redb stores do not have them.
+The version is the SHA-256 of the record re-encoded as the store file writes it; that equals the hash of the record's bytes in the file (and the C# reference's vector) whenever the file's MessagePack encodings are minimal, as every runtime's writer produces.
 
 `put` persists before mutating the in-memory cache. If persistence fails, the
 cache does not pretend the write succeeded.
