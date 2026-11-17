@@ -3487,6 +3487,8 @@ impl CultCache {
 
     /// The one decode behind every write entry and [`CultCache::is_writable`]: the held envelope at `(type_id, key)`
     /// read under the registered type's mark.
+    /// Each write over a held key pays one full typed decode of the held payload (about 40% of a `put` of a 200,000-element
+    /// record, measured in release); this cost is accepted deliberately, with no cached mark, so the check keeps no second state.
     fn held_finding(&self, type_id: &str, key: &str) -> Result<HeldFinding> {
         let Some(definition) = self.definitions.get(type_id) else {
             bail!("No entry type registered for CultCache envelope type {type_id:?}");
@@ -3985,15 +3987,22 @@ impl CultCache {
         self.require_loaded()?;
         self.require_entry_type::<T>()?;
         self.refuse_unread_slots(T::TYPE, key)?;
+        let home = self.home_index(T::TYPE)?;
         let id = entry_id_parts(T::TYPE, key);
         let Some(entry) = self.entries.get(&id).cloned() else {
-            if let Some((_, foreign)) = self.foreign.iter().find(|(_, foreign)| foreign.key == key) {
-                return Err(foreign_conflict(foreign, T::TYPE));
-            }
+            // The retype judge a write runs: a foreign record or another registered type holding the key refuses the removal.
+            let probe = CultCacheEnvelope {
+                key: key.to_string(),
+                r#type: T::TYPE.to_string(),
+                payload: Vec::new(),
+                stored_at: String::new(),
+                schema_id: None,
+            };
+            self.refuse_retype(&self.entries, &self.foreign, &probe)?;
             return Ok(false);
         };
         let released = self.projected_slots(&entry)?;
-        if let Some(home) = self.home_index(T::TYPE)? {
+        if let Some(home) = home {
             self.stores[home].store.delete(&entry)?;
         }
         self.entries.remove(&id);

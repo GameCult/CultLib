@@ -477,6 +477,21 @@ fn is_writable_is_false_for_a_type_with_no_home_store() {
     assert!(cache.is_writable(SlotUnit::TYPE, "k").unwrap());
 }
 
+// For a homeless type, is_writable, put and delete of an unheld key agree: removal is refused like the write, not answered false.
+#[test]
+fn delete_of_an_unheld_key_of_a_type_with_no_home_store_is_refused_like_the_put() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cache = registered();
+    cache.add_backing_store(SingleFileMessagePackBackingStore::new(dir.path().join("s.cc")), [SlotUnit::TYPE]).unwrap();
+    cache.pull_all_backing_stores().unwrap();
+    assert!(!cache.is_writable(UnionSurface::TYPE, "k").unwrap());
+    let error = cache.delete::<UnionSurface>("k").unwrap_err();
+    assert!(error.to_string().contains("No backing store is registered"), "{error:#}");
+    // A homed type's unheld delete is still a plain false.
+    assert!(cache.is_writable(SlotUnit::TYPE, "k").unwrap());
+    assert!(!cache.delete::<SlotUnit>("k").unwrap());
+}
+
 #[test]
 fn load_soa_refuses_a_same_length_replacement_of_a_marked_record() {
     use cultcache_rs::CultCacheSoaTable;
@@ -538,4 +553,54 @@ fn a_store_with_marked_records_and_a_tail_is_refused_and_its_cache_writes_nothin
         }
     }
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+// Attaching a store to a cache whose load was refused must keep the refusal: the write refusal still names why the load
+// failed, not merely that the cache has not pulled. (Only a pulled cache falls back to unpulled when a store is attached.)
+#[test]
+fn a_store_attached_after_a_refused_load_keeps_the_refusal_reason() {
+    use cultcache_rs::CacheBackingStore;
+    use cultcache_rs::CultCacheLoadRefused;
+    let (_held, dir, path) = held_marked_and_clean();
+    let mut tailed = vector("union-surface.msgpack");
+    tailed.push(0xc0);
+    SingleFileMessagePackBackingStore::new(&path).push(&envelope("tailed", tailed)).unwrap();
+    let mut cache = registered();
+    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+    assert!(cache.pull_all_backing_stores().is_err());
+    cache.add_backing_store(SingleFileMessagePackBackingStore::new(dir.path().join("routed.cc")), [SlotUnit::TYPE]).unwrap();
+    let error = cache.put("new", &constructed()).unwrap_err();
+    let refused = error.downcast_ref::<CultCacheLoadRefused>().unwrap_or_else(|| panic!("{error:#}"));
+    assert!(refused.reason.contains("bytes after"), "refusal reason lost: {}", refused.reason);
+}
+
+// A key held by another registered type, or carried as a foreign record: put, is_writable and typed delete all refuse, and
+// delete refuses with the put's conflict (delete used to answer Ok(false)). This agreement is for those two cases; for a
+// type with no home store delete's home-store error comes before the retype judge, and both still refuse.
+#[test]
+fn delete_of_a_key_held_by_another_registered_type_is_refused_like_the_put() {
+    let (mut cache, _dir, _path) = held_marked_and_clean();
+    assert!(!cache.is_writable(SlotUnit::TYPE, "clean").unwrap());
+    let put = cache.put("clean", &SlotUnit { name: "n".into(), outcome: UnitOutcome::Denied }).unwrap_err();
+    let delete = cache.delete::<SlotUnit>("clean").unwrap_err();
+    let (put, delete) = (conflict(&put), conflict(&delete));
+    assert_eq!(delete.record_key, "clean");
+    assert_eq!(delete.record_key, put.record_key);
+    assert_eq!(delete.schema_names, put.schema_names);
+    assert!(delete.schema_names.contains(&UnionSurface::TYPE.to_string()), "{:?}", delete.schema_names);
+    assert!(cache.snapshot_envelopes().iter().any(|held| held.key == "clean" && held.r#type == UnionSurface::TYPE));
+
+    // A foreign record at the key: only UnionSurface registered, the store's unit-arm record is foreign here.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("extra-slot-store.cc");
+    std::fs::write(&path, without_variant_row(&vector("extra-slot-store.cc"))).unwrap();
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<UnionSurface>().unwrap();
+    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+    cache.pull_all_backing_stores().unwrap();
+    assert!(!cache.is_writable(UnionSurface::TYPE, "unit-arm").unwrap());
+    let put = cache.put("unit-arm", &constructed()).unwrap_err();
+    let delete = cache.delete::<UnionSurface>("unit-arm").unwrap_err();
+    assert_eq!(conflict(&delete).record_key, "unit-arm");
+    assert_eq!(conflict(&delete).schema_names, conflict(&put).schema_names);
 }
