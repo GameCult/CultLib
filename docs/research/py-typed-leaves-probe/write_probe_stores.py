@@ -3,7 +3,7 @@ import sys, os
 sys.path.insert(0, r"F:\Projects\CultLib\packages\cultcache-py\src"); sys.path.insert(0, os.path.dirname(__file__))
 import proto_leaves as L
 from cultcache_py import CultCache, SingleFileMessagePackBackingStore
-from cultcache_py.documents import define_document_type
+from cultcache_py.documents import PayloadCodec, define_document_type
 from cultcache_py.backing_store import CultCacheSchemaCatalogMember as M
 
 NS = "GameCult.Caching.Tests.PyLeavesProbe"
@@ -25,7 +25,7 @@ def payload(doc_id):
 def write(path, members, tree_for):
     doc = define_document_type(
         "cultcache.py-leaves-probe", encode=lambda v: v, decode=lambda v: v,
-        payload_encoder=L.write, payload_decoder=lambda b: b, name=lambda v: v[0],
+        payload_codec=PayloadCodec("leaves-probe", L.write, lambda b: b), name=lambda v: v[0],
         schema_name="cultcache.py-leaves-probe", schema_version="cultcache.py_leaves_probe.v1",
         members=[M(slot=s, member_name=n, type_name=t, is_name=(s == 0)) for s, n, t in members])
     if os.path.exists(path): os.remove(path)

@@ -31,7 +31,7 @@ discovery, sessions, local server) build on it, mirroring `cultcache-rs` /
   second store, or a second generic store, raises `CultCacheError`; a write
   touches exactly one store and nothing is mirrored; once any store is
   attached, a write whose type has no home raises
-- the JSONL store uses only the Python standard library for bootstrap consumers
+- `define_document_type(...)` payloads are MessagePack by default; `JSON_PAYLOAD_CODEC` reads stores written by 0.3 and earlier
 - `define_database_entry_type(...)` emits Rust/C#-style slot-indexed
   MessagePack array payloads for cross-runtime `DatabaseEntry` contracts
 
@@ -131,7 +131,7 @@ reclassified; a unique key declared a role answers no lookups and stops refusing
 
 Backing stores persist envelopes, not caller domain objects. The cache decodes payloads through registered document definitions and rejects unknown type discriminators. This keeps Python's dynamic runtime from turning persistence into an open polymorphic sewer with a cheerful docstring.
 
-`JsonLinesBackingStore` is the dependency-free control-plane store. It rewrites an atomic JSONL snapshot and base64-encodes payload bytes. It is designed for compact state spines, settings, ledgers, and bootstrap surfaces.
+`JsonLinesBackingStore` is the control-plane store. It rewrites an atomic JSONL snapshot and base64-encodes the payload bytes its definition's codec wrote. It is designed for compact state spines, settings, ledgers, and bootstrap surfaces.
 
 `SingleFileMessagePackBackingStore` follows the shared CultCache v1 store shape
 used by the TypeScript, Rust, and C# runtimes:
@@ -150,10 +150,55 @@ Large corpora should use a sharded store or a real database. A single snapshot f
 
 A store whose elements hold an id is marked `cultcache.store.v3` by the C# runtime. This runtime reads and writes a v3 single-file store, keeps the header it read and carries the ids through a rewrite; it never drops the mark, so it has no carry-back. A cultcache-py from before element ids refuses a v3 store by name, so rolling back to it after a store has been written as v3 is one-way: restore from a copy taken before upgrading, and upgrade every reader before any writer. (The C# line is different: CultLib 1.x does not refuse; see the GameCult.Caching README.)
 
+## Payload format
+
+A definition's `payload_codec` owns its payload bytes. The default,
+`MESSAGEPACK_PAYLOAD_CODEC`, writes MessagePack; a store holds no format marker,
+so the registered definition decides how every record is read. A record in another
+format is refused when it is not one value of the definition's codec: a JSON object,
+list, string, `true` or `null` read as MessagePack is refused by count (`<type>
+payload has N bytes after its first MessagePack value`, a `ValueError`), and a payload
+the codec cannot read or carry is a `CultCachePayloadFormatError` or
+`CultCachePayloadDepthError`. The one exception is a JSON document that is a single
+digit (`0` to `9`), below.
+
+- Map keys are `str`, integer, float, `bool` or `msgpack.Timestamp`, as the C#
+  reference's object reader takes them; `None`, `bytes`, list and map keys are
+  refused, on read and on write. Two keys Python holds as one are refused on read
+  as `duplicate_map_key`, which includes `1` beside `1.0` or `True`: the reference
+  keeps those apart and a Python `dict` cannot. The same keys are refused on
+  write as `duplicate_map_key`, which includes a `Float32` key beside an equal
+  int, bool or float key, and two NaN keys, which are one key: the codec never
+  writes bytes its own reader refuses. One pair of keys is the exception to the reference, see Wire Parity.
+- Arrays and maps nest at most 256 deep (`MAX_PAYLOAD_DEPTH`), on read and on
+  write, in the codec and in the definition alike.
+- Integers beyond 64 bits (outside `-(2**63)..2**64-1`) are refused on write as
+  `integer_out_of_range`; MessagePack has no wider integer.
+- Timestamps lie within years 1 to 9999 (`.NET` `DateTime`), and no extension type
+  but the timestamp exists: a `msgpack.ExtType` value or a timestamp outside that
+  range is refused on read and on write as `value_kind` or `timestamp_out_of_range`.
+- A store written by cultcache-py 0.3 or earlier holds JSON payloads. Define each
+  type with `payload_codec=JSON_PAYLOAD_CODEC` to read it, or write it as a new store
+  with `convert(source, destination, definitions)`. Stop every writer of the source
+  first. `destination` must not exist; every record of the listed definitions is
+  rewritten under the definitions' own codec, records of other types keep their
+  bytes, and the new file is fsynced before the call returns. Open it with the
+  default definitions, then swap it in yourself. The source is never written. A
+  refused record raises `CultCacheError` naming the type, record key and code, and
+  leaves no destination; a killed run leaves the source as it was and a partial
+  destination, so delete the destination and run again.
+- A JSON payload that is a single digit (`0` to `9`) is also a valid one-byte
+  MessagePack integer and reads as 48 to 57 under the default, with no refusal. Only a
+  document whose whole value is such a digit meets this; objects, lists and
+  longer numbers never do.
+- A `PayloadCodec` you build owns the nesting depth of nodes the library's walk
+  cannot see (anything that is not a mapping, sequence or set), and may raise
+  `PayloadCodecFault(code, kind)` for a key or integer its format cannot carry.
+
 ## DatabaseEntry Slot Contract
 
-For cross-runtime cache entries, use `define_database_entry_type(...)` instead
-of the generic JSON formatter:
+For cross-runtime cache entries, use `define_database_entry_type(...)`, which
+fixes the MessagePack slot-array payload:
 
 ```python
 from dataclasses import dataclass
@@ -248,6 +293,10 @@ carries the value.
 
 ## Wire Parity
 
+Bytes match the C# reference for typed slots. An untyped (`object`) slot differs in
+what it writes: C# writes a boxed integer 1 as `d2 00000001`, this runtime writes the
+fixint `01`; each runtime reads the other's bytes.
+
 See [docs/python-runtime-parity.md](../../docs/python-runtime-parity.md) for
 the evidence map across the three Python packages.
 
@@ -257,6 +306,12 @@ The store interop peer is `cultcache_py.interop`:
 python -m cultcache_py.interop write --file cache.cc --runtime-id python
 python -m cultcache_py.interop read --file cache.cc
 ```
+
+One deliberate exception to leaf acceptance following the reference: Python reads `float32` and `float64` map keys as
+one float, so a map holding a `float32` NaN key beside a `float64` NaN key is refused on read and on write as
+`duplicate_map_key`. C# reads that map as two keys, from the bytes `82 ca ffc00000 01 cb fff8000000000000 02` (fixint
+values) and from the bytes it writes itself, `82 ca ffc00000 d2 00000001 cb fff8000000000000 d2 00000002` (`float.NaN`
+and `double.NaN` keys with values 1 and 2, written as int32); every pair of NaN keys of one width is refused by both runtimes.
 
 `packages/cultcache-ts/test/cult-cache.test.ts` includes Python in the shared
 CultCache v1 parity matrix with TypeScript, Rust, and C#. `cultcache_py` ships

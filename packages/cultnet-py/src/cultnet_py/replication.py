@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from cultcache_py import CultCache, CultCacheEnvelope
-from cultcache_py.documents import DocumentDefinition
+from cultcache_py.documents import MESSAGEPACK_PAYLOAD_CODEC, DocumentDefinition
 from cultcache_py.stores import parse_stored_at
 
 from .shard_log import CultNetShardLogResponse
@@ -190,9 +190,12 @@ def resolve_document_for_raw_record(
 
 
 def _infer_schema_version_from_payload(payload: bytes) -> str | None:
+    """Routing only, as the C# `CultNetDocumentRegistry.TryResolveDescriptorByPayloadSchema` does: reads a schema stamp
+    off a raw record whose schema id is unknown, to pick a definition. It decides no format; the definition it picks
+    has a codec that decodes the payload or refuses it. The codec's reader reads the stamp, so the router decides no key."""
     import msgpack  # type: ignore
     try:
-        decoded = msgpack.unpackb(payload, raw=False)
+        decoded = MESSAGEPACK_PAYLOAD_CODEC.decode(payload)
     except msgpack.ExtraData as extra:
         # The hint is read from the first value; the tail is not this function's to judge. The routed definition refuses
         # it by count when the record is applied, as it does for a record routed by a registered schema id. Treating a

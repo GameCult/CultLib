@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import struct
 import threading
 from dataclasses import MISSING, dataclass, field
 from collections.abc import Mapping, Sequence, Set
@@ -8,7 +9,6 @@ from itertools import chain
 from typing import Any, Callable, Generic, Iterable, TypeVar
 
 import msgpack
-from msgpack.exceptions import StackError as _MsgpackStackError
 
 from .backing_store import CultCacheSchemaCatalogEntry, CultCacheSchemaCatalogMember
 from .leaves import Float32, SlotCodec
@@ -27,9 +27,6 @@ or skipped, the outermost one is depth 1; depth 256 is accepted and 257 refused,
 
 MAX_SLOT_KEY = 65535
 """The largest slot key a record may define: the largest MessagePack array16 length."""
-
-_STACK_FAULTS: tuple[type[BaseException], ...] = (_MsgpackStackError,)
-
 
 @dataclass(frozen=True)
 class UnreadSlots:
@@ -89,20 +86,83 @@ class CultCachePayloadDepthError(ValueError):
         )
 
 
-def _refuse_past_depth_limit(tree: Any, type_name: str, direction: str) -> None:
-    """The one nesting count. Walks a payload tree iteratively (every mapping, sequence and set that is not text or
-    bytes is a container), refusing the first container past `MAX_PAYLOAD_DEPTH`."""
-    stack = [(tree, 1)] if _is_container(tree) else []
-    while stack:
-        node, depth = stack.pop()
-        if depth > MAX_PAYLOAD_DEPTH:
-            raise CultCachePayloadDepthError(type_name, direction)
-        children = chain(node.keys(), node.values()) if isinstance(node, Mapping) else node
-        stack.extend((child, depth + 1) for child in children if _is_container(child))
+class PayloadCodecFault(ValueError):
+    """A codec raises this for a payload its format cannot carry. `code` names the rule (the library's are
+    `map_key_kind`, `duplicate_map_key`, `integer_out_of_range`, `depth_limit`, `value_kind` and
+    `timestamp_out_of_range`) and `kind` the kind of node at fault (a MessagePack
+    kind such as `nil` or `bin`); neither is ever a payload value. A consumer-built codec may raise it."""
+
+    def __init__(self, code: str, kind: str = "") -> None:
+        self.code = code
+        self.kind = kind
+        super().__init__(code)
+
+
+class CultCachePayloadFormatError(ValueError):
+    """A payload is not one value of its definition's codec (read), or holds a key or integer the codec cannot carry.
+    Names the type, the codec, the direction and a `code`; `detail` is the fault's class or the kind of the key or
+    extension value. Never a payload byte or value."""
+
+    def __init__(self, type_name: str, codec: str, direction: str, code: str, detail: str) -> None:
+        self.type_name = type_name
+        self.codec = codec
+        self.direction = direction
+        self.code = code
+        if code == "not_one_value":
+            message = f"{type_name} payload is not one {codec} value ({detail}); refused on read."
+        elif code == "map_key_kind":
+            message = (
+                f"{type_name} payload has a map key of kind {detail}; "
+                f"{codec} payloads take str, int, float, bool or timestamp keys (refused on {direction})."
+            )
+        elif code == "duplicate_map_key":
+            message = f"{type_name} payload has two map keys Python holds as one; refused on {direction}."
+        elif code == "integer_out_of_range":
+            message = f"{type_name} payload has an integer beyond 64 bits; refused on write."
+        elif code == "value_kind":
+            message = (
+                f"{type_name} payload holds a value of kind {detail}; "
+                f"{codec} payloads carry no extension type but the timestamp (refused on {direction})."
+            )
+        elif code == "timestamp_out_of_range":
+            message = f"{type_name} payload holds a timestamp outside years 1 to 9999; refused on {direction}."
+        else:
+            message = f"{type_name} payload is refused by the {codec} codec ({code}); refused on {direction}."
+        super().__init__(message)
 
 
 def _is_container(node: Any) -> bool:
     return isinstance(node, _CONTAINERS) and not isinstance(node, _SCALAR_SEQUENCES)
+
+
+def _children(node: Any) -> Iterable[Any]:
+    return chain(node.keys(), node.values()) if isinstance(node, Mapping) else node
+
+
+def _containers(tree: Any) -> Iterable[Any]:
+    """The one depth walk over a payload tree, for every codec and every caller. Iterative, so a cycle ends at the limit:
+    yields every container (a mapping, sequence or set that is not text or bytes; a mapping's keys and values are both
+    children), the outermost at depth 1, and raises `PayloadCodecFault('depth_limit')` at the first one past
+    `MAX_PAYLOAD_DEPTH`."""
+    stack = [(tree, 1)] if _is_container(tree) else []
+    while stack:
+        node, depth = stack.pop()
+        if depth > MAX_PAYLOAD_DEPTH:
+            raise PayloadCodecFault("depth_limit")
+        yield node
+        stack.extend((child, depth + 1) for child in _children(node) if _is_container(child))
+
+
+def _check_payload_tree(tree: Any, type_name: str, direction: str) -> None:
+    """The definition's translation of the depth walk into its typed refusal."""
+    try:
+        for _ in _containers(tree):
+            pass
+    except PayloadCodecFault:
+        refusal = CultCachePayloadDepthError(type_name, direction)
+    else:
+        return
+    raise refusal
 
 
 def _default_encode(value: Any) -> Any:
@@ -117,14 +177,6 @@ def _default_encode(value: Any) -> Any:
 
 def _default_decode(value: Any) -> Any:
     return value
-
-
-def _json_payload_encoder(value: Any) -> bytes:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
-
-
-def _json_payload_decoder(payload: bytes) -> Any:
-    return json.loads(payload.decode("utf-8"))
 
 
 def _pack_tree(tree: Any) -> bytes:
@@ -154,27 +206,147 @@ def _pack_tree(tree: Any) -> bytes:
     return b"".join(out)
 
 
+@dataclass(frozen=True)
+class PayloadCodec:
+    """A codec owns one payload format: how a tree becomes bytes and back, which of its decode faults mean the payload
+    nests past the interpreter's own stack, and which trees it can carry: it raises `PayloadCodecFault` for a key, an
+    integer or a nesting its format cannot hold, and nothing it writes is refused by its own `decode`. A consumer-built codec owns
+    the depth of nodes the depth walk cannot see (anything that is not a Mapping, Sequence or Set)."""
+
+    name: str
+    encode: Callable[[Any], bytes]
+    decode: Callable[[bytes], Any]
+    depth_faults: tuple[type[BaseException], ...] = ()
+
+
+_INTEGER_RANGE = (-(2**63), 2**64 - 1)
+_TIMESTAMP_SECONDS = (-62135596800, 253402300799)
+_NAN_KEY = object()
+_KEY_TYPES = (str, int, float, Float32, msgpack.Timestamp)
+
+
+def _node_kind(node: Any) -> str:
+    """The MessagePack kind of a node, for a refusal: a kind, never a value."""
+    if node is None:
+        return "nil"
+    if isinstance(node, (bytes, bytearray, memoryview)):
+        return "bin"
+    if isinstance(node, Mapping):
+        return "map"
+    if isinstance(node, msgpack.ExtType):
+        return "ext"
+    if isinstance(node, _CONTAINERS):
+        return "array"
+    return "unsupported"
+
+
+def _key_image(key: Any) -> Any:
+    """A map key as the reader holds it, and the one key identity of read and write: a `Float32` is written as float32
+    and read back as that float, and every NaN is one key (the reference refuses two of them)."""
+    if isinstance(key, Float32):
+        key = struct.unpack(">f", struct.pack(">f", key.value))[0]
+    return _NAN_KEY if isinstance(key, float) and key != key else key
+
+
+def _checked_map(pairs: list[tuple[Any, Any]]) -> dict[Any, Any]:
+    """The read hook of every MessagePack map: the keys the C# reference's object reader accepts (str, int, float,
+    bool, timestamp) and no duplicate."""
+    for key, _ in pairs:
+        if not isinstance(key, _KEY_TYPES):
+            raise PayloadCodecFault("map_key_kind", _node_kind(key))
+    if len(dict.fromkeys(_key_image(key) for key, _ in pairs)) != len(pairs):
+        raise PayloadCodecFault("duplicate_map_key")
+    return dict(pairs)
+
+
+def _check_scalar(node: Any) -> None:
+    if isinstance(node, int) and not _INTEGER_RANGE[0] <= node <= _INTEGER_RANGE[1]:
+        raise PayloadCodecFault("integer_out_of_range")
+    if isinstance(node, msgpack.Timestamp) and not _TIMESTAMP_SECONDS[0] <= node.seconds <= _TIMESTAMP_SECONDS[1]:
+        raise PayloadCodecFault("timestamp_out_of_range")
+
+
+def _check_carried(tree: Any) -> None:
+    """The one check of what a MessagePack payload carries, on read and on write: the keys, integers, timestamps and
+    nesting the C# reference's object reader takes, no extension type but the timestamp, and no two keys that decode
+    as one (a `Float32` beside an equal int, bool or float, or two NaNs), so nothing this codec writes is refused by
+    its own decode."""
+    _check_scalar(tree)
+    for node in _containers(tree):
+        if isinstance(node, msgpack.ExtType):
+            raise PayloadCodecFault("value_kind", "ext")
+        for child in _children(node):
+            _check_scalar(child)
+        if isinstance(node, Mapping):
+            for key in node:
+                if not isinstance(key, _KEY_TYPES):
+                    raise PayloadCodecFault("map_key_kind", _node_kind(key))
+            if len(dict.fromkeys(_key_image(key) for key in node)) != len(node):
+                raise PayloadCodecFault("duplicate_map_key")
+
+
+def _unpack_tree(payload: bytes) -> Any:
+    return msgpack.unpackb(payload, raw=False, strict_map_key=False, object_pairs_hook=_checked_map)
+
+
+def _unpack_checked_tree(payload: bytes) -> Any:
+    tree = _unpack_tree(payload)
+    _check_carried(tree)
+    return tree
+
+
+def _pack_checked_tree(tree: Any) -> bytes:
+    _check_carried(tree)
+    return _pack_tree(tree)
+
+
+def _dump_json(tree: Any) -> bytes:
+    return json.dumps(tree, ensure_ascii=False, sort_keys=True).encode("utf-8")
+
+
+def _load_json(payload: bytes) -> Any:
+    return json.loads(payload.decode("utf-8"))
+
+
+MESSAGEPACK_PAYLOAD_CODEC = PayloadCodec(
+    "MessagePack", _pack_checked_tree, _unpack_checked_tree, depth_faults=(msgpack.exceptions.StackError,)
+)
+"""The default payload format. It carries what the C# reference's object reader accepts: str, int, float, bool and
+timestamp keys, no duplicate key (two NaN keys are one), integers within -(2**63)..2**64-1, timestamps within years 1 to
+9999, no extension type but the timestamp, and nesting no deeper than `MAX_PAYLOAD_DEPTH`. One check refuses the rest on
+read and on write, so it never writes a record it cannot read."""
+
+JSON_PAYLOAD_CODEC = PayloadCodec("JSON", _dump_json, _load_json, depth_faults=(RecursionError,))
+"""The 0.3 default, kept for stores written before MessagePack: it writes exactly the 0.3 bytes. Never a default."""
+
+
 def _messagepack_payload_decoder(payload: bytes) -> Any:
     return msgpack.unpackb(payload, raw=False)
 
 
-def read_payload_tree(type_name: str, payload: bytes, decoder: Callable[[bytes], Any] | None = None) -> Any:
+def read_payload_tree(
+    type_name: str,
+    payload: bytes,
+    decoder: Callable[[bytes], Any] | None = None,
+    depth_faults: tuple[type[BaseException], ...] = (msgpack.exceptions.StackError,),
+) -> Any:
     """The one read of a payload's tree: exactly one MessagePack value, within the nesting limit. Depth is judged first,
     on the value read so far, so a tail never pre-empts it (C# throws at container 257 before it reaches the tail); then a
-    tail is refused by count and never echoed. Raised outside the handler so no `__context__` keeps the tail."""
+    tail is refused by count and never echoed. Raised outside the handler so no `__context__` keeps the tail. A
+    definition passes its codec's `decode` and `depth_faults`; with none this reads plain MessagePack."""
     after = -1
     unpacked: Any = None
     try:
         tree = (decoder or _messagepack_payload_decoder)(payload)
-    except _STACK_FAULTS:
+    except depth_faults:
         raise CultCachePayloadDepthError(type_name, "read") from None
     except msgpack.ExtraData as error:
         after = len(error.extra)
         unpacked = error.unpacked
     if after >= 0:
-        _refuse_past_depth_limit(unpacked, type_name, "read")
+        _check_payload_tree(unpacked, type_name, "read")
         raise ValueError(f"{type_name} payload has {after} bytes after its first MessagePack value (refused on read).")
-    _refuse_past_depth_limit(tree, type_name, "read")
+    _check_payload_tree(tree, type_name, "read")
     return tree
 
 
@@ -212,6 +384,12 @@ class UnionArm:
     value: Any = None
 
 
+def _fault_refusal(type_name: str, codec: PayloadCodec, direction: str, fault: PayloadCodecFault) -> CultCachePayloadFormatError | CultCachePayloadDepthError:
+    if fault.code == "depth_limit":
+        return CultCachePayloadDepthError(type_name, direction)
+    return CultCachePayloadFormatError(type_name, codec.name, direction, fault.code, fault.kind)
+
+
 @dataclass(frozen=True)
 class DocumentDefinition(Generic[T]):
     type: str
@@ -226,8 +404,7 @@ class DocumentDefinition(Generic[T]):
     roles: dict[str, str | Extractor[T]] = field(default_factory=dict)
     """Selection aliases (C# `[CultRole]`): many records may share a value. Never indexed for lookup, never refuse; the
     member's catalog `index_alias` is the same either way."""
-    payload_encoder: Callable[[Any], bytes] = _json_payload_encoder
-    payload_decoder: Callable[[bytes], Any] = _json_payload_decoder
+    payload_codec: PayloadCodec = MESSAGEPACK_PAYLOAD_CODEC
     schema_id: str | None = None
     schema_name: str | None = None
     schema_version: str | None = None
@@ -245,8 +422,13 @@ class DocumentDefinition(Generic[T]):
         if self.validate:
             self.validate(value)
         tree = self.encode(value)
-        _refuse_past_depth_limit(tree, self.type, "write")
-        return self.payload_encoder(tree)
+        _check_payload_tree(tree, self.type, "write")
+        codec = self.payload_codec
+        try:
+            return codec.encode(tree)
+        except PayloadCodecFault as fault:
+            refusal = _fault_refusal(self.type, codec, "write", fault)
+        raise refusal
 
     def decode_payload(self, payload: bytes) -> T:
         return self.decode_payload_marked(payload)[0]
@@ -254,7 +436,23 @@ class DocumentDefinition(Generic[T]):
     def decode_payload_marked(self, payload: bytes) -> tuple[T, UnreadSlots | None]:
         """The value and what the decode found past the declared slots, at any depth. The payload depth check runs first: a
         payload past the limit is refused, never marked."""
-        tree = read_payload_tree(self.type, payload, self.payload_decoder)
+        codec = self.payload_codec
+
+        def read(raw: bytes) -> Any:
+            try:
+                return codec.decode(raw)
+            except (msgpack.ExtraData, *codec.depth_faults):
+                raise
+            except PayloadCodecFault as fault:
+                refusal = _fault_refusal(self.type, codec, "read", fault)
+            except ValueError as fault:
+                refusal = CultCachePayloadFormatError(self.type, codec.name, "read", "not_one_value", type(fault).__name__)
+            raise refusal
+
+        tree = read_payload_tree(self.type, payload, read, codec.depth_faults)
+        return self._decode_tree(tree)
+
+    def _decode_tree(self, tree: Any) -> tuple[T, UnreadSlots | None]:
         outer, opened = _current_scope(), _SlotScope()
         _scope.open = opened
         try:
@@ -325,8 +523,7 @@ def define_document_type(
     name: str | Extractor[T] | None = None,
     indexes: dict[str, str | Extractor[T]] | None = None,
     roles: dict[str, str | Extractor[T]] | None = None,
-    payload_encoder: Callable[[Any], bytes] = _json_payload_encoder,
-    payload_decoder: Callable[[bytes], Any] = _json_payload_decoder,
+    payload_codec: PayloadCodec | None = None,
     schema_id: str | None = None,
     schema_name: str | None = None,
     schema_version: str | None = None,
@@ -335,6 +532,10 @@ def define_document_type(
     compatible_schema_ids: Iterable[str] | None = None,
     members: Iterable[CultCacheSchemaCatalogMember] | Callable[[], tuple[CultCacheSchemaCatalogMember, ...]] | None = None,
 ) -> DocumentDefinition[T]:
+    """Define a document type. Its payload is the MessagePack of what `encode` returns; pass
+    `payload_codec=JSON_PAYLOAD_CODEC` to read a store written by cultcache-py 0.3 or earlier, and `convert` to write
+    it as a new MessagePack store."""
+    codec = {} if payload_codec is None else {"payload_codec": payload_codec}
     return DocumentDefinition(
         type=type,
         encode=encode,
@@ -344,8 +545,7 @@ def define_document_type(
         name=name,
         indexes=indexes or {},
         roles=roles or {},
-        payload_encoder=payload_encoder,
-        payload_decoder=payload_decoder,
+        **codec,
         schema_id=schema_id,
         schema_name=schema_name,
         schema_version=schema_version,
@@ -410,8 +610,6 @@ def define_database_entry_type(
         name=name,
         indexes=indexes,
         roles=roles,
-        payload_encoder=_pack_tree,
-        payload_decoder=_messagepack_payload_decoder,
         schema_id=schema_id,
         schema_name=schema_name,
         schema_version=schema_version,

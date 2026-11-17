@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
+import json
 import os
 import tempfile
 import threading
 import unittest
+import msgpack
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from cultcache_py.backing_store import CultCacheEnvelope
@@ -120,11 +123,6 @@ class CultCacheTests(unittest.TestCase):
         self.assertIsNone(cache.get_key_by_index(document, "category", "Rare"))
 
     def test_database_entry_formatter_uses_slot_indexed_messagepack_array(self) -> None:
-        try:
-            import msgpack  # type: ignore
-        except ModuleNotFoundError:
-            self.skipTest("msgpack optional dependency is not installed")
-
         @dataclass
         class Settings:
             theme: str
@@ -159,11 +157,6 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual([member.slot for member in first.members], [0, 2])
 
     def test_messagepack_store_writes_v1_snapshot(self) -> None:
-        try:
-            import msgpack  # type: ignore
-        except ModuleNotFoundError:
-            self.skipTest("msgpack optional dependency is not installed")
-
         with tempfile.TemporaryDirectory() as tmp:
             document = define_database_entry_type(
                 "settings",
@@ -1569,6 +1562,39 @@ class CultCacheTests(unittest.TestCase):
                 with self.assertRaises(OSError) as caught:
                     SingleFileMessagePackBackingStore(path).pull_all()
                 self.assertNotIsInstance(caught.exception, FileNotFoundError)
+
+    def test_json_lines_pull_all_reads_hand_written_lines_and_names_a_malformed_one(self) -> None:
+        def line(**fields: object) -> str:
+            return json.dumps(fields, ensure_ascii=False)
+
+        first = base64.b64encode(b"one").decode("ascii")
+        second = base64.b64encode(b"two").decode("ascii")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hand.jsonl"
+            lines = [
+                line(key="é-ключ", type="tests.t", payload=first, storedAt="2026-01-01T00:00:00Z", schemaId="schema.one"),
+                "",
+                line(key="k2", type="tests.t", payload=second, stored_at="2026-02-02T00:00:00Z", schema_id="schema.two"),
+            ]
+            path.write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
+            pulled = JsonLinesBackingStore(path).pull_all()
+            self.assertEqual(
+                [(e.key, e.type, e.payload, e.stored_at, e.schema_id) for e in pulled],
+                [
+                    ("é-ключ", "tests.t", b"one", "2026-01-01T00:00:00Z", "schema.one"),
+                    ("k2", "tests.t", b"two", "2026-02-02T00:00:00Z", "schema.two"),
+                ],
+            )
+            written = Path(tmp) / "written.jsonl"
+            JsonLinesBackingStore(written).push(CultCacheEnvelope.create(key="k", type="tests.t", payload=b"x"))
+            raw = written.read_bytes()
+            self.assertTrue(raw.endswith(b"\n"))
+            self.assertNotIn(b"\r", raw)
+            broken = Path(tmp) / "broken.jsonl"
+            broken.write_bytes(("\n".join([lines[0], "", line(key="k3", type="tests.t")]) + "\n").encode("utf-8"))
+            with self.assertRaises(ValueError) as caught:
+                JsonLinesBackingStore(broken).pull_all()
+            self.assertEqual(str(caught.exception), f"Malformed CultCache JSONL envelope at {broken}:3: missing 'payload'")
 
 
     # The element-id marker: tests/vectors/document-variants-c2a/v3-base.msgpack is v1-base with its header replaced.

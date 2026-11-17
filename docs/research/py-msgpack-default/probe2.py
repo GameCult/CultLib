@@ -14,7 +14,7 @@ raw = msgpack.unpackb(open(path, "rb").read(), raw=False)
 print("store header", raw[0], "catalog entry", raw[1][0][:5] if raw[1] else None)
 print("record", raw[2][0][:3], "payload", raw[2][0][3][:40])
 # MessagePack-default reader, today's _messagepack pair standing in for the proposed default
-new = cc.define_document_type("brokkr.sync.var.v0", payload_encoder=lambda t: msgpack.packb(t, use_bin_type=True), payload_decoder=lambda b: msgpack.unpackb(b, raw=False))
+new = cc.define_document_type("brokkr.sync.var.v0")  # historical: the probe stood a msgpack pair in for the proposed default, now the default
 try: open_cache(new); print("new reader: ACCEPTED")
 except Exception as e: print("new reader refused:", type(e).__module__, type(e).__name__, str(e)[:80])
 # opt-in JSON pair reads it

@@ -25,6 +25,7 @@ from cultnet_py.compare_csharp import (
 )
 from cultnet_py.interop_peer import (
     append_shard_log_put,
+    binding,
     build_state,
     handle_server_message,
     raw_snapshot_response,
@@ -1976,8 +1977,7 @@ class CultNetTests(unittest.TestCase):
         from cultcache_py import define_document_type
         from cultnet_py import resolve_document_for_raw_record
 
-        document = define_document_type("tests.tail_note", schema_id="tests.tail_note", schema_version="tests.tail_note.v1",
-                                   payload_encoder=msgpack.packb, payload_decoder=lambda payload: msgpack.unpackb(payload, raw=False))
+        document = define_document_type("tests.tail_note", schema_id="tests.tail_note", schema_version="tests.tail_note.v1")
         known = document.catalog_entry().schema_id
         head = msgpack.packb(["tests.tail_note.v1", "x"], use_bin_type=True)
 
@@ -2118,6 +2118,42 @@ class CultNetTests(unittest.TestCase):
         typed_applied_log = apply_shard_log_response(cache, [document], typed_shard_log)
         self.assertEqual([change.change_kind for change in typed_applied_log], ["updated", "removed"])
         self.assertIsNone(cache.get(document, "item:1"))
+
+    def test_the_stamp_router_judges_no_map_key_and_the_codec_alone_does(self) -> None:
+        import msgpack  # type: ignore
+        from cultnet_py import resolve_document_for_raw_record
+
+        document = define_database_entry_type(
+            "replica.stamped",
+            [("schema_version", 0), ("value", 1)],
+            schema_id="replica.stamped.current",
+            schema_name="replica.stamped",
+            schema_version="replica.stamped.v1",
+        )
+        by_schema_id = {"replica.stamped.current": document, "replica.stamped": document}
+
+        def routed(tree: object) -> object:
+            record = {"payload": msgpack.packb(tree, use_bin_type=True)}
+            return resolve_document_for_raw_record(by_schema_id, "sha256:unknown", record)
+
+        for name, tree in (
+            ("array", ["replica.stamped.v1", {1: "a"}]),
+            ("map", {"schemaVersion": "replica.stamped.v1", "v": {1: "a"}}),
+            ("nested", ["replica.stamped.v1", {"a": {2: [{3: 4}]}}]),
+            ("snake", {"schema_version": "replica.stamped.v1", "v": {1: "a"}}),
+        ):
+            with self.subTest(form=name):
+                self.assertIs(routed(tree), document)
+        for name, tree in (
+            ("array", ["replica.stamped.v1", {None: "a"}]),
+            ("map", {"schemaVersion": "replica.stamped.v1", "v": {None: "a"}}),
+            ("not-a-string", {"schemaVersion": 5, "v": {1: "a"}}),
+            ("unknown-name", ["replica.other.v1", {1: "a"}]),
+        ):
+            with self.subTest(form=name):
+                with self.assertRaises(KeyError) as caught:
+                    routed(tree)
+                self.assertEqual(caught.exception.args, ("sha256:unknown",))
 
     def test_cultnet_replication_helpers_recover_schema_stamped_raw_records(self) -> None:
         document = define_database_entry_type(
@@ -2677,6 +2713,12 @@ class CultNetTests(unittest.TestCase):
         self.assertEqual(response["shardId"], state.shard_id)
         self.assertEqual(response["shardLogSequence"], 1)
         self.assertEqual([record["recordKey"] for record in response["documents"]], ["note:logged"])
+
+    def test_python_interop_peer_binding_writes_plain_messagepack_slots(self) -> None:
+        # The bytes the binding wrote before it stopped passing its own codec lambdas: packb of the slot array.
+        note = binding("tests.note", "tests.note.v1", "tests.note.v1", "{}", lambda value: ["a", 1], lambda slots: slots)
+        self.assertEqual(note.document.encode_payload({}), bytes.fromhex("92a16101"))
+        self.assertEqual(note.document.decode_payload(bytes.fromhex("92a16101")), ["a", 1])
 
     def test_python_interop_peer_refuses_v1_selection_messages(self) -> None:
         # R-2, owed by Cut 1 (docs/cultnet-selection-cut.md, section 9): a v0-only peer refuses any

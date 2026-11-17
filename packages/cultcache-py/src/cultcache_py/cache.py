@@ -3,14 +3,24 @@
 import enum
 import functools
 import math
+import os
 import threading
 from decimal import Decimal
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Callable, Generic, Iterable, TypeVar
 
 from .backing_store import BackingStore, CultCacheEnvelope
-from .documents import DocumentDefinition, UnreadSlots, extract_value
-from .stores import SchemaConflictError, parse_stored_at, retyped, stored_at_over, written_owns
+from .documents import JSON_PAYLOAD_CODEC, DocumentDefinition, PayloadCodec, UnreadSlots, extract_value
+from .stores import (
+    JsonLinesBackingStore,
+    SchemaConflictError,
+    SingleFileMessagePackBackingStore,
+    parse_stored_at,
+    retyped,
+    stored_at_over,
+    written_owns,
+)
 
 T = TypeVar("T")
 F = TypeVar("F", bound=Callable[..., Any])
@@ -1042,3 +1052,74 @@ class CultCache:
         if document is not None:
             return document
         return self._state.documents_by_schema_name.get(envelope.type)
+
+
+def convert(
+    source: SingleFileMessagePackBackingStore | JsonLinesBackingStore,
+    destination: str | os.PathLike[str],
+    definitions: Iterable[DocumentDefinition[Any]],
+    *,
+    source_codec: PayloadCodec = JSON_PAYLOAD_CODEC,
+) -> int:
+    """Write the records of `source` to a new store of the same kind at `destination`, the records of `definitions`
+    rewritten from `source_codec` to each definition's own codec, and return the count rewritten. Records of other types
+    keep their bytes. Stop every writer of the source before calling. The destination keeps the header the source was read under (a `cultcache.store.v3` source stays v3). `destination` must not exist: the call creates it
+    exclusively, and it is complete only once the call returns. A refusal (a record, a failed write) or an interrupt
+    after the create removes it and leaves the source as it was. A killed run leaves the source intact and a partial
+    destination: delete the destination and run again. A file another process creates at the destination between the
+    existence check and the create is refused and left alone. The source is only read, never written; swap the new
+    store in yourself once it opens. A count of 0 still writes the destination.
+    """
+    if not isinstance(source, (SingleFileMessagePackBackingStore, JsonLinesBackingStore)):
+        raise TypeError(f"convert takes a library file store, not {type(source).__name__}")
+    if not source.path.exists():
+        raise CultCacheError("convert: argument source does not exist (source_missing); there is nothing to convert.")
+    by_type: dict[str, DocumentDefinition[Any]] = {}
+    for definition in definitions:
+        by_type[definition.type] = definition
+        by_type.setdefault(definition.catalog_entry().schema_name, definition)
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    exists = CultCacheError(
+        "convert: argument destination already exists (destination_exists); convert writes only a new store, "
+        "and the source is unchanged."
+    )
+    if destination.exists():
+        raise exists
+    target = None
+    failure: CultCacheError | None = None
+    try:
+        try:
+            target = open(destination, "xb")
+        except FileExistsError:
+            pass
+        else:
+            with target:
+                converted: list[CultCacheEnvelope] = []
+                count = 0
+                for envelope in source.pull_all():
+                    definition = by_type.get(envelope.type)
+                    if definition is not None:
+                        try:
+                            value = replace(definition, payload_codec=source_codec).decode_payload(envelope.payload)
+                            envelope = replace(envelope, payload=definition.encode_payload(value))
+                        except Exception as refusal:
+                            code = getattr(refusal, "code", type(refusal).__name__)
+                            failure = CultCacheError(
+                                f"Cannot convert {envelope.type} record {envelope.key}: {code}; "
+                                "no store was written and the source is unchanged."
+                            )
+                        else:
+                            count += 1
+                    if failure is not None:
+                        raise failure
+                    converted.append(envelope)
+                target.write(source._file_bytes(converted))
+                target.flush()
+                os.fsync(target.fileno())
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
+    if target is None:
+        raise exists
+    return count

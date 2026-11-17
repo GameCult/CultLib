@@ -17,7 +17,7 @@ from typing import Any, Callable, Iterator, TypeVar
 
 import msgpack
 
-from .documents import UnreadSlots
+from .documents import UnreadSlots, _unpack_tree
 from .backing_store import (
     CultCacheEnvelope,
     CultCacheSchemaCatalogEntry,
@@ -144,8 +144,8 @@ class JsonLinesBackingStore:
             change(existing)
             self._replace_all(list(existing.values()))
 
-    def _replace_all(self, envelopes: list[CultCacheEnvelope]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+    @staticmethod
+    def _file_bytes(envelopes: list[CultCacheEnvelope]) -> bytes:
         lines = []
         for envelope in sorted(envelopes, key=lambda item: (item.type, item.key)):
             lines.append(json.dumps({
@@ -154,7 +154,11 @@ class JsonLinesBackingStore:
                 "payload": base64.b64encode(envelope.payload).decode("ascii"),
                 "stored_at": envelope.stored_at,
             }, ensure_ascii=False, sort_keys=True))
-        commit_store_file(self.path, ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8"))
+        return ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
+
+    def _replace_all(self, envelopes: list[CultCacheEnvelope]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        commit_store_file(self.path, self._file_bytes(envelopes))
 
 
 class SingleFileMessagePackBackingStore:
@@ -181,7 +185,7 @@ class SingleFileMessagePackBackingStore:
             if data is None:
                 return None
             try:
-                decoded = msgpack.unpackb(data, raw=False)
+                decoded = _unpack_tree(data)
                 snapshot = _decode_snapshot(decoded)
                 if snapshot is not None:
                     self._format, envelopes = snapshot
@@ -232,6 +236,10 @@ class SingleFileMessagePackBackingStore:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with store_write_lock(self.path, self.lock_timeout):
                 yield
+
+    def _file_bytes(self, envelopes: list[CultCacheEnvelope]) -> bytes:
+        """The bytes of a new store holding exactly `envelopes`, under the header this store read (as a write keeps it)."""
+        return msgpack.packb(_encode_snapshot(envelopes, [], self._format)[0], use_bin_type=True)  # type: ignore[no-any-return]
 
     def _replace_all(self, supplied: list[CultCacheEnvelope], arrived: list[CultCacheEnvelope]) -> dict[str, str]:
         snapshot, stamps = _encode_snapshot(supplied, arrived, self._format)
@@ -669,6 +677,9 @@ def _decode_snapshot(decoded: Any) -> tuple[str, list[CultCacheEnvelope]] | None
 
 
 def _decode_legacy_envelopes(decoded: Any) -> list[CultCacheEnvelope]:
+    """A legacy envelope holds its payload as an inline MessagePack subtree or as bytes. The store's reader judged the
+    subtree's map keys when it unpacked the whole file (`_unpack_tree`, whatever the record's type or codec), so a nil or
+    bin key anywhere in the file refuses the store; the registered codec then reads the repacked bytes or refuses them."""
     if not isinstance(decoded, list):
         raise ValueError("CultCache MessagePack store is not a recognized snapshot")
     envelopes: list[CultCacheEnvelope] = []
