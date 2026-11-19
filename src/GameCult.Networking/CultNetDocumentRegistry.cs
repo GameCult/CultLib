@@ -253,7 +253,7 @@ namespace GameCult.Networking
                     RecordKey = handle.Key.Value,
                     StoredAt = storedAt,
                     PayloadEncoding = "messagepack",
-                    Payload = binding.PayloadSerializer(document),
+                    Payload = SerializeWithBinding(binding, document),
                     SourceRuntimeId = options?.SourceRuntimeId,
                     SourceAgentId = options?.SourceAgentId,
                     SourceRole = options?.SourceRole,
@@ -652,14 +652,22 @@ namespace GameCult.Networking
                 RecordKey = key.Value,
                 StoredAt = storedAt,
                 PayloadEncoding = "messagepack",
-                Payload = binding?.PayloadSerializer(document) ??
-                          CultDocumentMessagePackSerialization.SerializeUntyped(document, document.GetType(), _documents),
+                Payload = binding == null
+                    ? CultDocumentMessagePackSerialization.SerializeUntyped(document, document.GetType(), _documents)
+                    : SerializeWithBinding(binding, document),
                 SourceRuntimeId = options?.SourceRuntimeId,
                 SourceAgentId = options?.SourceAgentId,
                 SourceRole = options?.SourceRole,
                 Tags = options?.Tags
             };
         }
+
+        // A binding owns its payload bytes: a serializer that returns null is a broken owner, refused here rather than
+        // handed to the default serializer or onto the wire as a null payload.
+        private static byte[] SerializeWithBinding(CultNetDocumentBinding binding, object document) =>
+            binding.PayloadSerializer(document)
+            ?? throw new InvalidOperationException(
+                $"The payload serializer bound to {binding.DocumentType.FullName} (schema '{binding.SchemaId}') returned null; a binding must return the payload bytes.");
 
         private CultNetEdge ToEdge(CultNetSelectionEvaluator.EdgeMatch edge, bool wantDocument)
         {

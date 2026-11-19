@@ -89,5 +89,26 @@ namespace GameCult.Networking.Tests
             Assert.That(refused.Message, Does.Contain("refused on write"));
             Assert.That(refused.Message, Does.Contain(typeof(DeepDoc).FullName));
         }
+
+        // A binding owns its payload bytes: one whose serializer returns null is refused, not silently given the default
+        // serializer's bytes. A non-null result still wins over the default.
+        [Test]
+        public void ABindingWhoseSerializerReturnsNullIsRefusedNotDefaulted()
+        {
+            var descriptor = Documents.GetRequired(typeof(TailDoc));
+            var key = new CultRecordKey("a");
+            const string storedAt = "1970-01-01T00:00:00.000Z";
+
+            var broken = new CultNetDocumentRegistry(Documents).Register(
+                CultNetDocumentBinding.ForDocument<TailDoc>(Documents, payloadSerializer: _ => null!));
+            var refused = Assert.Throws<InvalidOperationException>(() => broken.ToRawRecord(descriptor, key, new TailDoc(), storedAt))!;
+            Assert.That(refused.Message, Does.Contain(typeof(TailDoc).FullName));
+            Assert.Throws<InvalidOperationException>(() => broken.CreateRawDocumentPutMessage("m", new CultRecordHandle<TailDoc>(key), new TailDoc()));
+
+            var custom = new byte[] { 0x91, 0x07 };
+            var honest = new CultNetDocumentRegistry(Documents).Register(
+                CultNetDocumentBinding.ForDocument<TailDoc>(Documents, payloadSerializer: _ => custom));
+            Assert.That(honest.ToRawRecord(descriptor, key, new TailDoc(), storedAt).Payload, Is.EqualTo(custom));
+        }
     }
 }
