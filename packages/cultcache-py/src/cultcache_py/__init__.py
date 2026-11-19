@@ -1,7 +1,7 @@
 ﻿from .backing_store import BackingStore, CultCacheEnvelope
 from .backing_store import CultCacheSchemaCatalogEntry, CultCacheSchemaCatalogMember
 from . import leaves
-from .cache import CultCache, CultCacheBuilder, ForeignRecord, UpdateOutcome, UpdateResult, convert
+from .cache import CultCache, CultCacheBuilder, CultCacheError, ForeignRecord, UpdateOutcome, UpdateResult, convert
 from .documents import (
     MAX_PAYLOAD_DEPTH,
     JSON_PAYLOAD_CODEC,
@@ -30,6 +30,7 @@ __all__ = [
     "BackingStore",
     "CultCache",
     "CultCacheBuilder",
+    "CultCacheError",
     "CultCachePayloadDepthError",
     "CultCachePayloadFormatError",
     "CultCacheEnvelope",

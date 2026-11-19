@@ -69,6 +69,7 @@ store.
 
 ## Public Surface
 
+- `CultCacheError` (a `RuntimeError`, exported from the package root): the cache's refusals (a unique-index violation; a key held by two types on load, while the same conflict on a write is a `SchemaConflictError`, a `ValueError`) and `convert`'s (`source_missing`, `destination_exists`, a refused record). Import it from `cultcache_py`, not from the private `cache` module.
 - `define_document_type(...)`
 - `define_database_entry_type(...)`
 - `database_entry_field(...)`
@@ -182,11 +183,17 @@ digit (`0` to `9`), below.
   with `convert(source, destination, definitions)`. Stop every writer of the source
   first. `destination` must not exist; every record of the listed definitions is
   rewritten under the definitions' own codec, records of other types keep their
-  bytes, and the new file is fsynced before the call returns. Open it with the
+  bytes unjudged (as a store's `push` does, below; a tail among them is refused by
+  the first load that defines the type), and the new file is fsynced before the call returns. Open it with the
   default definitions, then swap it in yourself. The source is never written. A
-  refused record raises `CultCacheError` naming the type, record key and code, and
+  refused record raises `CultCacheError` (importable from `cultcache_py`) naming the type, record key and code, and
   leaves no destination; a killed run leaves the source as it was and a partial
   destination, so delete the destination and run again.
+- A store's `push` does not validate payload bytes: a store holds no definition, so it cannot know a record's codec (a JSON or
+  custom-codec payload is not one MessagePack value) and carries the bytes it is given, as it carries a foreign record. The
+  cache write path judges them: `put_envelope(s)` decodes the payload under the definition before any store is touched, so a
+  payload with bytes after its first value is refused (`ValueError`, "bytes after its first MessagePack value (refused on read)")
+  and nothing is written. A tail pushed straight through a store is refused at the next load.
 - A JSON payload that is a single digit (`0` to `9`) is also a valid one-byte
   MessagePack integer and reads as 48 to 57 under the default, with no refusal. Only a
   document whose whole value is such a digit meets this; objects, lists and

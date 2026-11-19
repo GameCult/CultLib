@@ -1,10 +1,12 @@
 """The Python CultCache first call from docs/start/README.md. The docs show the region between the
 `snippet` markers verbatim, and test_docs_show_the_tested_snippet fails when they differ."""
 
+import tempfile
 import unittest
 from pathlib import Path
 
-from cultcache_py import UpdateOutcome
+import cultcache_py
+from cultcache_py import CultCacheEnvelope, JsonLinesBackingStore, UpdateOutcome
 
 # snippet:begin
 import tempfile
@@ -93,5 +95,62 @@ class FirstCallTests(unittest.TestCase):
                 self.assertIn("```python\n" + snippet + "```", docs)
 
 
+class RootExportTests(unittest.TestCase):
+    def test_cultcacheerror_from_the_root_catches_a_convert_refusal(self) -> None:
+        from cultcache_py import CultCacheError, convert
+        from cultcache_py.cache import CultCacheError as private
+
+        self.assertIs(CultCacheError, private)
+        self.assertIn("CultCacheError", cultcache_py.__all__)
+        document = define_document_type("tests.root_export")
+        with tempfile.TemporaryDirectory() as directory:
+            source = SingleFileMessagePackBackingStore(Path(directory) / "source.cc")
+            source.push(CultCacheEnvelope.create(key="k", type=document.type, payload=document.encode_payload({"a": 1})))
+            destination = Path(directory) / "destination.cc"
+            destination.write_bytes(b"in the way")
+            with self.assertRaises(CultCacheError) as caught:
+                convert(source, destination, [document])
+            self.assertIn("destination_exists", str(caught.exception))
+            self.assertEqual(destination.read_bytes(), b"in the way")
+
+    def test_the_cache_write_path_refuses_a_payload_tail_and_writes_nothing(self) -> None:
+        document = define_document_type("tests.tail")
+        with tempfile.TemporaryDirectory() as directory:
+            for store in (
+                SingleFileMessagePackBackingStore(Path(directory) / "tail.cc"),
+                JsonLinesBackingStore(Path(directory) / "tail.jsonl"),
+            ):
+                cache = CultCache.builder().register_document_type(document).add_generic_store(store).build()
+                tailed = document.encode_payload({"a": 1}) + b"\xc0"
+                with self.assertRaisesRegex(ValueError, r"1 bytes after its first MessagePack value \(refused on read\)"):
+                    cache.put_envelope(document, CultCacheEnvelope.create(key="k", type=document.type, payload=tailed))
+                self.assertEqual(store.pull_all(), [], type(store).__name__)
+
+    def test_a_batch_with_one_tailed_envelope_is_refused_whole_and_earlier_records_stay(self) -> None:
+        document = define_document_type("tests.tail_batch")
+        with tempfile.TemporaryDirectory() as directory:
+            for store in (
+                SingleFileMessagePackBackingStore(Path(directory) / "batch.cc"),
+                JsonLinesBackingStore(Path(directory) / "batch.jsonl"),
+            ):
+                name = type(store).__name__
+                cache = CultCache.builder().register_document_type(document).add_generic_store(store).build()
+                cache.put(document, "early", {"a": 0})
+                before = store.pull_all()
+                good = document.encode_payload({"a": 1})
+                with self.assertRaisesRegex(ValueError, r"1 bytes after its first MessagePack value \(refused on read\)"):
+                    cache.put_envelopes(
+                        document,
+                        [
+                            CultCacheEnvelope.create(key="good", type=document.type, payload=good),
+                            CultCacheEnvelope.create(key="bad", type=document.type, payload=good + b"\xc0"),
+                        ],
+                    )
+                self.assertEqual(store.pull_all(), before, name)
+                self.assertEqual([item.key for item in before], ["early"], name)
+                self.assertIsNone(cache.get(document, "good"), name)
+
+
 if __name__ == "__main__":
     unittest.main()
+

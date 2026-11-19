@@ -9,6 +9,7 @@
 
 ### Added
 
+- `CultCacheError` is exported from the package root (`from cultcache_py import CultCacheError`); it was reachable only from the private `cultcache_py.cache` module.
 - `CultCache.update` and `update_global` return `UpdateResult(outcome, document)`; `UpdateOutcome` is `UPDATED`, `DECLINED` or `LOST_RACE`. The single-file store gains `read(key)` (the record and its content version, the SHA-256 C# computes) and `commit_if(envelope, expected)`, the version is the SHA-256 of the record re-encoded as `[key, schemaId, storedAt, payload]` with minimal MessagePack encodings, which is the SHA-256 of the record's stored bytes exactly when the writer encoded it minimally (every writer in this library does; a record another writer encoded with a wider-than-needed length or integer has the version of its minimal form, not of its bytes). Both looked up by the cache and not `BackingStore` protocol members (variants:cut_spec:cut-update-with-retry-py).
 - `read_payload_tree(type_name, payload, decoder=None, depth_faults=(msgpack.exceptions.StackError,))`: the exported owner of the one-value, depth-first payload read that `decode_payload` uses, for payloads read outside a definition (`cultnet-py`'s witness bundle decode needs it, so `cultnet-py` now requires `cultcache-py>=0.4.0`). The manifest version is 0.4.0, the minor these Unreleased breaking changes imply, set in this change so the workspace install resolves the new bound; the `## Unreleased` heading becomes `## [0.4.0]` when it is tagged.
 
